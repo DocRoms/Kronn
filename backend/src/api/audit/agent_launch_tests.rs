@@ -1486,6 +1486,7 @@ fn sse_events(body: &str, name: &str) -> Vec<Value> {
 #[cfg(unix)]
 // scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
+#[serial_test::serial(kronn_templates_env)]
 async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_validated() {
     use axum::response::IntoResponse;
     let tools = tempfile::tempdir().unwrap();
@@ -1648,6 +1649,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
 #[cfg(unix)]
 // scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
+#[serial_test::serial(kronn_templates_env)]
 async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
     use axum::response::IntoResponse;
     let tools = tempfile::tempdir().unwrap();

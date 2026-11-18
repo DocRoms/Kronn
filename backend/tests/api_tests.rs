@@ -20668,18 +20668,38 @@ async fn network_exposure_with_the_proxy_declared_by_env_hands_over_the_minted_t
     // KT-1675: KRONN_TLS_TERMINATED_BY_PROXY=1 and a body without the declaration:
     // the token is minted and strict_localhost applies at once, so the owner's
     // browser must receive it or it is locked out.
+    // The variable is read by every route: it is set in a child process only,
+    // never in the one the other tests share.
     const ENV: &str = kronn::core::net_expose::TLS_TERMINATED_ENV;
-    struct RestoreEnv(Option<String>);
-    impl Drop for RestoreEnv {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => kronn::core::child_env::set_var(ENV, value),
-                None => kronn::core::child_env::remove_var(ENV),
-            }
-        }
+    const CHILD: &str = "KRONN_TEST_PROXY_DECLARED_BY_ENV_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &libtest_path(
+                    "network_exposure_with_the_proxy_declared_by_env_hands_over_the_minted_token",
+                ),
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(ENV, "1")
+            .env("KRONN_DATA_DIR", data_dir.path())
+            .kill_on_drop(true)
+            .output();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(60), output)
+            .await
+            .expect("the child ends within a minute")
+            .expect("launch the child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
     }
-    let _restore = RestoreEnv(kronn::core::child_env::var(ENV).ok());
-    kronn::core::child_env::set_var(ENV, "1");
+    assert_eq!(std::env::var(ENV).as_deref(), Ok("1"));
 
     let state = test_state();
     {
