@@ -212,7 +212,7 @@ fn an_unarmed_snapshot_gives_nothing_after_a_workspace_save_of_an_outer_project(
 /// The stored key went through a link (`/var` and `/private/var` on macOS), and
 /// the folder is gone by the time the project is forgotten or moved: the entry
 /// is still found.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_removed_folder_reached_through_a_link_is_still_forgotten_and_moved() {
     let _shared = test_guard::shared();

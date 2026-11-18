@@ -332,7 +332,7 @@ fn a_workspace_package_uses_the_workspaces_manager_and_installs_nothing_itself()
 /// KT-1747 review (blue) — a manifest under test fixtures, examples or build
 /// output is not a toolchain of the project, and a directory link is never
 /// followed (it may lead out of the repository or loop).
-#[cfg(unix)]
+#[cfg(unix)] // creates a directory link through std::os::unix
 #[test]
 fn fixtures_examples_build_output_and_directory_links_yield_no_root() {
     let dir = tempfile::tempdir().unwrap();

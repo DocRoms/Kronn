@@ -96,7 +96,7 @@ fn a_repo_relative_executable_runs_only_when_the_project_lists_it() {
     assert!(check_command_line_with("vendor/bin/other", &extra(&["vendor/bin/phpunit"])).is_err());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a POSIX sh script made executable with a Unix mode
 #[tokio::test]
 async fn a_listed_repo_relative_executable_is_run_from_the_worktree() {
     let root = tempfile::tempdir().unwrap();
@@ -120,7 +120,7 @@ async fn a_listed_repo_relative_executable_is_run_from_the_worktree() {
     assert!(log.contains("ran-from-the-worktree"), "{log}");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates a symlink and a Unix-mode executable
 #[test]
 fn a_listed_executable_that_resolves_outside_the_worktree_is_refused() {
     let root = tempfile::tempdir().unwrap();
@@ -153,7 +153,7 @@ fn a_listed_executable_that_resolves_outside_the_worktree_is_refused() {
 /// (`vendor/phpunit/phpunit/phpunit`, `node_modules/.bin/jest`) resolves into
 /// the main checkout's matching dependency directory: admitted, and nothing
 /// wider (a layer entry a worker re-pointed elsewhere is still refused).
-#[cfg(unix)]
+#[cfg(unix)] // writes POSIX sh scripts made executable with a Unix mode
 #[test]
 fn a_listed_executable_of_a_layered_dependency_dir_is_admitted_and_nothing_wider() {
     use crate::core::task_worker_env::{SharedCaches, WorkerLane};

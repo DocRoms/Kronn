@@ -267,7 +267,7 @@ fn composer_project(repo: &Repo) {
     write(&repo.main, "vendor/bin/tool.sh", "#!/bin/sh\necho hi\n");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // the dependency layer is made of symlinks (std::os::unix)
 #[test]
 fn a_composer_vendor_layer_keeps_the_autoloader_and_bin_as_real_files_of_the_lane() {
     let repo = repo();
@@ -316,7 +316,7 @@ fn a_composer_vendor_layer_keeps_the_autoloader_and_bin_as_real_files_of_the_lan
     assert!(!repo.main.join("vendor/.kronn-lane-layer").exists());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // the dependency layer php loads through is made of symlinks (std::os::unix)
 #[test]
 fn a_php_class_of_the_project_resolves_from_the_lanes_own_src() {
     let probe = std::process::Command::new("php").arg("--version").output();
@@ -337,7 +337,7 @@ fn a_php_class_of_the_project_resolves_from_the_lanes_own_src() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "lane");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_re_provisioned_lane_keeps_the_workers_own_autoloader_and_replaces_an_old_link() {
     let repo = repo();
@@ -362,7 +362,7 @@ fn a_re_provisioned_lane_keeps_the_workers_own_autoloader_and_replaces_an_old_li
     assert!(!std::fs::symlink_metadata(&autoload).unwrap().is_symlink());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_node_workspace_package_in_a_layered_node_modules_resolves_to_the_lanes_own_copy() {
     let repo = repo();
@@ -491,7 +491,7 @@ fn git_in(dir: &Path, args: &[&str]) {
 /// KT-1747 review (KT-1595): provisioning runs again after an agent, so the
 /// ignore rule of a dependency layer is written to the REGISTERED checkout's
 /// exclude, never to the repository a rewritten `<lane>/.git` names.
-#[cfg(unix)]
+#[cfg(unix)] // the dependency layer is made of symlinks (std::os::unix)
 #[test]
 fn a_dependency_layer_rule_never_follows_a_rewritten_git_pointer() {
     let repo = repo();

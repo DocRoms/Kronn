@@ -2736,7 +2736,7 @@ mod tests {
 
     /// A config reached through a tracked link is the repository's file,
     /// not a copy Kronn made: it stays where it is.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn an_agent_config_behind_a_tracked_link_is_left_alone() {
         let (_dir, repo) = make_test_repo().await;
@@ -2831,7 +2831,7 @@ mod tests {
 
     /// A directory replaced by a link after the copies were taken: nothing
     /// is written through it.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_config_is_never_put_back_through_a_linked_directory() {
         let dir = tempfile::TempDir::new().unwrap();
