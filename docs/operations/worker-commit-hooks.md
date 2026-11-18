@@ -221,7 +221,7 @@ cover it.
 - Claude's task-worker settings carry `sandbox.filesystem.denyWrite` for the
   pointer and for each existing nested `.git` (and its content), and
   `Edit/Write/MultiEdit/NotebookEdit` permission denies
-  ([src: file: backend/src/agents/runner.rs:13223-13233#claude_task_worker_settings]);
+  ([src: file: backend/src/agents/runner.rs:13233-13243#claude_task_worker_settings]);
 - the HTTP agents' write tools refuse any path with a `.git` component
   (compared without regard to case, explicitly) and a symlink to one
   ([src: file: backend/src/api/agent_workspace_tools.rs:434#resolve_writable_in_workspace]);
