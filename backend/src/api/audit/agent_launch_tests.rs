@@ -1294,6 +1294,28 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
     prompts
 }
 
+/// The adapter toggle is process environment, flipped by other tests while
+/// this one runs: a routed launch stays on its route, never the machine's CLI.
+#[cfg(unix)] // scripts a POSIX sh stand-in for the claude CLI, which Windows cannot exec
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn a_routed_audit_keeps_its_route_while_the_adapter_toggle_says_direct_cli() {
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CLAUDE", value),
+                None => crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CLAUDE"),
+            }
+        }
+    }
+    let _restore = Restore(crate::core::child_env::var_os("KRONN_ACP_ADAPTER_CLAUDE"));
+    crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
+
+    let prompts = step_prompts_of("partial", false).await;
+    assert!(!prompts.is_empty());
+}
+
 #[cfg(unix)]
 // scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]

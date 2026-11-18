@@ -4626,6 +4626,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
     let acp_route = crate::acp::resolve_acp_route(config.agent_type);
+    // The adapter toggle is process environment: a test that routed this
+    // launch must not be sent to the machine's CLI by another test's toggle.
+    #[cfg(test)]
+    let acp_route = if acp_route == crate::acp::AcpProductionRoute::DirectCliMigration
+        && test_acp_routes::transport_for(&config, &work_dir).is_some()
+    {
+        crate::acp::AcpProductionRoute::AdaptedAcp
+    } else {
+        acp_route
+    };
     if acp_route == crate::acp::AcpProductionRoute::DirectCliMigration {
         tracing::info!(agent = ?config.agent_type, task_worker,
             "Explicit KRONN_ACP_ADAPTER_* override selects direct CLI compatibility; no automatic prompt replay");
