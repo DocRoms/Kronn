@@ -168,7 +168,7 @@ impl Recette {
         let restore = TemplatesEnv(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
         crate::core::child_env::set_var(
             "KRONN_TEMPLATES_DIR",
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates"),
         );
         let project = tempfile::tempdir().unwrap();
         let initialized = crate::core::cmd::git_cmd()

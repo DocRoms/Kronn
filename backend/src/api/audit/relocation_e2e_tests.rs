@@ -509,7 +509,7 @@ fn template_reinstall_on_a_dot_ai_project_writes_relocated_templates_there() {
     std::fs::create_dir_all(project.join(".ai")).unwrap();
     let _relocated = relocate(&project, ".ai");
     let templates =
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
     let plan =
         crate::api::projects::template_reinstall::plan_reinstall(&project, &templates, false)
             .unwrap();
@@ -534,7 +534,7 @@ fn a_template_merge_preview_on_a_dot_ai_project_targets_its_root() {
     std::fs::write(project.join("README.md"), "# Repo\n").unwrap();
     let _relocated = relocate(&project, ".ai");
     let templates =
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
     let view = crate::api::projects::template_merge::preview_plan(&project, &templates).unwrap();
     assert_eq!(view.docs_dir, ".ai");
     assert!(
@@ -1149,7 +1149,7 @@ fn an_applied_template_merge_on_a_dot_ai_project_writes_and_commits_under_its_ro
     git_in(&project, &["commit", "-q", "-m", "init"]);
     let _relocated = relocate(&project, ".ai");
     let templates =
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
 
     let view = run_merge_in_worktree(&project, "Relocated", MergeBase::Local, &templates).unwrap();
     assert_eq!(view.docs_dir, ".ai");

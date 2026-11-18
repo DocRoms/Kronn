@@ -16999,7 +16999,7 @@ async fn bench_project_doc_inline_against_pointer() {
     // measure nothing.
     if real_project.is_none() {
         let real_doc = std::fs::read_to_string(
-            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../docs/AGENTS.md"),
         )
         .expect("the project's own docs/AGENTS.md");

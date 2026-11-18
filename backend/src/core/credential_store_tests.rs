@@ -2607,7 +2607,7 @@ async fn failed_connection_update_and_delete_leave_the_live_keys() {
 /// only inside the successful-save arm.
 #[test]
 fn litellm_and_startup_discovery_adopt_only_once_saved() {
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (file, adopt) in [
         ("src/api/lite_llm.rs", "*live = cfg;"),
         ("src/main.rs", "*live = config;"),

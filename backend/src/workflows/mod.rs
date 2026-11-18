@@ -28,6 +28,11 @@ pub mod sub_workflow_step;
 pub mod trigger_workflow_step;
 pub mod watch_trigger;
 pub mod workspace;
+pub mod autocode_issue_template;
+pub mod task_board_step;
+pub mod notify_step;
+pub mod step_agents;
+pub mod transform_data_step;
 
 use chrono::Utc;
 use std::sync::Arc;

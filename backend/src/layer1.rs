@@ -16,7 +16,6 @@ pub mod agents {
     pub mod acp_start;
     pub mod chat_codec;
     pub mod generation_settings;
-    pub mod media_codec;
     pub mod ollama_memory;
     pub mod read_only_repos;
     pub mod runner;
@@ -25,27 +24,20 @@ pub mod agents {
 }
 pub mod api {
     pub use kronn_l0::api::*;
-    pub mod activity;
-    pub mod agent_api;
     pub mod agent_workspace_tools;
-    pub mod ai_docs;
-    pub mod assistant_conversations;
     pub mod comfyui;
     pub mod discover;
     pub mod discussion_important;
     pub mod git_ops;
     pub mod lite_llm;
-    pub mod live_pages;
     pub mod nvidia;
     pub mod ollama_health;
     #[cfg(any(test, feature = "test-support"))]
     pub mod other_projects_fixture;
-    pub mod strong_confirm;
 }
 pub mod core {
     pub use kronn_l0::core::*;
     pub mod api_access;
-    pub mod approved_scripts;
     pub mod argv_roles;
     pub mod artifacts_reach;
     pub mod audit_baseline;
@@ -53,9 +45,7 @@ pub mod core {
     pub mod audit_ecosystems;
     pub mod audit_state;
     pub mod bridge_token;
-    pub mod briefing_docs;
     pub mod ci_facts;
-    pub mod cli_access_probe;
     pub mod comfyui_references;
     pub mod commit_hooks;
     pub mod commit_policy;
@@ -81,21 +71,18 @@ pub mod core {
     pub mod project_rules;
     pub mod prompt_limit;
     pub mod quick_exec;
-    pub mod repo_facts;
     pub mod repository_resources;
     pub mod repository_skills;
     pub mod resolution_proof;
     pub mod resource_refs;
     pub mod resource_snapshot;
     pub mod run_provenance;
-    pub mod run_retention;
     pub mod secret_facts;
     pub mod skill_bundle;
     pub mod skill_guide;
     pub mod skill_migration;
     pub mod skill_versions;
     pub mod skills;
-    pub mod task_worker_dep_fetch;
     pub mod task_worker_env;
     pub mod task_worker_lane_settings;
     pub mod task_worker_lane_warm;
@@ -105,19 +92,14 @@ pub mod core {
     pub mod trust;
     pub mod trust_sandbox;
     pub mod uplink_state;
-    pub mod upstream_mirror;
     pub mod vault_guard;
     pub mod worktree;
 }
 pub mod db {
     pub use kronn_l0::db::*;
     pub mod agent_decisions;
-    pub mod agent_jobs;
     pub mod api_call_logs;
-    pub mod audit_run_cost;
-    pub mod compare;
     pub mod default_contents;
-    pub mod discussion_ceiling_requests;
     pub mod discussion_effort;
     pub mod discussion_important;
     pub mod discussion_launch_settings;
@@ -147,21 +129,16 @@ pub mod workflows {
     pub mod api_auth_failure;
     pub mod api_call_binary;
     pub mod api_call_executor;
-    pub mod autocode_issue_template;
     pub mod big_ticket_template;
     pub mod gate_step;
     pub mod json_data_step;
-    pub mod notify_step;
     pub mod refs;
     pub mod run_artifacts;
     pub mod run_scope;
-    pub mod step_agents;
     pub mod step_output_format;
     pub mod step_room;
     pub mod steps;
-    pub mod task_board_step;
     pub mod template;
-    pub mod transform_data_step;
     pub mod triage;
 }
 

@@ -13,7 +13,10 @@
 pub mod acp {
     pub use kronn_l1::acp::*;
 }
-pub use kronn_l1::agents;
+pub mod agents {
+    pub use kronn_l1::agents::*;
+    pub mod media_codec;
+}
 pub mod api {
     pub use kronn_l1::api::*;
     pub mod agent_jobs;
@@ -38,6 +41,12 @@ pub mod api {
     pub mod worker_time_limit;
     pub mod workflows;
     pub mod ws;
+    pub mod ai_docs;
+    pub mod live_pages;
+    pub mod activity;
+    pub mod agent_api;
+    pub mod strong_confirm;
+    pub mod assistant_conversations;
 }
 pub mod core {
     pub use kronn_l1::core::*;
@@ -53,6 +62,13 @@ pub mod core {
     pub mod td_review;
     pub mod td_tasks;
     pub mod ws_client;
+    pub mod task_worker_dep_fetch;
+    pub mod repo_facts;
+    pub mod run_retention;
+    pub mod upstream_mirror;
+    pub mod approved_scripts;
+    pub mod briefing_docs;
+    pub mod cli_access_probe;
 }
 pub mod db {
     pub use kronn_l1::db::*;
@@ -65,6 +81,10 @@ pub mod db {
     pub mod step_shadow_merges;
     pub mod step_shadows;
     pub mod worker_offers;
+    pub mod compare;
+    pub mod agent_jobs;
+    pub mod audit_run_cost;
+    pub mod discussion_ceiling_requests;
 }
 pub use kronn_l1::delivery;
 pub use kronn_l1::http_transport;
