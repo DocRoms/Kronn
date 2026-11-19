@@ -909,6 +909,7 @@ mod tests {
             own_discussions: discussions.iter().map(|d| d.to_string()).collect(),
             own_run: run.map(str::to_string),
             agent: None,
+            room_agent_of: Vec::new(),
         }
     }
 

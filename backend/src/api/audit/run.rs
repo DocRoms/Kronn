@@ -681,6 +681,7 @@ mod audit_status_tests {
                         own_discussions: Vec::new(),
                         own_run: None,
                         agent: None,
+                        room_agent_of: Vec::new(),
                     })
                 });
                 audit_status(State(state), Path("p1".into()), caller, None)

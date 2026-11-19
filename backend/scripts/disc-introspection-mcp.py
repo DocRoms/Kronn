@@ -5022,6 +5022,13 @@ def call_task_update_dod(args):
         raise RuntimeError("task_update_dod: completed must be a boolean")
     encoded_task = urllib.parse.quote(task_id, safe="")
     encoded_dod = urllib.parse.quote(dod_id, safe="")
+    # A post-integration check is the principal's: send the identity the
+    # execution tools send, derived here and never named by the model. A bridge
+    # with none still ticks an ordinary item.
+    try:
+        principal = _task_exec_principal("task_update_dod")
+    except RuntimeError:
+        principal = {}
     return _task_ack(
         _unwrap(_http(
             "PATCH",
@@ -5030,6 +5037,7 @@ def call_task_update_dod(args):
                 "completed": args["completed"],
                 "evidence": args.get("evidence"),
                 "actor": _planning_actor(args),
+                **principal,
             },
         )),
         dod_id=dod_id,

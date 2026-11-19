@@ -162,6 +162,9 @@ pub struct BridgeCaller {
     pub own_run: Option<String>,
     /// The agent and model Kronn launched.
     pub agent: Option<crate::core::api_access::AgentIdentity>,
+    /// The rooms this launch is the agent of. A step or a worker runs in a
+    /// room without being its agent: it has none (KT-1270).
+    pub room_agent_of: Vec<String>,
 }
 
 impl BridgeCaller {

@@ -16397,6 +16397,77 @@ async fn authorize_execution_principal(
     .flatten()
 }
 
+/// KT-1954 — whether the caller is the principal of the latest execution of
+/// `task_reference`, by the identities the execution tools accept. `Some` is
+/// the agent and session the journal names; a worker, a stranger, an unknown
+/// task and a task that never ran all answer `None`.
+///
+/// A room agent's identity is made of facts any reader of the room can see (its
+/// running dispatch and the message that started it), so with a bridge token
+/// the grant itself must be the principal's: it owns the parent room and not
+/// the worker's.
+pub fn live_check_principal(
+    conn: &rusqlite::Connection,
+    task_reference: &str,
+    source_agent: &str,
+    source_session_id: &str,
+    room_agent: Option<SpawnedAgentCaller>,
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
+) -> Result<Option<(String, String)>> {
+    if room_agent.is_none() && caller_fields(source_agent, source_session_id).is_none() {
+        return Ok(None);
+    }
+    let Ok(caller) = principal_caller(source_agent, source_session_id, room_agent) else {
+        return Ok(None);
+    };
+    let Some(task) = crate::db::planning::get_task(conn, task_reference)? else {
+        return Ok(None);
+    };
+    let Some(execution) =
+        crate::db::orchestration::get_latest_execution_for_task(conn, &task.summary.id)?
+    else {
+        return Ok(None);
+    };
+    if !principal_is_authorized(conn, &execution.parent_discussion_id, &caller)? {
+        return Ok(None);
+    }
+    match &caller {
+        PrincipalCaller::Cli { agent, session_id } => {
+            // The worker's own session is never its execution's principal.
+            let session =
+                crate::db::discussion_sessions::find_active_session(conn, agent, session_id)?;
+            if session.is_none_or(|session| execution.worker_cli_session_id == Some(session.id)) {
+                return Ok(None);
+            }
+            // A session id is a declared fact: the worker's own grant never
+            // proves the principal, whichever session it names.
+            let child = execution.sub_discussion_id.as_ref();
+            if bridge.is_some_and(|bridge| {
+                child.is_some_and(|child| bridge.own_discussions.contains(child))
+            }) {
+                return Ok(None);
+            }
+            Ok(Some((agent.clone(), session_id.clone())))
+        }
+        PrincipalCaller::RoomAgent(room) => {
+            // Owning the room is not being its agent: a workflow step or
+            // another launch hosted there reads the same running turn.
+            if bridge.is_some_and(|bridge| {
+                !bridge_is_execution_principal(bridge, &execution)
+                    || !bridge
+                        .room_agent_of
+                        .contains(&execution.parent_discussion_id)
+            }) {
+                return Ok(None);
+            }
+            Ok(Some((
+                room.agent_type.trim().to_string(),
+                room_agent_actor_session(room),
+            )))
+        }
+    }
+}
+
 /// Make a CLI principal the one this execution's notices address. A room's
 /// native agent has no durable session to pin: its room already receives them.
 async fn pin_principal_caller(db: &Database, exec_id: &str, caller: &PrincipalCaller) {

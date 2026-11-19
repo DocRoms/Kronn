@@ -746,6 +746,7 @@ impl Audited {
                 own_discussions: vec![],
                 own_run: None,
                 agent: None,
+                room_agent_of: Vec::new(),
             })
         });
         crate::api::audit::accept_audit_step(

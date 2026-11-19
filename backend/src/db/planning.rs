@@ -2616,6 +2616,33 @@ pub fn update_dod_item(
     dod_id: &str,
     request: &UpdatePlanningDodItemRequest,
 ) -> Result<PlanningTaskDetail> {
+    update_dod_item_as(conn, task_reference, dod_id, request, false)
+}
+
+/// Whether the DoD item is a post-integration live check.
+pub fn dod_item_is_live_check(conn: &Connection, dod_id: &str) -> Result<bool> {
+    let mode: Option<String> = conn
+        .query_row(
+            "SELECT verification FROM planning_task_dod_items WHERE id = ?1",
+            params![dod_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(mode.is_some_and(|mode| {
+        PlanningDodVerification::from_db(&mode) == PlanningDodVerification::PostIntegration
+    }))
+}
+
+/// KT-1954 — `principal_proven`: the caller was authorised as the principal of
+/// the task's latest execution by the identities the execution tools accept (a
+/// session joined to the parent room, or the room's own agent during its turn).
+pub fn update_dod_item_as(
+    conn: &Connection,
+    task_reference: &str,
+    dod_id: &str,
+    request: &UpdatePlanningDodItemRequest,
+    principal_proven: bool,
+) -> Result<PlanningTaskDetail> {
     let task_id = resolve_task_id(conn, task_reference)?;
     validate_actor(&request.actor)?;
     let transaction = NestableTx::begin(conn)?;
@@ -2632,7 +2659,7 @@ pub fn update_dod_item(
     };
     let live_check =
         PlanningDodVerification::from_db(&mode) == PlanningDodVerification::PostIntegration;
-    if live_check {
+    if live_check && !principal_proven {
         ensure_live_check_principal(&transaction, Some(&task_id), &request.actor, true)?;
     }
     // KT-1254 — a live check is ticked with the principal's evidence, never

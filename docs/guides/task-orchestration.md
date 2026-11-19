@@ -427,6 +427,17 @@ it: a worker's own session, an HTTP agent and an anonymous agent are refused.
   A human ticks it in Kronn (plan panel or Planning page), which asks for the
   proof and sends it as `evidence`. The same actors may tick once the execution
   is over; an agent bound to another room is refused and asks the human.
+  The bridge proves the principal with the identity the `task_exec_*` tools
+  send, derived by the bridge and never named by the model (KT-1954): the
+  session joined to the execution's parent room, or the room's own agent during
+  its turn. A room agent's identity is made of facts any reader of the room
+  sees, so with a bridge token the grant itself must be the principal's: it
+  is the parent room's agent (a workflow step or another launch hosted there
+  is not) and does not own the worker's room. The worker's session, a session of
+  the worker's room and a bridge with no identity stay refused. The proof is
+  asked for a live check only, and the journal names the identity that was
+  proven. Before 0.15.3 the tick carried no joined
+  session, so every agent principal was refused its own check.
 - Unticking a live check (by `task_update_dod` or an array replace, principal or
   human only) clears its evidence, and a `done` task goes back to `in_progress`:
   the proof is owed again and the stale one cannot re-tick it.

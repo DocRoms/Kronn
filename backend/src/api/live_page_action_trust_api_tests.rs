@@ -21,6 +21,7 @@ fn agent() -> Option<axum::Extension<crate::core::bridge_token::BridgeCaller>> {
         own_discussions: vec![],
         own_run: None,
         agent: None,
+        room_agent_of: Vec::new(),
     }))
 }
 

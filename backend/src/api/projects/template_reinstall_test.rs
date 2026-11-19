@@ -508,6 +508,7 @@ async fn a_bridge_caller_is_refused_and_the_routes_are_off_the_bridge_list() {
             own_discussions: Vec::new(),
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
         }))
     };
 

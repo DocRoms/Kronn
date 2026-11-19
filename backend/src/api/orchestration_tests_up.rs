@@ -23182,6 +23182,129 @@ async fn only_the_principal_or_a_human_may_set_remove_or_tick_a_live_check() {
     );
 }
 
+/// KT-1954 — the bridge names the agent on a planning write without the
+/// session it joined with, so the principal was refused its own live check. The
+/// DoD write proves the principal by the identity the execution tools send.
+#[tokio::test]
+async fn the_principal_ticks_a_live_check_by_the_identity_the_execution_tools_send() {
+    use crate::models::UpdatePlanningDodItemRequest;
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task_ref, parent_id, child_id, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+    seed_cli_session(&db, 103, &child_id, "sess-other-room").await;
+    let task_id = exec_of(&db, &exec_id).await.task_id;
+    let dod_id = dod_id_for_execution(&db, &exec_id).await;
+    let live = dod_id.clone();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE planning_task_dod_items SET verification = 'post_integration' WHERE id = ?1",
+            [&live],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let db_ref = &db;
+    let proven = |agent: &'static str, session: &'static str| {
+        let task_id = task_id.clone();
+        async move {
+            db_ref
+                .with_conn(move |conn| {
+                    live_check_principal(conn, &task_id, agent, session, None, None)
+                })
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        proven("ClaudeCode", "sess-b").await,
+        Some(("ClaudeCode".to_string(), "sess-b".to_string()))
+    );
+    // The worker's own session, a session of the worker's room, another
+    // provider's name on the session, an unknown session and no identity.
+    for (agent, session) in [
+        ("ClaudeCode", "sess-a"),
+        ("ClaudeCode", "sess-other-room"),
+        ("Codex", "sess-b"),
+        ("ClaudeCode", "sess-nobody"),
+        ("ClaudeCode", ""),
+        ("", ""),
+    ] {
+        assert_eq!(proven(agent, session).await, None, "{agent}/{session}");
+    }
+    let unknown_task = db
+        .with_conn(|conn| {
+            live_check_principal(conn, "KT-999999", "ClaudeCode", "sess-b", None, None)
+        })
+        .await
+        .unwrap();
+    assert_eq!(unknown_task, None);
+
+    // What the bridge really sends as the planning actor: the agent, no session.
+    let request = |evidence: Option<&str>| UpdatePlanningDodItemRequest {
+        completed: true,
+        evidence: evidence.map(str::to_string),
+        actor: PlanningActor {
+            kind: PlanningActorKind::Agent,
+            id: Some("ClaudeCode".to_string()),
+            session_id: None,
+            source_message_id: None,
+        },
+    };
+    let tick = |evidence: Option<&'static str>, principal_proven: bool| {
+        let (task_id, dod_id, request) = (task_id.clone(), dod_id.clone(), request(evidence));
+        async move {
+            db_ref
+                .with_conn(move |conn| {
+                    crate::db::planning::update_dod_item_as(
+                        conn,
+                        &task_id,
+                        &dod_id,
+                        &request,
+                        principal_proven,
+                    )
+                })
+                .await
+        }
+    };
+    // Unproven, it is refused as before; proven, the evidence is still owed.
+    assert!(tick(Some("replayed live: ok"), false).await.is_err());
+    assert!(tick(None, true).await.is_err());
+    let ticked = tick(Some("replayed live: ok"), true).await.unwrap();
+    assert!(ticked.definition_of_done[0].completed);
+    assert_eq!(
+        ticked.definition_of_done[0].evidence.as_deref(),
+        Some("replayed live: ok")
+    );
+}
+
+/// KT-1954 — a DoD body without the principal fields is the body it always was.
+#[test]
+fn a_dod_body_reads_with_or_without_the_principal_identity() {
+    use crate::api::planning::UpdateDodItemBody;
+    let bare: UpdateDodItemBody =
+        serde_json::from_value(serde_json::json!({ "completed": true })).unwrap();
+    assert!(bare.request.completed && bare.source_session_id.is_empty());
+    assert!(bare.room_agent.is_none());
+    // A malformed identity does not fail the body.
+    let malformed: UpdateDodItemBody =
+        serde_json::from_value(serde_json::json!({ "completed": true, "room_agent": "x" }))
+            .unwrap();
+    assert!(malformed.request.completed);
+    let named: UpdateDodItemBody = serde_json::from_value(serde_json::json!({
+        "completed": true,
+        "evidence": "seen",
+        "actor": { "kind": "agent", "id": "Codex" },
+        "source_agent": "Codex",
+        "source_session_id": "adhoc-1",
+    }))
+    .unwrap();
+    assert_eq!(named.request.evidence.as_deref(), Some("seen"));
+    assert_eq!(named.source_session_id, "adhoc-1");
+}
+
 /// KT-1931 — once the execution is over the rule is unchanged: its room's
 /// principal and a human still tick with evidence, a CLI of another room is
 /// refused, and the refusal names who may.
@@ -31610,6 +31733,7 @@ async fn a_worker_bridge_token_cannot_extend_its_own_review_rounds() {
         own_discussions: rooms.iter().map(|room| room.to_string()).collect(),
         own_run: None,
         agent: None,
+        room_agent_of: Vec::new(),
     };
     // The worker names the principal's real session; only its token tells it apart.
     let extend = |bridge: Option<&BridgeCaller>| {
@@ -31880,6 +32004,96 @@ async fn execution_state(db: &std::sync::Arc<Database>, exec_id: &str) -> serde_
     })
     .await
     .unwrap()
+}
+
+/// KT-1954 — a room agent's identity is made of facts any reader of the room
+/// sees, so a bridge token proves a live check only when it is the principal's
+/// own grant: the parent room and not the worker's.
+#[tokio::test]
+async fn a_room_agent_proves_a_live_check_only_with_the_principals_own_grant() {
+    use crate::core::bridge_token::BridgeCaller;
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let execution_id = room_agent_lifecycle_fixture(&db).await;
+    // The worker's room: the fixture's other room stands for it.
+    let child = "d-other".to_string();
+    let id = execution_id.clone();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE task_executions SET sub_discussion_id = 'd-other' WHERE id = ?1",
+            [&id],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let execution = exec_of(&db, &execution_id).await;
+    let bridge = |rooms: &[&str]| BridgeCaller {
+        token_id: "tok".into(),
+        project: None,
+        own_discussions: rooms.iter().map(|room| room.to_string()).collect(),
+        own_run: None,
+        agent: None,
+        // The room's agent, unless a test says the launch only runs there.
+        room_agent_of: rooms.iter().map(|room| room.to_string()).collect(),
+    };
+    let proven = |room: SpawnedAgentCaller, bridge: Option<BridgeCaller>| {
+        let (db, task_id) = (db.clone(), execution.task_id.clone());
+        async move {
+            db.with_conn(move |conn| {
+                live_check_principal(conn, &task_id, "", "", Some(room), bridge.as_ref())
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let own = || lifecycle_room("d-parent", "job-1", "msg-1");
+    let named = Some(("Codex".to_string(), "native:d-parent:msg-1".to_string()));
+    assert_eq!(proven(own(), Some(bridge(&["d-parent"]))).await, named);
+    // A host process carries no token: nothing here is weaker than it was.
+    assert_eq!(proven(own(), None).await, named);
+    // The worker copying the running turn it reads in the parent room, a
+    // stranger of the project, and a grant that owns both rooms.
+    for rooms in [
+        vec![child.as_str()],
+        vec!["d-elsewhere"],
+        vec!["d-parent", child.as_str()],
+        vec![],
+    ] {
+        assert_eq!(proven(own(), Some(bridge(&rooms))).await, None, "{rooms:?}");
+    }
+    // The worker naming the principal's joined session: its grant owns the
+    // worker's room, so the session it declares proves nothing.
+    seed_cli_session(&db, 901, "d-parent", "principal-session").await;
+    let by_session = |bridge: Option<BridgeCaller>| {
+        let (db, task_id) = (db.clone(), execution.task_id.clone());
+        async move {
+            db.with_conn(move |conn| {
+                live_check_principal(
+                    conn,
+                    &task_id,
+                    "ClaudeCode",
+                    "principal-session",
+                    None,
+                    bridge.as_ref(),
+                )
+            })
+            .await
+            .unwrap()
+        }
+    };
+    assert!(by_session(None).await.is_some());
+    assert!(by_session(Some(bridge(&["d-elsewhere"]))).await.is_some());
+    assert_eq!(by_session(Some(bridge(&[child.as_str()]))).await, None);
+    // A workflow step or another launch hosted in the room owns it without
+    // being its agent.
+    let hosted = BridgeCaller {
+        room_agent_of: Vec::new(),
+        ..bridge(&["d-parent"])
+    };
+    assert_eq!(proven(own(), Some(hosted)).await, None);
+    // A turn that is not the room's running one proves nothing, token or not.
+    let stale = lifecycle_room("d-parent", "job-done", "msg-3");
+    assert_eq!(proven(stale, Some(bridge(&["d-parent"]))).await, None);
 }
 
 /// Every room-agent identity that is not the launching turn is refused on

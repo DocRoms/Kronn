@@ -15,6 +15,7 @@ fn agent() -> Caller {
         own_discussions: vec![],
         own_run: None,
         agent: None,
+        room_agent_of: Vec::new(),
     }))
 }
 

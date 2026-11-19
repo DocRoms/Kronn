@@ -11263,6 +11263,44 @@ class PlanningToolTests(unittest.TestCase):
         _method, _path, body = self.fake_http.call_args.args
         self.assertEqual(body["evidence"], "replayed on a real framing: ok")
 
+    def test_task_update_dod_sends_the_principal_identity_the_execution_tools_send(self):
+        # KT-1954 — the planning actor carries no joined session, so a live
+        # check is proven by the same identity as task_exec_*.
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_room_agent_context", return_value=None), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-1"):
+            self.mod.call_task_update_dod({
+                "task_id": "KT-42", "dod_id": "dod-a", "completed": True, "evidence": "seen",
+            })
+        _method, _path, body = self.fake_http.call_args.args
+        self.assertEqual(
+            (body["source_agent"], body["source_session_id"]), ("Codex", "adhoc-1"),
+        )
+        self.assertNotIn("room_agent", body)
+        room = {
+            "discussion_id": "d", "agent_type": "Codex",
+            "dispatch_job_id": "j", "source_message_id": "m",
+        }
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_room_agent_context", return_value=room):
+            self.mod.call_task_update_dod({
+                "task_id": "KT-42", "dod_id": "dod-a", "completed": True, "evidence": "seen",
+            })
+        _method, _path, body = self.fake_http.call_args.args
+        self.assertEqual(body["room_agent"], room)
+        self.assertNotIn("source_session_id", body)
+
+    def test_task_update_dod_without_a_session_still_ticks_an_ordinary_item(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Unknown"), \
+             mock.patch.object(self.mod, "_room_agent_context", return_value=None):
+            self.mod.call_task_update_dod({"task_id": "KT-42", "dod_id": "dod-a", "completed": True})
+        _method, _path, body = self.fake_http.call_args.args
+        self.assertEqual(body["completed"], True)
+        self.assertNotIn("source_agent", body)
+
     def test_task_assign_without_assignee_names_the_caller_session(self):
         # KT-154 — "myself" is resolved server-side from the durable session, so
         # the bridge never invents a provider-only identity.

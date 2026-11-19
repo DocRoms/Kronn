@@ -1084,6 +1084,10 @@ fn every_session_keyed_request_is_reviewed() {
         ("DeliverRequest", "joined session's room + ids"),
         ("ReviewRequest", "joined session's room + ids"),
         ("PlanningActor", "planning writes: forced to an agent actor"),
+        (
+            "UpdateDodItemBody",
+            "session's room visible; worker grant never proves a live check",
+        ),
         ("WsAuthQuery", "the WebSocket refuses a bridge token"),
         (
             "SendMessageRequest",

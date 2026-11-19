@@ -778,6 +778,7 @@ async fn trust_confirm_gate(
             own_discussions: grant.own_discussions(),
             own_run: grant.scope.workflow_run_id.clone(),
             agent: grant.scope.agent.clone(),
+            room_agent_of: grant.scope.room_grant_discussions.clone(),
         });
     next.run(axum::extract::Request::from_parts(
         parts,
@@ -824,6 +825,7 @@ async fn strong_code_gate(
             own_discussions: grant.own_discussions(),
             own_run: grant.scope.workflow_run_id.clone(),
             agent: grant.scope.agent.clone(),
+            room_agent_of: grant.scope.room_grant_discussions.clone(),
         });
     parts
         .extensions
@@ -1543,7 +1545,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/planning/tasks/{id}/dod/{dod_id}",
-            patch(api::planning::update_dod_item),
+            patch(api::planning::update_dod_item_as),
         )
         .route(
             "/api/planning/tasks/{id}/discussions",

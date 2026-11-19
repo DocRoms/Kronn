@@ -756,6 +756,7 @@ async fn launch_route_fresh(h: &Harness, bridge: bool, fresh: Option<bool>) -> S
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
         })
     });
     let response = crate::api::audit::briefing_cards::full_audit_route(

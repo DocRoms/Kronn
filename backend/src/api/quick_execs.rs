@@ -1564,6 +1564,7 @@ mod tests {
                         own_discussions: vec![],
                         own_run: None,
                         agent: None,
+                        room_agent_of: Vec::new(),
                     })
                 });
                 import(
@@ -1668,6 +1669,7 @@ mod tests {
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
         }))
     }
 
@@ -1741,6 +1743,7 @@ mod tests {
             own_discussions: vec![discussion.into()],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
         }))
     }
 
