@@ -6806,6 +6806,19 @@ pub async fn ollama_ctx_cap_for(
     ollama_run_ctx_cap(base, model, overrides, profile.as_ref()).await
 }
 
+/// The cost of one response as a gateway states it in `x-litellm-response-cost`
+/// (USD), in micro-USD. `None` when the header is absent or is not an amount.
+pub fn response_cost_header_micros(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let usd = headers
+        .get("x-litellm-response-cost")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    crate::core::pricing::usd_to_micros(usd)
+}
+
 /// `resolve_ctx_cap`, with the persistent per-model override inserted between
 /// the env break-glass and the auto-derived cap — see `CtxCapOrigin` for the
 /// full precedence. `overrides` is the whole config map so ONE call resolves
@@ -10335,6 +10348,9 @@ pub async fn start_ollama_http_with_idle(
             // and still emit its name; declaration removal is not an execution
             // boundary unless Kronn verifies it before calling the executor.
             let declared_tools_for_turn = declared_tool_names(&body);
+            // A gateway (LiteLLM) reports the response's cost in a header, not
+            // in the body; a cost in the body, read below, wins over it.
+            let header_cost = response_cost_header_micros(response.headers());
             let mut stream = response.bytes_stream();
             // KT-932 — each read of a streamed answer is bounded by the idle
             // delay, so every chunk that arrives restarts it. A response that is
@@ -10515,7 +10531,7 @@ pub async fn start_ollama_http_with_idle(
                             .saturating_add(written),
                     );
                 }
-                match tally.cost_usd_micros {
+                match tally.cost_usd_micros.or(header_cost) {
                     Some(cost) => {
                         usage.cost_usd_micros =
                             Some(usage.cost_usd_micros.unwrap_or(0).saturating_add(cost));

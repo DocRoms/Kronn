@@ -176,3 +176,37 @@ mod text_block_tests {
         assert!(!raw_after.contains(&allow), "{raw_after:?}");
     }
 }
+
+// ─── the cost a gateway states in a header ─────────────────────────────────
+
+#[test]
+fn a_gateway_cost_header_is_read_in_micro_usd() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    assert_eq!(
+        crate::agents::runner::response_cost_header_micros(&headers),
+        None
+    );
+    headers.insert("x-litellm-response-cost", "2.85e-05".parse().unwrap());
+    assert_eq!(
+        crate::agents::runner::response_cost_header_micros(&headers),
+        Some(29)
+    );
+    headers.insert("x-litellm-response-cost", " 0.0412 ".parse().unwrap());
+    assert_eq!(
+        crate::agents::runner::response_cost_header_micros(&headers),
+        Some(41_200)
+    );
+}
+
+#[test]
+fn a_cost_header_that_is_not_an_amount_is_no_cost() {
+    for value in ["None", "", "-1", "NaN", "inf"] {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-litellm-response-cost", value.parse().unwrap());
+        assert_eq!(
+            crate::agents::runner::response_cost_header_micros(&headers),
+            None,
+            "{value}"
+        );
+    }
+}

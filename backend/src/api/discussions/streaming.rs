@@ -5555,7 +5555,13 @@ pub(super) async fn make_agent_stream_inner(
                         &observed_models,
                     ),
                     tokens_used,
-                    stream_json_cost,
+                    // A structured transport (ACP, HTTP) reports its cost on
+                    // the process, like a workflow step's.
+                    stream_json_cost.or_else(|| {
+                        process
+                            .reported_cost_usd_micros()
+                            .map(|micros| micros as f64 / 1_000_000.0)
+                    }),
                     message_counters,
                 );
                 let cost_usd = priced.cost_usd;
