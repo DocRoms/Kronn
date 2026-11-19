@@ -1798,6 +1798,12 @@ pub async fn drive_agent_to_output(
     }
 
     let native_tool_calls = native_tool_calls_from_stderr(&stderr_lines);
+    // A structured transport (ACP, HTTP) reports its cost on the process.
+    let reported_cost_usd = stream_json_cost.or_else(|| {
+        process
+            .reported_cost_usd_micros()
+            .map(|micros| micros as f64 / 1_000_000.0)
+    });
 
     Ok(AgentOutput {
         attempt_id: 0, // Assigned by the launch recorder, outside the IO loop.
@@ -1805,7 +1811,7 @@ pub async fn drive_agent_to_output(
         tokens_used,
         prompt_cache,
         reported_usage,
-        reported_cost_usd: stream_json_cost,
+        reported_cost_usd,
         native_tool_calls,
         runtime_notices: stderr_lines
             .into_iter()
@@ -3043,6 +3049,33 @@ mod drive_agent_to_output_tests {
     //! non-zero-exit error path — without spawning a CLI or burning tokens.
     use super::format_silent_exit_error;
     use super::{drive_agent_to_output, native_tool_calls_from_stderr};
+
+    /// The cost an ACP or HTTP run reports reaches the step, like its tokens.
+    #[tokio::test]
+    async fn a_step_keeps_the_cost_its_structured_transport_reported() {
+        use crate::agents::runner::ScriptedProcess;
+        let stall = std::time::Duration::from_secs(1);
+        let reported = ScriptedProcess::raw(["done"])
+            .with_reported_usage(9_993)
+            .with_reported_cost_usd_micros(412_500);
+        let output = drive_agent_to_output(
+            reported,
+            None,
+            None,
+            stall,
+            &AgentType::ClaudeCode,
+            "reason",
+        )
+        .await
+        .expect("the step ends");
+        assert_eq!(output.reported_cost_usd, Some(0.4125));
+        let silent = ScriptedProcess::raw(["done"]).with_reported_usage(9_993);
+        let output =
+            drive_agent_to_output(silent, None, None, stall, &AgentType::ClaudeCode, "reason")
+                .await
+                .expect("the step ends");
+        assert_eq!(output.reported_cost_usd, None);
+    }
 
     /// An ACP run's own watchdog owns inactivity: a step waits through a long
     /// text silence (tool work) instead of killing it, and a plain CLI is

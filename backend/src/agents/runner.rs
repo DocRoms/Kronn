@@ -2540,6 +2540,7 @@ pub struct ScriptedProcess {
     hangs_forever: bool,
     /// Usage a structured transport (ACP) would report for the run.
     reported_usage: Option<u64>,
+    reported_cost_usd_micros: Option<u64>,
     reported_prompt_cache: PromptCacheUsage,
     activity_watched: bool,
     first_line_after: Option<Duration>,
@@ -2560,6 +2561,7 @@ impl ScriptedProcess {
             stderr: Vec::new(),
             hangs_forever: false,
             reported_usage: None,
+            reported_cost_usd_micros: None,
             reported_prompt_cache: PromptCacheUsage::default(),
             activity_watched: false,
             first_line_after: None,
@@ -2579,6 +2581,7 @@ impl ScriptedProcess {
             stderr: Vec::new(),
             hangs_forever: false,
             reported_usage: None,
+            reported_cost_usd_micros: None,
             reported_prompt_cache: PromptCacheUsage::default(),
             activity_watched: false,
             first_line_after: None,
@@ -2600,6 +2603,12 @@ impl ScriptedProcess {
     /// Simulate usage reported by a structured transport such as ACP.
     pub fn with_reported_usage(mut self, tokens: u64) -> Self {
         self.reported_usage = Some(tokens);
+        self
+    }
+
+    /// Simulate a cost reported by the provider or the CLI, in micro-USD.
+    pub fn with_reported_cost_usd_micros(mut self, micros: u64) -> Self {
+        self.reported_cost_usd_micros = Some(micros);
         self
     }
 
@@ -2650,6 +2659,9 @@ impl AgentIo for ScriptedProcess {
     }
     fn reported_token_usage(&self) -> Option<u64> {
         self.reported_usage
+    }
+    fn reported_cost_usd_micros(&self) -> Option<u64> {
+        self.reported_cost_usd_micros
     }
     fn activity_watched(&self) -> bool {
         self.activity_watched
