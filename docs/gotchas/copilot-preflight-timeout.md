@@ -23,8 +23,8 @@ Timeout explicitly awaits `Child::kill`, which also waits/reaps in Tokio;
 and spawn errors are covered separately. The timer budget still includes
 spawning; this does not alter account classification, authentication or worker
 reassignment policy.
-[src: file: backend/src/agents/runner.rs:13682-13731#wait_copilot_preflight_child_with_timeout]
-[src: file: backend/src/agents/runner.rs:13612-13643#run_copilot_task_worker_preflight_with_timeout]
+[src: file: backend/src/agents/runner.rs:13705-13754#wait_copilot_preflight_child_with_timeout]
+[src: file: backend/src/agents/runner.rs:13672-13703#run_copilot_task_worker_preflight_with_timeout]
 [src: file: backend/src/agents/runner_test_tests_up.rs:11716-11752#copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure]
 [Tokio Child lifecycle](https://docs.rs/tokio/latest/tokio/process/struct.Child.html#method.kill)
 

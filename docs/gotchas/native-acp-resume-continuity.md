@@ -109,10 +109,10 @@ Additional tests cover scope isolation, stale turn/session events, incomplete
 legacy progress and atomic response/checkpoint rollback. Existing ACP fixtures
 cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
-[src: file: backend/src/api/discussions/streaming.rs:8941-9260#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+[src: file: backend/src/api/discussions/streaming.rs:8952-9271#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
-[src: file: backend/src/agents/runner.rs:16129-16230#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
-[src: file: backend/src/agents/runner.rs:16287-16491#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
+[src: file: backend/src/agents/runner.rs:16152-16253#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
+[src: file: backend/src/agents/runner.rs:16310-16514#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
 
 These tests do not launch a live provider or qualify real model behavior.
 Kronn normalizes ACP token counts but does not yet normalize optional cumulative

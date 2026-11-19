@@ -51,7 +51,7 @@ capability they appear to have is a **tool Kronn executes server-side on their b
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
 any MCP environment is built [src: file: backend/src/agents/runner.rs:9565-9586#start_ollama_http_with_idle], and
-`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:13844-13861#insert_claude_mcp_config].
+`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:13867-13884#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
 
@@ -301,7 +301,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:9972#apply_http]
+[src: file: backend/src/agents/runner.rs:9995#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -314,8 +314,8 @@ validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:591-644#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
-[src: file: backend/src/workflows/steps.rs:1395-1399#reasoning_effort_override]
-[src: file: backend/src/agents/runner.rs:13272-13276#validate]
+[src: file: backend/src/workflows/steps.rs:1404-1408#reasoning_effort_override]
+[src: file: backend/src/agents/runner.rs:13295-13299#validate]
 
 The HTTP regression launches through the native QP tool and the discussion
 stream, edits the template while the job is queued, then inspects both requests
@@ -347,7 +347,7 @@ Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
-[src: file: backend/src/agents/runner.rs:7224-7255#reachable_tools_bytes]
+[src: file: backend/src/agents/runner.rs:7264-7295#reachable_tools_bytes]
 [src: file: backend/src/agents/runner_test_tests_up.rs:1748-1786#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
@@ -473,7 +473,7 @@ shipping it. Three things changed:
   on a later turn keeps it. A result that was already an extract gets no paths,
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
-  [src: file: backend/src/agents/runner.rs:7481-7509#shape_of]
+  [src: file: backend/src/agents/runner.rs:7521-7549#shape_of]
   [src: file: backend/src/agents/runner.rs:7605-7645#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
@@ -519,7 +519,7 @@ response>, "excerpt": "<start of the original>", "note": "…"}`, with the large
 excerpt that keeps the envelope inside the budget once embedded in `messages`. An
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
-[src: file: backend/src/agents/runner.rs:7942-7949#truncated_json_envelope]
+[src: file: backend/src/agents/runner.rs:7982-7989#truncated_json_envelope]
 [src: file: backend/src/agents/runner_test_tests_up.rs:3380-3383#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or
@@ -566,7 +566,7 @@ undergo the existing clamping. This protects a protocol contract;
 it does not establish model authoring quality. The measured attempts and their
 execution checks are recorded in
 [`native-workflow-2026-09-22.md`](../research/native-workflow-2026-09-22.md).
-[src: file: backend/src/agents/runner.rs:7914-7931#workflow_step_schema]
+[src: file: backend/src/agents/runner.rs:7968-7985#workflow_step_schema]
 [src: file: backend/src/agents/runner_test_tests_up.rs:2437-2504#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 ### Further capabilities

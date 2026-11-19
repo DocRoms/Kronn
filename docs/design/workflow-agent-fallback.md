@@ -17,8 +17,8 @@ session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
 [src: file: backend/src/models/workflows.rs:2019-2025#RetryConfig]
-[src: file: backend/src/workflows/steps.rs:496-502#retry_backoff_unit]
-[src: file: backend/src/workflows/steps.rs:993-1000#classify]
+[src: file: backend/src/workflows/steps.rs:217-223#retry_backoff_unit]
+[src: file: backend/src/workflows/steps.rs:1006-1013#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
 explicit fallback and make the switch visible]
 
@@ -171,8 +171,8 @@ explicit escalation policy rather than be folded into this router. [src: file: b
 This is the hardest part. An Agent step can modify the worktree or call tools
 before a provider error. The current executor streams output and tool markers,
 then only returns success or a string error; it does not produce a durable
-effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1578-1590#drive_agent_to_output]
-[src: file: backend/src/workflows/steps.rs:1305-1337#run_agent_with_timeout]
+effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1590-1602#drive_agent_to_output]
+[src: file: backend/src/workflows/steps.rs:1314-1346#run_agent_with_timeout]
 
 The router must distinguish these cases:
 
@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:500-522#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:5059-5068#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:5068-5077#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -255,7 +255,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:966-1123#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/disc_introspection.rs:732-931#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1840-2081#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4147-4232#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1849-2090#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4156-4241#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
