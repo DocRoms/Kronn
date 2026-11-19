@@ -27,7 +27,7 @@ Every encrypted column is listed in one registry, `keystore::ENCRYPTED_COLUMNS`;
 a test compares it with the schema, so a new `*_encrypted` / cipher column
 cannot be added without the reconciler seeing it.
 [src: file: backend/src/core/keystore.rs:41-61#ENCRYPTED_COLUMNS]
-[src: file: backend/src/core/keystore.rs:4473-4510#encrypted_column_registry_matches_the_schema]
+[src: file: backend/src/core/keystore.rs:4739-4776#encrypted_column_registry_matches_the_schema]
 
 The running process still reads `config.tokens.keys` and
 `config.server.auth_token`: the boot fills them from the table, and every
@@ -382,6 +382,13 @@ are kept untouched (logged as locked) and never deleted by later saves.
 ## Recovery passphrase, restore and imports
 
 `POST /api/config/recovery/set` wraps the active key under a new passphrase.
+Once it is stored, the retention rule of the boot is applied at once: when
+`recovery.key` matches the key in use by its fingerprint, a vault holds a
+copy and the key decrypts a row of every non-empty encrypted column,
+`config.toml` is rewritten without the key and `config_holds_key` turns
+false, with no restart. If the rule does not hold, the rows cannot be read
+or the file cannot be rewritten, the copy stays and the status keeps saying
+so; the next start applies the rule again.
 When `recovery.key` already exists, the request must carry
 `current_passphrase`, which must unwrap it; an unreadable `recovery.key` is
 never replaced from the API (move it out of the data directory by hand).

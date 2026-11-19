@@ -3396,7 +3396,13 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
         )));
     }
     // Remove the settings; a needed copy of the key stays in a key-only file.
-    if let Err(e) = config::reset_to_key_only().await {
+    // Under the config lock: no other writer of config.toml changes what the
+    // file must keep between the read of the retained key and the write.
+    let rewritten = {
+        let _config = state.config.write().await;
+        config::reset_to_key_only().await
+    };
+    if let Err(e) = rewritten {
         return Json(ApiResponse::err(format!(
             "Reset could not rewrite config.toml: {e}"
         )));
@@ -3688,8 +3694,13 @@ pub struct RestoreRecoveryRequest {
 /// GET /api/config/recovery/status — is a recovery passphrase configured?
 pub async fn recovery_status(State(state): State<AppState>) -> Json<ApiResponse<RecoveryStatus>> {
     let dir = config::config_dir().ok();
-    let key = state.config.read().await.encryption_secret.clone();
-    let mut status = recovery_status_in(dir.as_deref(), key.as_deref());
+    // Read under the config lock: never half-way through a rewrite of the file.
+    let (key, mut status) = {
+        let config = state.config.read().await;
+        let key = config.encryption_secret.clone();
+        let status = recovery_status_in(dir.as_deref(), key.as_deref());
+        (key, status)
+    };
     if let Some(k) = key.as_deref() {
         status.undecryptable_rows = crate::core::keystore::undecryptable_rows(&state.db, k)
             .await
@@ -3835,16 +3846,35 @@ pub async fn set_recovery(
     State(state): State<AppState>,
     Json(req): Json<SetRecoveryRequest>,
 ) -> Json<ApiResponse<SetRecoveryResponse>> {
-    // The write lock serializes concurrent sets: one recovery.key at a time.
-    let config = state.config.write().await;
-    match crate::core::keystore::set_recovery_passphrase(
-        &config,
-        &req.passphrase,
-        req.current_passphrase.as_deref(),
-        req.replace_unverified,
-    ) {
-        Ok(recovery_code) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
-        Err(e) => Json(ApiResponse::err(e.to_string())),
+    // Its own task: a client that goes away cannot stop it between the release
+    // of the file copy and the rewrite of config.toml.
+    let stored = tokio::spawn(async move {
+        // The write lock serializes concurrent sets: one recovery.key at a time.
+        let config = state.config.write().await;
+        let recovery_code = crate::core::keystore::set_recovery_passphrase(
+            &config,
+            &req.passphrase,
+            req.current_passphrase.as_deref(),
+            req.replace_unverified,
+        )?;
+        // The passphrase is stored either way; the file copy goes now when the
+        // boot's rule allows it, and otherwise at the next start.
+        if let Err(e) =
+            crate::core::keystore::release_disk_copy_if_settled(&config, &state.db).await
+        {
+            tracing::warn!(
+                "recovery: config.toml keeps its copy of the key until the next start ({e:#})"
+            );
+        }
+        anyhow::Ok(recovery_code)
+    })
+    .await;
+    match stored {
+        Ok(Ok(recovery_code)) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
+        Ok(Err(e)) => Json(ApiResponse::err(e.to_string())),
+        Err(e) => Json(ApiResponse::err(format!(
+            "the recovery passphrase task stopped: {e}"
+        ))),
     }
 }
 

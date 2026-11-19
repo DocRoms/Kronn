@@ -419,7 +419,11 @@ fn ensure_durable_copy(dir: &Path, store: &KeyStore, config: &AppConfig, key: &s
 /// Whether config.toml may go without its copy of `key`: two persisted vault
 /// copies, or one plus a `recovery.key` verified for this key.
 fn enough_copies(dir: &Path, store: &KeyStore, key: &str) -> bool {
-    let copies = store.copies_of(key);
+    enough_copies_among(dir, key, store.copies_of(key))
+}
+
+/// The same rule for a count of vault copies already read.
+fn enough_copies_among(dir: &Path, key: &str, copies: usize) -> bool {
     copies >= 2
         || (copies >= 1 && recovery::matches_key(dir, key) == recovery::RecoveryMatch::Matches)
 }
@@ -905,6 +909,57 @@ pub fn set_recovery_passphrase_in(
     current_passphrase: Option<&str>,
 ) -> Result<String> {
     set_recovery_passphrase_with(dir, config, passphrase, current_passphrase, false)
+}
+
+/// The boot's retention rule, applied as soon as a recovery passphrase is
+/// stored, so the file copy does not wait for a restart. Only ever releases,
+/// and rewrites config.toml itself: `Ok(true)` means the file no longer holds
+/// the key. On any error the copy and its report are as before the call.
+pub async fn release_disk_copy_if_settled(config: &AppConfig, db: &Database) -> Result<bool> {
+    let dir = config::config_dir()?;
+    let store = KeyStore::standard(&dir);
+    release_disk_copy_if_settled_with(&dir, &store, config, db, || config::save(config)).await
+}
+
+async fn release_disk_copy_if_settled_with<F, Fut>(
+    dir: &Path,
+    store: &KeyStore,
+    config: &AppConfig,
+    db: &Database,
+    save: F,
+) -> Result<bool>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let Some(key) = config.encryption_secret.as_deref() else {
+        return Ok(false);
+    };
+    let holds_key_in_use = config::retained_disk_key(dir)
+        .is_some_and(|kept| crate::core::keyvault::same_key(&kept, key));
+    if !holds_key_in_use {
+        return Ok(false);
+    }
+    let columns = collect_encrypted_rows(db).await?;
+    let copies = store.copies_of(key);
+    if !(enough_copies_among(dir, key, copies) && decrypts_every_column(key, &columns)) {
+        return Ok(false);
+    }
+    config::release_disk_key(dir);
+    if let Err(e) = save().await {
+        // The file was not rewritten: it still holds the key, and says so.
+        config::retain_disk_key(dir, key);
+        return Err(e.context("config.toml could not be rewritten without the key"));
+    }
+    let mut reports = REPORTS.lock().unwrap_or_else(|p| p.into_inner());
+    let report = reports.entry(dir.to_path_buf()).or_default();
+    report.copies = copies;
+    report.file_keeps_key = false;
+    tracing::info!(
+        "keystore: two independent copies of the key remain ({copies} in vaults) and it \
+         decrypts every encrypted column — config.toml no longer keeps a copy"
+    );
+    Ok(true)
 }
 
 /// `replace_unverified`: the user confirmed replacing a recovery.key (from
@@ -4073,6 +4128,217 @@ mod tests {
             .unwrap();
         assert_eq!(locked.encryption_secret.as_deref(), Some(k.as_str()));
         config::release_disk_key(dir);
+    }
+
+    // ── the file copy goes when the passphrase is stored (KT-1686) ──────────
+
+    /// One vault copy, the rows it decrypts, and the key kept in config.toml.
+    async fn kept_in_file(dir: &Path) -> (Database, AppConfig, KeyStore, String) {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = Some(k.clone());
+        let (sidecar, _s) = mem_vault("sidecar", Some(&k));
+        config::retain_disk_key(dir, &k);
+        record_report_for_tests(dir, 1, &[], true);
+        (db, cfg, KeyStore::from_vaults(vec![sidecar]), k)
+    }
+
+    async fn no_save() -> Result<()> {
+        panic!("config.toml must not be rewritten")
+    }
+
+    /// The copy stays, its report too, and config.toml is not rewritten.
+    async fn assert_kept(dir: &Path, store: &KeyStore, cfg: &AppConfig, db: &Database, k: &str) {
+        assert!(
+            !release_disk_copy_if_settled_with(dir, store, cfg, db, no_save)
+                .await
+                .unwrap()
+        );
+        assert_eq!(config::retained_disk_key(dir).as_deref(), Some(k));
+        assert!(boot_report(dir).file_keeps_key);
+        config::release_disk_key(dir);
+    }
+
+    #[tokio::test]
+    async fn storing_a_passphrase_releases_the_file_copy_at_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, cfg, store, _k) = kept_in_file(dir).await;
+        set_recovery_passphrase_in(dir, &cfg, "a long passphrase", None).unwrap();
+        // config.toml is rewritten once the retention is lifted, not before.
+        let held_at_save = std::cell::Cell::new(None);
+        let released = release_disk_copy_if_settled_with(dir, &store, &cfg, &db, || async {
+            held_at_save.set(Some(config::retained_disk_key(dir).is_some()));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(released);
+        assert_eq!(held_at_save.get(), Some(false));
+        assert_eq!(config::retained_disk_key(dir), None);
+        assert!(!boot_report(dir).file_keeps_key);
+        assert_eq!(boot_report(dir).copies, 1);
+        // Nothing left to release: no second rewrite.
+        assert!(
+            !release_disk_copy_if_settled_with(dir, &store, &cfg, &db, no_save)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_rewrite_keeps_the_file_copy_and_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, cfg, store, k) = kept_in_file(dir).await;
+        set_recovery_passphrase_in(dir, &cfg, "a long passphrase", None).unwrap();
+        let err = release_disk_copy_if_settled_with(dir, &store, &cfg, &db, || async {
+            anyhow::bail!("disk full")
+        })
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("disk full"));
+        assert_eq!(config::retained_disk_key(dir), Some(k));
+        assert!(boot_report(dir).file_keeps_key);
+        config::release_disk_key(dir);
+    }
+
+    #[tokio::test]
+    async fn unreadable_rows_keep_the_file_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, cfg, store, k) = kept_in_file(dir).await;
+        set_recovery_passphrase_in(dir, &cfg, "a long passphrase", None).unwrap();
+        db.with_conn(|conn| Ok(conn.execute_batch("DROP TABLE mcp_configs")?))
+            .await
+            .unwrap();
+        assert!(
+            release_disk_copy_if_settled_with(dir, &store, &cfg, &db, no_save)
+                .await
+                .is_err()
+        );
+        assert_eq!(config::retained_disk_key(dir), Some(k));
+        assert!(boot_report(dir).file_keeps_key);
+        config::release_disk_key(dir);
+    }
+
+    #[tokio::test]
+    async fn the_file_copy_stays_without_a_verified_passphrase_for_this_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, cfg, store, k) = kept_in_file(dir).await;
+        // None at all.
+        assert_kept(dir, &store, &cfg, &db, &k).await;
+        // One that wraps another key.
+        config::retain_disk_key(dir, &k);
+        recovery::save_blob(
+            dir,
+            &recovery::wrap_key(&crypto::generate_secret(), "a long passphrase").unwrap(),
+        )
+        .unwrap();
+        assert_kept(dir, &store, &cfg, &db, &k).await;
+        // One for this key that carries no fingerprint (before 0.14.3).
+        config::retain_disk_key(dir, &k);
+        let mut old = recovery::wrap_key(&k, "a long passphrase").unwrap();
+        old.fingerprint = None;
+        recovery::save_blob(dir, &old).unwrap();
+        assert_kept(dir, &store, &cfg, &db, &k).await;
+        // One for this key whose payload is damaged.
+        config::retain_disk_key(dir, &k);
+        let code = recovery::to_code(&recovery::wrap_key(&k, "a long passphrase").unwrap());
+        let mut parts: Vec<String> = code.split('.').map(str::to_string).collect();
+        let mut w: Vec<char> = parts[2].chars().collect();
+        w[5] = if w[5] == 'A' { 'B' } else { 'A' };
+        parts[2] = w.into_iter().collect();
+        std::fs::write(dir.join(recovery::RECOVERY_FILENAME), parts.join(".")).unwrap();
+        assert_kept(dir, &store, &cfg, &db, &k).await;
+    }
+
+    #[tokio::test]
+    async fn the_file_copy_stays_when_no_vault_holds_the_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, cfg, _store, k) = kept_in_file(dir).await;
+        set_recovery_passphrase_in(dir, &cfg, "a long passphrase", None).unwrap();
+        let (empty, _s) = mem_vault("sidecar", None);
+        assert_kept(dir, &KeyStore::from_vaults(vec![empty]), &cfg, &db, &k).await;
+        // A vault holding another key is not a copy of this one.
+        config::retain_disk_key(dir, &k);
+        let (other, _s) = mem_vault("sidecar", Some(&crypto::generate_secret()));
+        assert_kept(dir, &KeyStore::from_vaults(vec![other]), &cfg, &db, &k).await;
+    }
+
+    #[tokio::test]
+    async fn the_file_copy_stays_when_a_column_holds_rows_the_key_cannot_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, cfg, store, k) = kept_in_file(dir).await;
+        seed_snapshot(&db, &crypto::generate_secret()).await;
+        set_recovery_passphrase_in(dir, &cfg, "a long passphrase", None).unwrap();
+        assert_kept(dir, &store, &cfg, &db, &k).await;
+    }
+
+    #[tokio::test]
+    async fn another_value_kept_in_the_file_is_never_released() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, cfg, store, _k) = kept_in_file(dir).await;
+        set_recovery_passphrase_in(dir, &cfg, "a long passphrase", None).unwrap();
+        let other = crypto::generate_secret();
+        config::retain_disk_key(dir, &other);
+        assert_kept(dir, &store, &cfg, &db, &other).await;
+    }
+
+    #[tokio::test]
+    async fn a_locked_instance_releases_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, mut cfg, store, k) = kept_in_file(dir).await;
+        set_recovery_passphrase_in(dir, &cfg, "a long passphrase", None).unwrap();
+        cfg.encryption_secret = None;
+        assert_kept(dir, &store, &cfg, &db, &k).await;
+    }
+
+    /// The boot's other case: two vaults, no passphrase.
+    #[tokio::test]
+    async fn two_vault_copies_release_the_file_copy_without_a_passphrase() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (db, cfg, _store, k) = kept_in_file(dir).await;
+        let (keychain, _a) = mem_vault("keychain", Some(&k));
+        let (sidecar, _b) = mem_vault("sidecar", Some(&k));
+        let store = KeyStore::from_vaults(vec![keychain, sidecar]);
+        assert!(
+            release_disk_copy_if_settled_with(dir, &store, &cfg, &db, || async { Ok(()) })
+                .await
+                .unwrap()
+        );
+        assert_eq!(config::retained_disk_key(dir), None);
+        assert_eq!(boot_report(dir).copies, 2);
+        assert!(!boot_report(dir).file_keeps_key);
+    }
+
+    /// No report of a boot for this directory: the release writes one.
+    #[tokio::test]
+    async fn a_release_without_a_boot_report_records_the_new_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("fresh");
+        std::fs::create_dir(&dir).unwrap();
+        let (db, cfg, store, k) = kept_in_file(tmp.path()).await;
+        config::release_disk_key(tmp.path());
+        config::retain_disk_key(&dir, &k);
+        set_recovery_passphrase_in(&dir, &cfg, "a long passphrase", None).unwrap();
+        assert!(
+            release_disk_copy_if_settled_with(&dir, &store, &cfg, &db, || async { Ok(()) })
+                .await
+                .unwrap()
+        );
+        let report = boot_report(&dir);
+        assert!(!report.file_keeps_key);
+        assert_eq!(report.copies, 1);
+        assert!(report.stale_sources.is_empty() && report.invalid_sources.is_empty());
     }
 
     // ── review round 6 ──────────────────────────────────────────────────────
