@@ -153,9 +153,13 @@ execution beside its shadows.
   execution;
 - **the output of each shadow against the main one**, with a line diff where
   they differ, and any two executions side by side;
+  Each execution is named with its agent and model. JSON fields are compared
+  in alphabetical order at every depth, so two models that write the same
+  fields in another order are not shown as different; lists keep their order.
+  [src: file: frontend/src/lib/shadowRuns.ts:95-104#withSortedKeys]
 - **a determinism summary** when some shadows are identical to the step: how many
   distinct outputs there are out of N+1.
-  [src: file: frontend/src/lib/shadowRuns.ts:147#determinism]
+  [src: file: frontend/src/lib/shadowRuns.ts:158#determinism]
 
 While a shadow is still going, the comparison refreshes and shows it as running.
 
