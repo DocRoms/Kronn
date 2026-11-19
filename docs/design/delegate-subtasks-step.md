@@ -43,7 +43,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   `[src: file: backend/src/db/orchestration.rs:4861-4873#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
   decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:15864-15876#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:19646-19655#human_review]`
+  `[src: file: backend/src/api/orchestration.rs:19717-19726#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
@@ -79,7 +79,7 @@ branch. Checked against the code:
   review obligation and the escalation are messages posted to the principal of
   that discussion.
   `[src: file: backend/src/api/orchestration.rs:16360-16373#principal_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:16431-16473#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:16502-16544#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:8254-8261#deliver_worker_manifest]`
   `[src: file: backend/src/db/orchestration.rs:4774-4781#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
@@ -147,7 +147,7 @@ Behaviour:
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:285-295#idle]`
-   `[src: file: backend/src/api/orchestration.rs:17688-17726#wait_for_execution_status]`
+   `[src: file: backend/src/api/orchestration.rs:17759-17797#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP

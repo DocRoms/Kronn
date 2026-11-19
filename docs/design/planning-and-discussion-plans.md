@@ -5,7 +5,7 @@ Status: **implemented for 0.9.1** (2026-07-25).
 The domain schema, compact HTTP/MCP contract, discussion panel, global backlog,
 human-gated proposal cards and delta-only prompt notifications are implemented.
 `[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99#planning_tasks]`
-`[src: file: backend/src/api/planning.rs:239-280#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:327-374#decide_proposal_item]`
+`[src: file: backend/src/api/planning.rs:311-352#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:399-446#decide_proposal_item]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
 `[src: file: frontend/src/pages/PlanningPage.tsx:191-216#withDiscussion]`
 `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3782-3813#planning_change_count]`
@@ -184,7 +184,7 @@ Writes are separate tools with narrow schemas. Lists are compact by default and
 full content is returned only for an explicitly requested task.
 `task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
 checkbox progress. Delta timestamps are compared numerically as RFC3339
-instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2895-2943#task_changes]` Agents are
+instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2927-2975#task_changes]` Agents are
 taught this contract in the same prompt/instruction layer that advertises the
 discussion-history tools `disc_meta`, `disc_get_message` and `disc_summarize`:
 the delayed history notice also lists the Planning reads and says how to write (a direct `task_create`, or a `kronn-plan-action` proposal). `[src: file: backend/src/api/disc_prompts.rs:569-599#introspection_notice]`
