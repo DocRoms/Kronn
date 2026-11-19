@@ -285,12 +285,25 @@ fn masks_literal_secrets_in_every_hand_typed_field_of_a_step() {
         name: "inline".into(),
         exec_command: Some(key.into()),
         exec_setup_command: Some(format!("login {key}")),
+        api_endpoint_path: Some(format!("/v1/hook/{key}")),
         ..WorkflowStep::default()
     };
     let mut found = vec![];
     redact_steps("wf-1", "Nightly", std::iter::once(&mut command), &mut found);
     assert_eq!(command.exec_command.as_deref(), Some(REDACTED));
     assert_eq!(command.exec_setup_command.as_deref(), Some(REDACTED));
+    assert_eq!(command.api_endpoint_path.as_deref(), Some(REDACTED));
+    let mut plain = WorkflowStep {
+        name: "call".into(),
+        api_endpoint_path: Some("/repos/{owner}/{repo}/pulls".into()),
+        ..WorkflowStep::default()
+    };
+    let mut found = vec![];
+    redact_steps("wf-1", "Nightly", std::iter::once(&mut plain), &mut found);
+    assert_eq!(
+        plain.api_endpoint_path.as_deref(),
+        Some("/repos/{owner}/{repo}/pulls")
+    );
 }
 
 /// A collect source is an Exec line by another name, a transform fallback a

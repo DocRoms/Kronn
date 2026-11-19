@@ -1558,7 +1558,7 @@ pub fn join_via_token(
 }
 
 /// Why a launch cannot join again as a session it does not hold.
-pub const SESSION_HELD_ELSEWHERE: &str = "this session is already joined to the room and is \
+pub const SESSION_HELD_ELSEWHERE: &str = "this session is already joined to a room and is \
     not yours to take: an invite and a session id read in the room prove nothing. The bridge \
     that joined it resumes it by itself; join under your own session id";
 
@@ -1600,6 +1600,22 @@ pub fn join_via_token_as(
         ));
     }
 
+    // A launch joins as a session active anywhere only when it holds it: the
+    // join below either reissues that session's credential (same room) or
+    // ends it where it is and makes the caller its new holder (another room).
+    if let Some(held) = held {
+        let mut statement = tx.prepare(
+            "SELECT id FROM discussion_sessions
+              WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'",
+        )?;
+        let active: Vec<i64> = statement
+            .query_map(params![agent_type, session_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if active.iter().any(|pk| !held.contains(pk)) {
+            return Err(anyhow!(SESSION_HELD_ELSEWHERE));
+        }
+    }
+
     // Step 2a — idempotency on the session side : if THIS CLI session
     // already joined THIS disc, return the existing pk rather than
     // inserting a duplicate row. Without this, a flaky network +
@@ -1616,9 +1632,6 @@ pub fn join_via_token_as(
         .optional()?;
 
     let session_pk = if let Some(pk) = existing_pk {
-        if held.is_some_and(|held| !held.contains(&pk)) {
-            return Err(anyhow!(SESSION_HELD_ELSEWHERE));
-        }
         tx.execute(
             "UPDATE discussion_sessions
                 SET resume_token_hash = ?2, resume_rotated_at = ?3
@@ -3523,6 +3536,31 @@ mod tests {
         let fresh =
             join_via_token_as(&conn, &issued.token, "ClaudeCode", "sess-B", Some(&[])).unwrap();
         assert_ne!(fresh.session_pk, first.session_pk);
+
+        // Through another room: the join would end the session where it is
+        // and hand its name to the caller.
+        conn.execute(
+            "INSERT INTO discussions(id, title, created_at, updated_at)
+             VALUES ('d-other', 'other', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let elsewhere = create_invite_token(&conn, "d-other").unwrap();
+        let refused = join_via_token_as(&conn, &elsewhere.token, "ClaudeCode", "sess-A", Some(&[]))
+            .unwrap_err();
+        assert_eq!(refused.to_string(), SESSION_HELD_ELSEWHERE);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM discussion_sessions WHERE id = ?1",
+                [first.session_pk],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "active", "the session stays where it is");
+        // Its holder moves it.
+        let moved = join_via_token_as(&conn, &elsewhere.token, "ClaudeCode", "sess-A", Some(&held))
+            .unwrap();
+        assert_eq!(moved.disc_id, "d-other");
     }
 
     #[test]

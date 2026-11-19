@@ -317,6 +317,10 @@ fn redact_steps<'a>(
         if let Some(body) = step.api_body.as_mut() {
             scope.json("api_body".into(), None, body);
         }
+        // A key typed straight into the path (`/v1/hook/<key>`).
+        if let Some(path) = step.api_endpoint_path.as_mut() {
+            scope.text("api_endpoint_path", path);
+        }
         if let Some(config) = step.notify_config.as_mut() {
             scope.mask(&mut config.url, "notify_config.url".into());
             scope.text("notify_config.body_template", &mut config.body_template);
