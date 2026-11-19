@@ -43,7 +43,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:200-320#migrate_hardcoded_catalog_once]
 [src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
 [src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
-[src: file: backend/src/agents/runner.rs:3707-3726#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3628-3647#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3654-3829#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3666-3841#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13910-13927#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:14042-14073#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13922-13939#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14054-14085#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5142-5170#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5154-5182#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is

@@ -84,14 +84,14 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs:5590-5592#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:6032-6051#task_cancel] [src: file: backend/src/agents/runner.rs:6112-6118#shutdown].
+   [src: file: backend/src/agents/runner.rs:5602-5604#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:6044-6063#task_cancel] [src: file: backend/src/agents/runner.rs:6124-6130#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
    with it [src: file: backend/src/acp.rs:1070-1074#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1871-1879#shutdown].
 4. The pipeline waits on the lifeline, which exits only after that shutdown, so
    the audit is finalised as `Cancelled` once the agent is really gone. This is
    also why the lifeline's PID is **not** killed: doing it ended the wait early
-   [src: file: backend/src/agents/runner.rs:6121-6124#lifeline_stdin].
+   [src: file: backend/src/agents/runner.rs:6133-6136#lifeline_stdin].
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
@@ -145,7 +145,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:15241-15247#total_cost_usd] [src: file: backend/src/agents/runner.rs:6017-6019#usd_micros] [src: file: backend/src/agents/runner.rs:10502-10508#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:15253-15259#total_cost_usd] [src: file: backend/src/agents/runner.rs:6029-6031#usd_micros] [src: file: backend/src/agents/runner.rs:10514-10520#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
