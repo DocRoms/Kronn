@@ -330,6 +330,7 @@ pub async fn peer_join_as(
     let (disc_id, session_pk, resume_token) = {
         let (t, a, s) = (token.clone(), agent_type.clone(), session_id.clone());
         let held = bridge.map(|axum::Extension(caller)| caller.own_sessions);
+        let held_remote = held.clone();
         let local = state
             .db
             .with_conn(move |conn| {
@@ -351,7 +352,7 @@ pub async fn peer_join_as(
                          enable \"Accept P2P connections\" in Settings > Identity to join it."
                     )));
                 }
-                match try_remote_join(&state, &token, &agent_type, &session_id).await {
+                match try_remote_join(&state, &token, &agent_type, &session_id, held_remote).await {
                     Ok(Some(r)) => r,
                     // No contact hosts it → surface the original local error.
                     Ok(None) => return Json(ApiResponse::err(local_err.to_string())),
@@ -744,7 +745,17 @@ fn join_next_steps(
 /// invite token. A successful call rotates the opaque credential and updates
 /// the original participant row in place.
 pub async fn peer_resume(
+    state: State<AppState>,
+    request: Json<PeerResumeRequest>,
+) -> Json<ApiResponse<PeerResumeResponse>> {
+    peer_resume_as(state, None, request).await
+}
+
+/// [`peer_resume`] as the route serves it: a bridge token does not resume
+/// under the id of a session it does not hold.
+pub async fn peer_resume_as(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<PeerResumeRequest>,
 ) -> Json<ApiResponse<PeerResumeResponse>> {
     if req.agent_type.trim().is_empty() {
@@ -776,9 +787,18 @@ pub async fn peer_resume(
     let session_id = req.session_id;
     let resume_token = req.resume_token;
     let next_resume_token = req.next_resume_token;
+    let held = bridge.map(|axum::Extension(caller)| caller.own_sessions);
     match state
         .db
         .with_conn(move |conn| {
+            db::discussion_sessions::refuse_a_resume_under_another_sessions_name(
+                conn,
+                &agent_type,
+                &session_id,
+                &resume_token,
+                next_resume_token.as_deref(),
+                held.as_deref(),
+            )?;
             let resumed = db::discussion_sessions::resume_disc_session_in_disc(
                 conn,
                 &agent_type,
@@ -816,7 +836,16 @@ pub async fn peer_resume(
 /// derives the origin and execution from the exact session and persisted
 /// orchestrator proof; the caller supplies only the child it is leaving.
 pub async fn orchestrator_return_resume(
+    state: State<AppState>,
+    request: Json<OrchestratorReturnResumeRequest>,
+) -> Json<ApiResponse<PeerResumeResponse>> {
+    orchestrator_return_resume_as(state, None, request).await
+}
+
+/// [`orchestrator_return_resume`] as the route serves it.
+pub async fn orchestrator_return_resume_as(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<OrchestratorReturnResumeRequest>,
 ) -> Json<ApiResponse<PeerResumeResponse>> {
     if req.agent_type.trim().is_empty()
@@ -836,9 +865,18 @@ pub async fn orchestrator_return_resume(
             ));
         }
     }
+    let held = bridge.map(|axum::Extension(caller)| caller.own_sessions);
     let result = state
         .db
         .with_conn(move |conn| {
+            db::discussion_sessions::refuse_a_resume_under_another_sessions_name(
+                conn,
+                &req.agent_type,
+                &req.session_id,
+                &req.resume_token,
+                req.next_resume_token.as_deref(),
+                held.as_deref(),
+            )?;
             db::cli_worker_bindings::resume_after_orchestrator_return(
                 conn,
                 &req.agent_type,
@@ -872,7 +910,23 @@ async fn try_remote_join(
     token: &str,
     agent_type: &str,
     session_id: &str,
+    held: Option<Vec<i64>>,
 ) -> anyhow::Result<Option<(String, i64, String)>> {
+    // Refused before a contact is asked, and again in the join's own write.
+    {
+        let (a, s, held) = (agent_type.to_string(), session_id.to_string(), held.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::refuse_a_session_held_elsewhere(
+                    conn,
+                    &a,
+                    &s,
+                    held.as_deref(),
+                )
+            })
+            .await?;
+    }
     // Our own invite code — the credential the peer validates against its contacts.
     let our_code = {
         let cfg = state.config.read().await;
@@ -988,7 +1042,18 @@ async fn try_remote_join(
         let joined = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussion_sessions::join_disc_session_resumable(conn, &mdid, &a, &s)
+                let tx = conn.unchecked_transaction()?;
+                crate::db::discussion_sessions::refuse_a_session_held_elsewhere(
+                    &tx,
+                    &a,
+                    &s,
+                    held.as_deref(),
+                )?;
+                let joined = crate::db::discussion_sessions::join_disc_session_resumable(
+                    &tx, &mdid, &a, &s,
+                )?;
+                tx.commit()?;
+                Ok(joined)
             })
             .await?;
         return Ok(Some((

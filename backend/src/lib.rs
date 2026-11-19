@@ -2949,11 +2949,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/discussions/peer-resume",
-            post(api::disc_invite::peer_resume),
+            post(api::disc_invite::peer_resume_as),
         )
         .route(
             "/api/discussions/orchestrator-return-resume",
-            post(api::disc_invite::orchestrator_return_resume),
+            post(api::disc_invite::orchestrator_return_resume_as),
         )
         // Cross-instance leg of the unified "join by code": a peer asks whether
         // we host the room behind a token; if so we share it back. Auth-exempt

@@ -2998,6 +2998,45 @@ async fn a_token_joins_again_only_as_a_session_its_own_launch_joined() {
     let other = bridge_for("room-a");
     let refused = join(other.value().to_string(), "own-s").await;
     assert_eq!(refused["success"], false, "{refused}");
+
+    // A resume renames the caller's session: not to the principal's id.
+    let resume = |session: &'static str| {
+        let (app, bearer) = (app.clone(), co_member.value().to_string());
+        let credential = again["data"]["resume_token"].clone();
+        async move {
+            call(
+                &app,
+                "POST",
+                "/api/discussions/peer-resume",
+                Some(&bearer),
+                Some(json!({
+                    "agent_type": "ClaudeCode", "session_id": session, "resume_token": credential
+                })),
+            )
+            .await
+            .1
+        }
+    };
+    // The principal's session has left: its id is free in the index, and
+    // still not the co-member's to take.
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE discussion_sessions SET status = 'left' WHERE id = 951",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let renamed = resume("principal-s").await;
+    assert_eq!(renamed["success"], false, "{renamed}");
+    assert!(
+        renamed.to_string().contains("not yours to take"),
+        "{renamed}"
+    );
+    let reloaded = resume("own-s-reloaded").await;
+    assert_eq!(reloaded["success"], true, "{reloaded}");
+    assert_eq!(reloaded["data"]["session_pk"], first["data"]["session_pk"]);
 }
 
 /// B5-02 — a page a token's workflow will publish into must be its project's.
