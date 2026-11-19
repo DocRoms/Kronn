@@ -466,6 +466,32 @@ async fn the_condense_passes_tokens_are_reported_and_counted_in_the_step() {
     );
 }
 
+#[tokio::test]
+async fn a_refused_merge_leaves_the_main_row_its_own_spend() {
+    let mut main = scripted(MAIN_REVIEW);
+    main.replies = vec![
+        (CONDENSE_MARK.into(), leaking_condense()),
+        ("Second look".into(), OTHER_REVIEW.into()),
+    ];
+    main.usage = Some((700, 300));
+    let mut fx = fixture("proj-merge-refused-tokens", main).await;
+    fx.model_for(AgentType::Codex, scripted(LOCAL_REVIEW));
+    cite_files(&fx);
+    let wf = merged_workflow(&fx, Some(merge()));
+    let run = fx.run(&wf, "run-merge-refused-tokens").await;
+    let review = comparison(&fx, "run-merge-refused-tokens").await;
+    let report = review.merge.unwrap();
+    assert_eq!(report.status, MergeStatus::Rejected, "{report:?}");
+    let condense = report.tokens_used.unwrap_or_default();
+    assert!(condense > 0, "a refused merge still reports what it spent");
+    assert_eq!(review.main.output, MAIN_REVIEW);
+    assert_eq!(
+        result_of(&run, "review").tokens_used.unwrap_or_default(),
+        review.main.tokens_used.unwrap_or_default() + condense,
+        "the pass is counted once: in the step, not in the main row"
+    );
+}
+
 #[test]
 fn a_merge_is_checked_when_a_person_saves_it() {
     let with = |merge: ShadowMerge, shadows: Vec<StepShadow>| {

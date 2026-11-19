@@ -599,6 +599,32 @@ type Checked = Result<(Vec<MergePoint>, String, Option<String>), (Vec<MergePoint
 /// verdict that keeps no point states why (`agreement`); and no dropped point
 /// appears in the result. A breach returns the points read (for the report)
 /// and the reason. On success, the agreement stated when no point is kept.
+/// The main execution's own output and metrics stay readable beside the merge:
+/// its comparison row keeps them, the step's result then carries the pass's
+/// spend and, when published, the merged output.
+async fn keep_main_row(state: &AppState, run_id: &str, index: usize, outcome: &StepOutcome) {
+    let (tokens, cost, model) = super::shadow::spent(&outcome.result);
+    let main_row = rows_of(state, run_id, index)
+        .await
+        .into_iter()
+        .find(|row| row.shadow_id == step_shadows::MAIN);
+    let Some(mut row) = main_row else { return };
+    row.status = ShadowStatus::Success;
+    row.output = outcome.result.output.clone();
+    row.tokens_used = Some(tokens);
+    row.cost_usd = cost;
+    row.model = model;
+    row.duration_ms = Some(outcome.result.duration_ms);
+    row.finished_at = Some(now());
+    let _ = state
+        .db
+        .with_conn(move |conn| step_shadows::finish(conn, &row))
+        .await;
+}
+
+/// Why a point of the main execution lost its verified mark.
+const UNPROVEN_MARK: &str = "marked verified on the word of an execution alone: kept, not verified";
+
 fn check_answer(output: &str, tokens: &[String], scope: &EvidenceScope) -> Checked {
     let (provenance, merged) = match split_answer(output) {
         Ok(parts) => parts,
@@ -621,7 +647,8 @@ fn check_answer(output: &str, tokens: &[String], scope: &EvidenceScope) -> Check
         return Err((points, "the condense pass wrote no result".to_string()));
     }
     let merged_text = normalized(&merged);
-    for point in &points {
+    for index in 0..points.len() {
+        let point = &points[index];
         // What is published is traced to the executions that raised it.
         if point.verdict == PointVerdict::Kept && point.found_by.is_empty() {
             return Err((
@@ -636,9 +663,14 @@ fn check_answer(output: &str, tokens: &[String], scope: &EvidenceScope) -> Check
         } else {
             resolve_evidence(evidence, scope)
         };
+        let by_main = point.found_by.iter().any(|token| token == MAIN_TOKEN);
+        let mut unproven = false;
         if point.verified {
             match &resolved {
                 Ok(found) if found.grounded > 0 => {}
+                // The main execution raised it: the point stood before the
+                // merge and stands after it, without the mark it did not earn.
+                Ok(_) if by_main => unproven = true,
                 Ok(_) => {
                     return Err((
                         points.clone(),
@@ -661,7 +693,6 @@ fn check_answer(output: &str, tokens: &[String], scope: &EvidenceScope) -> Check
         }
         match point.verdict {
             PointVerdict::Kept => {
-                let by_main = point.found_by.iter().any(|token| token == MAIN_TOKEN);
                 if !by_main && (!point.verified || evidence.is_empty()) {
                     return Err((
                         points.clone(),
@@ -694,6 +725,17 @@ fn check_answer(output: &str, tokens: &[String], scope: &EvidenceScope) -> Check
                 }
             }
             PointVerdict::Duplicate => {}
+        }
+        if unproven {
+            let point = &mut points[index];
+            point.verified = false;
+            if point
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                point.reason = Some(UNPROVEN_MARK.to_string());
+            }
         }
     }
     let kept = points
@@ -936,6 +978,7 @@ pub async fn merge_step(
             "The condense pass failed ({}): the main execution's output stands",
             cut_to(condensed.result.output.trim(), 300)
         ));
+        keep_main_row(state, &run.id, index, outcome).await;
         outcome.result.tokens_used = Some(outcome.result.tokens_used.unwrap_or(0) + spent_tokens);
         save(
             state,
@@ -963,32 +1006,12 @@ pub async fn merge_step(
             report.note = Some(format!(
                 "The merged result was not published ({reason}): the main execution's output stands"
             ));
+            keep_main_row(state, &run.id, index, outcome).await;
             outcome.result.tokens_used =
                 Some(outcome.result.tokens_used.unwrap_or(0) + spent_tokens);
         }
         Ok((points, merged, agreement)) => {
-            // The main execution's own output and metrics stay readable beside
-            // the merged result: its comparison row keeps them.
-            let (main_tokens, main_cost, main_model) = super::shadow::spent(&outcome.result);
-            let main_duration = outcome.result.duration_ms;
-            let kept = outcome.result.output.clone();
-            let main_row = rows_of(state, &run.id, index)
-                .await
-                .into_iter()
-                .find(|row| row.shadow_id == step_shadows::MAIN);
-            if let Some(mut row) = main_row {
-                row.status = ShadowStatus::Success;
-                row.output = kept;
-                row.tokens_used = Some(main_tokens);
-                row.cost_usd = main_cost;
-                row.model = main_model;
-                row.duration_ms = Some(main_duration);
-                row.finished_at = Some(now());
-                let _ = state
-                    .db
-                    .with_conn(move |conn| step_shadows::finish(conn, &row))
-                    .await;
-            }
+            keep_main_row(state, &run.id, index, outcome).await;
             report.contributions = contributions(&tokens, &points);
             report.points = points;
             report.status = MergeStatus::Merged;
@@ -1249,6 +1272,33 @@ mod tests {
         );
         let (_, reason) = env.check(&circular).unwrap_err();
         assert!(reason.contains("cites only an execution"), "{reason}");
+    }
+
+    #[test]
+    fn a_point_of_the_main_execution_loses_an_unproven_mark_and_stays() {
+        let env = env();
+        // The main execution raised it and the pass vouched for it on the
+        // execution's word: the merge is published, the mark is not.
+        for found_by in [r#"["main"]"#, r#"["main","shadow:qwen"]"#] {
+            let points = format!(
+                r#"[{{"id":"p1","summary":"s","found_by":{found_by},"verdict":"kept","verified":true,"evidence":"main"}},{{"id":"p2","summary":"s","found_by":["main"],"verdict":"kept","verified":true,"evidence":"src/a.rs:1"}}]"#
+            );
+            let (read, merged, _) = env.check(&answer(&points, "Result.")).unwrap();
+            assert_eq!(merged, "Result.");
+            assert!(!read[0].verified, "{found_by}");
+            assert_eq!(read[0].verdict, PointVerdict::Kept);
+            assert_eq!(read[0].reason.as_deref(), Some(UNPROVEN_MARK));
+            assert!(read[1].verified, "an opened citation keeps its mark");
+            assert_eq!(read[1].reason, None);
+        }
+        // The reason the pass gave is not overwritten.
+        let reasoned = answer(
+            r#"[{"id":"p1","summary":"s","found_by":["main"],"verdict":"kept","verified":true,"evidence":"main","reason":"stated by main"}]"#,
+            "Result.",
+        );
+        let (read, _, _) = env.check(&reasoned).unwrap();
+        assert!(!read[0].verified);
+        assert_eq!(read[0].reason.as_deref(), Some("stated by main"));
     }
 
     #[test]
