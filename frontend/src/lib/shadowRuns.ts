@@ -91,13 +91,24 @@ const ENVELOPE = /---STEP_OUTPUT---\s*([\s\S]*?)\s*---END_STEP_OUTPUT---/;
 
 /** A step output as a person compares it: a JSON envelope pretty-printed one
  *  field per line (so a line diff points at the field), the signal dropped. */
+/** Keys in alphabetical order at every depth: two models write the same fields in different orders. */
+function withSortedKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withSortedKeys);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, v]) => [key, withSortedKeys(v)]));
+  }
+  return value;
+}
+
 export function readableOutput(output: string): string {
   const body = output.replace(/\n?\[SIGNAL: [A-Za-z0-9_]+\]\s*$/, '').trim();
   const envelope = ENVELOPE.exec(body);
   const candidate = envelope ? envelope[1] : body;
   try {
     const parsed: unknown = JSON.parse(candidate);
-    if (parsed && typeof parsed === 'object') return JSON.stringify(parsed, null, 2);
+    if (parsed && typeof parsed === 'object') return JSON.stringify(withSortedKeys(parsed), null, 2);
   } catch {
     // Not JSON: compared as text.
   }
