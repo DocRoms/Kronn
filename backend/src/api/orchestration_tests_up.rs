@@ -1913,21 +1913,81 @@ async fn stale_spawned_worker_cannot_commit_or_deliver_after_reassignment() {
     };
     let manifest: serde_json::Value =
         serde_json::from_str(&projected_manifest_for_execution(&db, &exec_id).await).unwrap();
+    // KT-1962 — the dispatch and its message are readable in the room: with a
+    // bridge token only the grant minted for this execution is its spawned
+    // worker. Another launch in the worker's room, the principal's room and
+    // another execution's worker name the right turn in vain.
+    let child = current.sub_discussion_id.clone().unwrap();
+    let grant = |room: &str, own_execution: Option<&str>| {
+        axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "tok".into(),
+            project: None,
+            own_discussions: vec![room.to_string()],
+            own_run: None,
+            agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: own_execution.map(str::to_string),
+            own_sessions: Vec::new(),
+        })
+    };
+    let request = || DeliverRequest {
+        task_execution_id: exec_id.clone(),
+        manifest: manifest.clone(),
+        source_agent: None,
+        source_session_id: None,
+        spawned_agent: Some(SpawnedAgentCaller {
+            discussion_id: child.clone(),
+            agent_type: "Codex".into(),
+            dispatch_job_id: current_dispatch.clone(),
+            source_message_id: current_trigger.clone(),
+        }),
+    };
+    for forged in [
+        grant(&child, None),
+        grant(&current.parent_discussion_id, None),
+        grant(&child, Some("exec-other")),
+    ] {
+        let Json(refused) =
+            deliver(State(state.clone()), Some(forged.clone()), Json(request())).await;
+        assert!(
+            !refused.success,
+            "a grant that is not this worker's delivers nothing"
+        );
+        let Json(commit) = commit_spawned_worker(
+            State(state.clone()),
+            Some(forged),
+            Json(
+                serde_json::from_value(serde_json::json!({
+                    "task_execution_id": exec_id,
+                    "files": ["README.md"],
+                    "message": "forged",
+                    "spawned_agent": {
+                        "discussion_id": child,
+                        "agent_type": "Codex",
+                        "dispatch_job_id": current_dispatch,
+                        "source_message_id": current_trigger,
+                    },
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+        assert_eq!(
+            commit.error_code.as_deref(),
+            Some("not_found"),
+            "{:?}",
+            commit.error
+        );
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Working,
+            "nothing was delivered"
+        );
+    }
     let Json(delivered) = deliver(
         State(state),
-        None,
-        Json(DeliverRequest {
-            task_execution_id: exec_id,
-            manifest,
-            source_agent: None,
-            source_session_id: None,
-            spawned_agent: Some(SpawnedAgentCaller {
-                discussion_id: current.sub_discussion_id.unwrap(),
-                agent_type: "Codex".into(),
-                dispatch_job_id: current_dispatch,
-                source_message_id: current_trigger,
-            }),
-        }),
+        Some(grant(&child, Some(exec_id.as_str()))),
+        Json(request()),
     )
     .await;
     assert!(
@@ -23366,6 +23426,7 @@ async fn a_proven_live_check_tick_is_journaled_under_the_proven_identity() {
             agent: None,
             room_agent_of: Vec::new(),
             own_execution: None,
+            own_sessions: Vec::new(),
         }))
     };
     let forged = |principal_fields: bool| -> UpdateDodItemBody {
@@ -23401,9 +23462,25 @@ async fn a_proven_live_check_tick_is_journaled_under_the_proven_identity() {
     )
     .await;
     assert!(!unproven.0.success);
-    let proven = update_dod_item_as(
+    // The worker here is a CLI of the parent room (KT-837): a grant of that
+    // room that never joined the principal's session may be the worker's.
+    let co_member = update_dod_item_as(
         State(state.clone()),
         token(&[parent_id.as_str()]),
+        Path((task_id.clone(), dod_id.clone())),
+        Json(forged(true)),
+    )
+    .await;
+    assert!(!co_member.0.success);
+    let joined = token(&[parent_id.as_str()]).map(|axum::Extension(grant)| {
+        axum::Extension(crate::core::bridge_token::BridgeCaller {
+            own_sessions: vec![102],
+            ..grant
+        })
+    });
+    let proven = update_dod_item_as(
+        State(state.clone()),
+        joined,
         Path((task_id.clone(), dod_id.clone())),
         Json(forged(true)),
     )
@@ -31888,6 +31965,7 @@ async fn a_worker_bridge_token_cannot_extend_its_own_review_rounds() {
         agent: None,
         room_agent_of: Vec::new(),
         own_execution: None,
+        own_sessions: Vec::new(),
     };
     // The worker names the principal's real session; only its token tells it apart.
     let extend = |bridge: Option<&BridgeCaller>| {
@@ -31936,8 +32014,19 @@ async fn a_worker_bridge_token_cannot_extend_its_own_review_rounds() {
     );
     assert_eq!(exec_of(&db, &exec_id).await.max_review_rounds, limit_before);
 
-    // The principal's own token (it owns the parent room), then the non-bridge path.
-    let extended = extend(Some(&bridge(&[parent.as_str()]))).await;
+    // A co-member of the parent room that never joined the principal's
+    // session: here the worker is a CLI of that very room (KT-837).
+    let co_member = extend(Some(&bridge(&[parent.as_str()]))).await;
+    assert!(!co_member.success, "the session it names is not its own");
+    assert_eq!(exec_of(&db, &exec_id).await.max_review_rounds, limit_before);
+
+    // The principal's own token (it owns the parent room and joined the
+    // session it names), then the non-bridge path.
+    let principal = BridgeCaller {
+        own_sessions: vec![103],
+        ..bridge(&[parent.as_str()])
+    };
+    let extended = extend(Some(&principal)).await;
     assert!(extended.success, "{:?}", extended.error);
     assert_eq!(exec_of(&db, &exec_id).await.max_review_rounds, 7);
     let extended = extend(None).await;
@@ -32209,6 +32298,7 @@ async fn a_room_agent_proves_a_live_check_only_with_the_principals_own_grant() {
         // The room's agent, unless a test says the launch only runs there.
         room_agent_of: rooms.iter().map(|room| room.to_string()).collect(),
         own_execution: None,
+        own_sessions: Vec::new(),
     };
     let proven = |room: SpawnedAgentCaller, bridge: Option<BridgeCaller>| {
         let (db, task_id) = (db.clone(), execution.task_id.clone());
@@ -32271,6 +32361,7 @@ async fn a_room_agent_proves_a_live_check_only_with_the_principals_own_grant() {
     let hosted = BridgeCaller {
         room_agent_of: Vec::new(),
         own_execution: None,
+        own_sessions: Vec::new(),
         ..bridge(&["d-parent"])
     };
     assert_eq!(proven(own(), Some(hosted)).await, None);
@@ -32307,6 +32398,7 @@ async fn a_room_agent_identity_is_the_principal_only_with_that_agents_own_grant(
         agent: None,
         room_agent_of: rooms.iter().map(|room| room.to_string()).collect(),
         own_execution: None,
+        own_sessions: Vec::new(),
     };
     let own = || lifecycle_room("d-parent", "job-1", "msg-1");
     let before = execution_state(&db, &execution_id).await;
@@ -32334,6 +32426,17 @@ async fn a_room_agent_identity_is_the_principal_only_with_that_agents_own_grant(
             "this execution's own worker grant",
             BridgeCaller {
                 own_execution: Some(execution_id.clone()),
+                own_sessions: Vec::new(),
+                ..grant(&["d-parent"])
+            },
+        ),
+        (
+            "another provider's launch in the room",
+            BridgeCaller {
+                agent: Some(crate::core::api_access::AgentIdentity {
+                    agent_type: AgentType::ClaudeCode,
+                    model: None,
+                }),
                 ..grant(&["d-parent"])
             },
         ),
@@ -32396,6 +32499,7 @@ async fn a_declared_session_holds_a_role_only_with_a_grant_that_can_hold_it() {
         agent: None,
         room_agent_of: Vec::new(),
         own_execution: own_execution.map(str::to_string),
+        own_sessions: Vec::new(),
     };
     fn answer<T: Serialize>(name: &'static str, r: ApiResponse<T>) -> LifecycleAnswer {
         (name, r.success, r.error, r.error_code)
@@ -32515,6 +32619,13 @@ async fn a_declared_session_holds_a_role_only_with_a_grant_that_can_hold_it() {
             "this execution's worker grant in the parent room",
             grant(&[parent.as_str()], Some(exec_id.as_str())),
         ),
+        // The worker here is a CLI of the principal's own room (KT-837): a
+        // grant of that room that never joined the principal's session may
+        // be the worker's own.
+        (
+            "a co-member of the parent room",
+            grant(&[parent.as_str()], None),
+        ),
     ];
     for (label, bridge) in &forged {
         let answers = principal_calls(&exec_id, Some(bridge.clone())).await;
@@ -32528,7 +32639,7 @@ async fn a_declared_session_holds_a_role_only_with_a_grant_that_can_hold_it() {
             if *name == "status" && label.contains("both rooms") {
                 continue;
             }
-            if *name == "status" && label.contains("parent room") {
+            if *name == "status" && (label.contains("parent room") || label.contains("co-member")) {
                 continue;
             }
             assert!(!success, "{label} / {name}: refused");
@@ -32584,9 +32695,14 @@ async fn a_declared_session_holds_a_role_only_with_a_grant_that_can_hold_it() {
         assert_eq!(launched.error.as_deref(), Some(REFUSAL));
     }
     assert_eq!(executions().await, launched_before, "nothing was launched");
+    // The grant that joined the principal's session itself.
+    let principal_grant = || BridgeCaller {
+        own_sessions: vec![103],
+        ..grant(&[parent.as_str()], None)
+    };
     let Json(prepared) = task_exec_prepare(
         State(state.clone()),
-        Some(axum::Extension(grant(&[parent.as_str()], None))),
+        Some(axum::Extension(principal_grant())),
         Json(serde_json::from_value(body()).unwrap()),
     )
     .await;
@@ -32613,8 +32729,11 @@ async fn a_declared_session_holds_a_role_only_with_a_grant_that_can_hold_it() {
         .await;
         assert!(matches!(reviewed, Ok(ReviewOutcome::NotAddressed)));
     }
+    // The worker's own launch: minted for the execution, or (KT-837) a CLI of
+    // the parent room where its session is joined.
     let worker = grant(&[child.as_str()], Some(exec_id.as_str()));
-    for bridge in [Some(&worker), None] {
+    let joined_worker = grant(&[parent.as_str()], None);
+    for bridge in [Some(&worker), Some(&joined_worker), None] {
         let delivered =
             deliver_worker_manifest_as(&db, &exec_id, "ClaudeCode", "sess-a", "{}", bridge).await;
         assert!(!matches!(delivered, Ok(DeliverOutcome::NotAddressed)));
@@ -32625,7 +32744,7 @@ async fn a_declared_session_holds_a_role_only_with_a_grant_that_can_hold_it() {
 
     // The principal's own grant (a CLI or a workflow step that runs in the
     // parent room) and a host process without a token keep every call.
-    for bridge in [Some(grant(&[parent.as_str()], None)), None] {
+    for bridge in [Some(principal_grant()), None] {
         let answers = principal_calls(&exec_id, bridge).await;
         for ((name, _, error, code), (_, _, unknown_error, unknown_code)) in
             answers.iter().zip(&unknown)
@@ -32666,6 +32785,7 @@ async fn a_bridge_token_accepts_an_offer_only_for_a_session_of_its_own_room() {
         agent: None,
         room_agent_of: Vec::new(),
         own_execution: None,
+        own_sessions: Vec::new(),
     };
     let accept = |session: &str, bridge: Option<BridgeCaller>| {
         let (state, offer_id, session) = (state.clone(), offer_id.clone(), session.to_string());

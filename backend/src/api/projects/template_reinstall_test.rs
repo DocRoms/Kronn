@@ -510,6 +510,7 @@ async fn a_bridge_caller_is_refused_and_the_routes_are_off_the_bridge_list() {
             agent: None,
             room_agent_of: Vec::new(),
             own_execution: None,
+            own_sessions: Vec::new(),
         }))
     };
 

@@ -72,6 +72,9 @@ pub struct BridgeGrant {
     pub scope: BridgeScope,
     /// Discussions this launch created through the bridge: its own too.
     adopted: Mutex<Vec<String>>,
+    /// The CLI sessions this launch joined or resumed through the bridge: the
+    /// only ones it holds, whatever session a later request names (KT-1962).
+    sessions: Mutex<Vec<i64>>,
     /// The project frozen on first use: `Some(None)` = bound to no project.
     bound: Mutex<Option<Option<String>>>,
     expires_at: Instant,
@@ -94,6 +97,23 @@ impl BridgeGrant {
             own.extend(adopted.iter().cloned());
         }
         own
+    }
+
+    /// Record a session this launch just joined or resumed.
+    pub fn adopt_session(&self, session_pk: i64) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            if !sessions.contains(&session_pk) {
+                sessions.push(session_pk);
+            }
+        }
+    }
+
+    /// The sessions this launch joined or resumed.
+    pub fn own_sessions(&self) -> Vec<i64> {
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.clone())
+            .unwrap_or_default()
     }
 
     /// Record a discussion this launch just created.
@@ -167,6 +187,8 @@ pub struct BridgeCaller {
     pub room_agent_of: Vec<String>,
     /// The task execution this launch is the worker of, when it is one.
     pub own_execution: Option<String>,
+    /// The CLI sessions this launch joined or resumed through the bridge.
+    pub own_sessions: Vec<i64>,
 }
 
 impl BridgeCaller {
@@ -286,6 +308,7 @@ pub fn mint_with_lifetime(
         id: id.clone(),
         scope,
         adopted: Mutex::new(Vec::new()),
+        sessions: Mutex::new(Vec::new()),
         bound: Mutex::new(None),
         expires_at: Instant::now() + lifetime,
     });
@@ -391,6 +414,9 @@ impl Kind {
 pub enum Role {
     Target,
     Ref,
+    /// Changed like a target, and the grant must own it whatever the route's
+    /// rule: the room of a session the caller only names (KT-1963).
+    Owned,
 }
 
 /// One id a request names.
@@ -1948,7 +1974,10 @@ pub fn authorize_in(
             let read_only = reach.reads(id) && route.rule != Rule::Effect;
             return Err(Refusal(project_refusal(&grant.scope, read_only)));
         }
-        if kind == Kind::Discussion && route.rule == Rule::Own && !grant.owns_discussion(id) {
+        if kind == Kind::Discussion
+            && (route.rule == Rule::Own || named.role == Role::Owned)
+            && !grant.owns_discussion(id)
+        {
             return Err(Refusal(
                 "a bridge token may only write to its own discussion".into(),
             ));
@@ -1966,7 +1995,9 @@ pub fn authorize_in(
         };
         let allowed = match (route.rule, named.role) {
             (Rule::Effect, _) => effect_allowed(grant, route, kind, id, &place, bound),
-            (Rule::Write | Rule::Own, Role::Target) => writable(grant, kind, id, &place, reach),
+            (Rule::Write | Rule::Own, Role::Target | Role::Owned) => {
+                writable(grant, kind, id, &place, reach)
+            }
             _ => visible_for_read_in(grant, kind, id, &place, reach),
         };
         if !allowed {
@@ -2429,12 +2460,13 @@ pub fn credential_targets(
             out.push(found.map_or_else(unresolved, |disc| {
                 NamedId::new(Kind::Discussion, disc, Role::Target)
             }));
-            // Joining ends the named session in every other room: each of
-            // them must be one the token may write.
+            // Joining ends the named session in every other room. A session
+            // id is readable by the whole project, so each of those rooms
+            // must be the grant's own: a worker never moves its principal.
             out.extend(
                 session_rooms()?
                     .into_iter()
-                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Target)),
+                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Owned)),
             );
         }
         "/api/discussions/peer-resume" | "/api/discussions/orchestrator-return-resume" => {
@@ -2452,11 +2484,12 @@ pub fn credential_targets(
                 NamedId::new(Kind::Discussion, disc, Role::Target)
             }));
         }
+        // Leaving for a session: only one that runs in the grant's own room.
         "/api/discussions/peer-leave" => {
             out.extend(
                 session_rooms()?
                     .into_iter()
-                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Target)),
+                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Owned)),
             );
         }
         // Acting on the room of a joined session: that room must be in

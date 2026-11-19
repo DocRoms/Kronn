@@ -250,6 +250,7 @@ async fn acknowledge(
             agent: None,
             room_agent_of: Vec::new(),
             own_execution: None,
+            own_sessions: Vec::new(),
         })
     });
     crate::api::audit::acknowledge_drift(

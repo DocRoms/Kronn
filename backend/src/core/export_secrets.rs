@@ -170,6 +170,40 @@ impl Scope<'_> {
         }
     }
 
+    /// A command's arguments: the value after a secret flag, an inline
+    /// `--token=value` or `TOKEN=value`, and anything shaped like a secret.
+    fn args(&mut self, prefix: &str, args: &mut [String]) {
+        let mut after_secret_flag = false;
+        for (index, arg) in args.iter_mut().enumerate() {
+            // A value may start with a single dash; only a long option ends the value.
+            let flag_value = after_secret_flag && !arg.starts_with("--");
+            // `--token=value` and `TOKEN=value` carry the value in the same argument.
+            let (name, value) = match arg.split_once('=') {
+                Some((name, value)) if !name.is_empty() && !name.contains(char::is_whitespace) => {
+                    (name, Some(value))
+                }
+                _ => (arg.as_str(), None),
+            };
+            after_secret_flag = arg.starts_with('-') && value.is_none() && secret_name(name);
+            let literal = literal_part(value.unwrap_or(arg));
+            if literal.is_empty() {
+                continue;
+            }
+            let named = value.is_some() && secret_name(name) && !only_scheme(&literal);
+            if flag_value || named || suspicious(&literal_part(arg)) {
+                self.mask(arg, format!("{prefix}.{index}"));
+            }
+        }
+    }
+
+    /// Free text (a command, a stdin, a body template): masked whole when its
+    /// literal part holds something shaped like a secret.
+    fn text(&mut self, field: &str, value: &mut String) {
+        if suspicious(&literal_part(value)) {
+            self.mask(value, field.to_owned());
+        }
+    }
+
     fn json(&mut self, path: String, key: Option<&str>, value: &mut serde_json::Value) {
         match value {
             serde_json::Value::String(text) => {
@@ -227,27 +261,7 @@ pub fn redact_quick_exec(exec: &mut QuickExec, found: &mut Vec<RedactedField>) {
     if suspicious(&literal_part(&exec.command)) {
         scope.mask(&mut exec.command, "command".into());
     }
-    let mut after_secret_flag = false;
-    for (index, arg) in exec.args.iter_mut().enumerate() {
-        // A value may start with a single dash; only a long option ends the value.
-        let flag_value = after_secret_flag && !arg.starts_with("--");
-        // `--token=value` and `TOKEN=value` carry the value in the same argument.
-        let (name, value) = match arg.split_once('=') {
-            Some((name, value)) if !name.is_empty() && !name.contains(char::is_whitespace) => {
-                (name, Some(value))
-            }
-            _ => (arg.as_str(), None),
-        };
-        after_secret_flag = arg.starts_with('-') && value.is_none() && secret_name(name);
-        let literal = literal_part(value.unwrap_or(arg));
-        if literal.is_empty() {
-            continue;
-        }
-        let named = value.is_some() && secret_name(name) && !only_scheme(&literal);
-        if flag_value || named || suspicious(&literal_part(arg)) {
-            scope.mask(arg, format!("args.{index}"));
-        }
-    }
+    scope.args("args", &mut exec.args);
 }
 
 pub fn redact_workflow(workflow: &mut Workflow, found: &mut Vec<RedactedField>) {
@@ -285,12 +299,37 @@ fn redact_steps<'a>(
         }
         if let Some(config) = step.notify_config.as_mut() {
             scope.mask(&mut config.url, "notify_config.url".into());
+            scope.text("notify_config.body_template", &mut config.body_template);
             let mut headers = Some(std::mem::take(&mut config.headers));
             scope.headers("notify_config.headers", &mut headers);
             config.headers = headers.unwrap_or_default();
         }
         if let Some(url) = step.gate_notify_url.as_mut() {
             scope.mask(url, "gate_notify_url".into());
+        }
+        // An Exec step is a Quick Exec line by another name, and the maps a
+        // step hands to a Quick Prompt or a sub-workflow are typed by hand too.
+        if let Some(command) = step.exec_command.as_mut() {
+            scope.text("exec_command", command);
+        }
+        scope.args("exec_args", &mut step.exec_args);
+        if let Some(command) = step.exec_setup_command.as_mut() {
+            scope.text("exec_setup_command", command);
+        }
+        scope.args("exec_setup_args", &mut step.exec_setup_args);
+        if let Some(stdin) = step.exec_stdin.as_mut() {
+            scope.text("exec_stdin", stdin);
+        }
+        if let Some(payload) = step.json_data_payload.as_mut() {
+            scope.json("json_data_payload".into(), None, payload);
+        }
+        for (prefix, variables) in [
+            ("quick_prompt_variables", &mut step.quick_prompt_variables),
+            ("sub_workflow_variables", &mut step.sub_workflow_variables),
+        ] {
+            let mut pairs = Some(std::mem::take(variables));
+            scope.pairs(prefix, &mut pairs);
+            *variables = pairs.unwrap_or_default();
         }
     }
 }

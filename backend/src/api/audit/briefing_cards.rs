@@ -911,6 +911,7 @@ mod tests {
             agent: None,
             room_agent_of: Vec::new(),
             own_execution: None,
+            own_sessions: Vec::new(),
         }
     }
 

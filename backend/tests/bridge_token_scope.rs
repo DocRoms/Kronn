@@ -2861,6 +2861,78 @@ async fn peer_join_cannot_evict_a_session_from_another_project() {
     assert_eq!(state.as_deref(), Some("active"));
 }
 
+/// KT-1963 — a session id is readable by the whole project: a token ends or
+/// moves a session only when that session runs in the grant's own room, so a
+/// worker never evicts its principal from the parent room.
+#[tokio::test]
+async fn a_token_cannot_end_or_move_a_session_of_another_room_of_its_project() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussion_sessions \
+             (id, disc_id, agent_type, session_id, role, status, joined_at) \
+             VALUES (950, 'room-a2', 'ClaudeCode', 'principal-s', 'peer', 'active', \
+                     '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO discussion_invite_tokens(token_hash, disc_id, created_at, expires_at) \
+             VALUES (?1, 'room-a', '2026-01-01T00:00:00Z', '2999-01-01T00:00:00Z')",
+            [sha256_hex("kr-join-own-room")],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let status_of = || {
+        let db = db.clone();
+        async move {
+            query_one(
+                &db,
+                "SELECT status FROM discussion_sessions WHERE id = CAST(?1 AS INTEGER)",
+                "950".into(),
+            )
+            .await
+        }
+    };
+    let worker = bridge_for("room-a");
+    let named = json!({"agent_type": "ClaudeCode", "session_id": "principal-s"});
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/discussions/peer-leave",
+        Some(worker.value()),
+        Some(named.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/discussions/peer-join",
+        Some(worker.value()),
+        Some(json!({
+            "token": "kr-join-own-room", "agent_type": "ClaudeCode", "session_id": "principal-s"
+        })),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+    assert_eq!(status_of().await.as_deref(), Some("active"));
+
+    // The grant of the session's own room still leaves for it.
+    let own = bridge_for("room-a2");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/discussions/peer-leave",
+        Some(own.value()),
+        Some(named),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(status_of().await.as_deref(), Some("left"));
+}
+
 /// B5-02 — a page a token's workflow will publish into must be its project's.
 #[tokio::test]
 async fn a_token_s_workflow_publishes_only_into_its_project_s_pages() {

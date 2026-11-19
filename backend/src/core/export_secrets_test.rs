@@ -218,6 +218,79 @@ fn masks_notify_and_gate_urls_in_workflows() {
     assert!(fields.contains(&"gate_notify_url".to_string()));
 }
 
+/// KT-1967 — an Exec step is a Quick Exec line by another name: its command,
+/// arguments and stdin, the JSON a step carries and the variables it hands on
+/// are masked like the fields of the other step types.
+#[test]
+fn masks_literal_secrets_in_every_hand_typed_field_of_a_step() {
+    let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+    let mut step = WorkflowStep {
+        name: "deploy".into(),
+        exec_command: Some("deploy".into()),
+        exec_args: vec!["--token".into(), "abc123".into(), "--env={{env}}".into()],
+        exec_setup_command: Some("login".into()),
+        exec_setup_args: vec!["--password=hunter2".into(), "--quiet".into()],
+        exec_stdin: Some(format!("export KEY={key}")),
+        json_data_payload: Some(serde_json::json!({
+            "api_key": "literal-key", "region": "eu-west-1"
+        })),
+        quick_prompt_variables: HashMap::from([
+            ("password".to_string(), "hunter2".to_string()),
+            ("topic".to_string(), "{{steps.plan.output}}".to_string()),
+        ]),
+        sub_workflow_variables: HashMap::from([("token".to_string(), "abc123".to_string())]),
+        notify_config: Some(NotifyConfig {
+            url: "https://example.test/hook".into(),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: format!("{{\"key\": \"{key}\"}}"),
+        }),
+        ..WorkflowStep::default()
+    };
+    let mut found = vec![];
+    redact_steps("wf-1", "Nightly", std::iter::once(&mut step), &mut found);
+    assert_eq!(step.exec_args, ["--token", REDACTED, "--env={{env}}"]);
+    assert_eq!(step.exec_setup_args, [REDACTED, "--quiet"]);
+    assert_eq!(step.exec_stdin.as_deref(), Some(REDACTED));
+    let payload = step.json_data_payload.unwrap();
+    assert_eq!(payload["api_key"], REDACTED);
+    assert_eq!(payload["region"], "eu-west-1");
+    assert_eq!(step.quick_prompt_variables["password"], REDACTED);
+    assert_eq!(
+        step.quick_prompt_variables["topic"],
+        "{{steps.plan.output}}"
+    );
+    assert_eq!(step.sub_workflow_variables["token"], REDACTED);
+    assert_eq!(step.notify_config.unwrap().body_template, REDACTED);
+    // The commands themselves hold nothing secret here.
+    assert_eq!(step.exec_command.as_deref(), Some("deploy"));
+    assert_eq!(step.exec_setup_command.as_deref(), Some("login"));
+    let mut fields: Vec<_> = found.into_iter().map(|field| field.field).collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "exec_args.1",
+            "exec_setup_args.0",
+            "exec_stdin",
+            "json_data_payload.api_key",
+            "notify_config.body_template",
+            "notify_config.url",
+            "quick_prompt_variables.password",
+            "sub_workflow_variables.token",
+        ]
+    );
+
+    let mut command = WorkflowStep {
+        name: "inline".into(),
+        exec_command: Some(key.into()),
+        ..WorkflowStep::default()
+    };
+    let mut found = vec![];
+    redact_steps("wf-1", "Nightly", std::iter::once(&mut command), &mut found);
+    assert_eq!(command.exec_command.as_deref(), Some(REDACTED));
+}
+
 #[test]
 fn an_export_without_literal_secrets_is_unchanged() {
     let mut qa = api(

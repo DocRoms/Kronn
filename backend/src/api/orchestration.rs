@@ -8298,10 +8298,14 @@ pub async fn deliver_worker_manifest_as(
         db.with_conn(move |conn| {
             let exec = crate::db::orchestration::get_task_execution(conn, &eid)?;
             let session = crate::db::discussion_sessions::find_active_session(conn, &agent, &sess)?;
-            Ok((exec, session.map(|s| s.id)))
+            Ok((exec, session.map(|s| (s.id, s.disc_id))))
         })
         .await
         .map_err(|e| ProvisionError::Internal(e.to_string()))?
+    };
+    let (caller_session_id, session_room) = match caller_session_id {
+        Some((id, room)) => (Some(id), room),
+        None => (None, String::new()),
     };
 
     // ── 2. Authorize: caller must be this execution's exact CLI worker. An unknown
@@ -8312,7 +8316,7 @@ pub async fn deliver_worker_manifest_as(
     let authorized = matches!(
         (exec.worker_cli_session_id, caller_session_id),
         (Some(worker), Some(caller)) if worker == caller
-    ) && bridge_may_be_execution_worker(bridge, &exec);
+    ) && bridge_may_be_execution_worker(bridge, &exec, &session_room);
     if !authorized {
         return Ok(DeliverOutcome::NotAddressed);
     }
@@ -8422,11 +8426,12 @@ async fn spawned_native_worker_execution_for_caller(
     else {
         return Ok(None);
     };
-    // The dispatch and its message are readable in the room: a grant minted
-    // for another execution, or running in neither room, is not this worker.
+    // The dispatch and its message are readable in the room, and a spawned
+    // worker's launch is always minted for its execution: any other grant,
+    // one that runs in the worker's room included, is not this worker.
     Ok(
         (execution.dispatch_job_id.as_deref() == Some(dispatch_job_id)
-            && bridge_may_be_execution_worker(bridge, &execution))
+            && bridge.is_none_or(|bridge| bridge.own_execution.as_deref() == Some(&*execution.id)))
         .then_some(execution),
     )
 }
@@ -9396,7 +9401,7 @@ pub async fn decide_review_as(
     bridge: Option<&crate::core::bridge_token::BridgeCaller>,
 ) -> Result<ReviewOutcome, ProvisionError> {
     // ── 1. Resolve the execution, the caller's session and the run, server-side. ──
-    let (exec, caller, run) = {
+    let (exec, caller, run, shared_room) = {
         let (eid, agent, sess) = (
             task_execution_id.to_string(),
             source_agent.to_string(),
@@ -9411,7 +9416,11 @@ pub async fn decide_review_as(
                 }
                 None => None,
             };
-            Ok((exec, caller, run))
+            let shared_room = match &exec {
+                Some(e) => worker_shares_the_principal_room(conn, e)?,
+                None => false,
+            };
+            Ok((exec, caller, run, shared_room))
         })
         .await
         .map_err(|e| ProvisionError::Internal(e.to_string()))?
@@ -9429,9 +9438,15 @@ pub async fn decide_review_as(
     // A session id is declared by the caller: with a bridge token it counts
     // only in the role the grant itself can hold.
     let is_worker = matches!(exec.worker_cli_session_id, Some(w) if w == caller.id)
-        && bridge_may_be_execution_worker(bridge, &exec);
+        && bridge_may_be_execution_worker(bridge, &exec, &caller.disc_id);
+    // When the worker is a CLI of the principal's own room, a grant of that
+    // room may be the worker's: the principal's session must be one this
+    // very launch joined or resumed.
     let is_principal = caller.disc_id == exec.parent_discussion_id
-        && bridge.is_none_or(|bridge| bridge_is_execution_principal(bridge, &exec));
+        && bridge.is_none_or(|bridge| {
+            bridge_is_execution_principal(bridge, &exec)
+                && (!shared_room || bridge.own_sessions.contains(&caller.id))
+        });
     if !is_worker && !is_principal {
         return Ok(ReviewOutcome::NotAddressed);
     }
@@ -16447,14 +16462,15 @@ async fn authorize_execution_principal(
     caller: &PrincipalCaller,
     bridge: Option<&crate::core::bridge_token::BridgeCaller>,
 ) -> Option<TaskExecution> {
-    let (id, declared) = (exec_id.to_string(), caller.clone());
+    let (id, declared, grant) = (exec_id.to_string(), caller.clone(), bridge.cloned());
     db.with_conn(move |conn| {
         let Some(execution) = crate::db::orchestration::get_task_execution(conn, &id)? else {
             return Ok(None);
         };
         Ok(
-            principal_is_authorized(conn, &execution.parent_discussion_id, &declared)?
-                .then_some(execution),
+            (principal_is_authorized(conn, &execution.parent_discussion_id, &declared)?
+                && principal_session_is_the_grants(conn, grant.as_ref(), &declared, &execution)?)
+            .then_some(execution),
         )
     })
     .await
@@ -16509,7 +16525,9 @@ pub fn live_check_principal(
             // grant proves it only when it runs in the parent room and not in
             // the worker's. Whatever runs in that room is a principal by its
             // own session already (a workflow step that joined it included).
-            if bridge.is_some_and(|bridge| !bridge_is_execution_principal(bridge, &execution)) {
+            if bridge.is_some_and(|bridge| !bridge_is_execution_principal(bridge, &execution))
+                || !principal_session_is_the_grants(conn, bridge, &caller, &execution)?
+            {
                 return Ok(None);
             }
             Ok(Some((agent.clone(), session_id.clone())))
@@ -16519,9 +16537,7 @@ pub fn live_check_principal(
             // another launch hosted there reads the same running turn.
             if bridge.is_some_and(|bridge| {
                 !bridge_is_execution_principal(bridge, &execution)
-                    || !bridge
-                        .room_agent_of
-                        .contains(&execution.parent_discussion_id)
+                    || !bridge_is_room_agent(bridge, room, &execution.parent_discussion_id)
             }) {
                 return Ok(None);
             }
@@ -18501,11 +18517,66 @@ fn bridge_holds_execution_principal(
         bridge_is_execution_principal(bridge, execution)
             && match caller {
                 PrincipalCaller::Cli { .. } => true,
-                PrincipalCaller::RoomAgent(_) => bridge
-                    .room_agent_of
-                    .contains(&execution.parent_discussion_id),
+                PrincipalCaller::RoomAgent(room) => {
+                    bridge_is_room_agent(bridge, room, &execution.parent_discussion_id)
+                }
             }
     })
+}
+
+/// KT-1962 — when an execution's worker is a CLI session of the principal's
+/// own room, a grant that runs in that room may be the worker's: the session a
+/// token names as the principal's must then be one that very launch joined or
+/// resumed. Every other shape is told apart by the rooms alone.
+fn principal_session_is_the_grants(
+    conn: &rusqlite::Connection,
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
+    caller: &PrincipalCaller,
+    execution: &TaskExecution,
+) -> Result<bool> {
+    let (Some(bridge), PrincipalCaller::Cli { agent, session_id }) = (bridge, caller) else {
+        return Ok(true);
+    };
+    if !worker_shares_the_principal_room(conn, execution)? {
+        return Ok(true);
+    }
+    Ok(
+        crate::db::discussion_sessions::find_active_session(conn, agent, session_id)?
+            .is_some_and(|session| bridge.own_sessions.contains(&session.id)),
+    )
+}
+
+fn worker_shares_the_principal_room(
+    conn: &rusqlite::Connection,
+    execution: &TaskExecution,
+) -> Result<bool> {
+    let Some(worker) = execution.worker_cli_session_id else {
+        return Ok(false);
+    };
+    let room: Option<String> = conn
+        .query_row(
+            "SELECT disc_id FROM discussion_sessions WHERE id = ?1",
+            [worker],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(room.as_deref() == Some(execution.parent_discussion_id.as_str()))
+}
+
+/// Whether a grant is the one of `room_id`'s own agent as `room` declares it:
+/// the launch is that room's agent, and of the provider the turn names (two
+/// agents may run in one room; the provider comes from the launch, never from
+/// the body).
+fn bridge_is_room_agent(
+    bridge: &crate::core::bridge_token::BridgeCaller,
+    room: &SpawnedAgentCaller,
+    room_id: &str,
+) -> bool {
+    bridge.room_agent_of.iter().any(|own| own == room_id)
+        && bridge.agent.as_ref().is_none_or(|launched| {
+            crate::db::orchestration::agent_type_from_db(room.agent_type.trim())
+                .is_ok_and(|declared| declared == launched.agent_type)
+        })
 }
 
 /// KT-1962 — the same before an execution exists (prepare, launch): the grant
@@ -18520,25 +18591,24 @@ fn bridge_holds_room_principal(
         bridge.own_discussions.contains(&room)
             && match caller {
                 PrincipalCaller::Cli { .. } => true,
-                PrincipalCaller::RoomAgent(_) => bridge.room_agent_of.contains(&room),
+                PrincipalCaller::RoomAgent(agent) => bridge_is_room_agent(bridge, agent, &room),
             }
     })
 }
 
 /// KT-1962 — whether a bridge-token caller may act as the worker of
-/// `execution`: a grant minted for an execution works for that one only, and
-/// any other grant runs in one of the execution's two rooms.
+/// `execution` by the session it names: a grant minted for an execution works
+/// for that execution only, and any other grant runs in the room that session
+/// is joined to (a CLI of the principal's room that accepted an offer keeps
+/// working from there, KT-837).
 fn bridge_may_be_execution_worker(
     bridge: Option<&crate::core::bridge_token::BridgeCaller>,
     execution: &TaskExecution,
+    session_room: &str,
 ) -> bool {
     bridge.is_none_or(|bridge| match bridge.own_execution.as_deref() {
         Some(own) => own == execution.id,
-        None => {
-            let owns = |room: &str| bridge.own_discussions.iter().any(|own| own == room);
-            owns(&execution.parent_discussion_id)
-                || execution.sub_discussion_id.as_deref().is_some_and(owns)
-        }
+        None => bridge.own_discussions.iter().any(|own| own == session_room),
     })
 }
 
@@ -18579,7 +18649,16 @@ pub async fn task_exec_reassign_as(
             "execution not found or caller is not its principal",
         ));
     };
-    let principal_grant = bridge_holds_execution_principal(bridge, &caller, &execution);
+    let principal_grant = bridge_holds_execution_principal(bridge, &caller, &execution) && {
+        let (grant, declared, execution) = (bridge.cloned(), caller.clone(), execution.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                principal_session_is_the_grants(conn, grant.as_ref(), &declared, &execution)
+            })
+            .await
+            .unwrap_or(false)
+    };
     let exec_id = execution.id;
     let amendment = match execution_amendment(
         request.worker,
@@ -19891,14 +19970,28 @@ pub async fn review(
     let may_pin = match bridge {
         None => true,
         Some(bridge) => {
-            let id = exec_id.clone();
+            let (id, grant) = (exec_id.clone(), bridge.clone());
+            let declared = PrincipalCaller::Cli {
+                agent: source_agent.clone(),
+                session_id: source_session_id.clone(),
+            };
             state
                 .db
-                .with_conn(move |conn| crate::db::orchestration::get_task_execution(conn, &id))
+                .with_conn(move |conn| {
+                    let Some(execution) = crate::db::orchestration::get_task_execution(conn, &id)?
+                    else {
+                        return Ok(false);
+                    };
+                    Ok(bridge_is_execution_principal(&grant, &execution)
+                        && principal_session_is_the_grants(
+                            conn,
+                            Some(&grant),
+                            &declared,
+                            &execution,
+                        )?)
+                })
                 .await
-                .ok()
-                .flatten()
-                .is_some_and(|execution| bridge_is_execution_principal(bridge, &execution))
+                .unwrap_or(false)
         }
     };
     if may_pin {

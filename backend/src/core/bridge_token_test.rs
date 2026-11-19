@@ -32,6 +32,7 @@ fn grant(discussions: &[&str]) -> BridgeGrant {
         id: "test".into(),
         scope: scope(discussions),
         adopted: Mutex::new(Vec::new()),
+        sessions: Mutex::new(Vec::new()),
         bound: Mutex::new(None),
         expires_at: Instant::now() + MAX_LIFETIME,
     }
