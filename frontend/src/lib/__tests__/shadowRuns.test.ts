@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { comparableOutput, mergeTally, readableOutput, runSpend, shadowLabel, shadowName } from '../shadowRuns';
+import { comparableOutput, mergeTally, readableOutput, runSpend, runTokens, shadowLabel, shadowName } from '../shadowRuns';
 import type { ShadowExecution, ShadowMergeReport, StepResult, StepShadowComparison } from '../../types/generated';
 
 describe('shadow outputs compared field by field (key order ignored)', () => {
@@ -127,5 +127,12 @@ describe('what a run spent, every execution counted', () => {
   it('has no cost when none was reported', () => {
     expect(runSpend({ tokens_used: 0, step_results: [step(0)] }, [])).toEqual({ tokens: 0, shadowTokens: 0, cost: null, partial: false });
     expect(runSpend({ tokens_used: 800, step_results: [step(800)] }, [])).toMatchObject({ cost: null, partial: true });
+  });
+});
+
+describe('runTokens', () => {
+  it('adds what the shadows spent to the steps of a run row', () => {
+    expect(runTokens({ tokens_used: 900, shadow_tokens_used: 350 })).toBe(1250);
+    expect(runTokens({ tokens_used: 0, shadow_tokens_used: 70 })).toBe(70);
   });
 });

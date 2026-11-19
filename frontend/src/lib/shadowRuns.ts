@@ -222,6 +222,11 @@ export interface RunSpend {
   partial: boolean;
 }
 
+/** Steps plus shadows, as the run row and the lists show it (KT-1957). */
+export function runTokens(run: Pick<WorkflowRun, 'tokens_used' | 'shadow_tokens_used'>): number {
+  return run.tokens_used + (run.shadow_tokens_used ?? 0);
+}
+
 export function runSpend(
   run: Pick<WorkflowRun, 'tokens_used' | 'step_results'>,
   comparisons: readonly StepShadowComparison[],

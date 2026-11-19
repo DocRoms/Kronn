@@ -305,6 +305,7 @@ mod tests {
             trigger_context: None,
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: Some(path.to_string_lossy().to_string()),
             started_at: finished - chrono::Duration::hours(1),
             finished_at: Some(finished),

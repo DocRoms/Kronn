@@ -26,6 +26,7 @@ const mkRun = (state: Record<string, string>): WorkflowRun => ({
     step_name: 'advise', status: 'Success', output: 'done', tokens_used: 0, duration_ms: 600, is_rollback: false,
   }],
   tokens_used: 0,
+  shadow_tokens_used: 0,
   workspace_path: null,
   started_at: '2026-11-17T08:00:00Z',
   finished_at: '2026-11-17T08:00:01Z',

@@ -569,6 +569,7 @@ async fn prepare_child(
         trigger_context: Some(serde_json::Value::Object(trigger)),
         step_results: vec![],
         tokens_used: 0,
+        shadow_tokens_used: 0,
         // Phase 1b-i: child gets its OWN workspace (execute_run handles it,
         // named by run_id → no collision). Sharing/merge is Phase 2.
         workspace_path: None,
@@ -1588,6 +1589,7 @@ async fn execute_foreach(
                 trigger_context: Some(trigger_context),
                 step_results: vec![],
                 tokens_used: 0,
+                shadow_tokens_used: 0,
                 workspace_path: None,
                 started_at: now,
                 finished_at: None,
@@ -1974,6 +1976,7 @@ mod tests {
             trigger_context: None,
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: None,
             started_at: chrono::Utc::now(),
             finished_at: None,

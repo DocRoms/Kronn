@@ -5548,6 +5548,7 @@ pub async fn create_manual_run_admitted(
         trigger_context: Some(serde_json::Value::Object(trigger_obj)),
         step_results: vec![],
         tokens_used: 0,
+        shadow_tokens_used: 0,
         workspace_path: None,
         started_at: now,
         finished_at: None,

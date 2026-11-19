@@ -2142,6 +2142,9 @@ pub struct WorkflowRun {
     pub trigger_context: Option<serde_json::Value>,
     pub step_results: Vec<StepResult>,
     pub tokens_used: u64,
+    /// What the run's shadows spent, on top of `tokens_used` (KT-1957).
+    #[serde(default)]
+    pub shadow_tokens_used: u64,
     pub workspace_path: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,

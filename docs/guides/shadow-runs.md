@@ -133,7 +133,7 @@ shadow, and a crash in it is recorded on its own row.
   `max_tokens` is also handed to an agent that takes a generation cap;
   [src: file: backend/src/workflows/shadow.rs:890-891#budget_exceeded]
 - a shadow left running by a restart is marked *interrupted*.
-  [src: file: backend/src/db/step_shadows.rs:144#interrupt_running]
+  [src: file: backend/src/db/step_shadows.rs:154-156#interrupt_running]
 
 What each execution loaded and produced is stored in `step_shadow_runs`, with its
 tokens, duration and cost, and removed with its run; run retention blanks the
@@ -218,9 +218,12 @@ sets a merge, like a shadow.
 The header of the run gives what the whole run spent (KT-1948): the tokens of
 its steps (a merge pass is counted in its step) plus those of its shadows, and
 the summed cost of the steps, the shadows and the merges. The cost is preceded
-by « ≥ » when an execution spent tokens without reporting a cost. The run lists
-keep the steps' tokens only.
-[src: file: frontend/src/lib/shadowRuns.ts:303-308#mergeTally]
+by « ≥ » when an execution spent tokens without reporting a cost. The run list,
+the workflow card and the token statistics show the same tokens, steps plus
+shadows (KT-1957): each run stores what its shadows spent, recounted whenever
+one of them finishes. The MCP status and wait answers keep the steps' tokens,
+next to the steps they list.
+[src: file: frontend/src/lib/shadowRuns.ts:308-313#mergeTally]
 
 ## Show the shadows on a Page
 
@@ -309,7 +312,7 @@ that step. The role (`witness`, `contributor`) is gone. The migration moves only
 the stored shadow: the steps are left as they were.
 [src: file: backend/src/workflows/shadow.rs:1376#legacy_shadow_to_steps]
 [src: file: backend/src/workflows/shadow.rs:1376#migrate_workflow_shadows]
-[src: file: backend/src/db/workflows.rs:2987#split_shadows]
+[src: file: backend/src/db/workflows.rs:2987-2990#split_shadows]
 
 Runs the former shadow recorded stay in the run list with a **Shadow** badge.
 An export written before this change carries a `shadow` key that an import now

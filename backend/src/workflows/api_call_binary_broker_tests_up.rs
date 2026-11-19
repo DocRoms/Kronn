@@ -498,6 +498,7 @@ async fn insert_workflow_run(state: &crate::AppState, steps: Vec<WorkflowStep>) 
         trigger_context: None,
         step_results: vec![],
         tokens_used: 0,
+        shadow_tokens_used: 0,
         workspace_path: None,
         started_at: now,
         finished_at: None,

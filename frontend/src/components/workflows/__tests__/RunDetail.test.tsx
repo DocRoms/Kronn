@@ -43,6 +43,7 @@ const mkRun = (over: Partial<WorkflowRun>): WorkflowRun => ({
   trigger_context: null,
   step_results: [],
   tokens_used: 0,
+  shadow_tokens_used: 0,
   workspace_path: null,
   started_at: '2026-04-26T12:00:00Z',
   finished_at: '2026-04-26T12:00:01Z',

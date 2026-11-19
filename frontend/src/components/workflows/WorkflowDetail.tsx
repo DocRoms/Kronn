@@ -3,7 +3,7 @@ import { StepShadowCompareView } from './StepShadowCompare';
 import { WithStepShadows } from './useStepShadows';
 import { useStepShadows } from './useStepShadows';
 import { runPossibleSecrets } from '../../lib/docsPossibleSecrets';
-import { isShadowRun } from '../../lib/shadowRuns';
+import { isShadowRun, runTokens } from '../../lib/shadowRuns';
 import { newTabClickProps } from '../../lib/newTabNavigation';
 import { livePagePath, workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
@@ -2725,7 +2725,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
               <span className="wf-run-compact-time">{new Date(run.started_at).toLocaleString()}</span>
               <span className="wf-run-compact-meta">
                 {durMs != null && formatDurationCompact(durMs)}
-                {run.tokens_used > 0 && ` · ${run.tokens_used} tk`}
+                {runTokens(run) > 0 && ` · ${runTokens(run)} tk`}
               </span>
               <ChevronRight size={12} className={expanded ? 'wf-chevron-rotated' : 'wf-chevron'} />
             </button>

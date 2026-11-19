@@ -216,6 +216,7 @@ fn pending_run(id: &str, workflow_id: &str) -> WorkflowRun {
         trigger_context: None,
         step_results: vec![],
         tokens_used: 0,
+        shadow_tokens_used: 0,
         workspace_path: None,
         started_at: chrono::Utc::now(),
         finished_at: None,

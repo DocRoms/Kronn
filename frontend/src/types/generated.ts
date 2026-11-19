@@ -13580,7 +13580,11 @@ success_days?: number,
  */
 failure_days?: number, };
 
-export type WorkflowRun = { id: string, workflow_id: string, status: RunStatus, trigger_context: any, step_results: Array<StepResult>, tokens_used: number, workspace_path: string | null, started_at: string, finished_at: string | null,
+export type WorkflowRun = { id: string, workflow_id: string, status: RunStatus, trigger_context: any, step_results: Array<StepResult>, tokens_used: number,
+/**
+ * What the run's shadows spent, on top of `tokens_used` (KT-1957).
+ */
+shadow_tokens_used: number, workspace_path: string | null, started_at: string, finished_at: string | null,
 /**
  * Linear workflow run vs batch fan-out. Default "linear" for backward
  * compatibility with existing runs created before Phase 1b.

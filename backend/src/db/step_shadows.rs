@@ -102,6 +102,18 @@ pub fn finish(conn: &Connection, row: &StepShadowRow) -> Result<()> {
             row.finished_at,
         ],
     )?;
+    // The run's total of its shadows, recounted whole: never an increment a
+    // second finish of the same row would add twice.
+    if row.shadow_id != MAIN {
+        conn.execute(
+            "UPDATE workflow_runs
+                SET shadow_tokens_used = (
+                    SELECT COALESCE(SUM(tokens_used), 0) FROM step_shadow_runs
+                     WHERE run_id = ?1 AND shadow_id != ?2)
+              WHERE id = ?1",
+            params![row.run_id, MAIN],
+        )?;
+    }
     Ok(())
 }
 
@@ -179,5 +191,78 @@ mod tests {
             assert_eq!(status_of(&status_str(status)), status);
         }
         assert_eq!(status_of("nonsense"), ShadowStatus::Interrupted);
+    }
+
+    fn shadow(shadow_id: &str, tokens: Option<u64>) -> StepShadowRow {
+        StepShadowRow {
+            run_id: "run-1".into(),
+            result_index: 0,
+            step_name: "review".into(),
+            shadow_id: shadow_id.into(),
+            label: shadow_id.into(),
+            status: ShadowStatus::Success,
+            identity: ExecutionIdentity::default(),
+            output: String::new(),
+            tokens_used: tokens,
+            duration_ms: None,
+            cost_usd: None,
+            model: None,
+            stopped: None,
+            started_at: "2026-11-19T00:00:00Z".into(),
+            finished_at: Some("2026-11-19T00:01:00Z".into()),
+        }
+    }
+
+    /// KT-1957 — the run carries what its shadows spent, so the run list, the
+    /// workflow card and the statistics count them without the shadow rows.
+    #[test]
+    fn a_finished_shadow_is_counted_once_in_its_runs_total() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('wf-1', 'Flux', '\"Manual\"', '[]', '2026-11-19T00:00:00Z', '2026-11-19T00:00:00Z');
+             INSERT INTO workflow_runs (id, workflow_id, status, tokens_used, started_at)
+                 VALUES ('run-1', 'wf-1', 'Success', 100, '2026-11-19T00:00:00Z');",
+        )
+        .unwrap();
+        let total = |conn: &Connection| -> (i64, i64) {
+            conn.query_row(
+                "SELECT tokens_used, shadow_tokens_used FROM workflow_runs WHERE id = 'run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        for row in [
+            shadow(MAIN, Some(100)),
+            shadow("a", None),
+            shadow("b", None),
+        ] {
+            insert(&conn, &row).unwrap();
+        }
+        // The main row repeats the step's own spend: it is never a shadow's.
+        finish(&conn, &shadow(MAIN, Some(100))).unwrap();
+        assert_eq!(total(&conn), (100, 0));
+        finish(&conn, &shadow("a", Some(40))).unwrap();
+        finish(&conn, &shadow("b", Some(7))).unwrap();
+        assert_eq!(total(&conn), (100, 47));
+        // Finishing a row again recounts, it does not add.
+        finish(&conn, &shadow("a", Some(40))).unwrap();
+        assert_eq!(total(&conn), (100, 47));
+        // A shadow that reported nothing counts for nothing.
+        finish(&conn, &shadow("b", None)).unwrap();
+        assert_eq!(total(&conn), (100, 40));
+
+        let summary: i64 = conn
+            .query_row(crate::db::workflows::LAST_RUN_SUMMARIES_SQL, [], |row| {
+                row.get(5)
+            })
+            .unwrap();
+        assert_eq!(summary, 140, "the workflow card shows steps and shadows");
+        let run = crate::db::workflows::get_run(&conn, "run-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!((run.tokens_used, run.shadow_tokens_used), (100, 40));
     }
 }

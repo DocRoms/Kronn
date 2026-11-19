@@ -653,6 +653,7 @@ pub fn create_batch_run_with_launch_settings(
         })),
         step_results: vec![],
         tokens_used: 0,
+        shadow_tokens_used: 0,
         workspace_path: None,
         started_at: now,
         finished_at: None,
@@ -1853,7 +1854,7 @@ fn child_run_metrics(
 ) -> Result<std::collections::HashMap<String, (u64, Option<u64>)>> {
     use std::collections::HashMap;
     let mut stmt = conn.prepare(
-        "SELECT id, tokens_used, started_at, finished_at FROM workflow_runs WHERE parent_run_id = ?1",
+        "SELECT id, tokens_used + shadow_tokens_used, started_at, finished_at FROM workflow_runs WHERE parent_run_id = ?1",
     )?;
     let rows = stmt.query_map(params![parent_run_id], |row| {
         Ok((
@@ -2690,7 +2691,8 @@ pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<()> {
 /// here is stored after the step results, so touching the table would walk
 /// each run's payload pages.
 pub const LAST_RUN_SUMMARIES_SQL: &str = "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
-            wr.finished_at, wr.tokens_used, wr.heaviest_output_bytes, wr.heaviest_output_step
+            wr.finished_at, wr.tokens_used + wr.shadow_tokens_used, wr.heaviest_output_bytes,
+            wr.heaviest_output_step
      FROM workflow_runs wr
      INNER JOIN (
          SELECT workflow_id, MAX(started_at) AS max_started
@@ -2701,7 +2703,8 @@ pub const LAST_RUN_SUMMARIES_SQL: &str = "SELECT wr.workflow_id, wr.id, wr.statu
 /// runs (`?1`) and its own run (`?2`).
 pub const LAST_RUN_SUMMARIES_VISIBLE_SQL: &str =
     "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
-            wr.finished_at, wr.tokens_used, wr.heaviest_output_bytes, wr.heaviest_output_step
+            wr.finished_at, wr.tokens_used + wr.shadow_tokens_used, wr.heaviest_output_bytes,
+            wr.heaviest_output_step
      FROM workflow_runs wr
      INNER JOIN (
          SELECT workflow_id, MAX(started_at) AS max_started
@@ -3202,6 +3205,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
         trigger_context: ctx_str.and_then(|s| serde_json::from_str(&s).ok()),
         step_results: serde_json::from_str(&results_str).unwrap_or_default(),
         tokens_used: row.get::<_, i64>(5).unwrap_or(0) as u64,
+        shadow_tokens_used: row.get::<_, i64>(22).unwrap_or(0) as u64,
         workspace_path: row.get(6).unwrap_or(None),
         started_at: parse_dt(row.get::<_, String>(7).unwrap_or_default()),
         finished_at: row
@@ -3241,7 +3245,8 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
-    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id, outcome";
+    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id, outcome, \
+    shadow_tokens_used";
 
 /// Blanks every step's `output` inside SQLite, leaving names, statuses and
 /// timings intact. `output` is the entire weight of the column — measured at

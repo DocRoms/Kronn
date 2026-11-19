@@ -1096,6 +1096,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "300_mcp_token_checks",
         include_str!("sql/300_mcp_token_checks.sql"),
     ),
+    (
+        "301_workflow_runs_shadow_tokens",
+        include_str!("sql/301_workflow_runs_shadow_tokens.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
@@ -3337,6 +3341,38 @@ mod tests {
                 "{presented:?}"
             );
         }
+    }
+
+    /// KT-1957 — runs recorded before the column get what their shadows spent,
+    /// the main row left out, and the others stay at zero.
+    #[test]
+    fn existing_runs_get_their_shadow_spend_on_upgrade() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "300_mcp_token_checks").unwrap();
+        conn.execute_batch(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('wf-1', 'Flux', '\"Manual\"', '[]', '2026-11-19T00:00:00Z', '2026-11-19T00:00:00Z');
+             INSERT INTO workflow_runs (id, workflow_id, status, tokens_used, started_at) VALUES
+                 ('run-shadowed', 'wf-1', 'Success', 100, '2026-11-19T00:00:00Z'),
+                 ('run-plain', 'wf-1', 'Success', 30, '2026-11-19T00:01:00Z');
+             INSERT INTO step_shadow_runs
+                 (id, run_id, result_index, step_name, shadow_id, status, identity_json, tokens_used, started_at) VALUES
+                 ('s-main', 'run-shadowed', 0, 'review', '', 'success', '{}', 100, '2026-11-19T00:00:00Z'),
+                 ('s-a', 'run-shadowed', 0, 'review', 'a', 'success', '{}', 40, '2026-11-19T00:00:00Z'),
+                 ('s-b', 'run-shadowed', 0, 'review', 'b', 'failed', '{}', NULL, '2026-11-19T00:00:00Z'),
+                 ('s-c', 'run-shadowed', 1, 'fix', 'a', 'success', '{}', 5, '2026-11-19T00:00:00Z');",
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        let spent = |id: &str| -> i64 {
+            conn.query_row(
+                "SELECT shadow_tokens_used FROM workflow_runs WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!((spent("run-shadowed"), spent("run-plain")), (45, 0));
     }
 
     /// KT-1656 — the upgrade masks the vendor-shaped credentials that agent output

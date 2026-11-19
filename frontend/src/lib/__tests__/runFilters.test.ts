@@ -4,7 +4,7 @@ import type { WorkflowRun } from '../../types/generated';
 
 const mk = (over: Partial<WorkflowRun>): WorkflowRun => ({
   id: 'run-x', workflow_id: 'wf', status: 'Success', trigger_context: null,
-  step_results: [], tokens_used: 0, workspace_path: null,
+  step_results: [], tokens_used: 0, shadow_tokens_used: 0, workspace_path: null,
   started_at: '2026-07-06T06:13:00Z', finished_at: null,
   run_type: 'linear', batch_total: 0, batch_completed: 0, batch_failed: 0, batch_no_response: 0,
   batch_name: null, parent_run_id: null, state: {}, produced_branches: [], ...over,
