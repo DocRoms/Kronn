@@ -328,7 +328,7 @@ Required UI:
 Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
 attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
 cross-provider cost display therefore needs additive persistence of that total,
-not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2136-2145#tokens_used] [src: file: backend/src/models/workflows.rs:2408-2416#cost_usd]
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2136-2145#tokens_used] [src: file: backend/src/models/workflows.rs:2411-2419#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.

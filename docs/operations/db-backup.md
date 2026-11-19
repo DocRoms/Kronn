@@ -44,9 +44,9 @@ The pre-migration copy is a file copy of the checkpointed database to
 `kronn.db.backup.tmp`, synced, then renamed over `kronn.db.backup`. If the
 disk lacks room or the copy fails, boot stops before any migration with a
 message saying so. `KRONN_MIGRATION_BACKUP=0` upgrades without a backup; use
-it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1347-1410#backup_before_migration]`
+it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1355-1418#backup_before_migration]`
 The copy is taken only when a migration is pending, after the WAL is folded in
-and pinned. `[src: file: backend/src/db/migrations.rs:1507-1538#has_pending]`
+and pinned. `[src: file: backend/src/db/migrations.rs:1511-1542#has_pending]`
 
 ## Run retention and compaction
 
@@ -92,7 +92,7 @@ was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
   nothing until a human enables it.
   `[src: file: backend/src/core/run_retention.rs:50-68#window_hours]`
   `[src: file: backend/src/core/run_retention.rs:91-131#run_pass]`
-  `[src: file: backend/src/db/workflows.rs:3046-3057#retention_from_column]`
+  `[src: file: backend/src/db/workflows.rs:3053-3064#retention_from_column]`
 
 Never touched, whatever their age: runs that are not `Success`, `Partial`,
 `Failed`, `Cancelled` or `StoppedByGuard` (so not `Running`, `Pending`,
