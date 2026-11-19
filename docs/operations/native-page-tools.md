@@ -37,7 +37,7 @@ An unknown project or discussion fails through the shared foreign-key checks;
 a failed creation does not leave a partial Page.
 [src: file: backend/src/api/agent_page_tools.rs:84-116#page_in_scope]
 [src: file: backend/src/api/agent_page_tools.rs:118-169#scoped_links]
-[src: file: backend/src/api/agent_tools.rs:4767-4769#project_is_in_scope]
+[src: file: backend/src/api/agent_tools.rs:4770-4772#project_is_in_scope]
 [src: file: backend/src/api/agent_page_tests.rs:18-99#native_pages_follow_mcp_project_scope_inheritance_and_selector_contracts]
 [src: file: backend/src/api/agent_page_tests.rs:86-88#standalone]
 [src: file: backend/src/api/agent_page_tests.rs:110-173#native_page_validation_failures_leave_no_partial_page]

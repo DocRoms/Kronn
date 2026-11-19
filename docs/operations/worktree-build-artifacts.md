@@ -485,7 +485,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_lane_warm.rs:1780#first_build_args]
 [src: file: backend/src/core/project_toolchains.rs:609#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:11509-11540#warm_failure_notice]
+[src: file: backend/src/api/orchestration.rs:11568-11599#warm_failure_notice]
 
 ## Seed and lane agree on the C flags (KT-1742)
 

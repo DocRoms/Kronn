@@ -524,7 +524,7 @@ board tag; it refuses any task without it. The order of open cards lives in
 `task_board_orders` per tag, because the planning `rank` is renumbered across
 a priority band. Its `data.rows` ends with one `__col_<column>__` marker per
 column, which the Page binds to for "end of column" moves.
-`[src: file: backend/src/workflows/task_board_step.rs:198-199#board_task]`
+`[src: file: backend/src/workflows/task_board_step.rs:199-200#board_task]`
 `[src: file: backend/src/db/task_boards.rs:78#task_board_orders]`
 `[src: file: backend/src/workflows/task_board_step.rs:34-37#column_marker]`
 `[src: file: backend/src/core/default_todo/board.html:297#marker]`
@@ -761,10 +761,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1230-1253#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:15864-16053#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:17274-17316#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:17511-17553#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:17555-17625#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:15923-16112#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:17339-17381#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:17576-17618#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:17620-17690#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for

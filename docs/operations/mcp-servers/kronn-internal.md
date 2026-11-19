@@ -285,7 +285,7 @@ thread again: ask before renaming a room you did not open.
    The worker of a live task execution is shown from the execution itself and
    is not removable here.
    `[src: file: backend/scripts/disc-introspection-mcp.py:5081-5118#_assignee_arg]`
-   `[src: file: backend/src/db/planning.rs:1166-1204#actor_assignee]`
+   `[src: file: backend/src/db/planning.rs:1175-1213#actor_assignee]`
    `proposal_list` and `proposal_get` expose the human validation inbox as
    read-only context; no MCP tool can accept or reject a proposal.
    `[src: file: backend/scripts/disc-introspection-mcp.py:4825-4869#call_plan_get]`
@@ -443,7 +443,7 @@ close the task.
 Delivery refuses a commit whose `Signed-off-by`, `Co-Authored-By` or similar
 identity trailer names anyone but the repository's git identity; a CLI worker
 commits with `git commit -s` and never writes such a line by hand.
-`[src: file: backend/src/api/orchestration.rs:8996-9036#validate_delivery_identity_trailers]`
+`[src: file: backend/src/api/orchestration.rs:9028-9068#validate_delivery_identity_trailers]`
 The principal is either a CLI session joined to the room or the room's own
 native agent during its turn. For the latter Kronn injects
 `KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
@@ -530,7 +530,7 @@ before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
 `[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:329-376#check_command_line]`
-`[src: file: backend/src/api/orchestration.rs:13137-13147#validations_refusal]`
+`[src: file: backend/src/api/orchestration.rs:13196-13206#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls
 `task_exec_reassign({task_execution_id, validations, reason})` — `validations`
@@ -548,7 +548,7 @@ because that tool is already the principal's amendment of a live execution:
 principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
 have let a self-reviewing worker weaken its own gates and ties the swap to the
 persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
-`[src: file: backend/src/api/orchestration.rs:16249-16260#ExecutionAmendment]`
+`[src: file: backend/src/api/orchestration.rs:16308-16319#ExecutionAmendment]`
 
 **Review-round limit (KT-1345).** `task_exec_prepare` and `task_exec_launch` take an optional
 `max_review_rounds`: an integer from 1 to 1000, or `"unlimited"` (no cap; a worker looping on a review
@@ -561,7 +561,7 @@ paid for inside the catalogue budget; on an execution the limit itself escalated
 back to its worker, unless the campaign's `token_budget` is spent: the answer then says `stop_reason:
 token_budget_exhausted` and nothing is scheduled (a `request_changes` or a worker reassignment is stopped the same way). The whole contract, the sentinel and the UI are in
 [worker review rounds](../worker-review-rounds.md).
-`[src: file: backend/src/api/orchestration.rs:18476-18481#extend_execution_review_rounds]`
+`[src: file: backend/src/api/orchestration.rs:18708-18713#extend_execution_review_rounds]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played
@@ -569,7 +569,7 @@ by Kronn at integration, and the worker commits and delivers in the same turn
 without ever waiting on a background command (its shell tool cuts a command at
 600 s, and a worker that hands the turn back to wait ends without delivering,
 `worker_completed_without_delivery`).
-`[src: file: backend/src/api/orchestration.rs:10949-10952#can_run_shell]`
+`[src: file: backend/src/api/orchestration.rs:11008-11011#can_run_shell]`
 
 `task_exec_status` returns `next_action.tool = task_exec_resume` only for an
 integration hold: an Applying-origin checkpoint, a pending integration recovery
@@ -578,9 +578,9 @@ decision, or an approved integration held on a coded cause. The principal may th
 the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
 returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
-[src: file: backend/src/api/orchestration.rs:17876-17930#compact_next_action]
-[src: file: backend/src/api/orchestration.rs:14483-14591#resume_blocked_apply]
-[src: file: backend/src/api/orchestration.rs:18296-18340#task_exec_resume]
+[src: file: backend/src/api/orchestration.rs:17954-18008#compact_next_action]
+[src: file: backend/src/api/orchestration.rs:14542-14650#resume_blocked_apply]
+[src: file: backend/src/api/orchestration.rs:18381-18425#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6311-6389#call_task_exec_status]
 
 An approved delivery the integration sends back (a red validation, a merge
@@ -597,7 +597,7 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:6523-6660#send_back] [src: file: backend/src/api/orchestration.rs:14618-14695#revalidate_sent_back_execution]
+[src: file: backend/src/api/orchestration.rs:6523-6660#send_back] [src: file: backend/src/api/orchestration.rs:14677-14754#revalidate_sent_back_execution]
 [src: file: backend/src/db/orchestration.rs:5660-5733#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
@@ -629,7 +629,7 @@ integration refusal, campaign pause, undelivered worker, terminal state)
 address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
-`[src: file: backend/src/api/orchestration.rs:17745-17797#EXEC_WAIT_DEFAULT_SECS]`
+`[src: file: backend/src/api/orchestration.rs:17823-17875#EXEC_WAIT_DEFAULT_SECS]`
 `[src: file: backend/src/db/orchestration.rs:6543-6585#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
@@ -761,8 +761,8 @@ event rows separately persist `actor_session_id` (the CLI session id, or
 of the same provider remain distinguishable in the audit trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5824-5839#_task_exec_identity]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5917-5926#_task_exec_principal]`
-`[src: file: backend/src/api/orchestration.rs:16297-16307#principal_cli_is_authorized]`
-`[src: file: backend/src/api/orchestration.rs:16502-16540#room_agent_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:16356-16366#principal_cli_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:16567-16605#room_agent_is_authorized]`
 `[src: file: backend/src/api/agent_tools.rs:4136-4172#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
@@ -794,14 +794,14 @@ input schema — the model supplies only `offer_id`; there is no fallback to
 agent-type/alias matching or any other permissive resolution if either is missing.
 [src: file: backend/src/api/orchestration.rs:7876-8218#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:8023-8027#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:18756-18757#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:18917-18918#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6445-6491#call_task_exec_accept_worker_offer]
 
 `task_exec_deliver` does not perform a room return: the execution transitions to
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration_tests_up.rs:13925-14051#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration_tests_up.rs:13937-14063#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:75-188#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -812,7 +812,7 @@ and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong
 attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `kronn-internal` MCP server for that session before retrying.
-`[src: file: backend/src/api/orchestration.rs:18756-18757#source_binding_session_id]`
+`[src: file: backend/src/api/orchestration.rs:18917-18918#source_binding_session_id]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:6433-6458#source_binding_session_id]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
@@ -888,7 +888,7 @@ local Ollama/LiteLLM/NVIDIA worker capable of producing the clean committed HEAD
 required by `task_exec_deliver` without turning the HTTP tool catalogue into
 arbitrary Git access.
 `[src: file: backend/src/api/agent_workspace_tools.rs:611-618#git_commit_payload] [src: file: backend/src/api/agent_workspace_tools.rs:659-736#git_commit_payload_with_data_dir_lock]`
-`[src: file: backend/src/api/agent_tools.rs:3706-3778#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1580-1591#DISCUSSION_ONLY]`
+`[src: file: backend/src/api/agent_tools.rs:3708-3780#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1580-1591#DISCUSSION_ONLY]`
 `[src: file: backend/src/db/orchestration.rs:1179-1211#managed_working_execution_for_workspace]`
 
 ## Rich discussion output

@@ -249,7 +249,7 @@ those tokens ahead of the call.
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
   [src: file: backend/src/core/token_checks.rs:316-334#spawn_scheduler]
-  [src: file: backend/src/lib.rs:2262-2264#check_token]
+  [src: file: backend/src/lib.rs:2266-2268#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
   OAuth / token-exchange refresh included), with the 15 s timeout of the
@@ -317,7 +317,7 @@ those tokens ahead of the call.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:17511-17520#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:17576-17585#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6195-6210#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:167-185#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]

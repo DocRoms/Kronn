@@ -223,10 +223,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:11985#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:12039-12063#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:10033-10057#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration_tests_up.rs:22096-22206#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:12044#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:12098-12122#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:10092-10116#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration_tests_up.rs:22124-22234#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -269,8 +269,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8163-8166#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8174-8176#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8168-8171#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8179-8181#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -402,6 +402,31 @@ settlement above.
 [src: file: backend/src/api/agent_workspace_tools.rs:762-789#git_commit_payload_reanchoring_docs]
 [src: file: backend/src/core/docs_citations/merge.rs:650-662#reanchor_branch_leaving_unplaced]
 
+### Who a bridge token can be
+
+The `task_exec_*` tools name their caller in the request body: a joined
+session, or the room's own agent during its turn. Both are facts any reader of
+the room sees, so for an agent Kronn launched the body is only a claim and the
+launch's own bridge token decides the role (KT-1962):
+
+- **Principal** (prepare, launch, status, resume, cancel, reassign, review):
+  the grant runs in the execution's parent room, does not own the worker's
+  room and was not minted for that execution. The room-agent identity also
+  wants the grant of that room's agent; a workflow step or another launch
+  hosted in the room is a principal by its own joined session only. Any other
+  grant gets the answer of an unknown execution, and a review it sends pins no
+  principal session.
+- **Worker** (deliver, commit, its own status and review): a grant minted for
+  an execution works for that execution only; any other grant runs in one of
+  the execution's two rooms.
+- **Offer**: a grant accepts an offer only for a session that runs in one of
+  its own rooms.
+
+A host CLI and the web UI carry no such token and are judged on the declared
+identity alone, as before. A principal whose token adopted the child room is
+refused like a worker: it acts through a token that owns only the parent room,
+or through the human UI.
+
 ### A DoD item the principal checks live, after integration
 
 Some items cannot be proven before the code is integrated and running (a replay
@@ -433,8 +458,13 @@ it: a worker's own session, an HTTP agent and an anonymous agent are refused.
   its turn. A room agent's identity is made of facts any reader of the room
   sees, so with a bridge token the grant itself must be the principal's: it
   is the parent room's agent (a workflow step or another launch hosted there
-  is not) and does not own the worker's room. The worker's session, a session of
-  the worker's room and a bridge with no identity stay refused. The proof is
+  is not) and does not own the worker's room. A session id is also a fact
+  the journal shows: on any planning write a bridge token's actor session is
+  marked as a claim that authorises nothing, and the joined-session proof holds
+  only for a grant that runs in the parent room and not in the worker's (a
+  workflow step that joined that room is a principal by its own session). The
+  worker's session, a session of the worker's room, another task's worker and a
+  bridge with no identity stay refused. The proof is
   asked for a live check only, and the journal names the identity that was
   proven. Before 0.15.3 the tick carried no joined
   session, so every agent principal was refused its own check.
