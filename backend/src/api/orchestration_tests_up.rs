@@ -23280,6 +23280,66 @@ async fn the_principal_ticks_a_live_check_by_the_identity_the_execution_tools_se
     );
 }
 
+/// KT-1954 — through the route, the journal names the identity that was
+/// proven, not the actor the body declared, and an unproven caller is refused.
+#[tokio::test]
+async fn a_proven_live_check_tick_is_journaled_under_the_proven_identity() {
+    use crate::api::planning::{update_dod_item_as, UpdateDodItemBody};
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (_task_ref, parent_id, _child_id, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+    let task_id = exec_of(&db, &exec_id).await.task_id;
+    let dod_id = dod_id_for_execution(&db, &exec_id).await;
+    let live = dod_id.clone();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE planning_task_dod_items SET verification = 'post_integration' WHERE id = ?1",
+            [&live],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let state = state_for(&db);
+    let body = |session: &str| -> UpdateDodItemBody {
+        serde_json::from_value(serde_json::json!({
+            "completed": true,
+            "evidence": "replayed live: ok",
+            "actor": { "kind": "agent", "id": "someone-else", "session_id": "declared" },
+            "source_agent": "ClaudeCode",
+            "source_session_id": session,
+        }))
+        .unwrap()
+    };
+    let call = |session: &'static str| {
+        update_dod_item_as(
+            State(state.clone()),
+            None,
+            Path((task_id.clone(), dod_id.clone())),
+            Json(body(session)),
+        )
+    };
+    assert!(!call("sess-unknown").await.0.success);
+    assert!(call("sess-b").await.0.success);
+    let task = task_id.clone();
+    let actor: (String, Option<String>) = db
+        .with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT actor_id, actor_session_id FROM planning_task_events
+                  WHERE task_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                [&task],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        actor,
+        ("ClaudeCode".to_string(), Some("sess-b".to_string()))
+    );
+}
+
 /// KT-1954 — a DoD body without the principal fields is the body it always was.
 #[test]
 fn a_dod_body_reads_with_or_without_the_principal_identity() {
