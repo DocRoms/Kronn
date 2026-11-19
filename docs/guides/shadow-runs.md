@@ -172,7 +172,7 @@ rest of the workflow. Measured on the pull-request review above, two different
 first passes merged find more than either alone; but a shadow on a small local
 model may invent a finding, so the merge **verifies every point before it keeps
 it**.
-[src: file: backend/src/workflows/shadow_merge.rs:764-769#merge_step]
+[src: file: backend/src/workflows/shadow_merge.rs:806-811#merge_step]
 
 - **Which shadows merge**: one, several or all of the step's shadows
   (`shadows`, empty means all). The others still run and are compared.
@@ -194,8 +194,11 @@ it**.
 - **A verdict has to prove itself** (KT-1731). Every kept point cites an
   evidence the engine can open: a `path:line` that exists in the working
   directory (the line inside the file) or a step output (`steps.<step>.output`).
-  A point marked `verified` whose citation does not resolve, or that cites only
-  an execution's own word, is refused, whatever its verdict. A verdict that keeps
+  A point marked `verified` whose citation does not resolve is refused, whatever
+  its verdict. A point marked `verified` on an execution's own word alone is
+  refused when only a shadow raised it; when the main execution raised it, the
+  point stood before the merge, so it stays and loses the mark (KT-1947): the
+  merge is published and the point reads « not verified », with the reason. A verdict that keeps
   no point (an empty list, `{}`) is refused unless the condense pass states in
   `agreement` that the executions agree there is nothing to report; the
   statement is then shown as the note of the merge. The statement is the pass's
@@ -207,9 +210,17 @@ The run view shows, under the step, how the merge ended, the missing shadows,
 what each execution brought (points raised, of which in the result, of which
 found alone, and left out as unverified: a point of the result counts for every
 execution that found it, so a row always adds up), the provenance of every
-point, what the merge spent and the merged result against each execution. Only
-a person sets a merge, like a shadow.
-[src: file: frontend/src/lib/shadowRuns.ts:272#mergeTally]
+point, what the merge spent and the merged result against each execution. The
+main execution's row keeps its own tokens and cost, whether the merge was
+published, refused or failed; the pass is counted in the step. Only a person
+sets a merge, like a shadow.
+
+The header of the run gives what the whole run spent (KT-1948): the tokens of
+its steps (a merge pass is counted in its step) plus those of its shadows, and
+the summed cost of the steps, the shadows and the merges. The cost is preceded
+by « ≥ » when an execution spent tokens without reporting a cost. The run lists
+keep the steps' tokens only.
+[src: file: frontend/src/lib/shadowRuns.ts:303-308#mergeTally]
 
 ## Show the shadows on a Page
 

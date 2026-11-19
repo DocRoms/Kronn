@@ -282,7 +282,7 @@ property of each surface, not of an agent being installed. [src: file: backend/s
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
 Run Detail renders them. [src: file: backend/src/models/discussions.rs:324-372#DiscussionMessage]
 [src: file: backend/src/models/workflows.rs:2531-2544#step_agent]
-[src: file: frontend/src/components/workflows/RunDetail.tsx:1173-1180#StepModelBadge]
+[src: file: frontend/src/components/workflows/RunDetail.tsx:1185-1192#StepModelBadge]
 
 Workflow Agent steps also keep a per-attempt trail (`StepResult.agent_provenance`:
 every retry, repair, escalation and review/author turn, with the requested and
