@@ -13,7 +13,7 @@ import { diffLines } from '../../lib/qp-history-diff';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import {
   clip, comparableOutput, compareIdentities, determinism, executionKey, fieldValue, formatCost, hasOutput,
-  mergeExecutionLabel, mergeStatusKey, percent, readableOutput, shadowLabel, shadowStatusKey,
+  mergeExecutionLabel, mergeStatusKey, mergeTally, percent, readableOutput, shadowLabel, shadowStatusKey,
   type IdentityField,
 } from '../../lib/shadowRuns';
 import type { ShadowExecution, ShadowMergeReport, StepShadowComparison } from '../../types/generated';
@@ -96,6 +96,7 @@ function MergeSection({ comparison, merge, t }: { comparison: StepShadowComparis
   const merged: ShadowExecution = { ...main, shadow_id: undefined, output: merge.merged_output };
   const executions = [main, ...shadows].filter(hasOutput);
   const published = merge.status === 'merged';
+  const tally = mergeTally(merge);
   return (
     <div className="wf-shadow-merge-result" data-testid={`wf-shadow-merge-${step}`} data-status={merge.status}>
       <p className="wf-shadow-subtitle">{t('wf.shadow.merge.run.title')}</p>
@@ -119,31 +120,36 @@ function MergeSection({ comparison, merge, t }: { comparison: StepShadowComparis
           </ul>
         </div>
       )}
-      {merge.contributions.length > 0 && (
-        <table className="wf-shadow-merge-table" data-testid={`wf-shadow-merge-contrib-${step}`}>
-          <thead>
-            <tr>
-              <th scope="col">{t('wf.shadow.merge.col.execution')}</th>
-              <th scope="col">{t('wf.shadow.merge.col.raised')}</th>
-              <th scope="col">{t('wf.shadow.merge.col.kept')}</th>
-              <th scope="col">{t('wf.shadow.merge.col.unique')}</th>
-              <th scope="col">{t('wf.shadow.merge.col.duplicate')}</th>
-              <th scope="col">{t('wf.shadow.merge.col.dropped')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {merge.contributions.map(row => (
-              <tr key={row.execution} data-testid={`wf-shadow-merge-contrib-${step}-${row.execution}`}>
-                <th scope="row">{name(row.execution)}</th>
-                <td data-col="raised">{merge.points.filter(point => point.found_by.includes(row.execution)).length}</td>
-                <td data-col="kept">{row.kept}</td>
-                <td data-col="unique">{row.unique}</td>
-                <td data-col="duplicate">{row.duplicate}</td>
-                <td data-col="dropped" data-warn={row.dropped_unverified > 0}>{row.dropped_unverified}</td>
+      {tally.rows.length > 0 && (
+        <>
+          <p className="wf-shadow-cmp-note" data-testid={`wf-shadow-merge-tally-${step}`}>
+            <strong>{t(published ? 'wf.shadow.merge.tally.result' : 'wf.shadow.merge.tally.proposal', tally.result)}</strong>
+            {' '}{t('wf.shadow.merge.tally.alone', tally.alone)}
+            {' '}{t('wf.shadow.merge.tally.dropped', tally.dropped)}
+          </p>
+          <table className="wf-shadow-merge-table" data-testid={`wf-shadow-merge-contrib-${step}`}>
+            <thead>
+              <tr>
+                <th scope="col">{t('wf.shadow.merge.col.execution')}</th>
+                <th scope="col">{t('wf.shadow.merge.col.raised')}</th>
+                <th scope="col">{t('wf.shadow.merge.col.kept')}</th>
+                <th scope="col">{t('wf.shadow.merge.col.unique')}</th>
+                <th scope="col">{t('wf.shadow.merge.col.dropped')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {tally.rows.map(row => (
+                <tr key={row.execution} data-testid={`wf-shadow-merge-contrib-${step}-${row.execution}`}>
+                  <th scope="row">{name(row.execution)}</th>
+                  <td data-col="raised">{row.raised}</td>
+                  <td data-col="kept">{row.inResult}</td>
+                  <td data-col="unique" data-brought={row.alone > 0 && row.execution !== 'main'}>{row.alone}</td>
+                  <td data-col="dropped" data-warn={row.dropped > 0}>{row.dropped}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
       {merge.points.length > 0 && (
         <details className="wf-shadow-cmp-more" data-testid={`wf-shadow-merge-points-${step}`}>

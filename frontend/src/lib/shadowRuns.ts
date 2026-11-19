@@ -175,7 +175,8 @@ export function shadowName(execution: ShadowExecution, mainLabel: string): strin
 export function shadowLabel(execution: ShadowExecution, mainLabel: string): string {
   const name = shadowName(execution, mainLabel);
   // Which agent and model answered: « shadow-2 » alone says nothing in a pick list.
-  const who = [execution.identity.agent, execution.identity.model].filter(Boolean).join(' · ');
+  // The model that answered when the run resolved one; else the one asked for (a tier).
+  const who = [execution.identity.agent, execution.model || execution.identity.model].filter(Boolean).join(' · ');
   return who ? `${name} (${who})` : name;
 }
 
@@ -238,6 +239,69 @@ export function mergeExecutionLabel(token: string, comparison: StepShadowCompari
   const id = token.startsWith('shadow:') ? token.slice('shadow:'.length) : token;
   const shadow = comparison.shadows.find(candidate => candidate.shadow_id === id);
   return shadow ? shadowLabel(shadow, mainLabel) : id;
+}
+
+/** What one execution brought to a merge. `raised` is always `inResult + dropped`. */
+export interface MergeRow {
+  execution: string;
+  /** Distinct points it raised, kept or not. */
+  raised: number;
+  /** Of those, the points that stand in the result: found alone, with others, or reworded. */
+  inResult: number;
+  /** Of those, the points no other execution found. */
+  alone: number;
+  /** Raised but left out: no evidence held. */
+  dropped: number;
+}
+
+export interface MergeTally {
+  rows: MergeRow[];
+  /** Points of the result. */
+  result: number;
+  /** Of those, found by a single execution. */
+  alone: number;
+  /** Distinct points left out. */
+  dropped: number;
+}
+
+/**
+ * The merge read point by point. A point of the result belongs to every
+ * execution that found it, not to the first one named: a shadow that confirms
+ * three points of the main execution found three points, not zero.
+ */
+export function mergeTally(report: ShadowMergeReport): MergeTally {
+  const byId = new Map(report.points.map(point => [point.id, point]));
+  // The kept point a point stands for: itself, or the one it rewords.
+  const rootOf = (point: ShadowMergeReport['points'][number]) => {
+    let current = point;
+    for (let hop = 0; hop < report.points.length && current.verdict === 'duplicate'; hop += 1) {
+      const next = current.duplicate_of ? byId.get(current.duplicate_of) : undefined;
+      if (!next) return undefined;
+      current = next;
+    }
+    return current.verdict === 'kept' ? current : undefined;
+  };
+  const finders = new Map<string, Set<string>>();
+  const droppedBy = new Map<string, number>();
+  let dropped = 0;
+  for (const point of report.points) {
+    const root = rootOf(point);
+    if (!root) {
+      dropped += 1;
+      for (const execution of point.found_by) droppedBy.set(execution, (droppedBy.get(execution) ?? 0) + 1);
+      continue;
+    }
+    const found = finders.get(root.id) ?? new Set<string>();
+    point.found_by.forEach(execution => found.add(execution));
+    finders.set(root.id, found);
+  }
+  const rows = report.contributions.map(({ execution }) => {
+    // A point reworded twice by one execution is one point of the result.
+    const mine = [...finders.values()].filter(found => found.has(execution));
+    const left = droppedBy.get(execution) ?? 0;
+    return { execution, raised: mine.length + left, inResult: mine.length, alone: mine.filter(found => found.size === 1).length, dropped: left };
+  });
+  return { rows, result: finders.size, alone: [...finders.values()].filter(found => found.size === 1).length, dropped };
 }
 
 /** The longest wait the backend accepts, in minutes. */

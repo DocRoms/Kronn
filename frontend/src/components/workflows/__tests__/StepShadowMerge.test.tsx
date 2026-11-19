@@ -190,23 +190,25 @@ describe('StepShadowCompare — the merged step (KT-1544)', () => {
   const renderCompare = () => render(<I18nProvider><StepShadowCompare workflowId="wf" runId="r1" runStatus="Success" /></I18nProvider>);
   afterEach(() => { vi.useRealTimers(); });
 
-  it('shows each execution’s contribution: kept, duplicate and dropped as unverified', async () => {
+  it('shows what each execution brought: raised, in the result, found alone, left out', async () => {
     vi.mocked(workflowsApi.stepShadows).mockResolvedValue([merged()]);
     renderCompare();
     const table = await screen.findByTestId('wf-shadow-merge-contrib-review');
     expect(table).toBeInTheDocument();
     expect(screen.getByTestId('wf-shadow-merge-review')).toHaveAttribute('data-status', 'merged');
-    const main = screen.getByTestId('wf-shadow-merge-contrib-review-main');
-    expect(main.querySelector('[data-col="kept"]')).toHaveTextContent('1');
-    // The first number says the execution took part: what it raised, kept or not.
-    expect(main.querySelector('[data-col="raised"]')).toHaveTextContent('1');
+    const cells = (id: string) => {
+      const row = screen.getByTestId(`wf-shadow-merge-contrib-review-${id}`);
+      return ['raised', 'kept', 'unique', 'dropped'].map(col => row.querySelector(`[data-col="${col}"]`)?.textContent);
+    };
+    // p1 is found by main and local: both have it in the result, neither alone.
+    expect(cells('main')).toEqual(['1', '1', '0', '0']);
+    expect(cells('shadow:local')).toEqual(['2', '1', '0', '1']);
+    expect(cells('shadow:other')).toEqual(['1', '1', '1', '0']);
     const local = screen.getByTestId('wf-shadow-merge-contrib-review-shadow:local');
-    expect(local.querySelector('[data-col="raised"]')).toHaveTextContent('2');
-    expect(local.querySelector('[data-col="duplicate"]')).toHaveTextContent('1');
-    expect(local.querySelector('[data-col="dropped"]')).toHaveTextContent('1');
     expect(local.querySelector('[data-col="dropped"]')).toHaveAttribute('data-warn', 'true');
-    const other = screen.getByTestId('wf-shadow-merge-contrib-review-shadow:other');
-    expect(other.querySelector('[data-col="unique"]')).toHaveTextContent('1');
+    // What a shadow found that nobody else did is the reason it ran.
+    expect(screen.getByTestId('wf-shadow-merge-contrib-review-shadow:other').querySelector('[data-col="unique"]')).toHaveAttribute('data-brought', 'true');
+    expect(screen.getByTestId('wf-shadow-merge-tally-review')).toHaveTextContent('2');
   });
 
   it('names where each point came from and why a dropped point was dropped', async () => {

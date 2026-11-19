@@ -8490,6 +8490,10 @@
 .wf-shadow-merge-table th, .wf-shadow-merge-table td { padding: 3px 8px; border-bottom: 1px solid var(--kr-border-subtle); text-align: right; }
 .wf-shadow-merge-table th:first-child, .wf-shadow-merge-table th[scope="row"] { text-align: left; font-weight: 600; }
 .wf-shadow-merge-table td[data-warn="true"] { color: var(--kr-error); font-weight: 650; }
+/* What a shadow found that no other execution did: the reason it ran. */
+.wf-shadow-merge-table td[data-brought="true"] { color: var(--kr-success); font-weight: 650; }
+.wf-shadow-merge-table td[data-col="unique"] { color: var(--kr-text-muted); }
+.wf-shadow-merge-table td[data-col="unique"][data-brought="true"] { color: var(--kr-success); }
 .wf-shadow-merge-verdict { padding: 0 6px; border-radius: var(--kr-r-pill); border: 1px solid var(--kr-border-subtle); color: var(--kr-text-secondary); white-space: nowrap; }
 .wf-shadow-merge-verdict[data-verdict="kept"] { border-color: var(--kr-success); color: var(--kr-text-primary); background: var(--kr-success-bg); }
 .wf-shadow-merge-verdict[data-verdict="dropped_unverified"] { border-color: var(--kr-error); color: var(--kr-error); }
