@@ -3252,6 +3252,7 @@ impl KronnToolExecutor {
                             id: Some(self.actor_id.clone()),
                             session_id: self.actor_session_id(),
                             source_message_id: self.source_message_id.clone(),
+                            token_declared: false,
                         };
                         match crate::api::orchestration::extend_execution_review_rounds(
                             &self.state,
@@ -3274,6 +3275,7 @@ impl KronnToolExecutor {
                             id: Some(self.actor_id.clone()),
                             session_id: self.actor_session_id(),
                             source_message_id: self.source_message_id.clone(),
+                            token_declared: false,
                         };
                         match crate::api::orchestration::replace_execution_validations(
                             &self.state.db,
@@ -4073,6 +4075,7 @@ impl KronnToolExecutor {
             id: Some(self.actor_id.clone()),
             session_id: self.actor_session_id(),
             source_message_id: self.source_message_id.clone(),
+            token_declared: false,
         }
     }
 

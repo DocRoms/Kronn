@@ -109,6 +109,7 @@ fn backend_actor() -> OrchestrationActor {
         id: Some("orchestrator".into()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     }
 }
 
@@ -7025,6 +7026,7 @@ fn principal_actor() -> OrchestrationActor {
         id: Some("Claude Code".into()),
         session_id: Some("adhoc-principal".into()),
         source_message_id: None,
+        token_declared: false,
     }
 }
 

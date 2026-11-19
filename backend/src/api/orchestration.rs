@@ -160,6 +160,7 @@ pub fn backend_actor() -> OrchestrationActor {
         id: Some("orchestrator".to_string()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     }
 }
 
@@ -174,6 +175,7 @@ pub fn agent_actor(alias: &str, session_id: Option<&str>) -> OrchestrationActor 
         id: Some(alias.to_string()),
         session_id: session_id.map(str::to_string),
         source_message_id: None,
+        token_declared: false,
     }
 }
 
@@ -8264,6 +8266,28 @@ pub async fn deliver_worker_manifest(
     source_session_id: &str,
     manifest_json: &str,
 ) -> Result<DeliverOutcome, ProvisionError> {
+    deliver_worker_manifest_as(
+        db,
+        task_execution_id,
+        source_agent,
+        source_session_id,
+        manifest_json,
+        None,
+    )
+    .await
+}
+
+/// [`deliver_worker_manifest`] for a caller that may hold a bridge token: the
+/// worker session it names is its own only if its grant can be that worker's
+/// (KT-1962).
+pub async fn deliver_worker_manifest_as(
+    db: &Database,
+    task_execution_id: &str,
+    source_agent: &str,
+    source_session_id: &str,
+    manifest_json: &str,
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
+) -> Result<DeliverOutcome, ProvisionError> {
     // ── 1. Resolve the execution + the caller's session server-side. ──
     let (exec, caller_session_id) = {
         let (eid, agent, sess) = (
@@ -8288,7 +8312,7 @@ pub async fn deliver_worker_manifest(
     let authorized = matches!(
         (exec.worker_cli_session_id, caller_session_id),
         (Some(worker), Some(caller)) if worker == caller
-    );
+    ) && bridge_may_be_execution_worker(bridge, &exec);
     if !authorized {
         return Ok(DeliverOutcome::NotAddressed);
     }
@@ -8392,12 +8416,19 @@ async fn spawned_native_worker_execution_for_caller(
     task_execution_id: &str,
     dispatch_job_id: &str,
     caller: NativeExecutionCaller<'_>,
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
 ) -> Result<Option<TaskExecution>, ProvisionError> {
     let Some(execution) = native_worker_execution_for_caller(db, task_execution_id, caller).await?
     else {
         return Ok(None);
     };
-    Ok((execution.dispatch_job_id.as_deref() == Some(dispatch_job_id)).then_some(execution))
+    // The dispatch and its message are readable in the room: a grant minted
+    // for another execution, or running in neither room, is not this worker.
+    Ok(
+        (execution.dispatch_job_id.as_deref() == Some(dispatch_job_id)
+            && bridge_may_be_execution_worker(bridge, &execution))
+        .then_some(execution),
+    )
 }
 
 /// Native HTTP agents do not own a CLI session. Their trusted executor supplies the
@@ -8415,6 +8446,7 @@ pub async fn deliver_native_worker_manifest(
         task_execution_id,
         expected_dispatch_job_id,
         caller,
+        None,
     )
     .await?
     else {
@@ -9342,6 +9374,27 @@ pub async fn decide_review(
     source_agent: &str,
     source_session_id: &str,
 ) -> Result<ReviewOutcome, ProvisionError> {
+    decide_review_as(
+        db,
+        task_execution_id,
+        decision_json,
+        source_agent,
+        source_session_id,
+        None,
+    )
+    .await
+}
+
+/// [`decide_review`] for a caller that may hold a bridge token: the session it
+/// names makes it a party only in the role its grant can hold (KT-1962).
+pub async fn decide_review_as(
+    db: &Database,
+    task_execution_id: &str,
+    decision_json: &str,
+    source_agent: &str,
+    source_session_id: &str,
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
+) -> Result<ReviewOutcome, ProvisionError> {
     // ── 1. Resolve the execution, the caller's session and the run, server-side. ──
     let (exec, caller, run) = {
         let (eid, agent, sess) = (
@@ -9373,8 +9426,12 @@ pub async fn decide_review(
     let Some(caller) = caller else {
         return Ok(ReviewOutcome::NotAddressed);
     };
-    let is_worker = matches!(exec.worker_cli_session_id, Some(w) if w == caller.id);
-    let is_principal = caller.disc_id == exec.parent_discussion_id;
+    // A session id is declared by the caller: with a bridge token it counts
+    // only in the role the grant itself can hold.
+    let is_worker = matches!(exec.worker_cli_session_id, Some(w) if w == caller.id)
+        && bridge_may_be_execution_worker(bridge, &exec);
+    let is_principal = caller.disc_id == exec.parent_discussion_id
+        && bridge.is_none_or(|bridge| bridge_is_execution_principal(bridge, &exec));
     if !is_worker && !is_principal {
         return Ok(ReviewOutcome::NotAddressed);
     }
@@ -9484,9 +9541,11 @@ pub async fn decide_room_agent_review(
     task_execution_id: &str,
     decision_json: &str,
     room: SpawnedAgentCaller,
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
 ) -> Result<ReviewOutcome, ProvisionError> {
     let caller = PrincipalCaller::RoomAgent(room.clone());
-    let Some(execution) = authorize_execution_principal(db, task_execution_id, &caller).await
+    let Some(execution) =
+        authorize_execution_principal(db, task_execution_id, &caller, bridge).await
     else {
         return Ok(ReviewOutcome::NotAddressed);
     };
@@ -16334,6 +16393,11 @@ pub async fn pin_cli_principal(
     }
 }
 
+/// One answer for an unknown room, a stranger and a grant that is not the
+/// room's: none of them learns which it was.
+const PRINCIPAL_ROOM_REFUSAL: &str =
+    "principal discussion not found or caller is not an active member";
+
 /// Who is asking, as the room's principal, to prepare, launch, follow, review,
 /// cancel, resume or reassign a task execution.
 #[derive(Clone)]
@@ -16381,20 +16445,22 @@ async fn authorize_execution_principal(
     db: &Database,
     exec_id: &str,
     caller: &PrincipalCaller,
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
 ) -> Option<TaskExecution> {
-    let (id, caller) = (exec_id.to_string(), caller.clone());
+    let (id, declared) = (exec_id.to_string(), caller.clone());
     db.with_conn(move |conn| {
         let Some(execution) = crate::db::orchestration::get_task_execution(conn, &id)? else {
             return Ok(None);
         };
         Ok(
-            principal_is_authorized(conn, &execution.parent_discussion_id, &caller)?
+            principal_is_authorized(conn, &execution.parent_discussion_id, &declared)?
                 .then_some(execution),
         )
     })
     .await
     .ok()
     .flatten()
+    .filter(|execution| bridge_holds_execution_principal(bridge, caller, execution))
 }
 
 /// KT-1954 — whether the caller is the principal of the latest execution of
@@ -16439,12 +16505,11 @@ pub fn live_check_principal(
             if session.is_none_or(|session| execution.worker_cli_session_id == Some(session.id)) {
                 return Ok(None);
             }
-            // A session id is a declared fact: the worker's own grant never
-            // proves the principal, whichever session it names.
-            let child = execution.sub_discussion_id.as_ref();
-            if bridge.is_some_and(|bridge| {
-                child.is_some_and(|child| bridge.own_discussions.contains(child))
-            }) {
+            // A session id is a declared fact, readable in the journal: a
+            // grant proves it only when it runs in the parent room and not in
+            // the worker's. Whatever runs in that room is a principal by its
+            // own session already (a workflow step that joined it included).
+            if bridge.is_some_and(|bridge| !bridge_is_execution_principal(bridge, &execution)) {
                 return Ok(None);
             }
             Ok(Some((agent.clone(), session_id.clone())))
@@ -17556,6 +17621,7 @@ pub async fn task_worker_catalogue(
 /// the backend before task/project/worker details are returned.
 pub async fn task_exec_prepare(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(mut request): Json<TaskExecPrepareRequest>,
 ) -> Json<ApiResponse<crate::models::TaskExecutionPreparation>> {
     let caller = match principal_caller(
@@ -17575,6 +17641,13 @@ pub async fn task_exec_prepare(
         ));
     }
     let parent = request.parent_discussion_id.trim().to_string();
+    let bridge = bridge.as_ref().map(|extension| &extension.0);
+    if !bridge_holds_room_principal(bridge, &caller, &parent) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            PRINCIPAL_ROOM_REFUSAL,
+        ));
+    }
     let task = request.task_reference.trim().to_string();
     let worker = request.worker;
     let base_rev = request.base_rev.clone();
@@ -17597,7 +17670,7 @@ pub async fn task_exec_prepare(
         .db
         .with_conn(move |conn| {
             if !principal_is_authorized(conn, &parent, &caller)? {
-                bail!("principal discussion not found or caller is not an active member");
+                bail!(PRINCIPAL_ROOM_REFUSAL);
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
             integration_target_preparation(conn, &mut preparation, base_rev.as_deref())?;
@@ -17631,6 +17704,7 @@ pub async fn task_exec_prepare(
 
 pub async fn task_exec_launch(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(mut request): Json<TaskExecLaunchRequest>,
 ) -> Json<ApiResponse<TaskExecution>> {
     let caller = match principal_caller(
@@ -17654,17 +17728,21 @@ pub async fn task_exec_launch(
         PrincipalCaller::Cli { agent, session_id } => Some((agent.clone(), session_id.clone())),
         PrincipalCaller::RoomAgent(_) => None,
     };
-    let authorized = {
+    let bridge = bridge.as_ref().map(|extension| &extension.0);
+    let authorized = bridge_holds_room_principal(bridge, &caller, &parent) && {
         let parent = parent.clone();
-        state
-            .db
-            .with_conn(move |conn| principal_is_authorized(conn, &parent, &caller))
-            .await
+        matches!(
+            state
+                .db
+                .with_conn(move |conn| principal_is_authorized(conn, &parent, &caller))
+                .await,
+            Ok(true)
+        )
     };
-    if !matches!(authorized, Ok(true)) {
+    if !authorized {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
-            "principal discussion not found or caller is not an active member",
+            PRINCIPAL_ROOM_REFUSAL,
         ));
     }
     if let Some(reason) = worker_scope_refusal(&request.worker, request.worker_scope.as_ref()) {
@@ -18111,6 +18189,7 @@ pub struct TaskExecStatusRequest {
 pub async fn task_exec_status(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<TaskExecStatusRequest>,
 ) -> Json<ApiResponse<serde_json::Value>> {
     let TaskExecStatusRequest {
@@ -18119,6 +18198,7 @@ pub async fn task_exec_status(
         wait_for,
         timeout_secs,
     } = request;
+    let bridge = bridge.map(|extension| extension.0);
     // KT-1408 — a spawned worker is told how close the execution limit is.
     let mut worker_limit_clock: Option<(AgentType, String)> = None;
     let execution_id = if let Some(caller) = request.spawned_agent {
@@ -18154,6 +18234,7 @@ pub async fn task_exec_status(
                 alias: &alias,
                 actor_session_id: Some(source_message_id),
             },
+            bridge.as_ref(),
         )
         .await
         {
@@ -18185,7 +18266,9 @@ pub async fn task_exec_status(
             .with_conn(move |conn| {
                 let execution = resolve_task_execution_reference(conn, &exec_id)?
                     .context("execution not found or caller is not a party")?;
-                if !principal_is_authorized(conn, &execution.parent_discussion_id, &caller)? {
+                if !principal_is_authorized(conn, &execution.parent_discussion_id, &caller)?
+                    || !bridge_holds_execution_principal(bridge.as_ref(), &caller, &execution)
+                {
                     bail!("execution not found or caller is not a party");
                 }
                 Ok(execution.id)
@@ -18214,7 +18297,9 @@ pub async fn task_exec_status(
             .with_conn(move |conn| {
                 let execution = resolve_task_execution_reference(conn, &exec_id)?
                     .context("execution not found or caller is not a party")?;
-                if !execution_party_is_authorized(conn, &execution, &agent, &session_id)? {
+                if !execution_party_is_authorized(conn, &execution, &agent, &session_id)?
+                    || !bridge_is_execution_party(bridge.as_ref(), &execution)
+                {
                     bail!("execution not found or caller is not a party");
                 }
                 Ok(execution.id)
@@ -18296,6 +18381,7 @@ pub async fn task_exec_status(
 pub async fn task_exec_resume(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<TaskExecCallerRequest>,
 ) -> Json<ApiResponse<ExecutionRecoveryView>> {
     if request.spawned_agent.is_some() {
@@ -18312,7 +18398,9 @@ pub async fn task_exec_resume(
         Ok(caller) => caller,
         Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
     };
-    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller).await else {
+    let bridge = bridge.as_ref().map(|extension| &extension.0);
+    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller, bridge).await
+    else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "execution not found or caller is not its principal",
@@ -18325,6 +18413,7 @@ pub async fn task_exec_resume(
 pub async fn task_exec_cancel(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<TaskExecCancelRequest>,
 ) -> Json<ApiResponse<ExecutionRecoveryView>> {
     let caller = match principal_caller(
@@ -18335,7 +18424,9 @@ pub async fn task_exec_cancel(
         Ok(caller) => caller,
         Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
     };
-    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller).await else {
+    let bridge = bridge.as_ref().map(|extension| &extension.0);
+    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller, bridge).await
+    else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "execution not found or caller is not its principal",
@@ -18393,6 +18484,76 @@ fn bridge_is_execution_principal(
     let owns = |room: &str| bridge.own_discussions.iter().any(|own| own == room);
     owns(&execution.parent_discussion_id)
         && !execution.sub_discussion_id.as_deref().is_some_and(owns)
+        && bridge.own_execution.as_deref() != Some(execution.id.as_str())
+}
+
+/// KT-1962 — whether a bridge-token caller may use `caller` as the principal
+/// of `execution`. The body's agent, session and room-agent context are facts
+/// any reader of the room can copy, so the grant itself must be the
+/// principal's; a room agent's must also be the grant of that room's agent.
+/// No token (the operator, a host CLI, a browser) is not judged here.
+fn bridge_holds_execution_principal(
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
+    caller: &PrincipalCaller,
+    execution: &TaskExecution,
+) -> bool {
+    bridge.is_none_or(|bridge| {
+        bridge_is_execution_principal(bridge, execution)
+            && match caller {
+                PrincipalCaller::Cli { .. } => true,
+                PrincipalCaller::RoomAgent(_) => bridge
+                    .room_agent_of
+                    .contains(&execution.parent_discussion_id),
+            }
+    })
+}
+
+/// KT-1962 — the same before an execution exists (prepare, launch): the grant
+/// runs in the room the caller names as the principal's.
+fn bridge_holds_room_principal(
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
+    caller: &PrincipalCaller,
+    parent_discussion_id: &str,
+) -> bool {
+    bridge.is_none_or(|bridge| {
+        let room = parent_discussion_id.to_string();
+        bridge.own_discussions.contains(&room)
+            && match caller {
+                PrincipalCaller::Cli { .. } => true,
+                PrincipalCaller::RoomAgent(_) => bridge.room_agent_of.contains(&room),
+            }
+    })
+}
+
+/// KT-1962 — whether a bridge-token caller may act as the worker of
+/// `execution`: a grant minted for an execution works for that one only, and
+/// any other grant runs in one of the execution's two rooms.
+fn bridge_may_be_execution_worker(
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
+    execution: &TaskExecution,
+) -> bool {
+    bridge.is_none_or(|bridge| match bridge.own_execution.as_deref() {
+        Some(own) => own == execution.id,
+        None => {
+            let owns = |room: &str| bridge.own_discussions.iter().any(|own| own == room);
+            owns(&execution.parent_discussion_id)
+                || execution.sub_discussion_id.as_deref().is_some_and(owns)
+        }
+    })
+}
+
+/// KT-1962 — whether a bridge-token caller may read `execution` as one of its
+/// parties: it runs in one of its two rooms or is its worker.
+fn bridge_is_execution_party(
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
+    execution: &TaskExecution,
+) -> bool {
+    bridge.is_none_or(|bridge| {
+        let owns = |room: &str| bridge.own_discussions.iter().any(|own| own == room);
+        bridge.own_execution.as_deref() == Some(execution.id.as_str())
+            || owns(&execution.parent_discussion_id)
+            || execution.sub_discussion_id.as_deref().is_some_and(owns)
+    })
 }
 
 pub async fn task_exec_reassign_as(
@@ -18409,12 +18570,16 @@ pub async fn task_exec_reassign_as(
         Ok(caller) => caller,
         Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
     };
-    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller).await else {
+    // The grant is judged below, so the review-round refusal keeps its own
+    // wording for a principal whose token adopted the child room.
+    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller, None).await
+    else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "execution not found or caller is not its principal",
         ));
     };
+    let principal_grant = bridge_holds_execution_principal(bridge, &caller, &execution);
     let exec_id = execution.id;
     let amendment = match execution_amendment(
         request.worker,
@@ -18424,6 +18589,12 @@ pub async fn task_exec_reassign_as(
         Ok(amendment) => amendment,
         Err(refusal) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, refusal)),
     };
+    if !principal_grant && !matches!(amendment, ExecutionAmendment::ExtendReviewRounds(_)) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "execution not found or caller is not its principal",
+        ));
+    }
     match amendment {
         ExecutionAmendment::Reassign(target) => {
             pin_principal_caller(&state.db, &exec_id, &caller).await;
@@ -18455,23 +18626,13 @@ pub async fn task_exec_reassign_as(
             // The body's `source_agent`/`source_session_id` are declared by the
             // caller, so a worker could name its principal in them: with a bridge
             // token, the grant itself must be the principal's (KT-1345).
-            if let Some(bridge) = bridge {
-                let id = exec_id.clone();
-                let principal = state
-                    .db
-                    .with_conn(move |conn| crate::db::orchestration::get_task_execution(conn, &id))
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|execution| bridge_is_execution_principal(bridge, &execution));
-                if !principal {
-                    return Json(ApiResponse::err_coded(
-                        ApiErrorCode::Validation,
-                        "only the execution's principal or a human can extend its review-round \
-                         limit: a worker cannot raise its own, and a token that also owns the \
-                         child room (e.g. after adopting it) counts as the worker's",
-                    ));
-                }
+            if !principal_grant {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::Validation,
+                    "only the execution's principal or a human can extend its review-round \
+                     limit: a worker cannot raise its own, and a token that also owns the \
+                     child room (e.g. after adopting it) counts as the worker's",
+                ));
             }
             pin_principal_caller(&state.db, &exec_id, &caller).await;
             match extend_execution_review_rounds(
@@ -18816,6 +18977,7 @@ pub fn accept_outcome_to_response(
 /// `offer_id`.
 pub async fn accept_offer(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<AcceptOfferRequest>,
 ) -> Json<ApiResponse<AcceptOfferResponse>> {
     let clean = |value: &Option<String>| {
@@ -18845,6 +19007,27 @@ pub async fn accept_offer(
             ApiErrorCode::Validation,
             "offer_id is required".to_string(),
         ));
+    }
+    // KT-1962 — a session id is readable in its room: a bridge token accepts
+    // only for a session that runs in one of the grant's own rooms.
+    if let Some(axum::Extension(bridge)) = &bridge {
+        let (agent, session) = (source_agent.clone(), source_session_id.clone());
+        let room = state
+            .db
+            .with_conn(move |conn| {
+                Ok(
+                    crate::db::discussion_sessions::find_active_session(conn, &agent, &session)?
+                        .map(|session| session.disc_id),
+                )
+            })
+            .await
+            .ok()
+            .flatten();
+        if !room.is_some_and(|room| bridge.own_discussions.contains(&room)) {
+            return Json(accept_outcome_to_response(
+                AcceptAttachOutcome::WrongAcceptor,
+            ));
+        }
     }
     match accept_worker_offer_and_attach(
         &state.db,
@@ -18910,8 +19093,10 @@ pub struct SpawnedWorkerCommitRequest {
 /// parameter.
 pub async fn commit_spawned_worker(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<SpawnedWorkerCommitRequest>,
 ) -> Json<ApiResponse<serde_json::Value>> {
+    let bridge = bridge.as_ref().map(|extension| &extension.0);
     let exec_id = request.task_execution_id.trim().to_string();
     if exec_id.is_empty() {
         return Json(ApiResponse::err_coded(
@@ -18941,6 +19126,7 @@ pub async fn commit_spawned_worker(
             alias: &alias,
             actor_session_id: Some(source_message_id),
         },
+        bridge,
     )
     .await
     {
@@ -19302,8 +19488,10 @@ pub fn deliver_outcome_to_response(outcome: DeliverOutcome) -> ApiResponse<Deliv
 /// supplies only `task_execution_id` + `manifest`.
 pub async fn deliver(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<DeliverRequest>,
 ) -> Json<ApiResponse<DeliverResponse>> {
+    let bridge = bridge.as_ref().map(|extension| &extension.0);
     let clean = |value: &Option<String>| {
         value
             .as_deref()
@@ -19356,6 +19544,7 @@ pub async fn deliver(
                 alias: &alias,
                 actor_session_id: Some(source_message_id),
             },
+            bridge,
         )
         .await
         {
@@ -19393,12 +19582,13 @@ pub async fn deliver(
                 ))
             }
         };
-        deliver_worker_manifest(
+        deliver_worker_manifest_as(
             &state.db,
             &exec_id,
             &source_agent,
             &source_session_id,
             &manifest_json,
+            bridge,
         )
         .await
     };
@@ -19623,8 +19813,10 @@ pub fn review_outcome_to_response(outcome: ReviewOutcome) -> ApiResponse<ReviewR
 /// caller supplies only `task_execution_id` + `decision`.
 pub async fn review(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<ReviewRequest>,
 ) -> Json<ApiResponse<ReviewResponse>> {
+    let bridge = bridge.as_ref().map(|extension| &extension.0);
     let clean = |value: &Option<String>| {
         value
             .as_deref()
@@ -19653,6 +19845,7 @@ pub async fn review(
             request.task_execution_id.trim(),
             &decision_json,
             room,
+            bridge,
         )
         .await
         {
@@ -19693,14 +19886,31 @@ pub async fn review(
             ))
         }
     };
-    // Before the decision, so an escalation it raises addresses this reviewer.
-    pin_cli_principal(&state.db, &exec_id, &source_agent, &source_session_id).await;
-    match decide_review(
+    // Before the decision, so an escalation it raises addresses this reviewer;
+    // never for a grant that cannot be the principal's.
+    let may_pin = match bridge {
+        None => true,
+        Some(bridge) => {
+            let id = exec_id.clone();
+            state
+                .db
+                .with_conn(move |conn| crate::db::orchestration::get_task_execution(conn, &id))
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|execution| bridge_is_execution_principal(bridge, &execution))
+        }
+    };
+    if may_pin {
+        pin_cli_principal(&state.db, &exec_id, &source_agent, &source_session_id).await;
+    }
+    match decide_review_as(
         &state.db,
         &exec_id,
         &decision_json,
         &source_agent,
         &source_session_id,
+        bridge,
     )
     .await
     {
@@ -19853,6 +20063,7 @@ pub mod tests {
                 id: Some("room-agent-test".into()),
                 session_id: None,
                 source_message_id: None,
+                token_declared: false,
             };
             let execution =
                 crate::db::orchestration::launch_single_task(conn, &input, &actor)?.execution;
@@ -20011,6 +20222,7 @@ pub mod tests {
                 id: Some("room-agent-lifecycle-test".into()),
                 session_id: None,
                 source_message_id: None,
+                token_declared: false,
             };
             let launched = crate::db::orchestration::launch_single_task(
                 conn,
@@ -20053,7 +20265,7 @@ pub mod tests {
         let room = lifecycle_room;
 
         let own = PrincipalCaller::RoomAgent(room("d-parent", "job-1", "msg-1"));
-        let found = authorize_execution_principal(&db, &execution_id, &own).await;
+        let found = authorize_execution_principal(&db, &execution_id, &own, None).await;
         assert_eq!(found.map(|e| e.id), Some(execution_id.clone()));
         for (caller, label) in [
             (
@@ -20064,14 +20276,14 @@ pub mod tests {
         ] {
             let caller = PrincipalCaller::RoomAgent(caller);
             assert!(
-                authorize_execution_principal(&db, &execution_id, &caller)
+                authorize_execution_principal(&db, &execution_id, &caller, None)
                     .await
                     .is_none(),
                 "{label}"
             );
         }
         assert!(
-            authorize_execution_principal(&db, "missing-exec", &own)
+            authorize_execution_principal(&db, "missing-exec", &own, None)
                 .await
                 .is_none(),
             "unknown execution"
@@ -20084,6 +20296,7 @@ pub mod tests {
             &execution_id,
             decision,
             room("d-parent", "job-1", "msg-1"),
+            None,
         )
         .await
         .unwrap();
@@ -20096,6 +20309,7 @@ pub mod tests {
             &execution_id,
             decision,
             room("d-other", "job-2", "msg-2"),
+            None,
         )
         .await
         .unwrap();
@@ -20133,6 +20347,7 @@ pub mod tests {
         let Json(status) = task_exec_status(
             State(state.clone()),
             Path(exec_id.to_string()),
+            None,
             Json(TaskExecStatusRequest {
                 caller: caller(),
                 ..Default::default()
@@ -20141,6 +20356,7 @@ pub mod tests {
         .await;
         let Json(review) = review(
             State(state.clone()),
+            None,
             Json(ReviewRequest {
                 task_execution_id: exec_id.to_string(),
                 decision: serde_json::json!({
@@ -20155,6 +20371,7 @@ pub mod tests {
         let Json(cancel) = task_exec_cancel(
             State(state.clone()),
             Path(exec_id.to_string()),
+            None,
             Json(TaskExecCancelRequest {
                 source_agent: agent.clone(),
                 source_session_id: session.clone(),
@@ -20167,6 +20384,7 @@ pub mod tests {
         let Json(resume) = task_exec_resume(
             State(state.clone()),
             Path(exec_id.to_string()),
+            None,
             Json(caller()),
         )
         .await;

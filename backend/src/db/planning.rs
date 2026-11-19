@@ -520,6 +520,11 @@ fn ensure_live_check_principal(
         return Ok(());
     }
     let refused = || anyhow::anyhow!(LIVE_CHECK_REFUSAL);
+    // A bridge token's body names any session it has read: only a principal
+    // proven against the token itself passes (`live_check_principal`).
+    if actor.token_declared {
+        return Err(refused());
+    }
     let (Some(task_id), Some(agent), Some(session_id)) = (
         task_id,
         actor.id.as_deref().map(str::trim),
@@ -1970,6 +1975,7 @@ pub fn update_task(
                 id: Some("orchestrator".to_string()),
                 session_id: None,
                 source_message_id: None,
+                token_declared: false,
             },
         )?;
     }
@@ -3510,6 +3516,7 @@ mod tests {
             id: Some("ClaudeCode".into()),
             session_id: Some("session-a".into()),
             source_message_id: None,
+            token_declared: false,
         };
         let mut second = request("Second session");
         second.actor = PlanningActor {
@@ -3517,6 +3524,7 @@ mod tests {
             id: Some("ClaudeCode".into()),
             session_id: Some("session-b".into()),
             source_message_id: None,
+            token_declared: false,
         };
 
         let first = create_task(&connection, &first).unwrap();
@@ -3718,6 +3726,7 @@ mod tests {
             id: Some("Codex".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         };
         add_blocker(
             &connection,
@@ -5112,6 +5121,7 @@ mod tests {
             id: Some("orchestrator".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         }
     }
 

@@ -118,6 +118,7 @@ fn interrupt_undelivered_with_notice(
         id: Some("orchestrator".into()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     };
     if let Some(interrupted) =
         crate::db::orchestration::interrupt_undelivered_execution_for_dispatch(
@@ -223,6 +224,7 @@ pub fn interrupt_undelivered_after_failure(
         id: Some("orchestrator".into()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     };
     crate::db::orchestration::interrupt_undelivered_execution_for_dispatch(
         conn,
@@ -2982,6 +2984,7 @@ mod chain_render_tests {
                     id: Some("orchestrator".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 };
                 let execution = crate::db::orchestration::launch_single_task(
                     conn,
@@ -3096,6 +3099,7 @@ mod chain_render_tests {
                     id: Some("orchestrator".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 };
                 let execution = crate::db::orchestration::launch_single_task(
                     conn,
@@ -3258,6 +3262,7 @@ mod chain_render_tests {
                     id: Some("orchestrator".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 };
                 let execution = crate::db::orchestration::launch_single_task(
                     conn,
@@ -3568,6 +3573,7 @@ mod refused_tool_call_notice_tests {
                     id: Some("orchestrator".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 };
                 let execution = crate::db::orchestration::launch_single_task(
                     conn,

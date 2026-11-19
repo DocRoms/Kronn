@@ -305,6 +305,7 @@ mod native_http_tools_scope_tests {
             id: Some("streaming-scope-test".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         }
     }
 
@@ -1086,8 +1087,7 @@ mod dispatch_liveness_tests {
                     kind: PlanningActorKind::Backend,
                     id: Some("liveness-test".into()),
                     session_id: None,
-                    source_message_id: None,
-                };
+                    source_message_id: None, token_declared: false, };
                 let now = "2026-01-01T00:00:00Z";
                 conn.execute(
                     "INSERT INTO discussions (id, title, created_at, updated_at) \

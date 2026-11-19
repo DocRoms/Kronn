@@ -58,6 +58,7 @@ pub async fn convert_after_audit(
         id: Some(format!("audit:{audit_run_id}")),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     };
     Some(
         convert_project_tds(

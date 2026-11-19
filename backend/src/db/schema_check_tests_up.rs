@@ -12,6 +12,7 @@ async fn boot_repairs_a_database_that_lost_a_table_and_campaign_control_works_ag
             id: Some("orchestrator".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         }
     }
 

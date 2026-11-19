@@ -634,6 +634,58 @@ fn updates_cannot_move_a_resource_out_of_the_project() {
     assert_eq!(kept["project_id"], "p1");
 }
 
+/// KT-1954 — the session a token's planning actor names is a claim: the gate
+/// marks it so on every planning write, whatever the body said about it.
+#[test]
+fn a_token_planning_actor_session_is_marked_as_a_claim() {
+    for (method, pattern) in [
+        ("POST", "/api/planning/tasks"),
+        ("PATCH", "/api/planning/tasks/{id}"),
+        ("PATCH", "/api/planning/tasks/{id}/dod/{dod_id}"),
+    ] {
+        for body in [
+            json!({"actor": {"kind": "human", "id": "Codex", "session_id": "s", "token_declared": false}}),
+            json!({"actor": {"id": "Codex", "session_id": "s"}}),
+            json!({}),
+        ] {
+            let prepared = prepare_body(route(method, pattern), Some("p1"), Some(&body))
+                .unwrap()
+                .unwrap();
+            assert_eq!(prepared["actor"]["kind"], "agent", "{pattern}");
+            assert_eq!(prepared["actor"]["token_declared"], true, "{pattern}");
+        }
+    }
+    // A struct reads from an array too, field by position: the gate would
+    // rewrite nothing in it, so it is refused on every route, whatever it holds.
+    for (method, pattern) in [
+        ("POST", "/api/planning/tasks"),
+        ("PATCH", "/api/planning/tasks/{id}"),
+        ("PATCH", "/api/planning/tasks/{id}/dod/{dod_id}"),
+        ("POST", "/api/quick-execs"),
+    ] {
+        for body in [
+            json!([null, {"kind": "human", "id": "romu"}]),
+            json!("x"),
+            json!(3),
+            json!(null),
+        ] {
+            assert!(
+                prepare_body(route(method, pattern), Some("p1"), Some(&body)).is_err(),
+                "{pattern} {body}"
+            );
+        }
+    }
+    // A human's body is never marked: the field is not read back from the wire
+    // as true unless the gate wrote it, and it is never sent out.
+    let human: crate::models::PlanningActor =
+        serde_json::from_value(json!({"kind": "human", "id": "romu"})).unwrap();
+    assert!(!human.token_declared);
+    assert!(serde_json::to_value(&human)
+        .unwrap()
+        .get("token_declared")
+        .is_none());
+}
+
 /// B-03 / B-16 — a workflow may be scoped to the token's project only.
 #[test]
 fn workflow_scopes_stay_within_the_bound_project() {

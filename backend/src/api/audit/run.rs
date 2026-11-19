@@ -682,6 +682,7 @@ mod audit_status_tests {
                         own_run: None,
                         agent: None,
                         room_agent_of: Vec::new(),
+                        own_execution: None,
                     })
                 });
                 audit_status(State(state), Path("p1".into()), caller, None)

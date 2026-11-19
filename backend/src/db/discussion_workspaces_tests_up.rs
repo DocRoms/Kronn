@@ -466,6 +466,7 @@ fn seed_execution(conn: &Connection, task_id: &str, number: i64) -> String {
             id: Some("orchestrator".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
     )
     .unwrap()

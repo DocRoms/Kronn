@@ -915,6 +915,7 @@ async fn a_bridge_caller_is_refused_the_validation_of_a_version() {
         own_run: None,
         agent: None,
         room_agent_of: Vec::new(),
+        own_execution: None,
     };
     let Json(response) = validate_current_docs(
         State(state),

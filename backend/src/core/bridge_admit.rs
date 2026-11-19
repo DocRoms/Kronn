@@ -173,6 +173,7 @@ pub async fn admit(
         own_run: grant.scope.workflow_run_id.clone(),
         agent: grant.scope.agent.clone(),
         room_agent_of: grant.scope.room_grant_discussions.clone(),
+        own_execution: grant.scope.task_execution_id.clone(),
     };
     Ok(Admitted {
         route,

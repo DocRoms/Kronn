@@ -203,6 +203,7 @@ fn step_actor(run_id: &str, step_name: &str) -> PlanningActor {
         )),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     }
 }
 

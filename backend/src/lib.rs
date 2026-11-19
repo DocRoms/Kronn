@@ -779,6 +779,7 @@ async fn trust_confirm_gate(
             own_run: grant.scope.workflow_run_id.clone(),
             agent: grant.scope.agent.clone(),
             room_agent_of: grant.scope.room_grant_discussions.clone(),
+            own_execution: grant.scope.task_execution_id.clone(),
         });
     next.run(axum::extract::Request::from_parts(
         parts,
@@ -826,6 +827,7 @@ async fn strong_code_gate(
             own_run: grant.scope.workflow_run_id.clone(),
             agent: grant.scope.agent.clone(),
             room_agent_of: grant.scope.room_grant_discussions.clone(),
+            own_execution: grant.scope.task_execution_id.clone(),
         });
     parts
         .extensions

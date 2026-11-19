@@ -7256,6 +7256,7 @@ async fn worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispat
                 id: Some("test-orchestrator".into()),
                 session_id: None,
                 source_message_id: None,
+                token_declared: false,
             };
             let worker_agent = AgentType::Ollama;
             let mut execution_ids = Vec::new();

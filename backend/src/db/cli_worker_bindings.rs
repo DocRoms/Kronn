@@ -25,6 +25,7 @@ fn audit(conn: &Connection, execution_id: &str, session_pk: i64, action: &str) -
             id: Some("orchestrator".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
         serde_json::json!({ "cli_session_id": session_pk }),
     )

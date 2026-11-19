@@ -165,6 +165,8 @@ pub struct BridgeCaller {
     /// The rooms this launch is the agent of. A step or a worker runs in a
     /// room without being its agent: it has none (KT-1270).
     pub room_agent_of: Vec<String>,
+    /// The task execution this launch is the worker of, when it is one.
+    pub own_execution: Option<String>,
 }
 
 impl BridgeCaller {
@@ -957,6 +959,14 @@ pub fn prepare_body_in(
     let Some(body) = body else {
         return Ok(None);
     };
+    // Every rule below reads and rewrites fields by name. A struct also reads
+    // from a JSON array, field by position: such a body would cross the gate
+    // unseen, so no bridge route takes one.
+    if !body.is_object() {
+        return Err(Refusal(
+            "a bridge token sends a JSON object as its request body".into(),
+        ));
+    }
     let mut body = body.clone();
     let mut changed = false;
     if let Some(fields) = body
@@ -999,6 +1009,8 @@ pub fn prepare_body_in(
             }
             if let Some(actor) = actor.as_object_mut() {
                 actor.insert("kind".into(), serde_json::json!("agent"));
+                // The session it names is its own claim: it authorises nothing.
+                actor.insert("token_declared".into(), serde_json::json!(true));
                 // An agent actor must name itself; a token that did not is
                 // recorded as a bridge agent.
                 let named = actor

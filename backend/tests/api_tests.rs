@@ -8159,7 +8159,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             tags: vec![],
             definition_of_done: vec![kronn::models::CreatePlanningDodItem { id: None, sentence: "worker returns".into(), completed: false, verification: None }],
             links: vec![],
-            actor: kronn::models::PlanningActor { kind: kronn::models::PlanningActorKind::Backend, id: Some("api-test".into()), session_id: None, source_message_id: None },
+            actor: kronn::models::PlanningActor { kind: kronn::models::PlanningActorKind::Backend, id: Some("api-test".into()), session_id: None, source_message_id: None, token_declared: false, },
         })?;
         Ok(task.summary.reference)
     }).await.unwrap();

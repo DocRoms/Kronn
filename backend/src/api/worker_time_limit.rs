@@ -318,6 +318,7 @@ pub fn record_stop_event(
             id: Some("orchestrator".to_string()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
         changes,
     )

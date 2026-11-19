@@ -211,6 +211,7 @@ fn an_agent_without_a_principal_session_cannot_declare_or_drop_a_live_check() {
         id: Some("ClaudeCode".into()),
         session_id: Some("sess-x".into()),
         source_message_id: None,
+        token_declared: false,
     };
     let live = |sentence: &str| CreatePlanningDodItem {
         id: None,
@@ -294,6 +295,7 @@ fn unticking_a_live_check_clears_its_evidence_and_reopens_the_task() {
         id: Some("ClaudeCode".into()),
         session_id: Some("sess-x".into()),
         source_message_id: None,
+        token_declared: false,
     };
     assert!(update_task(&connection, &task.summary.id, &by_agent).is_err());
     let untouched = get_task(&connection, &task.summary.id).unwrap().unwrap();

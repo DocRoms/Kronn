@@ -192,6 +192,7 @@ fn actor(workflow_id: &str) -> PlanningActor {
         id: Some(format!("workflow:{workflow_id}")),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     }
 }
 

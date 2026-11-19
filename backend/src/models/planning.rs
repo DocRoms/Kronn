@@ -166,6 +166,11 @@ pub struct PlanningActor {
     pub session_id: Option<String>,
     #[serde(default)]
     pub source_message_id: Option<String>,
+    /// Set by the bridge-token gate, whatever the body says: the session this
+    /// actor names is a claim of the caller's and authorises nothing (KT-1954).
+    #[serde(default, skip_serializing)]
+    #[ts(skip)]
+    pub token_declared: bool,
 }
 
 /// KT-154 — what an assignee does on the task. Optional on a manual assignment.

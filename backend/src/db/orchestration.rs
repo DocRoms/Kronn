@@ -398,6 +398,7 @@ pub fn record_artifact_reclaim(
             id: Some("disk-maintenance".to_string()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
         changes,
     )
@@ -1134,6 +1135,7 @@ pub fn record_lane_target_reclaim_for_execution(
             id: Some("disk-maintenance".to_string()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
         changes,
     )
@@ -2642,6 +2644,7 @@ pub fn record_http_turn_telemetry_for_dispatch(
                 id: Some("http-agent-runner".to_string()),
                 session_id: Some(dispatch_job_id.to_string()),
                 source_message_id: None,
+                token_declared: false,
             },
             serde_json::json!({"version": 1, "turns": turns}),
         )?;
@@ -2785,6 +2788,7 @@ pub fn adopt_woken_dispatch_for_interrupted_worker(
                 id: Some("orchestrator".into()),
                 session_id: None,
                 source_message_id: None,
+                token_declared: false,
             },
             serde_json::json!({
                 "recovery": "worker_woken_in_room",
@@ -2829,6 +2833,7 @@ pub fn escalate_execution_for_dispatch_quota(
                 id: Some("provider-quota-guard".into()),
                 session_id: None,
                 source_message_id: None,
+                token_declared: false,
             },
             serde_json::json!({
                 "failure_kind": "quota_exhausted",
@@ -8757,6 +8762,7 @@ pub fn apply_execution_timeout(
                     id: Some("orchestration-watchdog".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 },
                 serde_json::json!({ "timeout_kind": label }),
             )?;
@@ -8836,6 +8842,7 @@ pub fn apply_execution_timeout(
                     id: Some("orchestration-watchdog".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 },
                 serde_json::json!({ "timeout_kind": label }),
             )?;
@@ -9510,6 +9517,7 @@ pub fn reconcile_stale_task_executions(conn: &Connection) -> Result<Vec<String>>
         id: Some("boot-reconcile".into()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     };
 
     let mut moved = Vec::new();

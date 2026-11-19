@@ -9460,6 +9460,7 @@ mod tests {
             own_run: None,
             agent: None,
             room_agent_of: Vec::new(),
+            own_execution: None,
         }));
         let Json(by_bridge) = create(State(state.clone()), bridge, None, Json(request())).await;
         let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
@@ -9541,6 +9542,7 @@ mod tests {
             own_run: None,
             agent: None,
             room_agent_of: Vec::new(),
+            own_execution: None,
         }));
         let Json(by_bridge) = create(State(state.clone()), bridge, None, Json(request())).await;
         let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
@@ -9584,6 +9586,7 @@ mod tests {
             own_run: None,
             agent: None,
             room_agent_of: Vec::new(),
+            own_execution: None,
         }));
         let Json(by_bridge) = create(
             State(state.clone()),
@@ -11103,6 +11106,7 @@ mod tests {
             own_run: None,
             agent: None,
             room_agent_of: Vec::new(),
+            own_execution: None,
         }));
         let Json(refused) = reenable(
             State(state.clone()),
@@ -11693,6 +11697,7 @@ mod tests {
                         own_run: None,
                         agent: None,
                         room_agent_of: Vec::new(),
+                        own_execution: None,
                     })
                 });
                 import_workflow(

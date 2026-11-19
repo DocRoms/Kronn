@@ -1565,6 +1565,7 @@ mod tests {
                         own_run: None,
                         agent: None,
                         room_agent_of: Vec::new(),
+                        own_execution: None,
                     })
                 });
                 import(
@@ -1670,6 +1671,7 @@ mod tests {
             own_run: None,
             agent: None,
             room_agent_of: Vec::new(),
+            own_execution: None,
         }))
     }
 
@@ -1744,6 +1746,7 @@ mod tests {
             own_run: None,
             agent: None,
             room_agent_of: Vec::new(),
+            own_execution: None,
         }))
     }
 

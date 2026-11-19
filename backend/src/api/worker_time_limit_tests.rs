@@ -253,6 +253,7 @@ fn seeded_execution() -> (Connection, String) {
             id: Some("test".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
     )
     .unwrap()

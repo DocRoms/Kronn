@@ -50,6 +50,7 @@ fn backend_actor() -> OrchestrationActor {
         id: Some("orchestrator".into()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     }
 }
 

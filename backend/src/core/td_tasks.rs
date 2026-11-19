@@ -542,6 +542,7 @@ pub fn close_inactive_logged(conn: &Connection, project_id: &str, docs_dir: &Pat
         id: Some(origin.to_string()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     };
     match close_inactive(conn, project_id, docs_dir, &actor) {
         Ok(closed) if !closed.is_empty() => tracing::info!(
