@@ -172,7 +172,7 @@ rest of the workflow. Measured on the pull-request review above, two different
 first passes merged find more than either alone; but a shadow on a small local
 model may invent a finding, so the merge **verifies every point before it keeps
 it**.
-[src: file: backend/src/workflows/shadow_merge.rs:806-811#merge_step]
+[src: file: backend/src/workflows/shadow_merge.rs:914-919#merge_step]
 
 - **Which shadows merge**: one, several or all of the step's shadows
   (`shadows`, empty means all). The others still run and are compared.
@@ -194,6 +194,15 @@ it**.
 - **A verdict has to prove itself** (KT-1731). Every kept point cites an
   evidence the engine can open: a `path:line` that exists in the working
   directory (the line inside the file) or a step output (`steps.<step>.output`).
+  When an Exec step of the run printed, as its whole output, the path of a
+  linked git worktree of the project's repository (a `setup` step that checks
+  a pull request out beside the checkout), a `path:line` is also looked up
+  there (KT-1960). The repository's own worktree registry decides what a
+  worktree is; one no step of the run named is never read, whatever branch it
+  holds. A path that leaves the tree, through `..` or a link, never resolves,
+  and the answer is the same whether its target exists. A line of a file that
+  may hold secrets (`.env`, a key) is not an evidence, and a file over 2 MiB
+  is not counted.
   A point marked `verified` whose citation does not resolve is refused, whatever
   its verdict. A point marked `verified` on an execution's own word alone is
   refused when only a shadow raised it; when the main execution raised it, the
