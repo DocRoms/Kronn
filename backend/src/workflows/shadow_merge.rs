@@ -736,7 +736,8 @@ async fn save(
 ) {
     let (run_id, step_name) = (run_id.to_string(), step_name.to_string());
     let (report, started_at) = (report.clone(), started_at.to_string());
-    let _ = state
+    let (logged_run, logged_step) = (run_id.clone(), step_name.clone());
+    let saved = state
         .db
         .with_conn(move |conn| {
             step_shadow_merges::upsert(
@@ -750,6 +751,14 @@ async fn save(
             )
         })
         .await;
+    // A merge nobody can read back looks like a merge that never ran.
+    if let Err(error) = saved {
+        tracing::error!(
+            run_id = %logged_run,
+            step = %logged_step,
+            "the merge report could not be saved: {error:#}"
+        );
+    }
 }
 
 /// Merges the step's main execution with the shadows its `shadow_merge`
@@ -770,10 +779,17 @@ pub async fn merge_step(
         return;
     };
     if !matches!(outcome.result.status, RunStatus::Success) {
+        tracing::info!(
+            run_id = %run.id,
+            step = %step.name,
+            status = ?outcome.result.status,
+            "no merge: the main execution did not succeed"
+        );
         return;
     }
     let started_at = now();
     let started = Instant::now();
+    tracing::info!(run_id = %run.id, step = %step.name, "merging the step with its shadows");
     let mut report = ShadowMergeReport {
         status: MergeStatus::Waiting,
         selected: selected_shadows(step, merge)

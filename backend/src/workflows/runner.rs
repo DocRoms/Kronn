@@ -3075,6 +3075,15 @@ async fn execute_run_body(
                         // shadows are waited for (up to the merge's timeout),
                         // then condensed with the main output. Anything that goes
                         // wrong leaves the main output as it is.
+                        if step.shadow_merge.as_ref().is_some_and(|merge| merge.enabled)
+                            && (shadow_snapshot.is_none() || shadow_input.is_none())
+                        {
+                            tracing::warn!(
+                                run_id = %run.id,
+                                step = %step.name,
+                                "no merge: the step started no shadow for this run"
+                            );
+                        }
                         if let (Some(shadow_run), Some(input)) = (&shadow_snapshot, &shadow_input) {
                             super::shadow_merge::merge_step(
                                 &state,
