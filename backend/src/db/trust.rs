@@ -217,20 +217,75 @@ fn workflow_of_run(conn: &Connection, run_id: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// The nearest room up the delegation chain of `room` that a human gave a
+/// level: a worker's room was opened from its principal's (KT-1964).
+fn delegating_room_level(conn: &Connection, room: &str) -> Result<Option<(TrustLevel, String)>> {
+    let mut current = room.to_owned();
+    for _ in 0..DELEGATION_DEPTH {
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_discussion_id FROM task_executions \
+                 WHERE sub_discussion_id = ?1 ORDER BY rowid LIMIT 1",
+                [&current],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(parent) = parent.filter(|parent| *parent != current) else {
+            return Ok(None);
+        };
+        if let Some(level) = get_setting(conn, TrustScope::Room, Some(&parent))?.level {
+            return Ok(Some((level, parent)));
+        }
+        current = parent;
+    }
+    Ok(None)
+}
+
+/// How far up a delegation chain a level is looked for.
+const DELEGATION_DEPTH: usize = 8;
+
 /// The level in force for `origin`: the narrowest explicit setting (a room,
 /// then the workflow, then the instance), else Standard. When an agent's
 /// rooms disagree, the lowest of their levels wins. The workflow is the one
 /// `origin` runs in (a run, or a workflow's own launch): a room that merely
-/// edits a workflow never takes that workflow's level.
+/// edits a workflow never takes that workflow's level. A worker's room with no
+/// setting of its own is held to the level a human gave the room that
+/// delegated to it: that level lowers what the worker would get, never raises it.
 pub fn effective(conn: &Connection, origin: &TrustOrigin) -> Result<EffectiveTrust> {
     let mut room: Option<(TrustLevel, String)> = None;
+    let mut delegated: Option<(TrustLevel, String)> = None;
+    let lower = |kept: &mut Option<(TrustLevel, String)>, level: TrustLevel, id: String| {
+        if kept.as_ref().is_none_or(|(lowest, _)| level < *lowest) {
+            *kept = Some((level, id));
+        }
+    };
     for id in &origin.discussion_ids {
-        if let Some(level) = get_setting(conn, TrustScope::Room, Some(id))?.level {
-            if room.as_ref().is_none_or(|(lowest, _)| level < *lowest) {
-                room = Some((level, id.clone()));
+        match get_setting(conn, TrustScope::Room, Some(id))?.level {
+            Some(level) => lower(&mut room, level, id.clone()),
+            None => {
+                if let Some((level, parent)) = delegating_room_level(conn, id)? {
+                    lower(&mut delegated, level, parent);
+                }
             }
         }
     }
+    let resolved = effective_unbounded(conn, origin, room)?;
+    Ok(match delegated {
+        Some((level, id)) if level < resolved.level => EffectiveTrust {
+            level,
+            source: TrustScope::Room,
+            source_id: Some(id),
+            explicit: true,
+        },
+        _ => resolved,
+    })
+}
+
+fn effective_unbounded(
+    conn: &Connection,
+    origin: &TrustOrigin,
+    room: Option<(TrustLevel, String)>,
+) -> Result<EffectiveTrust> {
     if let Some((level, id)) = room {
         return Ok(EffectiveTrust {
             level,

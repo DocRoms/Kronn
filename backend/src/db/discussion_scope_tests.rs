@@ -1238,3 +1238,43 @@ fn lowering_the_level_names_the_rooms_that_lost_a_code_grant() {
     );
     assert!(crate::db::trust::rooms_losing_code(&[]).is_empty());
 }
+
+/// KT-1964: the level that decides a request is the asking launch's, so a room
+/// it opened itself, or a run of a lower workflow, lends it nothing.
+#[test]
+fn a_request_is_decided_at_the_level_of_the_launch_that_asks() {
+    use crate::db::trust::TrustOrigin;
+    use crate::models::{TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
+    trust(
+        &conn,
+        TrustScope::Room,
+        Some("general"),
+        TrustLevel::Standard,
+    );
+    let asker = TrustOrigin {
+        discussion_ids: vec!["general".into(), "room".into()],
+        ..TrustOrigin::default()
+    };
+    let file = |asker: Option<&TrustOrigin>| {
+        file_request_as(
+            &conn,
+            asker,
+            "room",
+            Some("p2"),
+            "p2",
+            ScopeAccess::Read,
+            "needed",
+            "@claude",
+        )
+        .unwrap()
+    };
+    let (filed, granted) = file(Some(&asker));
+    assert!(matches!(filed, Filed::New(_)));
+    assert_eq!(granted, None);
+    assert!(granted_projects(&conn, &room()).unwrap().read.is_empty());
+    // A launch of that room alone is granted, as before.
+    let (_, granted) = file(Some(&TrustOrigin::room("room")));
+    assert_eq!(granted, Some(TrustLevel::Trusted));
+}

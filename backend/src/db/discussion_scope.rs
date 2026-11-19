@@ -629,9 +629,34 @@ pub fn file_request(
 /// for a human to decline, like any request; so does a request the level does
 /// not cover, or one that cannot be decided. A request already pending for the
 /// same scope is decided like a new one. Returns the level that granted it.
-#[allow(clippy::too_many_arguments)]
 pub fn file_request_with_trust(
     conn: &Connection,
+    discussion_id: &str,
+    project_id: Option<&str>,
+    requested_name: &str,
+    access: ScopeAccess,
+    reason: &str,
+    requested_by: &str,
+) -> Result<(Filed, Option<crate::models::TrustLevel>)> {
+    file_request_as(
+        conn,
+        None,
+        discussion_id,
+        project_id,
+        requested_name,
+        access,
+        reason,
+        requested_by,
+    )
+}
+
+/// [`file_request_with_trust`] for the launch that asks: the level is the one
+/// in force for every room and the run of `asker`, not for the room it names
+/// alone, so a room it just opened never lends it a higher level (KT-1964).
+#[allow(clippy::too_many_arguments)]
+pub fn file_request_as(
+    conn: &Connection,
+    asker: Option<&crate::db::trust::TrustOrigin>,
     discussion_id: &str,
     project_id: Option<&str>,
     requested_name: &str,
@@ -673,7 +698,15 @@ pub fn file_request_with_trust(
         // Standard and Trusted a human decides each one.
         ScopeAccess::Code => crate::models::TrustApproval::CodeWriteOtherProject,
     };
-    let origin = crate::db::trust::TrustOrigin::room(discussion_id);
+    let mut origin = crate::db::trust::TrustOrigin::room(discussion_id);
+    if let Some(asker) = asker {
+        for room in &asker.discussion_ids {
+            if !origin.discussion_ids.contains(room) {
+                origin.discussion_ids.push(room.clone());
+            }
+        }
+        origin.workflow_run_id.clone_from(&asker.workflow_run_id);
+    }
     let Some(trust) = crate::db::trust::level_grants(conn, &origin, approval)? else {
         return Ok((filed, None));
     };

@@ -14,7 +14,7 @@
 //! own output stays the step's output, and the report says why. A point the
 //! condense pass could not verify is never published.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -457,10 +457,12 @@ fn contributions(tokens: &[String], points: &[MergePoint]) -> Vec<ExecutionContr
         .collect()
 }
 
-/// Where a citation is looked up: the working tree the condense pass read, the
-/// step outputs of the run, and the executions it was given.
+/// Where a citation is looked up: the working tree the condense pass read and
+/// the worktrees this run's own steps made, the step outputs of the run, and
+/// the executions it was given.
 struct EvidenceScope<'a> {
-    work_dir: &'a Path,
+    /// The working directory first, then the run's own worktrees.
+    roots: &'a [PathBuf],
     ctx: &'a TemplateContext,
     tokens: &'a [String],
 }
@@ -517,8 +519,87 @@ fn file_citation(word: &str) -> Option<(&str, usize, Option<usize>)> {
     None
 }
 
+/// The biggest file a cited line is counted in.
+const EVIDENCE_FILE_CAP_BYTES: u64 = crate::core::anti_halluc::LINE_COUNT_SIZE_CAP_BYTES;
+
+/// How many worktrees of a run a citation is looked up in.
+const MAX_RUN_WORKTREES: usize = 8;
+
+/// The linked worktrees of the project's repository that an Exec step of this
+/// run printed as its output (a `setup` step that checks a pull request out
+/// beside the checkout, KT-1960). The repository's own registry decides
+/// (`.git/worktrees/<id>/gitdir`), never the candidate's `.git` pointer: a
+/// directory that only claims to be a worktree is not one, and a worktree no
+/// step of the run named stays out, whatever branch it holds.
+fn run_worktrees(
+    steps: &[WorkflowStep],
+    ctx: &TemplateContext,
+    checkouts: &[&Path],
+) -> Vec<PathBuf> {
+    let registered: Vec<PathBuf> = checkouts
+        .iter()
+        .flat_map(|checkout| registered_worktrees(checkout))
+        .collect();
+    let mut found: Vec<PathBuf> = Vec::new();
+    for step in steps {
+        if !matches!(step.step_type, crate::models::StepType::Exec) {
+            continue;
+        }
+        let Some(value) = ctx.resolve_value(&format!("steps.{}.output", step.name)) else {
+            continue;
+        };
+        let Some(printed) = value.as_str().map(str::trim) else {
+            continue;
+        };
+        if printed.contains('\n') || !Path::new(printed).is_absolute() {
+            continue;
+        }
+        let Ok(real) = Path::new(printed).canonicalize() else {
+            continue;
+        };
+        if registered.contains(&real) && !found.contains(&real) {
+            found.push(real);
+        }
+        if found.len() == MAX_RUN_WORKTREES {
+            break;
+        }
+    }
+    found
+}
+
+/// The linked worktrees `checkout` registers, by their real path.
+fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
+    let registry = checkout.join(".git").join("worktrees");
+    let Ok(entries) = std::fs::read_dir(&registry) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let record = entry.path().join("gitdir");
+            let small = std::fs::metadata(&record).is_ok_and(|meta| meta.len() <= 4096);
+            let raw = small
+                .then(|| std::fs::read_to_string(&record).ok())
+                .flatten()?;
+            let recorded = PathBuf::from(raw.trim());
+            // `worktree.useRelativePaths` records it relative to the entry.
+            let recorded = if recorded.is_relative() {
+                entry.path().join(recorded)
+            } else {
+                recorded
+            };
+            (recorded.file_name()? == ".git").then_some(())?;
+            recorded.parent()?.canonicalize().ok()
+        })
+        .collect()
+}
+
+/// A citation resolves when one of the roots holds the file with that line.
+/// What is told about a path is what a reader of the tree already sees: a
+/// path written to leave the tree is refused on its spelling alone, and one
+/// that leaves it through a link is reported like a missing file.
 fn check_file_line(
-    work_dir: &Path,
+    roots: &[PathBuf],
     path: &str,
     line: usize,
     end: Option<usize>,
@@ -533,27 +614,54 @@ fn check_file_line(
     if escapes {
         return Err(format!("`{path}` is outside the working directory"));
     }
-    let root = work_dir
-        .canonicalize()
-        .map_err(|_| "the working directory cannot be read".to_string())?;
-    let file = root
-        .join(path)
-        .canonicalize()
-        .map_err(|_| format!("`{path}` does not exist"))?;
-    if !file.starts_with(&root) {
-        return Err(format!("`{path}` is outside the working directory"));
+    let mut refusal = None;
+    for root in roots {
+        match check_file_line_in(root, path, line, end) {
+            Ok(()) => return Ok(()),
+            // The first tree that holds the file says why its line is refused.
+            Err(Some(reason)) => refusal = refusal.or(Some(reason)),
+            Err(None) => {}
+        }
     }
-    if !file.is_file() {
-        return Err(format!("`{path}` is not a file"));
+    Err(refusal.unwrap_or_else(|| format!("`{path}` does not exist")))
+}
+
+/// `Err(None)`: this root does not hold the file.
+fn check_file_line_in(
+    root: &Path,
+    path: &str,
+    line: usize,
+    end: Option<usize>,
+) -> Result<(), Option<String>> {
+    use crate::core::anti_halluc::{resolve_in_root, secret_line_refusal, Jailed};
+    let rel = Path::new(path);
+    let Jailed::Inside(file) = resolve_in_root(root, rel) else {
+        return Err(None);
+    };
+    let last = end.unwrap_or(line);
+    if secret_line_refusal(root, rel, &file, Some((line, last))).is_some() {
+        return Err(Some(format!(
+            "`{path}` may hold secrets: no line of it is an evidence"
+        )));
     }
-    let bytes = std::fs::read(&file).map_err(|_| format!("`{path}` cannot be read"))?;
+    let meta = std::fs::symlink_metadata(&file).map_err(|_| None)?;
+    if !meta.is_file() {
+        return Err(Some(format!("`{path}` is not a file")));
+    }
+    if meta.len() > EVIDENCE_FILE_CAP_BYTES {
+        return Err(Some(format!("`{path}` is too large to count its lines")));
+    }
+    let unreadable = || Some(format!("`{path}` cannot be read"));
+    let real_root = root.canonicalize().map_err(|_| unreadable())?;
+    let inside = file.strip_prefix(&real_root).map_err(|_| unreadable())?;
+    let bytes = crate::core::rooted_io::read_capped(&real_root, inside, EVIDENCE_FILE_CAP_BYTES)
+        .map_err(|_| unreadable())?;
     let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
     let lines = newlines + usize::from(bytes.last().is_some_and(|byte| *byte != b'\n'));
-    let last = end.unwrap_or(line);
     if line == 0 || last < line || last > lines {
-        return Err(format!(
+        return Err(Some(format!(
             "`{path}:{line}` is not inside the file ({lines} lines)"
-        ));
+        )));
     }
     Ok(())
 }
@@ -575,7 +683,7 @@ fn resolve_evidence(evidence: &str, scope: &EvidenceScope) -> Result<Citations, 
             }
             found.grounded += 1;
         } else if let Some((path, line, end)) = file_citation(word) {
-            check_file_line(scope.work_dir, path, line, end)?;
+            check_file_line(scope.roots, path, line, end)?;
             found.grounded += 1;
         }
     }
@@ -993,8 +1101,14 @@ pub async fn merge_step(
         return;
     }
 
+    let mut roots = vec![PathBuf::from(&input.work_dir)];
+    roots.extend(run_worktrees(
+        &workflow.steps,
+        &input.ctx,
+        &[Path::new(&input.project_path), Path::new(&input.work_dir)],
+    ));
     let scope = EvidenceScope {
-        work_dir: Path::new(&input.work_dir),
+        roots: &roots,
         ctx: &input.ctx,
         tokens: &tokens,
     };
@@ -1078,13 +1192,156 @@ mod tests {
 
     impl Env {
         fn check(&self, output: &str) -> Checked {
+            let roots = [self.dir.path().to_path_buf()];
             let scope = EvidenceScope {
-                work_dir: self.dir.path(),
+                roots: &roots,
                 ctx: &self.ctx,
                 tokens: &self.tokens,
             };
             check_answer(output, &self.tokens, &scope)
         }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let done = std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    }
+
+    fn step(name: &str, kind: &str) -> WorkflowStep {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "step_type": { "type": kind },
+            "agent": "ClaudeCode",
+            "prompt_template": "",
+            "mode": { "type": "Normal" },
+        }))
+        .unwrap()
+    }
+
+    /// A checkout with two linked worktrees beside it, each holding `only.rs`
+    /// (5 lines) that the checkout does not have.
+    struct Repo {
+        _dir: tempfile::TempDir,
+        checkout: PathBuf,
+        named: PathBuf,
+        unrelated: PathBuf,
+    }
+
+    fn repo() -> Repo {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        git(&checkout, &["init", "-q"]);
+        git(&checkout, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        let (named, unrelated) = (dir.path().join("pr-1"), dir.path().join("lane"));
+        for tree in [&named, &unrelated] {
+            git(
+                &checkout,
+                &["worktree", "add", "-q", "--detach", tree.to_str().unwrap()],
+            );
+            std::fs::write(tree.join("only.rs"), "line\n".repeat(5)).unwrap();
+        }
+        Repo {
+            _dir: dir,
+            checkout,
+            named,
+            unrelated,
+        }
+    }
+
+    impl Repo {
+        fn roots(&self, steps: &[WorkflowStep], ctx: &TemplateContext) -> Vec<PathBuf> {
+            let mut roots = vec![self.checkout.clone()];
+            roots.extend(run_worktrees(steps, ctx, &[&self.checkout]));
+            roots
+        }
+    }
+
+    #[test]
+    fn a_citation_resolves_in_a_worktree_an_exec_step_of_the_run_named() {
+        let repo = repo();
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("setup", &format!("{}\n", repo.named.display()));
+        let steps = [step("setup", "Exec")];
+        let roots = repo.roots(&steps, &ctx);
+        assert_eq!(roots.len(), 2, "{roots:?}");
+        assert_eq!(check_file_line(&roots, "only.rs", 5, None), Ok(()));
+        let past = check_file_line(&roots, "only.rs", 6, None).unwrap_err();
+        assert!(past.contains("not inside the file (5 lines)"), "{past}");
+    }
+
+    #[test]
+    fn a_worktree_no_exec_step_of_the_run_named_holds_no_evidence() {
+        let repo = repo();
+        let stray = repo.checkout.parent().unwrap().join("stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("only.rs"), "line\n".repeat(5)).unwrap();
+        // A folder that points at a real worktree's git directory is not one.
+        std::fs::copy(repo.named.join(".git"), stray.join(".git")).unwrap();
+        let cases: [(&str, &str, String); 4] = [
+            ("nothing named", "Exec", "done".into()),
+            // The agent's own word is not the run's setup.
+            (
+                "named by an agent",
+                "Agent",
+                repo.named.display().to_string(),
+            ),
+            ("not a worktree", "Exec", stray.display().to_string()),
+            (
+                "two lines",
+                "Exec",
+                format!("{}\n{}", repo.named.display(), repo.unrelated.display()),
+            ),
+        ];
+        for (case, kind, output) in cases {
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("setup", &output);
+            let roots = repo.roots(&[step("setup", kind)], &ctx);
+            assert_eq!(roots, vec![repo.checkout.clone()], "{case}");
+            let refused = check_file_line(&roots, "only.rs", 1, None).unwrap_err();
+            assert!(refused.contains("does not exist"), "{case}: {refused}");
+        }
+        // Naming one worktree opens that one, not its neighbour.
+        std::fs::write(repo.unrelated.join("lane.rs"), "line\n").unwrap();
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("setup", &repo.named.display().to_string());
+        let roots = repo.roots(&[step("setup", "Exec")], &ctx);
+        assert!(check_file_line(&roots, "lane.rs", 1, None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_citation_tells_nothing_about_what_lies_outside_the_tree_or_holds_secrets() {
+        let env = env();
+        let root = env.dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("present"), "a\nb\n").unwrap();
+        for (link, target) in [("to-present", "present"), ("to-absent", "absent")] {
+            std::os::unix::fs::symlink(outside.path().join(target), root.join(link)).unwrap();
+        }
+        std::fs::write(root.join(".env"), "KEY=value\n").unwrap();
+        std::os::unix::fs::symlink(root.join(".env"), root.join("settings")).unwrap();
+        let big = std::fs::File::create(root.join("big.txt")).unwrap();
+        big.set_len(EVIDENCE_FILE_CAP_BYTES + 1).unwrap();
+        let roots = [root.to_path_buf()];
+        let refused = |path: &str| check_file_line(&roots, path, 1, None).unwrap_err();
+        // A link out of the tree answers the same whether its target exists.
+        assert_eq!(refused("to-present"), "`to-present` does not exist");
+        assert_eq!(refused("to-absent"), "`to-absent` does not exist");
+        for secret in [".env", "settings"] {
+            let reason = refused(secret);
+            assert!(reason.contains("may hold secrets"), "{reason}");
+            assert!(!reason.contains("lines"), "{reason}");
+        }
+        assert!(refused("big.txt").contains("too large"));
     }
 
     const GOOD_POINT: &str = r#"[{"id":"p1","summary":"s","found_by":["main"],"verdict":"kept","verified":true,"evidence":"src/a.rs:10"}]"#;
