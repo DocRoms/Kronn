@@ -1859,9 +1859,22 @@ pub fn join_disc_session_resumable(
     agent_type: &str,
     session_id: &str,
 ) -> Result<JoinViaTokenResult> {
+    join_disc_session_resumable_as(conn, disc_id, agent_type, session_id, None)
+}
+
+/// [`join_disc_session_resumable`] for a bridge token: like an invite join, it
+/// takes the name of a session active anywhere only when the launch holds it.
+pub fn join_disc_session_resumable_as(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: &str,
+    held: Option<&[i64]>,
+) -> Result<JoinViaTokenResult> {
     let (resume_token, resume_token_hash) = new_resume_credential();
     let now = Utc::now().to_rfc3339();
     let tx = conn.unchecked_transaction()?;
+    refuse_a_session_held_elsewhere(&tx, agent_type, session_id, held)?;
     let session_pk = join_disc_session(&tx, disc_id, agent_type, session_id)?;
     tx.execute(
         "UPDATE discussion_sessions
@@ -3636,6 +3649,17 @@ mod tests {
             [first.session_pk],
         )
         .unwrap();
+        // A room joined through a contact, without an invite: the same rule,
+        // in the join's own transaction.
+        for (room, held, taken) in [
+            ("d1", Some(&[][..]), false),
+            ("d-other", Some(&[][..]), false),
+            ("d1", Some(&held[..]), true),
+            ("d1", None, true),
+        ] {
+            let joined = join_disc_session_resumable_as(&conn, room, "ClaudeCode", "sess-A", held);
+            assert_eq!(joined.is_ok(), taken, "{room} {held:?}");
+        }
         // Its holder moves it.
         let moved = join_via_token_as(&conn, &elsewhere.token, "ClaudeCode", "sess-A", Some(&held))
             .unwrap();

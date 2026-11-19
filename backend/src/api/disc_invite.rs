@@ -1042,18 +1042,13 @@ async fn try_remote_join(
         let joined = state
             .db
             .with_conn(move |conn| {
-                let tx = conn.unchecked_transaction()?;
-                crate::db::discussion_sessions::refuse_a_session_held_elsewhere(
-                    &tx,
+                crate::db::discussion_sessions::join_disc_session_resumable_as(
+                    conn,
+                    &mdid,
                     &a,
                     &s,
                     held.as_deref(),
-                )?;
-                let joined = crate::db::discussion_sessions::join_disc_session_resumable(
-                    &tx, &mdid, &a, &s,
-                )?;
-                tx.commit()?;
-                Ok(joined)
+                )
             })
             .await?;
         return Ok(Some((
