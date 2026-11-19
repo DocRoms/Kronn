@@ -198,7 +198,10 @@ describe('StepShadowCompare — the merged step (KT-1544)', () => {
     expect(screen.getByTestId('wf-shadow-merge-review')).toHaveAttribute('data-status', 'merged');
     const main = screen.getByTestId('wf-shadow-merge-contrib-review-main');
     expect(main.querySelector('[data-col="kept"]')).toHaveTextContent('1');
+    // The first number says the execution took part: what it raised, kept or not.
+    expect(main.querySelector('[data-col="raised"]')).toHaveTextContent('1');
     const local = screen.getByTestId('wf-shadow-merge-contrib-review-shadow:local');
+    expect(local.querySelector('[data-col="raised"]')).toHaveTextContent('2');
     expect(local.querySelector('[data-col="duplicate"]')).toHaveTextContent('1');
     expect(local.querySelector('[data-col="dropped"]')).toHaveTextContent('1');
     expect(local.querySelector('[data-col="dropped"]')).toHaveAttribute('data-warn', 'true');
@@ -286,8 +289,8 @@ describe('StepShadowCompare — the merged step (KT-1544)', () => {
 describe('merge helpers', () => {
   it('names the executions of a merge, and knows when one is still going', () => {
     const comparison = merged();
-    expect(mergeExecutionLabel('main', comparison, 'Main')).toBe('Main');
-    expect(mergeExecutionLabel('shadow:local', comparison, 'Main')).toBe('Local qwen');
+    expect(mergeExecutionLabel('main', comparison, 'Main')).toBe('Main (ClaudeCode · opus)');
+    expect(mergeExecutionLabel('shadow:local', comparison, 'Main')).toBe('Local qwen (ClaudeCode · opus)');
     expect(mergeExecutionLabel('shadow:ghost', comparison, 'Main')).toBe('ghost');
     expect(mergeInProgress(report({ status: 'waiting' }))).toBe(true);
     expect(mergeInProgress(report({ status: 'condensing' }))).toBe(true);

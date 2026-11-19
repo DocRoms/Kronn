@@ -234,10 +234,10 @@ export function mergeStatusKey(status: MergeStatus): string {
 
 /** The label of an execution named in a merge (`main`, `shadow:<id>`). */
 export function mergeExecutionLabel(token: string, comparison: StepShadowComparison, mainLabel: string): string {
-  if (token === MERGE_MAIN) return mainLabel;
+  if (token === MERGE_MAIN) return shadowLabel(comparison.main, mainLabel);
   const id = token.startsWith('shadow:') ? token.slice('shadow:'.length) : token;
   const shadow = comparison.shadows.find(candidate => candidate.shadow_id === id);
-  return shadow ? shadowName(shadow, mainLabel) : id;
+  return shadow ? shadowLabel(shadow, mainLabel) : id;
 }
 
 /** The longest wait the backend accepts, in minutes. */

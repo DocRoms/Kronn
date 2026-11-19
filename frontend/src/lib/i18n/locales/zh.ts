@@ -7591,6 +7591,7 @@ const zh: TranslationDict = {
   "wf.shadow.merge.status.rejected": "未发布",
   "wf.shadow.merge.status.failed": "失败",
   "wf.shadow.merge.col.execution": "执行",
+  "wf.shadow.merge.col.raised": "提出的要点",
   "wf.shadow.merge.col.kept": "保留",
   "wf.shadow.merge.col.unique": "仅此执行发现",
   "wf.shadow.merge.col.duplicate": "重复",

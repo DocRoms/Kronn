@@ -124,6 +124,7 @@ function MergeSection({ comparison, merge, t }: { comparison: StepShadowComparis
           <thead>
             <tr>
               <th scope="col">{t('wf.shadow.merge.col.execution')}</th>
+              <th scope="col">{t('wf.shadow.merge.col.raised')}</th>
               <th scope="col">{t('wf.shadow.merge.col.kept')}</th>
               <th scope="col">{t('wf.shadow.merge.col.unique')}</th>
               <th scope="col">{t('wf.shadow.merge.col.duplicate')}</th>
@@ -134,6 +135,7 @@ function MergeSection({ comparison, merge, t }: { comparison: StepShadowComparis
             {merge.contributions.map(row => (
               <tr key={row.execution} data-testid={`wf-shadow-merge-contrib-${step}-${row.execution}`}>
                 <th scope="row">{name(row.execution)}</th>
+                <td data-col="raised">{merge.points.filter(point => point.found_by.includes(row.execution)).length}</td>
                 <td data-col="kept">{row.kept}</td>
                 <td data-col="unique">{row.unique}</td>
                 <td data-col="duplicate">{row.duplicate}</td>
