@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   update: vi.fn(),
   removeBlocker: vi.fn(),
+  updateDod: vi.fn(),
 }));
 
 vi.mock('../../lib/api', () => ({
@@ -128,6 +129,69 @@ describe('PlanningPage', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+  });
+
+  describe('ticking a post-integration criterion (KT-1931)', () => {
+    const live = { id: 'dod-live', sentence: 'Seen on a live run', completed: false, position: 0, verification: 'post_integration' as const };
+    const worker = { id: 'dod-worker', sentence: 'The code compiles', completed: false, position: 1, verification: 'worker' as const };
+    async function openDetail(toast = vi.fn()) {
+      mocks.get.mockResolvedValue({ ...detail(), definition_of_done: [live, worker] });
+      render(<PlanningPage projects={[]} discussions={[]} toast={toast} onNavigateDiscussion={vi.fn()} />);
+      fireEvent.click(await findCanonicalTaskRow(summary().title));
+      return screen.findByLabelText('planning.checkDod:Seen on a live run');
+    }
+
+    it('asks for the proof and sends it with the tick', async () => {
+      mocks.updateDod.mockResolvedValue({
+        ...detail(),
+        definition_of_done: [{ ...live, completed: true, evidence: 'run 42 ended green' }, worker],
+      });
+      fireEvent.click(await openDetail());
+      expect(mocks.updateDod).not.toHaveBeenCalled();
+      const prompt = within(screen.getByTestId('dod-evidence-prompt'));
+      const confirm = prompt.getByRole('button', { name: 'planning.dodEvidenceConfirm' });
+      expect(confirm).toBeDisabled();
+      fireEvent.change(prompt.getByRole('textbox'), { target: { value: '   ' } });
+      expect(confirm).toBeDisabled();
+      fireEvent.change(prompt.getByRole('textbox'), { target: { value: '  run 42 ended green ' } });
+      fireEvent.click(confirm);
+      await waitFor(() => expect(mocks.updateDod).toHaveBeenCalledWith(
+        'task-1', 'dod-live', { completed: true, evidence: 'run 42 ended green' },
+      ));
+      await waitFor(() => expect(screen.queryByTestId('dod-evidence-prompt')).not.toBeInTheDocument());
+      expect(screen.getByLabelText('planning.uncheckDod:Seen on a live run')).toBeInTheDocument();
+    });
+
+    it('sends nothing when the proof is cancelled', async () => {
+      fireEvent.click(await openDetail());
+      fireEvent.click(within(screen.getByTestId('dod-evidence-prompt')).getByRole('button', { name: 'common.cancel' }));
+      expect(screen.queryByTestId('dod-evidence-prompt')).not.toBeInTheDocument();
+      expect(mocks.updateDod).not.toHaveBeenCalled();
+      expect(screen.getByLabelText('planning.checkDod:Seen on a live run')).toBeInTheDocument();
+    });
+
+    it('keeps the criterion unticked and the proof on screen when the server refuses', async () => {
+      const toast = vi.fn();
+      mocks.updateDod.mockRejectedValue(new Error('refused'));
+      fireEvent.click(await openDetail(toast));
+      const prompt = within(screen.getByTestId('dod-evidence-prompt'));
+      fireEvent.change(prompt.getByRole('textbox'), { target: { value: 'seen' } });
+      fireEvent.click(prompt.getByRole('button', { name: 'planning.dodEvidenceConfirm' }));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.any(String), 'error'));
+      expect(prompt.getByRole('textbox')).toHaveValue('seen');
+      expect(screen.getByLabelText('planning.checkDod:Seen on a live run')).toBeInTheDocument();
+    });
+
+    it('ticks a worker criterion at once, without a proof', async () => {
+      mocks.updateDod.mockResolvedValue({
+        ...detail(),
+        definition_of_done: [live, { ...worker, completed: true }],
+      });
+      await openDetail();
+      fireEvent.click(screen.getByLabelText('planning.checkDod:The code compiles'));
+      await waitFor(() => expect(mocks.updateDod).toHaveBeenCalledWith('task-1', 'dod-worker', { completed: true }));
+      expect(screen.queryByTestId('dod-evidence-prompt')).not.toBeInTheDocument();
+    });
   });
 
   it('renders tasks in the shared collection sidebar', async () => {

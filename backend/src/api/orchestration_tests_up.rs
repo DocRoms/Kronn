@@ -23182,6 +23182,108 @@ async fn only_the_principal_or_a_human_may_set_remove_or_tick_a_live_check() {
     );
 }
 
+/// KT-1931 — once the execution is over the rule is unchanged: its room's
+/// principal and a human still tick with evidence, a CLI of another room is
+/// refused, and the refusal names who may.
+#[tokio::test]
+async fn a_live_check_is_still_ticked_by_the_same_actors_once_the_execution_is_over() {
+    use crate::models::{
+        CreatePlanningDodItem, UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
+    };
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task_ref, parent_id, child_id, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+    seed_cli_session(&db, 103, &child_id, "sess-other-room").await;
+    let task_id = exec_of(&db, &exec_id).await.task_id;
+    let dod_id = dod_id_for_execution(&db, &exec_id).await;
+    let agent = |session: &str| PlanningActor {
+        kind: PlanningActorKind::Agent,
+        id: Some("ClaudeCode".to_string()),
+        session_id: Some(session.to_string()),
+        source_message_id: None,
+    };
+    let db_ref = &db;
+    let set = |actor: PlanningActor, completed: bool, evidence: Option<&str>| {
+        let (task_id, dod_id) = (task_id.clone(), dod_id.clone());
+        let evidence = evidence.map(str::to_string);
+        async move {
+            db_ref
+                .with_conn(move |conn| {
+                    crate::db::planning::update_dod_item(
+                        conn,
+                        &task_id,
+                        &dod_id,
+                        &UpdatePlanningDodItemRequest {
+                            completed,
+                            evidence,
+                            actor,
+                        },
+                    )
+                })
+                .await
+        }
+    };
+    {
+        let (task_id, dod_id, actor) = (task_id.clone(), dod_id.clone(), agent("sess-b"));
+        db.with_conn(move |conn| {
+            crate::db::planning::update_task(
+                conn,
+                &task_id,
+                &UpdatePlanningTaskRequest {
+                    title: None,
+                    description: None,
+                    status: None,
+                    priority: None,
+                    parent_id: None,
+                    blocked_reason: None,
+                    rank: None,
+                    project_ids: None,
+                    tags: None,
+                    definition_of_done: Some(vec![CreatePlanningDodItem {
+                        id: Some(dod_id),
+                        sentence: "tests pass".into(),
+                        completed: false,
+                        verification: Some(PlanningDodVerification::PostIntegration),
+                    }]),
+                    links: None,
+                    actor,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    }
+    force_status(&db, &exec_id, "Done").await;
+
+    let refusal = set(agent("sess-other-room"), true, Some("seen live"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("a human") && refusal.contains("principal of the task's execution"),
+        "the refusal names who may tick: {refusal}"
+    );
+    assert!(set(agent("sess-b"), true, None).await.is_err());
+
+    let ticked = set(agent("sess-b"), true, Some("replayed live: ok"))
+        .await
+        .unwrap();
+    assert_eq!(
+        ticked.definition_of_done[0].evidence.as_deref(),
+        Some("replayed live: ok")
+    );
+    set(agent("sess-b"), false, None).await.unwrap();
+    let by_human = set(PlanningActor::default(), true, Some("seen on my instance"))
+        .await
+        .unwrap();
+    assert!(by_human.definition_of_done[0].completed);
+    assert_eq!(
+        by_human.definition_of_done[0].evidence.as_deref(),
+        Some("seen on my instance")
+    );
+}
+
 fn approve_with_evidence(repo_head: &str, dod_id: &str, evidence: &str) -> String {
     serde_json::json!({
         "version": "1",

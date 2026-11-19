@@ -424,6 +424,9 @@ it: a worker's own session, an HTTP agent and an anonymous agent are refused.
   (`completed: true` and non-empty `evidence`). A bare tick is refused, as is
   ticking it through a `definition_of_done` replace, and downgrading it to a
   worker check in the same write that ticks it. The task closes on the last pending live check of an integrated execution.
+  A human ticks it in Kronn (plan panel or Planning page), which asks for the
+  proof and sends it as `evidence`. The same actors may tick once the execution
+  is over; an agent bound to another room is refused and asks the human.
 - Unticking a live check (by `task_update_dod` or an array replace, principal or
   human only) clears its evidence, and a `done` task goes back to `in_progress`:
   the proof is owed again and the stale one cannot re-tick it.

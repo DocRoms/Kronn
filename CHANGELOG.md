@@ -318,6 +318,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- **KT-1931 — A post-integration criterion can be ticked from Kronn.** Ticking a criterion that is checked live after integration asks for its proof in the plan panel and on the Planning page, and sends it with the tick; the button stays off while the proof is empty and Cancel sends nothing. The Planning page no longer shows the criterion ticked when the server refused it. The rule on who may tick is unchanged once the execution is over: a human, or the principal of the room that ran the task.
 - A task worker that bumps a dependency is no longer delivered uncompiled: before
   the lane's first build, Kronn fetches the crates (and npm packages) its lock
   files reference and the host cache lacks, outside the worker's sandbox, from
