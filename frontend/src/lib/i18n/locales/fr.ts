@@ -5768,6 +5768,8 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'wf.pausedZeroTokensHint': 'Aucun appel d\'IA pendant la pause d\'un Gate — la facture s\'arrête tant que l\'opérateur n\'a pas décidé.',
   'wf.tokensTotal': 'tokens (total run)',
   'wf.tokensTotalHint': 'Somme des tokens consommés par tous les steps de ce run depuis son démarrage. Inclus les agents passés, les gates restent à 0.',
+  'wf.tokensTotalShadows': 'Dont {0} pour les steps (une passe de fusion est comptée dans son step) et {1} pour leurs shadows.',
+  'wf.costTotalPartialHint': 'Au minimum : une exécution a consommé des tokens sans rapporter de coût.',
   'wf.stepTokensSuffix': 'tk',
   'wf.stepTokensUnknown': 'tokens inconnus',
   'wf.stepTokensUnknownHint': 'L\'agent n\'a pas communiqué sa consommation de tokens pour ce step. Elle n\'est pas nulle : elle n\'a simplement pas été mesurée.',

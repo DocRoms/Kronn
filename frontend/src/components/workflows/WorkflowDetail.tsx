@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
-import { StepShadowCompare } from './StepShadowCompare';
+import { StepShadowCompareView } from './StepShadowCompare';
+import { WithStepShadows } from './useStepShadows';
 import { useStepShadows } from './useStepShadows';
 import { runPossibleSecrets } from '../../lib/docsPossibleSecrets';
 import { isShadowRun } from '../../lib/shadowRuns';
@@ -2615,8 +2616,10 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
         const childBatch = batchByParentRunId.get(run.id);
         return (<>
             <RunStatusCard runId={run.id} model={workflowRunStatusCardModel(run)} />
+            <WithStepShadows workflowId={workflow.id} runId={run.id} runStatus={run.status}>{shadowSteps => (<>
             <LoadedRunDetail
               run={run}
+              shadowSteps={shadowSteps}
               workflowSteps={workflow.steps}
               onNavigateToWorkflow={onNavigateToWorkflow}
               onNavigateToRun={onNavigateToRun}
@@ -2665,7 +2668,8 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
             />
             <ExecutionVariablesInspector runId={run.id} />
             {/* KT-1459 — the steps of this run that ran shadows, side by side. */}
-            <StepShadowCompare workflowId={workflow.id} runId={run.id} runStatus={run.status} />
+            <StepShadowCompareView steps={shadowSteps} />
+            </>)}</WithStepShadows>
             {childBatch && onNavigateToBatch && (
               <button
                 type="button"

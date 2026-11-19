@@ -5755,6 +5755,8 @@ suggestion; that would overwrite the real value with a placeholder
   'wf.pausedZeroTokensHint': 'No LLM calls fire during a Gate pause — the meter stops until the operator decides.',
   'wf.tokensTotal': 'tokens (run total)',
   'wf.tokensTotalHint': 'Sum of tokens used by every step in this run since it started. Includes the agent steps; gates always contribute 0.',
+  'wf.tokensTotalShadows': 'Of which {0} for the steps (a merge pass is counted in its step) and {1} for their shadows.',
+  'wf.costTotalPartialHint': 'At least: an execution spent tokens without reporting a cost.',
   'wf.stepTokensSuffix': 'tk',
   'wf.stepTokensUnknown': 'tokens unknown',
   'wf.stepTokensUnknownHint': 'The agent runtime did not report token usage for this step. It is not zero; it was simply not measured.',

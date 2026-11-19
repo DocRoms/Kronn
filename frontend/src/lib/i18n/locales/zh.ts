@@ -5659,6 +5659,8 @@ const zh: TranslationDict = {
   "wf.pausedZeroTokensHint": "在 Gate 暂停期间，不会触发 LLM 调用 — 计费器将停止，直到操作员决定。",
   "wf.tokensTotal": "token（运行总计）",
   "wf.tokensTotalHint": "自运行开始以来，此运行中每个步骤使用的 token 总和。包括代理步骤；Gate 始终贡献 0。",
+  "wf.tokensTotalShadows": "其中步骤 {0}（合并过程计入其步骤），其 shadow {1}。",
+  "wf.costTotalPartialHint": "至少：有一次执行消耗了 token 但未报告成本。",
   "wf.stepTokensSuffix": "tk",
   "wf.stepTokensUnknown": "token 未知",
   "wf.stepTokensUnknownHint": "智能体运行时未报告此步骤的 token 用量。它不是 0，只是未被测量。",

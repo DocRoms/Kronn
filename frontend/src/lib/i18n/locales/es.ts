@@ -5755,6 +5755,8 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'wf.pausedZeroTokensHint': 'Ninguna llamada IA durante la pausa de un Gate — el contador se para hasta que el operador decida.',
   'wf.tokensTotal': 'tokens (total run)',
   'wf.tokensTotalHint': 'Suma de tokens consumidos por todos los steps de este run desde su inicio. Incluye los agentes; los gates siempre contribuyen 0.',
+  'wf.tokensTotalShadows': 'De los cuales {0} para los steps (una pasada de fusión se cuenta en su step) y {1} para sus shadows.',
+  'wf.costTotalPartialHint': 'Como mínimo: una ejecución consumió tokens sin informar de un coste.',
   'wf.stepTokensSuffix': 'tk',
   'wf.stepTokensUnknown': 'tokens desconocidos',
   'wf.stepTokensUnknownHint': 'El agente no informó el consumo de tokens de este step. No es cero: simplemente no se midió.',

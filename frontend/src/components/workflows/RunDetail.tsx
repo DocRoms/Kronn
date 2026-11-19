@@ -3,7 +3,8 @@ import { newTabClickProps } from '../../lib/newTabNavigation';
 import { workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
-import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch, QuotaWait } from '../../types/generated';
+import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch, QuotaWait, StepShadowComparison } from '../../types/generated';
+import { formatCost, runSpend } from '../../lib/shadowRuns';
 import { quotaPauseLabel } from '../../lib/quotaPause';
 import { QuotaAgentSwitch } from './QuotaPauseControls';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle, Clock } from 'lucide-react';
@@ -134,6 +135,8 @@ export function RunStatusTrail({
 export interface RunDetailProps {
   run: WorkflowRun;
   workflowSteps?: WorkflowStep[];
+  /** The run's steps that ran shadows: their spend is part of the run's total. */
+  shadowSteps?: StepShadowComparison[];
   onDelete: () => void;
   /** Cancel a Running workflow run. Button is only rendered for Running status. */
   onCancel?: () => void;
@@ -704,13 +707,14 @@ function ProducedBranchesPanel({
   );
 }
 
-export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
+export function RunDetail({ run, workflowSteps, shadowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
   const { t } = useT();
   const heavyOutputKb = useHeavyOutputThreshold();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const statusTimeline = runStatusTimeline(run);
   const uncertainEffect = uncertainSideEffectIntent(run);
   const quotaWait = pendingQuotaWait(run);
+  const spend = runSpend(run, shadowSteps ?? []);
 
   const CONDITION_LABELS: Record<string, string> = {
     Stop: 'Stop',
@@ -781,7 +785,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             )}
           </button>
         )}
-        {run.tokens_used > 0 && (
+        {spend.tokens > 0 && (
           // 0.8.2 — Explicit "total" scope. Pre-fix this badge sat next to
           // the gate's `0 tokens consumed` and read as a contradiction
           // ("you said 0, then 3579?"). The two numbers are legitimate:
@@ -790,9 +794,17 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
           // disambiguates without dropping the run-cost-to-date info.
           <span
             className="text-xs text-muted"
-            title={t('wf.tokensTotalHint')}
+            title={spend.shadowTokens > 0
+              ? `${t('wf.tokensTotalHint')} ${t('wf.tokensTotalShadows', run.tokens_used.toLocaleString(), spend.shadowTokens.toLocaleString())}`
+              : t('wf.tokensTotalHint')}
+            data-testid="wf-run-total"
           >
-            {run.tokens_used} {t('wf.tokensTotal')}
+            {spend.tokens.toLocaleString()} {t('wf.tokensTotal')}
+            {spend.cost != null && (
+              <span title={spend.partial ? t('wf.costTotalPartialHint') : undefined}>
+                {' \u00b7 '}{spend.partial ? '\u2265 ' : ''}{formatCost(spend.cost)}
+              </span>
+            )}
           </span>
         )}
         {(run.status === 'Running' || run.status === 'WaitingQuota') && onCancel && (

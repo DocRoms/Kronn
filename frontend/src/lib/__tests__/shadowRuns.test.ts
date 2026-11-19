@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { comparableOutput, mergeTally, readableOutput, shadowLabel, shadowName } from '../shadowRuns';
-import type { ShadowExecution, ShadowMergeReport } from '../../types/generated';
+import { comparableOutput, mergeTally, readableOutput, runSpend, shadowLabel, shadowName } from '../shadowRuns';
+import type { ShadowExecution, ShadowMergeReport, StepResult, StepShadowComparison } from '../../types/generated';
 
 describe('shadow outputs compared field by field (key order ignored)', () => {
   const main = '{"data":{"pr":2084,"verdict":"approve","blockers":[{"path":"a.ts","line":3}]},"status":"OK"}';
@@ -90,5 +90,42 @@ describe('the merge read point by point', () => {
   it('a rewording of a point that was left out is left out too', () => {
     const orphan = { ...report, points: [point('p1', 'dropped_unverified', ['main']), point('p2', 'duplicate', ['shadow:a'], 'p1')] } as unknown as ShadowMergeReport;
     expect(mergeTally(orphan)).toMatchObject({ result: 0, dropped: 2 });
+  });
+});
+
+describe('what a run spent, every execution counted', () => {
+  const step = (tokens: number, costs: (number | null)[] = []) => ({
+    tokens_used: tokens,
+    agent_provenance: costs.length ? { attempts: costs.map(cost_usd => ({ cost_usd })) } : null,
+  }) as unknown as StepResult;
+  const shadow = (tokens: number | null, cost: number | null) => ({ tokens_used: tokens, cost_usd: cost }) as unknown as ShadowExecution;
+  const compared = (shadows: ShadowExecution[], merge?: { tokens_used: number; cost_usd: number | null }) =>
+    ({ shadows, merge }) as unknown as StepShadowComparison;
+
+  it('adds the shadows to the tokens and every known cost to the total', () => {
+    // The step's 17 635 tokens already hold its merge pass (7 876).
+    const run = { tokens_used: 17635, step_results: [step(0), step(17635, [1.396307])] };
+    const spend = runSpend(run, [compared([shadow(39799, 0), shadow(58717, 0.157588)], { tokens_used: 7876, cost_usd: 1.41934 })]);
+    expect(spend.tokens).toBe(17635 + 39799 + 58717);
+    expect(spend.shadowTokens).toBe(39799 + 58717);
+    expect(spend.cost).toBeCloseTo(1.396307 + 0.157588 + 1.41934, 6);
+    expect(spend.partial).toBe(false);
+  });
+
+  it('sums the attempts of a step that retried', () => {
+    const spend = runSpend({ tokens_used: 900, step_results: [step(900, [0.2, null, 0.3])] }, []);
+    expect(spend.cost).toBeCloseTo(0.5, 6);
+    expect(spend.partial).toBe(false);
+  });
+
+  it('gives a floor when an execution spent tokens without a cost', () => {
+    const run = { tokens_used: 500, step_results: [step(500, [0.4])] };
+    expect(runSpend(run, [compared([shadow(1200, null)])])).toMatchObject({ tokens: 1700, cost: 0.4, partial: true });
+    expect(runSpend(run, [compared([shadow(0, 0)], { tokens_used: 300, cost_usd: null })]).partial).toBe(true);
+  });
+
+  it('has no cost when none was reported', () => {
+    expect(runSpend({ tokens_used: 0, step_results: [step(0)] }, [])).toEqual({ tokens: 0, shadowTokens: 0, cost: null, partial: false });
+    expect(runSpend({ tokens_used: 800, step_results: [step(800)] }, [])).toMatchObject({ cost: null, partial: true });
   });
 });

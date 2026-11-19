@@ -316,8 +316,11 @@ function StepComparison({ comparison, t }: { comparison: StepShadowComparison; t
 
 /** The run's step shadows; nothing when its steps ran none. */
 export function StepShadowCompare({ workflowId, runId, runStatus }: { workflowId: string; runId: string; runStatus: string }) {
+  return <StepShadowCompareView steps={useStepShadows(workflowId, runId, runStatus)} />;
+}
+
+export function StepShadowCompareView({ steps }: { steps: StepShadowComparison[] }) {
   const { t } = useT();
-  const steps = useStepShadows(workflowId, runId, runStatus);
   if (steps.length === 0) return null;
   return (
     <section className="wf-shadow-cmp" data-testid="wf-step-shadow-compare" aria-label={t('wf.shadow.compare.title')}>

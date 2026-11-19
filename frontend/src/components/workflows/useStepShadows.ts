@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { workflows as workflowsApi } from '../../lib/api';
 import { mergeInProgress } from '../../lib/shadowRuns';
 import type { StepShadowComparison } from '../../types/generated';
@@ -29,4 +29,12 @@ export function useStepShadows(workflowId: string, runId: string, runStatus: str
     return () => { active = false; clearInterval(timer); };
   }, [workflowId, runId, running]);
   return steps;
+}
+
+/** One read of a run's comparison for everything that shows it. */
+export function WithStepShadows({ workflowId, runId, runStatus, children }: {
+  workflowId: string; runId: string; runStatus: string;
+  children: (steps: StepShadowComparison[]) => ReactNode;
+}) {
+  return children(useStepShadows(workflowId, runId, runStatus));
 }

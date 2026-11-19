@@ -211,6 +211,42 @@ export function formatCost(cost: number | null | undefined): string {
   return `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
 }
 
+/** What a run spent, every execution counted: its steps, their shadows, their merges. */
+export interface RunSpend {
+  /** Steps (a merge pass is counted in its step) plus shadows. */
+  tokens: number;
+  shadowTokens: number;
+  /** Null when no execution reported a cost. */
+  cost: number | null;
+  /** An execution spent tokens and gave no cost: `cost` is then a floor. */
+  partial: boolean;
+}
+
+export function runSpend(
+  run: Pick<WorkflowRun, 'tokens_used' | 'step_results'>,
+  comparisons: readonly StepShadowComparison[],
+): RunSpend {
+  let cost: number | null = null;
+  let partial = false;
+  const add = (tokens: number | null | undefined, costs: readonly (number | null | undefined)[]) => {
+    const known = costs.filter((value): value is number => typeof value === 'number');
+    if (known.length > 0) cost = known.reduce((sum, value) => sum + value, cost ?? 0);
+    else if ((tokens ?? 0) > 0) partial = true;
+  };
+  for (const result of run.step_results ?? []) {
+    add(result.tokens_used, (result.agent_provenance?.attempts ?? []).map(attempt => attempt.cost_usd));
+  }
+  let shadowTokens = 0;
+  for (const step of comparisons) {
+    for (const shadow of step.shadows) {
+      shadowTokens += shadow.tokens_used ?? 0;
+      add(shadow.tokens_used, [shadow.cost_usd]);
+    }
+    if (step.merge) add(step.merge.tokens_used, [step.merge.cost_usd]);
+  }
+  return { tokens: run.tokens_used + shadowTokens, shadowTokens, cost, partial };
+}
+
 /** The change of `to` against `from`, as « (+12 %) », « (=) » or nothing when `from` is empty. */
 export function percent(from: number | null | undefined, to: number | null | undefined): string {
   if (!from || from <= 0 || to == null) return '';
