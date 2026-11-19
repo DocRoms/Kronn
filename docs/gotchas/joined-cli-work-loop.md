@@ -11,7 +11,7 @@ This is an instruction-order defect, not proof that a particular CLI host
 caused a reported stop or imposed a specific timeout.
 [src: file: backend/scripts/disc-introspection-mcp.py:7622-7630#call_disc_wait_for_peer]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12957-12976#test_default_wait_is_unbounded_and_does_not_return_on_inner_quiet_polls]
-[src: file: backend/src/api/disc_invite.rs:7559-7568#join_protocol_reads_plan_before_substantive_first_reply]
+[src: file: backend/src/api/disc_invite.rs:7578-7587#join_protocol_reads_plan_before_substantive_first_reply]
 
 The join protocol now orders introduction, plan read, addressed initial turns,
 scope announcement, then repeated bounded work. Between real steps it requests
@@ -20,9 +20,9 @@ execution monitoring even in a quiet room. Idle listening remains unbounded
 when no actionable work or execution needs following. The bridge's wait,
 routing, cancellation and durable-cursor functions are unchanged.
 [src: file: backend/src/api/disc_invite.rs:604-667#plan_get]
-[src: file: backend/src/api/disc_invite.rs:683-689#max_total_secs]
-[src: file: backend/src/api/disc_invite.rs:698-703#disc_wait_for_peer]
-[src: file: backend/src/api/disc_invite.rs:7570-7579#join_protocol_does_not_put_unbounded_wait_before_ready_work]
+[src: file: backend/src/api/disc_invite.rs:702-708#max_total_secs]
+[src: file: backend/src/api/disc_invite.rs:717-722#disc_wait_for_peer]
+[src: file: backend/src/api/disc_invite.rs:7589-7598#join_protocol_does_not_put_unbounded_wait_before_ready_work]
 [src: file: backend/scripts/disc-introspection-mcp.py:10129-10165#ROOM_WORK_PROTOCOL]
 
 Each bounded step has a room announcement and an evidence/limits update.
@@ -30,15 +30,15 @@ Delegated milestones belong in the parent room too. An exact CLI target in
 another room must not silently become a native-provider dispatch. Addressed
 turns require reading; `awareness` is background context. An append receipt
 never substitutes for the durable read cursor.
-[src: file: backend/src/api/disc_invite.rs:676-707#attention_required]
-[src: file: backend/src/api/disc_invite.rs:7581-7602#join_protocol_reports_each_step_and_preserves_wait_ownership]
+[src: file: backend/src/api/disc_invite.rs:695-726#attention_required]
+[src: file: backend/src/api/disc_invite.rs:7600-7621#join_protocol_reports_each_step_and_preserves_wait_ownership]
 
 A host may move a tool call to the background. That call remains owned and
 must reach a terminal result before another wait starts. A queued MCP request
 can interrupt the wait normally; handle the request and resume the work loop.
 Neither condition is a command to leave. Kronn does not guarantee that every
 host will follow instructions or hide all background notifications.
-[src: file: backend/src/api/disc_invite.rs:704-709#CAVEAT]
+[src: file: backend/src/api/disc_invite.rs:723-728#CAVEAT]
 [src: file: backend/scripts/disc-introspection-mcp.py:7622-7630#call_disc_wait_for_peer]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12978-12985#test_wait_description_prevents_stacked_host_background_tasks]
 
@@ -72,7 +72,7 @@ The `session_budget` block on a wake said "rotate this session" to any long
 session, including the principal of a shared room. A session that read it
 stopped listening there. The verdict is now attached only in a delegated
 task's execution room.
-[src: file: backend/src/api/disc_invite.rs:1844-1876#session_budget]
+[src: file: backend/src/api/disc_invite.rs:1863-1895#session_budget]
 
 These fixes do not cover host behaviour. A host can still move a long wait to
 the background. Any other Kronn call ends the wait (`wait_preempted`), and an
@@ -90,7 +90,7 @@ changed by these tests. The KT-619 owner confirmed the boundary on September 10
 at 05:53:21 UTC: KT-629 owns instruction text and its contract regressions;
 KT-619 owns credential/grant publication and preserves the isolated test-loader
 harness. These results do not qualify KT-619's authority changes.
-[src: file: backend/src/api/disc_invite.rs:7559-7602#join_protocol_reads_plan_before_substantive_first_reply]
+[src: file: backend/src/api/disc_invite.rs:7578-7621#join_protocol_reads_plan_before_substantive_first_reply]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12865-12993#WaitOutsideLlmLoopTests]
 
 The unfiltered offline backend suite completed successfully (run 35315,

@@ -413,7 +413,7 @@ launch's own bridge token decides the role (KT-1962):
   the grant runs in the execution's parent room, does not own the worker's
   room and was not minted for that execution. The room-agent identity also
   wants the grant of that room's agent, launched with the provider the turn
-  names; a workflow step or another launch hosted in the room is a principal
+  names (a grant that names no launched agent is refused); a workflow step or another launch hosted in the room is a principal
   by its own joined session only. Any other grant gets the answer of an
   unknown execution, and a review it sends pins no principal session.
 - **Principal beside its worker**: when the worker is a CLI session of the
@@ -421,7 +421,12 @@ launch's own bridge token decides the role (KT-1962):
   that room may be the worker's. The session a token names as the principal's
   must then be one that very launch joined or resumed through the bridge
   (`peer-join`, `peer-resume`, the workflow step join); a co-member that only
-  read the session id is refused.
+  read the session id is refused, and the worker's own session never makes it
+  the principal. For the same reason a token joins again (`peer-join`) only as
+  a session its own launch holds: an invite and a session id read in the room
+  would otherwise hand out that session's resume credential. A session held
+  elsewhere answers « not yours to take »; its bridge resumes it by itself. A
+  caller without a token (a host CLI) joins as before.
 - **Worker**: a spawned worker (deliver, commit, status) is the grant minted
   for that execution and no other, even one that runs in the worker's room. A
   worker that names its joined session (deliver, review) holds a grant minted
