@@ -223,10 +223,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:12044#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:12059#has_room_publication]
 [src: file: backend/src/api/orchestration.rs:12098-12122#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:10092-10116#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration_tests_up.rs:22124-22234#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:10107-10131#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration_tests_up.rs:22184-22294#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -412,13 +412,20 @@ launch's own bridge token decides the role (KT-1962):
 - **Principal** (prepare, launch, status, resume, cancel, reassign, review):
   the grant runs in the execution's parent room, does not own the worker's
   room and was not minted for that execution. The room-agent identity also
-  wants the grant of that room's agent; a workflow step or another launch
-  hosted in the room is a principal by its own joined session only. Any other
-  grant gets the answer of an unknown execution, and a review it sends pins no
-  principal session.
-- **Worker** (deliver, commit, its own status and review): a grant minted for
-  an execution works for that execution only; any other grant runs in one of
-  the execution's two rooms.
+  wants the grant of that room's agent, launched with the provider the turn
+  names; a workflow step or another launch hosted in the room is a principal
+  by its own joined session only. Any other grant gets the answer of an
+  unknown execution, and a review it sends pins no principal session.
+- **Principal beside its worker**: when the worker is a CLI session of the
+  principal's own room (it accepted an offer and works from there), a grant of
+  that room may be the worker's. The session a token names as the principal's
+  must then be one that very launch joined or resumed through the bridge
+  (`peer-join`, `peer-resume`, the workflow step join); a co-member that only
+  read the session id is refused.
+- **Worker**: a spawned worker (deliver, commit, status) is the grant minted
+  for that execution and no other, even one that runs in the worker's room. A
+  worker that names its joined session (deliver, review) holds a grant minted
+  for that execution, or one that runs in the room this session is joined to.
 - **Offer**: a grant accepts an offer only for a session that runs in one of
   its own rooms.
 
