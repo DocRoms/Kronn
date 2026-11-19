@@ -1318,7 +1318,7 @@ durable event id and retain the revised transcript id separately in
 `target_message_id`.
 [src: file: backend/scripts/disc-introspection-mcp.py:4037-4057#_ack_pending_read_cursors] [src: file: backend/scripts/disc-introspection-mcp.py:7210-7227#delivered_message_ids]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:10799-10847#test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor]
-[src: file: backend/src/api/disc_invite.rs:1128-1190#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1242-1250#withheld_by_routing]
+[src: file: backend/src/api/disc_invite.rs:1193-1255#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1307-1315#withheld_by_routing]
 
 Human turns use typed identities. `discussion_agent` means the configured
 native agent, `agent` means a punctual native invocation, and `cli` means one
