@@ -199,9 +199,29 @@ impl Scope<'_> {
     /// Free text (a command, a stdin, a body template): masked whole when its
     /// literal part holds something shaped like a secret.
     fn text(&mut self, field: &str, value: &mut String) {
-        if suspicious(&literal_part(value)) {
+        if suspicious(&literal_part(value)) || self.keyed_json_secret(value) {
             self.mask(value, field.to_owned());
         }
+    }
+
+    /// The text is JSON and one of its values sits under a secret's name:
+    /// `{"api_key": "abc123"}` has no shape a secret is known by.
+    fn keyed_json_secret(&self, text: &str) -> bool {
+        let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(text) else {
+            return false;
+        };
+        if !(parsed.is_object() || parsed.is_array()) {
+            return false;
+        }
+        let mut probe = Vec::new();
+        Scope {
+            kind: self.kind,
+            resource_id: self.resource_id,
+            name: self.name,
+            found: &mut probe,
+        }
+        .json(String::new(), None, &mut parsed);
+        !probe.is_empty()
     }
 
     fn json(&mut self, path: String, key: Option<&str>, value: &mut serde_json::Value) {
@@ -317,8 +337,18 @@ fn redact_steps<'a>(
             scope.text("exec_setup_command", command);
         }
         scope.args("exec_setup_args", &mut step.exec_setup_args);
+        // `--password-stdin`: what the command reads there is the secret,
+        // whatever it looks like.
+        let secret_on_stdin = step
+            .exec_args
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg.contains("stdin") && secret_name(arg));
         if let Some(stdin) = step.exec_stdin.as_mut() {
-            scope.text("exec_stdin", stdin);
+            if secret_on_stdin && !literal_part(stdin).is_empty() {
+                scope.mask(stdin, "exec_stdin".into());
+            } else {
+                scope.text("exec_stdin", stdin);
+            }
         }
         if let Some(payload) = step.json_data_payload.as_mut() {
             scope.json("json_data_payload".into(), None, payload);
@@ -330,6 +360,37 @@ fn redact_steps<'a>(
             let mut pairs = Some(std::mem::take(variables));
             scope.pairs(prefix, &mut pairs);
             *variables = pairs.unwrap_or_default();
+        }
+        // A collect source is an inline Quick Exec line with its own variables,
+        // and a transform fallback is a JSON literal.
+        for (index, source) in step
+            .collect_api_data
+            .iter_mut()
+            .flat_map(|collect| collect.sources.iter_mut())
+            .enumerate()
+        {
+            let at = format!("collect_api_data.sources.{index}");
+            if let Some(line) = source.quick_exec.as_mut() {
+                scope.text(&format!("{at}.quick_exec.command"), &mut line.command);
+                scope.args(&format!("{at}.quick_exec.args"), &mut line.args);
+            }
+            let mut pairs = Some(std::mem::take(&mut source.variables));
+            scope.pairs(&format!("{at}.variables"), &mut pairs);
+            source.variables = pairs.unwrap_or_default();
+        }
+        for (index, field) in step
+            .transform_data
+            .iter_mut()
+            .flat_map(|transform| transform.fields.iter_mut())
+            .enumerate()
+        {
+            if let Some(fallback) = field.fallback.as_mut() {
+                scope.json(
+                    format!("transform_data.fields.{index}.fallback"),
+                    None,
+                    fallback,
+                );
+            }
         }
     }
 }

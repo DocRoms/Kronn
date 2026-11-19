@@ -567,8 +567,16 @@ fn run_worktrees(
     found
 }
 
-/// The linked worktrees `checkout` registers, by their real path.
+/// The linked worktrees `checkout` registers, by their real path. A record
+/// counts when the worktree still points back at it: a stale entry whose
+/// folder was removed and made again as an ordinary directory names nothing.
 fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
+    /// A small regular file read as text; a link is not followed.
+    fn pointer(file: &Path) -> Option<String> {
+        let meta = std::fs::symlink_metadata(file).ok()?;
+        (meta.is_file() && meta.len() <= 4096).then_some(())?;
+        std::fs::read_to_string(file).ok()
+    }
     let registry = checkout.join(".git").join("worktrees");
     let Ok(entries) = std::fs::read_dir(&registry) else {
         return Vec::new();
@@ -576,20 +584,24 @@ fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
     entries
         .flatten()
         .filter_map(|entry| {
-            let record = entry.path().join("gitdir");
-            let small = std::fs::metadata(&record).is_ok_and(|meta| meta.len() <= 4096);
-            let raw = small
-                .then(|| std::fs::read_to_string(&record).ok())
-                .flatten()?;
-            let recorded = PathBuf::from(raw.trim());
+            let entry = entry.path();
+            let recorded = PathBuf::from(pointer(&entry.join("gitdir"))?.trim());
             // `worktree.useRelativePaths` records it relative to the entry.
             let recorded = if recorded.is_relative() {
-                entry.path().join(recorded)
+                entry.join(recorded)
             } else {
                 recorded
             };
             (recorded.file_name()? == ".git").then_some(())?;
-            recorded.parent()?.canonicalize().ok()
+            let worktree = recorded.parent()?.canonicalize().ok()?;
+            let back = pointer(&worktree.join(".git"))?;
+            let back = PathBuf::from(back.trim().strip_prefix("gitdir:")?.trim());
+            let back = if back.is_relative() {
+                worktree.join(back)
+            } else {
+                back
+            };
+            (back.canonicalize().ok()? == entry.canonicalize().ok()?).then_some(worktree)
         })
         .collect()
 }
@@ -1276,6 +1288,14 @@ mod tests {
         assert_eq!(check_file_line(&roots, "only.rs", 5, None), Ok(()));
         let past = check_file_line(&roots, "only.rs", 6, None).unwrap_err();
         assert!(past.contains("not inside the file (5 lines)"), "{past}");
+        // The agents worked in the worktree: its version of a file the
+        // checkout also holds is an evidence, and the refusal names the
+        // first tree that holds the file.
+        std::fs::write(repo.checkout.join("both.rs"), "line\n").unwrap();
+        std::fs::write(repo.named.join("both.rs"), "line\n".repeat(3)).unwrap();
+        assert_eq!(check_file_line(&roots, "both.rs", 3, None), Ok(()));
+        let past = check_file_line(&roots, "both.rs", 4, None).unwrap_err();
+        assert!(past.contains("(1 lines)"), "{past}");
     }
 
     #[test]
@@ -1309,6 +1329,14 @@ mod tests {
             let refused = check_file_line(&roots, "only.rs", 1, None).unwrap_err();
             assert!(refused.contains("does not exist"), "{case}: {refused}");
         }
+        // A stale record: the folder was removed and made again by hand.
+        std::fs::remove_dir_all(&repo.unrelated).unwrap();
+        std::fs::create_dir_all(&repo.unrelated).unwrap();
+        std::fs::write(repo.unrelated.join("only.rs"), "line\n".repeat(5)).unwrap();
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("setup", &repo.unrelated.display().to_string());
+        let roots = repo.roots(&[step("setup", "Exec")], &ctx);
+        assert_eq!(roots, vec![repo.checkout.clone()], "a stale record");
         // Naming one worktree opens that one, not its neighbour.
         std::fs::write(repo.unrelated.join("lane.rs"), "line\n").unwrap();
         let mut ctx = TemplateContext::new();

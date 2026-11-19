@@ -284,11 +284,95 @@ fn masks_literal_secrets_in_every_hand_typed_field_of_a_step() {
     let mut command = WorkflowStep {
         name: "inline".into(),
         exec_command: Some(key.into()),
+        exec_setup_command: Some(format!("login {key}")),
         ..WorkflowStep::default()
     };
     let mut found = vec![];
     redact_steps("wf-1", "Nightly", std::iter::once(&mut command), &mut found);
     assert_eq!(command.exec_command.as_deref(), Some(REDACTED));
+    assert_eq!(command.exec_setup_command.as_deref(), Some(REDACTED));
+}
+
+/// A collect source is an Exec line by another name, a transform fallback a
+/// JSON literal, and a secret under a key or read on stdin has no shape.
+#[test]
+fn masks_secrets_no_shape_gives_away_and_the_sibling_fields_of_a_step() {
+    use crate::models::{CollectApiDataConfig, TransformDataConfig};
+    let source = serde_json::json!({
+        "alias": "stats",
+        "quick_exec": { "command": "curl", "args": ["--token", "abc123", "{{url}}"] },
+        "variables": { "password": "hunter2", "page": "{{page}}" },
+    });
+    let mut step = WorkflowStep {
+        name: "collect".into(),
+        exec_command: Some("docker".into()),
+        exec_args: vec!["login".into(), "--password-stdin".into()],
+        exec_stdin: Some("hunter2".into()),
+        notify_config: Some(NotifyConfig {
+            url: "{{hook}}".into(),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: r#"{"api_key": "abc123", "text": "done"}"#.into(),
+        }),
+        collect_api_data: Some(
+            serde_json::from_value::<CollectApiDataConfig>(
+                serde_json::json!({ "sources": [source] }),
+            )
+            .unwrap(),
+        ),
+        transform_data: Some(
+            serde_json::from_value::<TransformDataConfig>(serde_json::json!({
+                "input_from": "steps.collect.data",
+                "fields": [{
+                    "target": "t", "source": "$.a",
+                    "fallback": {"token": "abc123", "count": 0},
+                }],
+            }))
+            .unwrap(),
+        ),
+        ..WorkflowStep::default()
+    };
+    let mut found = vec![];
+    redact_steps("wf-1", "Nightly", std::iter::once(&mut step), &mut found);
+    assert_eq!(step.exec_stdin.as_deref(), Some(REDACTED));
+    assert_eq!(step.notify_config.unwrap().body_template, REDACTED);
+    let source = &step.collect_api_data.unwrap().sources[0];
+    assert_eq!(
+        source.quick_exec.as_ref().unwrap().args,
+        ["--token", REDACTED, "{{url}}"]
+    );
+    assert_eq!(source.variables["password"], REDACTED);
+    assert_eq!(source.variables["page"], "{{page}}");
+    let fallback = step.transform_data.unwrap().fields[0]
+        .fallback
+        .clone()
+        .unwrap();
+    assert_eq!(fallback["token"], REDACTED);
+    assert_eq!(fallback["count"], 0);
+
+    // A body or a stdin that holds no secret stays as typed.
+    let mut plain = WorkflowStep {
+        name: "plain".into(),
+        exec_args: vec!["--stdin".into()],
+        exec_stdin: Some("hello".into()),
+        notify_config: Some(NotifyConfig {
+            url: "{{hook}}".into(),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: r#"{"text": "done", "count": 2}"#.into(),
+        }),
+        ..WorkflowStep::default()
+    };
+    let mut found = vec![];
+    redact_steps("wf-1", "Nightly", std::iter::once(&mut plain), &mut found);
+    assert_eq!(plain.exec_stdin.as_deref(), Some("hello"));
+    assert_eq!(
+        plain.notify_config.unwrap().body_template,
+        r#"{"text": "done", "count": 2}"#
+    );
+    // A notify URL is always masked: nothing else of this step is.
+    let fields: Vec<_> = found.iter().map(|field| field.field.as_str()).collect();
+    assert_eq!(fields, ["notify_config.url"]);
 }
 
 #[test]

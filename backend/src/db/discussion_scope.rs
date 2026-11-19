@@ -706,6 +706,13 @@ pub fn file_request_as(
             }
         }
         origin.workflow_run_id.clone_from(&asker.workflow_run_id);
+        origin.workflow_id.clone_from(&asker.workflow_id);
+    }
+    // The room's own level still has to grant it: the asker's run or other
+    // rooms only ever lower what the room would give.
+    let room_alone = crate::db::trust::TrustOrigin::room(discussion_id);
+    if crate::db::trust::level_grants(conn, &room_alone, approval)?.is_none() {
+        return Ok((filed, None));
     }
     let Some(trust) = crate::db::trust::level_grants(conn, &origin, approval)? else {
         return Ok((filed, None));

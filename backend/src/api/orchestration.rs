@@ -18540,9 +18540,15 @@ fn principal_session_is_the_grants(
     if !worker_shares_the_principal_room(conn, execution)? {
         return Ok(true);
     }
+    // The worker's own session lives in that room too: holding it proves the
+    // worker, never the principal.
     Ok(
-        crate::db::discussion_sessions::find_active_session(conn, agent, session_id)?
-            .is_some_and(|session| bridge.own_sessions.contains(&session.id)),
+        crate::db::discussion_sessions::find_active_session(conn, agent, session_id)?.is_some_and(
+            |session| {
+                Some(session.id) != execution.worker_cli_session_id
+                    && bridge.own_sessions.contains(&session.id)
+            },
+        ),
     )
 }
 
@@ -18573,7 +18579,7 @@ fn bridge_is_room_agent(
     room_id: &str,
 ) -> bool {
     bridge.room_agent_of.iter().any(|own| own == room_id)
-        && bridge.agent.as_ref().is_none_or(|launched| {
+        && bridge.agent.as_ref().is_some_and(|launched| {
             crate::db::orchestration::agent_type_from_db(room.agent_type.trim())
                 .is_ok_and(|declared| declared == launched.agent_type)
         })

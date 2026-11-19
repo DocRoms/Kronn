@@ -2941,7 +2941,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // Not scoped by id — the disc identity is what the token resolves to.
         .route(
             "/api/discussions/peer-join",
-            post(api::disc_invite::peer_join),
+            post(api::disc_invite::peer_join_as),
         )
         .route(
             "/api/discussions/workflow-step-join",

@@ -2933,6 +2933,73 @@ async fn a_token_cannot_end_or_move_a_session_of_another_room_of_its_project() {
     assert_eq!(status_of().await.as_deref(), Some("left"));
 }
 
+/// KT-1962 — an invite and a session id read in the room are no proof: a token
+/// joins again only as a session its own launch joined, and that join is what
+/// makes the session its own.
+#[tokio::test]
+async fn a_token_joins_again_only_as_a_session_its_own_launch_joined() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussion_sessions \
+             (id, disc_id, agent_type, session_id, role, status, joined_at, resume_token_hash) \
+             VALUES (951, 'room-a', 'ClaudeCode', 'principal-s', 'peer', 'active', \
+                     '2026-01-01T00:00:00Z', 'the-principal-s-own')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO discussion_invite_tokens(token_hash, disc_id, created_at, expires_at) \
+             VALUES (?1, 'room-a', '2026-01-01T00:00:00Z', '2999-01-01T00:00:00Z')",
+            [sha256_hex("kr-join-own-room")],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let co_member = bridge_for("room-a");
+    let join = |bridge: String, session: &'static str| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "POST",
+                "/api/discussions/peer-join",
+                Some(&bridge),
+                Some(json!({
+                    "token": "kr-join-own-room", "agent_type": "ClaudeCode", "session_id": session
+                })),
+            )
+            .await
+            .1
+        }
+    };
+    let taken = join(co_member.value().to_string(), "principal-s").await;
+    assert_eq!(taken["success"], false, "{taken}");
+    assert!(taken.to_string().contains("not yours to take"), "{taken}");
+    assert!(!taken.to_string().contains("kr-resume-"), "{taken}");
+    assert_eq!(
+        query_one(
+            &db,
+            "SELECT resume_token_hash FROM discussion_sessions WHERE id = CAST(?1 AS INTEGER)",
+            "951".into(),
+        )
+        .await
+        .as_deref(),
+        Some("the-principal-s-own"),
+        "the session keeps its credential"
+    );
+    // Its own session: the first join makes it the launch's, so a retry passes;
+    // another launch of the same room is refused for it too.
+    let first = join(co_member.value().to_string(), "own-s").await;
+    assert_eq!(first["success"], true, "{first}");
+    let again = join(co_member.value().to_string(), "own-s").await;
+    assert_eq!(again["success"], true, "{again}");
+    assert_eq!(again["data"]["session_pk"], first["data"]["session_pk"]);
+    let other = bridge_for("room-a");
+    let refused = join(other.value().to_string(), "own-s").await;
+    assert_eq!(refused["success"], false, "{refused}");
+}
+
 /// B5-02 — a page a token's workflow will publish into must be its project's.
 #[tokio::test]
 async fn a_token_s_workflow_publishes_only_into_its_project_s_pages() {

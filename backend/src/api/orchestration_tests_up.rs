@@ -32294,7 +32294,10 @@ async fn a_room_agent_proves_a_live_check_only_with_the_principals_own_grant() {
         project: None,
         own_discussions: rooms.iter().map(|room| room.to_string()).collect(),
         own_run: None,
-        agent: None,
+        agent: Some(crate::core::api_access::AgentIdentity {
+            agent_type: AgentType::Codex,
+            model: None,
+        }),
         // The room's agent, unless a test says the launch only runs there.
         room_agent_of: rooms.iter().map(|room| room.to_string()).collect(),
         own_execution: None,
@@ -32395,7 +32398,10 @@ async fn a_room_agent_identity_is_the_principal_only_with_that_agents_own_grant(
         project: None,
         own_discussions: rooms.iter().map(|room| room.to_string()).collect(),
         own_run: None,
-        agent: None,
+        agent: Some(crate::core::api_access::AgentIdentity {
+            agent_type: AgentType::Codex,
+            model: None,
+        }),
         room_agent_of: rooms.iter().map(|room| room.to_string()).collect(),
         own_execution: None,
         own_sessions: Vec::new(),
@@ -32427,6 +32433,13 @@ async fn a_room_agent_identity_is_the_principal_only_with_that_agents_own_grant(
             BridgeCaller {
                 own_execution: Some(execution_id.clone()),
                 own_sessions: Vec::new(),
+                ..grant(&["d-parent"])
+            },
+        ),
+        (
+            "a grant that names no launched agent",
+            BridgeCaller {
+                agent: None,
                 ..grant(&["d-parent"])
             },
         ),
@@ -32695,6 +32708,41 @@ async fn a_declared_session_holds_a_role_only_with_a_grant_that_can_hold_it() {
         assert_eq!(launched.error.as_deref(), Some(REFUSAL));
     }
     assert_eq!(executions().await, launched_before, "nothing was launched");
+    // The worker holds its own session, which lives in the principal's room:
+    // naming it as the principal's proves the worker, not the principal.
+    let worker_pk: i64 = {
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT worker_cli_session_id FROM task_executions WHERE id = ?1",
+                [&id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+    };
+    let Json(cancelled) = task_exec_cancel(
+        State(state.clone()),
+        Path(exec_id.clone()),
+        Some(axum::Extension(BridgeCaller {
+            own_sessions: vec![worker_pk],
+            ..grant(&[parent.as_str()], None)
+        })),
+        Json(TaskExecCancelRequest {
+            source_agent: "ClaudeCode".into(),
+            source_session_id: "sess-a".into(),
+            room_agent: None,
+            reason: "stop".into(),
+            cleanup_policy: None,
+        }),
+    )
+    .await;
+    assert!(!cancelled.success, "the worker is not its own principal");
+    assert_eq!(
+        (execution_state(&db, &exec_id).await, pinned().await),
+        before
+    );
     // The grant that joined the principal's session itself.
     let principal_grant = || BridgeCaller {
         own_sessions: vec![103],

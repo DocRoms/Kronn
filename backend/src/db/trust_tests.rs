@@ -1239,6 +1239,53 @@ fn a_worker_room_is_held_to_the_level_of_the_room_that_delegated_to_it() {
 }
 
 #[test]
+fn a_long_or_shared_delegation_chain_never_opens_a_higher_level() {
+    let conn = connection();
+    set(&conn, TrustScope::Instance, None, TrustLevel::Full);
+    set(&conn, TrustScope::Room, Some("r0"), TrustLevel::Standard);
+    for depth in 0..20 {
+        delegate(&conn, &format!("r{depth}"), &format!("r{}", depth + 1));
+    }
+    let deep = effective(&conn, &TrustOrigin::room("r20")).unwrap();
+    assert_eq!(
+        (deep.level, deep.source_id.as_deref()),
+        (TrustLevel::Standard, Some("r0"))
+    );
+    // Too long to follow, with no setting anywhere: Standard, not the instance.
+    for depth in 0..80 {
+        delegate(&conn, &format!("x{depth}"), &format!("x{}", depth + 1));
+    }
+    let endless = effective(&conn, &TrustOrigin::room("x80")).unwrap();
+    assert_eq!(endless.level, TrustLevel::Standard);
+    // Two rooms delegated to the same room: the lowest holds, whichever came first.
+    set(&conn, TrustScope::Room, Some("wide"), TrustLevel::Full);
+    set(
+        &conn,
+        TrustScope::Room,
+        Some("narrow"),
+        TrustLevel::Standard,
+    );
+    conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    for (id, parent) in [("e-wide", "wide"), ("e-narrow", "narrow")] {
+        conn.execute(
+            "INSERT INTO task_executions
+                 (id, orchestration_run_id, task_id, parent_discussion_id, sub_discussion_id,
+                  status, review_rounds, max_review_rounds, attempt_no, worker_target_kind,
+                  worker_agent_type, worker_model_tier, created_at, updated_at)
+             VALUES (?1, 'run', ?1, ?2, 'shared', 'Done', 0, 3, 0, 'agent',
+                     'ClaudeCode', 'reasoning', 'now', 'now')",
+            [id, parent],
+        )
+        .unwrap();
+    }
+    let shared = effective(&conn, &TrustOrigin::room("shared")).unwrap();
+    assert_eq!(
+        (shared.level, shared.source_id.as_deref()),
+        (TrustLevel::Standard, Some("narrow"))
+    );
+}
+
+#[test]
 fn a_delegating_room_lowers_a_worker_and_never_raises_it() {
     let conn = connection();
     set(&conn, TrustScope::Instance, None, TrustLevel::Standard);

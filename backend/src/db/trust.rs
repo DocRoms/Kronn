@@ -217,32 +217,45 @@ fn workflow_of_run(conn: &Connection, run_id: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
-/// The nearest room up the delegation chain of `room` that a human gave a
-/// level: a worker's room was opened from its principal's (KT-1964).
+/// The lowest level a human gave a room up the delegation chain of `room`: a
+/// worker's room was opened from its principal's (KT-1964). A branch stops at
+/// the first room that has a setting; a room several rooms delegated to is
+/// held to the lowest of them. A chain too long to follow is held to Standard.
 fn delegating_room_level(conn: &Connection, room: &str) -> Result<Option<(TrustLevel, String)>> {
-    let mut current = room.to_owned();
-    for _ in 0..DELEGATION_DEPTH {
-        let parent: Option<String> = conn
-            .query_row(
-                "SELECT parent_discussion_id FROM task_executions \
-                 WHERE sub_discussion_id = ?1 ORDER BY rowid LIMIT 1",
-                [&current],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(parent) = parent.filter(|parent| *parent != current) else {
-            return Ok(None);
-        };
-        if let Some(level) = get_setting(conn, TrustScope::Room, Some(&parent))?.level {
-            return Ok(Some((level, parent)));
+    let mut seen = vec![room.to_owned()];
+    let mut frontier = vec![room.to_owned()];
+    let mut lowest: Option<(TrustLevel, String)> = None;
+    while let Some(current) = frontier.pop() {
+        let mut statement = conn.prepare_cached(
+            "SELECT DISTINCT parent_discussion_id FROM task_executions \
+             WHERE sub_discussion_id = ?1",
+        )?;
+        let parents: Vec<String> = statement
+            .query_map([&current], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for parent in parents {
+            if seen.contains(&parent) {
+                continue;
+            }
+            if seen.len() >= DELEGATION_ROOMS {
+                return Ok(Some((TrustLevel::Standard, parent)));
+            }
+            seen.push(parent.clone());
+            match get_setting(conn, TrustScope::Room, Some(&parent))?.level {
+                Some(level) => {
+                    if lowest.as_ref().is_none_or(|(kept, _)| level < *kept) {
+                        lowest = Some((level, parent));
+                    }
+                }
+                None => frontier.push(parent),
+            }
         }
-        current = parent;
     }
-    Ok(None)
+    Ok(lowest)
 }
 
-/// How far up a delegation chain a level is looked for.
-const DELEGATION_DEPTH: usize = 8;
+/// How many rooms of a delegation chain are read before giving up.
+const DELEGATION_ROOMS: usize = 64;
 
 /// The level in force for `origin`: the narrowest explicit setting (a room,
 /// then the workflow, then the instance), else Standard. When an agent's

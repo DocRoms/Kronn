@@ -279,7 +279,17 @@ pub struct RecentMessagePreview {
 /// row, and returns enough context for the bridge to bind + the
 /// agent to greet the other participants.
 pub async fn peer_join(
+    state: State<AppState>,
+    request: Json<PeerJoinRequest>,
+) -> Json<ApiResponse<PeerJoinResponse>> {
+    peer_join_as(state, None, request).await
+}
+
+/// [`peer_join`] as the route serves it: a bridge token joins again only as a
+/// session its own launch holds.
+pub async fn peer_join_as(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<PeerJoinRequest>,
 ) -> Json<ApiResponse<PeerJoinResponse>> {
     if req.token.trim().is_empty() {
@@ -319,12 +329,21 @@ pub async fn peer_join(
     // federation, we mirror it, and bind a session to the mirror.
     let (disc_id, session_pk, resume_token) = {
         let (t, a, s) = (token.clone(), agent_type.clone(), session_id.clone());
+        let held = bridge.map(|axum::Extension(caller)| caller.own_sessions);
         let local = state
             .db
-            .with_conn(move |conn| db::discussion_sessions::join_via_token(conn, &t, &a, &s))
+            .with_conn(move |conn| {
+                db::discussion_sessions::join_via_token_as(conn, &t, &a, &s, held.as_deref())
+            })
             .await;
         match local {
             Ok(j) => (j.disc_id, j.session_pk, j.resume_token),
+            // Not a missing invite: no contact is asked.
+            Err(refused)
+                if refused.to_string() == db::discussion_sessions::SESSION_HELD_ELSEWHERE =>
+            {
+                return Json(ApiResponse::err(refused.to_string()));
+            }
             Err(local_err) => {
                 if !state.p2p.enabled() {
                     return Json(ApiResponse::err(format!(
