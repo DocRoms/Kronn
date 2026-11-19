@@ -422,9 +422,10 @@ launch's own bridge token decides the role (KT-1962):
   must then be one that very launch joined or resumed through the bridge
   (`peer-join`, `peer-resume`, the workflow step join); a co-member that only
   read the session id is refused, and the worker's own session never makes it
-  the principal. For the same reason a token joins again (`peer-join`) only as
-  a session its own launch holds: an invite and a session id read in the room
-  would otherwise hand out that session's resume credential. A session held
+  the principal. For the same reason a token joins a room (`peer-join`) as a session
+  already active somewhere only when its own launch holds it: an invite and a
+  session id read in a room would otherwise hand out that session's resume
+  credential, or end it where it is and make the caller its holder. A session held
   elsewhere answers « not yours to take »; its bridge resumes it by itself. A
   caller without a token (a host CLI) joins as before.
 - **Worker**: a spawned worker (deliver, commit, status) is the grant minted
