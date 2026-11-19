@@ -167,8 +167,16 @@ export function determinism(step: StepShadowComparison): Determinism | null {
 }
 
 /** The label of an execution: `main`'s is the caller's, a shadow's its label, else its id. */
-export function shadowLabel(execution: ShadowExecution, mainLabel: string): string {
+export function shadowName(execution: ShadowExecution, mainLabel: string): string {
   return execution.shadow_id == null ? mainLabel : execution.label || execution.shadow_id;
+}
+
+/** `shadowName` followed by the agent and the model that answered. */
+export function shadowLabel(execution: ShadowExecution, mainLabel: string): string {
+  const name = shadowName(execution, mainLabel);
+  // Which agent and model answered: « shadow-2 » alone says nothing in a pick list.
+  const who = [execution.identity.agent, execution.identity.model].filter(Boolean).join(' · ');
+  return who ? `${name} (${who})` : name;
 }
 
 /** A stable key for an execution inside its step. */
@@ -229,7 +237,7 @@ export function mergeExecutionLabel(token: string, comparison: StepShadowCompari
   if (token === MERGE_MAIN) return mainLabel;
   const id = token.startsWith('shadow:') ? token.slice('shadow:'.length) : token;
   const shadow = comparison.shadows.find(candidate => candidate.shadow_id === id);
-  return shadow ? shadowLabel(shadow, mainLabel) : id;
+  return shadow ? shadowName(shadow, mainLabel) : id;
 }
 
 /** The longest wait the backend accepts, in minutes. */
