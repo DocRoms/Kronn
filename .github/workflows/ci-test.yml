@@ -56,7 +56,7 @@ jobs:
   # checks and reads as green. This required job always runs and fails unless
   # the trigger is a manual measurement or the PR retains the label.
   require-ci-label:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       pull-requests: read
@@ -90,7 +90,7 @@ jobs:
   test-backend-build:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A cache miss compiles the instrumented tree from scratch.
     timeout-minutes: 40
     outputs:
@@ -313,7 +313,7 @@ jobs:
   test-backend-shard:
     needs: [require-ci-label, test-backend-build]
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -397,7 +397,7 @@ jobs:
   test-backend:
     needs: [require-ci-label, test-backend-build, test-backend-shard]
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
@@ -481,7 +481,7 @@ jobs:
   test-backend-quality:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -599,7 +599,7 @@ jobs:
   duplication-check:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -623,7 +623,7 @@ jobs:
   diff-hygiene:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -649,7 +649,7 @@ jobs:
   test-python:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -684,7 +684,7 @@ jobs:
   test-frontend:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -755,7 +755,7 @@ jobs:
     # see).
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # ── Playwright official container ─────────────────────────────────
     # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
     # INTO this image. That eliminates the `pnpm exec playwright install`
@@ -954,7 +954,7 @@ jobs:
   test-shell:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -984,7 +984,7 @@ jobs:
   security-scan:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -1057,7 +1057,7 @@ jobs:
       - test-e2e
       - test-shell
       - security-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       # Only a label check that ran and failed means "label missing". One that
@@ -1092,7 +1092,7 @@ jobs:
     # gate result: an SLO breach is a warning, while a real timeout still fails.
     if: always() && inputs.ref == '' && needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
     needs: [require-ci-label, test-backend-build, test-backend, ci-quality-gates]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       actions: read
@@ -1108,3 +1108,6 @@ jobs:
           CI_COMPILED_CACHE_HIT: ${{ needs.test-backend-build.outputs.compiled_cache_hit }}
           CI_COMPILED_CACHE_STATE: ${{ needs.test-backend-build.outputs.compiled_cache_state }}
         run: node scripts/ci/backend_ci_slo.mjs
+
+# Linux jobs name their image: four confinement tests fail on ubuntu-26.04, where
+# `ubuntu-latest` lands on some jobs and not on others (KT-1929).

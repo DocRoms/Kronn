@@ -38,7 +38,7 @@ env:
 jobs:
   # Labels are read live: a re-run replays the original event payload.
   require-ci-build-label:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       pull-requests: read
@@ -63,7 +63,7 @@ jobs:
   test-desktop-compile:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -184,7 +184,7 @@ jobs:
   portability-scope:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       run: ${{ steps.scope.outputs.run }}
@@ -333,7 +333,7 @@ jobs:
   build-release:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -382,7 +382,7 @@ jobs:
       - lint-windows-skips
       - boot-scope
       - test-boot-windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       # Only a label check that ran and failed means "label missing". One that
@@ -430,7 +430,7 @@ jobs:
   lint-windows-skips:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -471,7 +471,7 @@ jobs:
   boot-scope:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       run: ${{ steps.scope.outputs.run }}
@@ -582,3 +582,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cache-boot.outputs.cache-primary-key }}
+
+# Linux jobs name their image: four confinement tests fail on ubuntu-26.04, where
+# `ubuntu-latest` lands on some jobs and not on others (KT-1929).
