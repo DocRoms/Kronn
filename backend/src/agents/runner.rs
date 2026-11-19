@@ -6754,6 +6754,46 @@ pub fn parse_num_ctx_cap(raw: Option<String>) -> Option<u64> {
     }
 }
 
+/// The context cap one run of `model` gets on the Ollama server at `base`: the
+/// env break-glass, else the per-model override, else the model's own window
+/// bounded by what this machine holds. The prompt-size check asks the same
+/// question through `ollama_ctx_cap_for`, so both read one answer.
+pub async fn ollama_run_ctx_cap(
+    base: &str,
+    model: &str,
+    overrides: Option<&std::collections::HashMap<String, u64>>,
+    profile: Option<&OllamaModelProfile>,
+) -> CtxCap {
+    let model_limit = profile.and_then(|profile| profile.context_length);
+    // Bound this model by resident weights and observed cache cost when available.
+    sample_ollama_memory(base, model).await;
+    let machine_ceiling = ollama_machine_ceiling(
+        &MachineFacts::read(),
+        base,
+        model,
+        profile,
+        ollama_model_size_bytes(base, model).await,
+    )
+    .await;
+    let env_raw = crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
+    match overrides {
+        Some(overrides) => {
+            resolve_ctx_cap_for_model(env_raw, model, overrides, model_limit, machine_ceiling)
+        }
+        None => resolve_ctx_cap_within(env_raw, model_limit, machine_ceiling),
+    }
+}
+
+/// `ollama_run_ctx_cap` for a caller that has not read the model's profile.
+pub async fn ollama_ctx_cap_for(
+    base: &str,
+    model: &str,
+    overrides: Option<&std::collections::HashMap<String, u64>>,
+) -> CtxCap {
+    let profile = ollama_model_profile(base, model).await;
+    ollama_run_ctx_cap(base, model, overrides, profile.as_ref()).await
+}
+
 /// `resolve_ctx_cap`, with the persistent per-model override inserted between
 /// the env break-glass and the auto-derived cap — see `CtxCapOrigin` for the
 /// full precedence. `overrides` is the whole config map so ONE call resolves
@@ -9675,30 +9715,13 @@ pub async fn start_ollama_http_with_idle(
             let model_storage_format = model_profile
                 .as_ref()
                 .and_then(|profile| profile.storage_format.clone());
-            // Bound this model by resident weights and observed cache cost when available.
-            sample_ollama_memory(&base, model).await;
-            let machine_ceiling = ollama_machine_ceiling(
-                &MachineFacts::read(),
+            let cap = ollama_run_ctx_cap(
                 &base,
                 model,
+                ollama_context_overrides,
                 model_profile.as_ref(),
-                ollama_model_size_bytes(&base, model).await,
             )
             .await;
-            let cap = match ollama_context_overrides {
-                Some(overrides) => resolve_ctx_cap_for_model(
-                    crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
-                    model,
-                    overrides,
-                    model_limit,
-                    machine_ceiling,
-                ),
-                None => resolve_ctx_cap_within(
-                    crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
-                    model_limit,
-                    machine_ceiling,
-                ),
-            };
             let ctx_cap = cap.value;
             ctx_notice = cap.throttle_notice(model);
             if let Some(notice) = ctx_notice.as_deref() {

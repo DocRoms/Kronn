@@ -5,7 +5,7 @@
 //! every model. A server-wide hard ceiling (`server.max_prompt_bytes`) stays as
 //! a safety net so a single request can never be unbounded.
 
-use crate::agents::runner::effective_model_flag;
+use crate::agents::runner::{effective_model_flag, CtxCap, CtxCapOrigin};
 use crate::models::{AgentType, MessageTarget, ModelTier, ModelTiersConfig};
 use std::collections::HashMap;
 
@@ -85,7 +85,14 @@ pub struct PromptLimit {
     pub window_tokens: u64,
     /// True when the hard ceiling, not the model window, is what binds.
     pub ceiling_bound: bool,
+    /// Where a local model's window comes from; `None` for a hosted model or a
+    /// window Kronn assumed without asking the runtime.
+    pub local_window: Option<CtxCapOrigin>,
 }
+
+/// The windows of the local models a check is about, by model name: what a run
+/// of each would get (`ollama_ctx_cap_for`).
+pub type LocalWindows = HashMap<String, CtxCap>;
 
 /// Derive the limit for `agent` running `model` (explicit override, else the
 /// tier's model). `ollama_overrides` carries the per-model `num_ctx` the user
@@ -96,11 +103,31 @@ pub fn limit_for(
     ollama_overrides: &HashMap<String, u64>,
     hard_ceiling: usize,
 ) -> PromptLimit {
+    limit_with_local_windows(
+        agent,
+        model,
+        ollama_overrides,
+        &LocalWindows::new(),
+        hard_ceiling,
+    )
+}
+
+/// `limit_for`, where an Ollama model named in `local` takes the window a run
+/// of it gets instead of the assumed one.
+pub fn limit_with_local_windows(
+    agent: &AgentType,
+    model: Option<&str>,
+    ollama_overrides: &HashMap<String, u64>,
+    local: &LocalWindows,
+    hard_ceiling: usize,
+) -> PromptLimit {
     let model_name = model.map(str::trim).filter(|m| !m.is_empty());
-    let pinned = model_name
-        .filter(|_| matches!(agent, AgentType::Ollama))
-        .and_then(|m| ollama_overrides.get(m).copied());
-    let window_tokens = pinned
+    let ollama_model = model_name.filter(|_| matches!(agent, AgentType::Ollama));
+    let resolved = ollama_model.and_then(|m| local.get(m));
+    let pinned = ollama_model.and_then(|m| ollama_overrides.get(m).copied());
+    let window_tokens = resolved
+        .map(|cap| cap.value)
+        .or(pinned)
         .or_else(|| model_name.and_then(|m| model_window_tokens(agent, m)))
         .unwrap_or_else(|| agent_default_window_tokens(agent));
     let from_window = window_tokens.saturating_mul(USABLE_BYTES_PER_WINDOW_TOKEN);
@@ -113,6 +140,48 @@ pub fn limit_for(
             .unwrap_or_else(|| crate::agents::agent_display_name(agent)),
         window_tokens,
         ceiling_bound,
+        local_window: resolved.map(|cap| cap.origin.clone()),
+    }
+}
+
+/// The windows of the Ollama models among `models`, asked of the server the
+/// runs use. A model the server does not answer for gets the run's fallback.
+pub async fn local_windows(
+    models: impl IntoIterator<Item = (AgentType, Option<String>)>,
+    ollama_overrides: &HashMap<String, u64>,
+) -> LocalWindows {
+    let mut windows = LocalWindows::new();
+    let base = crate::api::ollama_health::resolve_base_url_pub(None);
+    for (agent, model) in models {
+        let Some(model) = model.filter(|_| matches!(agent, AgentType::Ollama)) else {
+            continue;
+        };
+        let model = model.trim().to_string();
+        if model.is_empty() || windows.contains_key(&model) {
+            continue;
+        }
+        let cap =
+            crate::agents::runner::ollama_ctx_cap_for(&base, &model, Some(ollama_overrides)).await;
+        windows.insert(model, cap);
+    }
+    windows
+}
+
+/// Why a local model has this window, for the refusal: the remedy differs.
+fn local_window_reason(origin: &CtxCapOrigin) -> String {
+    match origin {
+        CtxCapOrigin::ModelWindow => "the model's own context window".to_string(),
+        CtxCapOrigin::ModelOverride => {
+            "the context override set for this model in Settings".to_string()
+        }
+        CtxCapOrigin::OperatorOverride => "set by KRONN_OLLAMA_NUM_CTX_CAP".to_string(),
+        CtxCapOrigin::MachineCeiling { model_limit }
+        | CtxCapOrigin::ModelEstimate { model_limit } => format!(
+            "what this machine's memory holds; the model itself supports {model_limit} tokens"
+        ),
+        CtxCapOrigin::PortableFallback => {
+            "a fallback: Ollama did not report this model's context window".to_string()
+        }
     }
 }
 
@@ -129,6 +198,18 @@ pub fn check(len: usize, limit: &PromptLimit, subject: &str) -> Result<(), Strin
              including {} ({} tokens of context). Attach the content as a file for the agent to \
              read in parts, or raise the ceiling.",
             limit.bytes, limit.model, limit.window_tokens,
+        ));
+    }
+    if let Some(origin) = &limit.local_window {
+        return Err(format!(
+            "{subject} too long ({len} bytes): the limit for {} is {} bytes (a {}-token context \
+             window, {}; minus room for the system prompt, history and answer). Attach the \
+             content as a file for the agent to read in parts, or pick a model with a larger \
+             context window.",
+            limit.model,
+            limit.bytes,
+            limit.window_tokens,
+            local_window_reason(origin),
         ));
     }
     Err(format!(
@@ -156,11 +237,34 @@ pub fn tightest_limit(
     ollama_overrides: &HashMap<String, u64>,
     hard_ceiling: usize,
 ) -> PromptLimit {
+    tightest_limit_with_local_windows(
+        targets,
+        fallback_agent,
+        discussion_tier,
+        model_override,
+        tiers,
+        ollama_overrides,
+        &LocalWindows::new(),
+        hard_ceiling,
+    )
+}
+
+/// The agent and model each responder runs: one per target, or the
+/// discussion's own agent when none is named.
+fn responders(
+    targets: &[MessageTarget],
+    fallback_agent: &AgentType,
+    discussion_tier: ModelTier,
+    model_override: Option<&str>,
+    tiers: &ModelTiersConfig,
+) -> Vec<(AgentType, Option<String>)> {
     let resolve = |agent: &AgentType, tier: ModelTier, pinned: Option<&str>| {
-        let model = effective_model_flag(pinned, agent, tier, Some(tiers));
-        limit_for(agent, model.as_deref(), ollama_overrides, hard_ceiling)
+        (
+            agent.clone(),
+            effective_model_flag(pinned, agent, tier, Some(tiers)),
+        )
     };
-    let mut limits: Vec<PromptLimit> = targets
+    let mut responders: Vec<(AgentType, Option<String>)> = targets
         .iter()
         .map(|t| {
             let pinned =
@@ -168,13 +272,43 @@ pub fn tightest_limit(
             resolve(&t.agent_type, t.tier.unwrap_or(discussion_tier), pinned)
         })
         .collect();
-    if limits.is_empty() {
-        limits.push(resolve(fallback_agent, discussion_tier, model_override));
+    if responders.is_empty() {
+        responders.push(resolve(fallback_agent, discussion_tier, model_override));
     }
-    limits
-        .into_iter()
-        .min_by_key(|l| l.bytes)
-        .expect("at least one limit")
+    responders
+}
+
+/// `tightest_limit`, with the windows of the local models already asked.
+#[allow(clippy::too_many_arguments)]
+pub fn tightest_limit_with_local_windows(
+    targets: &[MessageTarget],
+    fallback_agent: &AgentType,
+    discussion_tier: ModelTier,
+    model_override: Option<&str>,
+    tiers: &ModelTiersConfig,
+    ollama_overrides: &HashMap<String, u64>,
+    local: &LocalWindows,
+    hard_ceiling: usize,
+) -> PromptLimit {
+    responders(
+        targets,
+        fallback_agent,
+        discussion_tier,
+        model_override,
+        tiers,
+    )
+    .into_iter()
+    .map(|(agent, model)| {
+        limit_with_local_windows(
+            &agent,
+            model.as_deref(),
+            ollama_overrides,
+            local,
+            hard_ceiling,
+        )
+    })
+    .min_by_key(|l| l.bytes)
+    .expect("at least one limit")
 }
 
 /// Resolve the limit for a discussion's targets from live config.
@@ -185,15 +319,35 @@ pub async fn resolve_for_targets(
     discussion_tier: ModelTier,
     model_override: Option<&str>,
 ) -> PromptLimit {
-    let config = state.config.read().await;
-    tightest_limit(
+    // The lock is not held while Ollama is asked for a model's window.
+    let (tiers, overrides, hard_ceiling) = {
+        let config = state.config.read().await;
+        (
+            config.agents.model_tiers.clone(),
+            config.server.ollama_context_overrides.clone(),
+            config.server.max_prompt_bytes.max(MIN_MAX_PROMPT_BYTES),
+        )
+    };
+    let local = local_windows(
+        responders(
+            targets,
+            fallback_agent,
+            discussion_tier,
+            model_override,
+            &tiers,
+        ),
+        &overrides,
+    )
+    .await;
+    tightest_limit_with_local_windows(
         targets,
         fallback_agent,
         discussion_tier,
         model_override,
-        &config.agents.model_tiers,
-        &config.server.ollama_context_overrides,
-        config.server.max_prompt_bytes.max(MIN_MAX_PROMPT_BYTES),
+        &tiers,
+        &overrides,
+        &local,
+        hard_ceiling,
     )
 }
 
@@ -344,6 +498,137 @@ mod tests {
         let l = limit_for(&AgentType::Ollama, Some("qwen3:27b"), &pinned, CEILING);
         assert_eq!(l.window_tokens, 262_144);
         assert!(check(500_000, &l, "Prompt").is_ok());
+    }
+
+    // ─── a local model is held to the window its run gets (KT-1933) ─────────
+
+    use crate::agents::runner::{resolve_ctx_cap_for_model, resolve_ctx_cap_within};
+
+    const QWEN: &str = "qwen3.8:27b-mlx";
+    const QWEN_WINDOW: u64 = 262_144;
+
+    fn local(cap: CtxCap) -> LocalWindows {
+        LocalWindows::from([(QWEN.to_string(), cap)])
+    }
+
+    fn qwen_limit(cap: CtxCap, overrides: &HashMap<String, u64>) -> PromptLimit {
+        limit_with_local_windows(
+            &AgentType::Ollama,
+            Some(QWEN),
+            overrides,
+            &local(cap),
+            CEILING,
+        )
+    }
+
+    #[test]
+    fn a_local_model_takes_the_window_its_run_gets_not_the_assumed_one() {
+        // What the run resolves when the machine holds the whole window.
+        let cap = resolve_ctx_cap_for_model(None, QWEN, &none(), Some(QWEN_WINDOW), QWEN_WINDOW);
+        let l = qwen_limit(cap.clone(), &none());
+        assert_eq!(l.window_tokens, cap.value);
+        assert_eq!(l.window_tokens, QWEN_WINDOW);
+        assert_eq!(l.local_window, Some(CtxCapOrigin::ModelWindow));
+        // The prompt the assumed 32 000-token window refused.
+        assert!(check(100_213, &l, "Prompt").is_ok());
+        let assumed = limit_for(&AgentType::Ollama, Some(QWEN), &none(), CEILING);
+        assert_eq!(assumed.window_tokens, 32_000);
+        assert!(check(100_213, &assumed, "Prompt").is_err());
+    }
+
+    #[test]
+    fn the_machine_bounds_a_local_window_and_the_refusal_says_so() {
+        let cap = resolve_ctx_cap_within(None, Some(QWEN_WINDOW), 40_000u64);
+        let l = qwen_limit(cap.clone(), &none());
+        assert_eq!(l.window_tokens, cap.value);
+        assert!(l.window_tokens < QWEN_WINDOW);
+        let refusal = check(500_000, &l, "Prompt").unwrap_err();
+        assert!(refusal.contains("this machine's memory"), "{refusal}");
+        assert!(refusal.contains("262144"), "{refusal}");
+    }
+
+    #[test]
+    fn an_override_below_the_models_window_lowers_the_limit_and_is_named() {
+        let overrides = HashMap::from([(QWEN.to_string(), 16_384u64)]);
+        let cap = resolve_ctx_cap_for_model(None, QWEN, &overrides, Some(QWEN_WINDOW), QWEN_WINDOW);
+        let l = qwen_limit(cap, &overrides);
+        assert_eq!(l.window_tokens, 16_384);
+        let refusal = check(100_213, &l, "Prompt").unwrap_err();
+        assert!(refusal.contains("override set for this model"), "{refusal}");
+    }
+
+    #[test]
+    fn the_env_cap_wins_over_the_override_like_in_a_run() {
+        let overrides = HashMap::from([(QWEN.to_string(), 16_384u64)]);
+        let cap = resolve_ctx_cap_for_model(
+            Some("65536".into()),
+            QWEN,
+            &overrides,
+            Some(QWEN_WINDOW),
+            QWEN_WINDOW,
+        );
+        let l = qwen_limit(cap, &overrides);
+        assert_eq!(l.window_tokens, 65_536);
+        let refusal = check(500_000, &l, "Prompt").unwrap_err();
+        assert!(refusal.contains("KRONN_OLLAMA_NUM_CTX_CAP"), "{refusal}");
+    }
+
+    #[test]
+    fn a_window_ollama_did_not_report_is_the_runs_fallback_and_says_so() {
+        let cap = resolve_ctx_cap_within(None, None, QWEN_WINDOW);
+        assert_eq!(cap.origin, CtxCapOrigin::PortableFallback);
+        let l = qwen_limit(cap.clone(), &none());
+        assert_eq!(l.window_tokens, cap.value);
+        let refusal = check(500_000, &l, "Prompt").unwrap_err();
+        assert!(refusal.contains("did not report"), "{refusal}");
+    }
+
+    #[test]
+    fn a_resolved_window_belongs_to_its_model_and_to_ollama_only() {
+        let windows = local(CtxCap {
+            value: QWEN_WINDOW,
+            origin: CtxCapOrigin::ModelWindow,
+        });
+        let other = limit_with_local_windows(
+            &AgentType::Ollama,
+            Some("llama3:8b"),
+            &none(),
+            &windows,
+            CEILING,
+        );
+        assert_eq!(other.window_tokens, 32_000);
+        assert_eq!(other.local_window, None);
+        let hosted =
+            limit_with_local_windows(&AgentType::LiteLlm, Some(QWEN), &none(), &windows, CEILING);
+        assert_eq!(hosted.window_tokens, 128_000);
+        assert_eq!(hosted.local_window, None);
+    }
+
+    #[test]
+    fn the_tightest_responder_counts_a_local_model_at_its_real_window() {
+        let tiers = ModelTiersConfig::default();
+        let targets = vec![MessageTarget::agent(AgentType::Ollama)];
+        let model =
+            effective_model_flag(None, &AgentType::Ollama, ModelTier::Default, Some(&tiers));
+        let Some(model) = model else { return };
+        let windows = LocalWindows::from([(
+            model,
+            CtxCap {
+                value: 100_000,
+                origin: CtxCapOrigin::ModelWindow,
+            },
+        )]);
+        let l = tightest_limit_with_local_windows(
+            &targets,
+            &AgentType::ClaudeCode,
+            ModelTier::Default,
+            None,
+            &tiers,
+            &none(),
+            &windows,
+            CEILING,
+        );
+        assert_eq!(l.window_tokens, 100_000);
     }
 
     #[test]

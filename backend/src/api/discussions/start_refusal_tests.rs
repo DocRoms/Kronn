@@ -445,6 +445,7 @@ fn model_limit() -> PromptLimit {
         model: "gemini-4-argon".into(),
         window_tokens: 1_000_000,
         ceiling_bound: false,
+        local_window: None,
     }
 }
 

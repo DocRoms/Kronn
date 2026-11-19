@@ -471,10 +471,18 @@ pub async fn execute_step(
     // discussion message: the model's context window, under the configured
     // hard ceiling. Refused here, once, rather than sent to be truncated.
     let no_pinned_windows = std::collections::HashMap::new();
-    let prompt_limit = crate::core::prompt_limit::limit_for(
+    let pinned_windows = ollama_context_overrides.unwrap_or(&no_pinned_windows);
+    // A local model is held to the window its run gets, not to an assumed one.
+    let local_windows = crate::core::prompt_limit::local_windows(
+        [(step.agent.clone(), effective_model.clone())],
+        pinned_windows,
+    )
+    .await;
+    let prompt_limit = crate::core::prompt_limit::limit_with_local_windows(
         &step.agent,
         effective_model.as_deref(),
-        ollama_context_overrides.unwrap_or(&no_pinned_windows),
+        pinned_windows,
+        &local_windows,
         crate::core::prompt_limit::saved_hard_ceiling(),
     );
     if let Err(refusal) = crate::core::prompt_limit::check(prompt.len(), &prompt_limit, "Prompt") {

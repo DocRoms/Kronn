@@ -6403,10 +6403,16 @@ pub(super) async fn make_agent_stream_inner(
                 let content = match start_timeout {
                     Some(_) => e.clone(),
                     None if size_refusal => {
-                        let limit = super::prompt_limit::limit_for(
+                        let local_windows = super::prompt_limit::local_windows(
+                            [(agent_type.clone(), attempted_model.clone())],
+                            &ollama_context_overrides,
+                        )
+                        .await;
+                        let limit = super::prompt_limit::limit_with_local_windows(
                             &agent_type,
                             attempted_model.as_deref(),
                             &ollama_context_overrides,
+                            &local_windows,
                             super::prompt_limit::hard_ceiling(&state).await,
                         );
                         super::start_refusal::prompt_too_large_card(
