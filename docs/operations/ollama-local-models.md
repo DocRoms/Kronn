@@ -303,9 +303,9 @@ call. Its command-builder branch is a non-inference `echo` sentinel,
 like the other HTTP families; it cannot choose or invoke an embedded model.
 This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3535-3540#is_http_chat_agent]
-[src: file: backend/src/agents/runner.rs:9565-9586#start_ollama_http_with_idle]
+[src: file: backend/src/agents/runner.rs:9630-9651#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:13925-13938#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:14278-14287#Ollama]
+[src: file: backend/src/agents/runner.rs:14294-14303#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -342,7 +342,7 @@ launch (`crud.rs` stamps `discussions.model` from the QP).
 
 ## "Stable output", NOT bit-exact determinism
 
-`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:8297-8357#build_ollama_chat_body] sends
+`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:8310-8370#build_ollama_chat_body] sends
 `temperature:0, top_k:1, seed:42` as INTERNAL constants (no per-step knob).
 On Apple Metal the float reduction order isn't guaranteed, so two logits within
 epsilon can flip the argmax (more so under Q4 quant) → output is *greedy-stable*,
@@ -483,7 +483,7 @@ the model has been loaded at two different windows, the cache cost measured on
 the server replaces the computed one in the formula of KT-943 (and, off Apple
 Silicon, the 70 %-of-memory rule: what is left of 70 % of memory after the
 weights, over that cost)
-[src: file: backend/src/agents/runner.rs:6923-6943#kv_bytes_per_token_from_samples] [src: file: backend/src/agents/runner.rs:6945-6961#RAM_SHARE_FOR_MODEL].
+[src: file: backend/src/agents/runner.rs:6936-6956#kv_bytes_per_token_from_samples] [src: file: backend/src/agents/runner.rs:6958-6974#RAM_SHARE_FOR_MODEL].
 
 So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
 Mac is at the ceiling resolved above — the model's whole 262,144 when its
@@ -645,7 +645,7 @@ policy is unchanged: `Fail` rejects output that remains invalid, while
 `Continue` may keep invalid raw output. Prompt-based output is not a guarantee
 of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
-`[src: file: backend/src/agents/runner.rs:9345-9379#rejects_structured_output]`
+`[src: file: backend/src/agents/runner.rs:9358-9392#rejects_structured_output]`
 `[src: file: backend/src/agents/runner.rs:10085-10149#format_fallback_notice]`
 `[src: file: backend/src/workflows/steps.rs:1117-1140#ollama_envelope_format]`
 
@@ -816,7 +816,7 @@ where Ollama runs. [src: file: backend/src/api/ollama_health.rs:51-73#fetch_serv
    9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
    prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
    should steer a user to.
-   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:7263-7267#mlx_prefix_cache_reused]
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:7276-7280#mlx_prefix_cache_reused]
 
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.
