@@ -204,9 +204,12 @@ it**.
   stay visible for comparison.
 
 The run view shows, under the step, how the merge ended, the missing shadows,
-each execution's contribution (kept, only this one, duplicate, dropped as
-unverified), the provenance of every point, what the condense pass spent and the
-merged result against each execution. Only a person sets a merge, like a shadow.
+what each execution brought (points raised, of which in the result, of which
+found alone, and left out as unverified: a point of the result counts for every
+execution that found it, so a row always adds up), the provenance of every
+point, what the merge spent and the merged result against each execution. Only
+a person sets a merge, like a shadow.
+[src: file: frontend/src/lib/shadowRuns.ts:272#mergeTally]
 
 ## Show the shadows on a Page
 
