@@ -165,7 +165,7 @@ export function App() {
       setLoading(true);
       setupApi.getStatus().then(applySetupStatus).finally(() => setLoading(false));
     }).catch(e => {
-      // A failed reset is said on screen (the backend names what was not done).
+      // A failed reset opens the bell on it (the backend names what was not done).
       setResetError(e instanceof Error ? e.message : String(e));
       fetchStatus(true);
     });

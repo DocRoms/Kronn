@@ -6,15 +6,32 @@ import { useActivityPopover } from '../../hooks/useActivityPopover';
 import { useT } from '../../lib/I18nContext';
 import {
   ACTIVITY_ACTION_HANDLERS,
-  ACTIVITY_COMPARTMENTS,
   actionLabelKey,
   activityLinkPath,
   formatDuration,
+  formatTimeOfDay,
   humanizeType,
-  rowsOfCompartment,
+  sortRowsForPanel,
   translateOr,
   type ActivityActionHandler,
 } from '../../lib/activity';
+import {
+  ACTIVITY_CATEGORIES,
+  categoryOfRow,
+  countByCategory,
+  readFilter,
+  writeFilter,
+  type ActivityFilter,
+  type ActivityTab,
+} from '../../lib/activityFilters';
+import {
+  hasUnresolvedAlert,
+  markNotificationsSeen,
+  unreadCount,
+  useNotifications,
+} from '../../lib/notifications';
+import { ActivityFilterChips } from './ActivityFilterChips';
+import { NotificationsTab } from './NotificationsTab';
 import type { ActivityAction, ActivityLink, ActivityOverview, ActivityRow } from '../../types/generated';
 import './ActivityPanel.css';
 
@@ -22,6 +39,10 @@ export interface ActivityPanelProps {
   overview: ActivityOverview | null;
   /** The last poll failed: what is shown may be out of date. */
   failed?: boolean;
+  /** The tab to open on; by default Notifications when an alert is unresolved, else In progress. */
+  initialTab?: ActivityTab;
+  /** When the overview shown was last read (ms): the "as of" of a greyed view. */
+  asOf?: number | null;
   onClose: () => void;
   onOpenLink: (link: ActivityLink) => void;
   /** Called once an action has settled, whichever way, so the view refreshes. */
@@ -43,16 +64,19 @@ const ACTION_ICON = {
 } as const;
 
 /**
- * The attention center's panel (KT-1658). It knows compartments and the
- * generic row facts — title, state, elapsed time, a stalled hint, a link,
- * actions — and nothing about what a row is, so a new row type needs no change
- * here. `running` is the one compartment phase 1 fills; the KT-334 ones
- * (`needs_decision`, `unseen_done`) render under their own heading as soon as a
- * row lands in them.
+ * The attention center's panel (KT-1658), in two tabs since KT-1684: In
+ * progress, and Notifications (the outage and the server errors). Each tab has
+ * the same category chips; "All" groups the list into one titled section per
+ * category. The In progress side knows the generic row facts — title, state,
+ * elapsed time, a stalled hint, a link, actions — and nothing about what a row
+ * is, so a new row type needs no change here: its compartment only orders it
+ * (the KT-334 ones, `needs_decision` and `unseen_done`, are tagged on the row).
  */
 export function ActivityPanel({
   overview,
   failed = false,
+  initialTab,
+  asOf = null,
   onClose,
   onOpenLink,
   onActionSettled,
@@ -96,8 +120,48 @@ export function ActivityPanel({
     }
   };
 
-  const rows = overview?.rows ?? [];
+  const notifications = useNotifications();
+  const [tab, setTab] = useState<ActivityTab>(
+    () => initialTab ?? (hasUnresolvedAlert(notifications) ? 'notifications' : 'progress'),
+  );
+  const [filters, setFilters] = useState<Record<ActivityTab, ActivityFilter>>(() => ({
+    progress: readFilter('progress'),
+    notifications: readFilter('notifications'),
+  }));
+  const changeFilter = (target: ActivityTab, filter: ActivityFilter) => {
+    writeFilter(target, filter);
+    setFilters(current => ({ ...current, [target]: filter }));
+  };
+
+  // Looking at the Notifications tab is reading it: the counter and the bell's dot clear.
+  useEffect(() => {
+    if (tab === 'notifications') markNotificationsSeen();
+  }, [tab, notifications]);
+
+  const outage = notifications.outage;
+  const rows = sortRowsForPanel(overview?.rows ?? []);
+  const counts = countByCategory(rows, categoryOfRow);
+  const progressFilter = filters.progress;
+  const inProgress = (overview?.rows ?? []).filter(row => row.compartment === 'running').length;
+  const visibleRows = progressFilter === 'all' ? rows : rows.filter(row => categoryOfRow(row) === progressFilter);
   const unavailable = overview?.unavailable_sources ?? [];
+  const lastKnown = asOf ?? (overview ? new Date(overview.generated_at).getTime() : null);
+  const unread = unreadCount(notifications);
+
+  const renderRow = (row: ActivityRow) => (
+    <ActivityRowItem
+      key={row.id}
+      row={row}
+      now={now}
+      stallAfterSecs={overview?.stall_after_secs ?? 0}
+      busy={busy}
+      stale={outage !== null}
+      error={errors[row.id]}
+      handlers={handlers}
+      onOpenLink={onOpenLink}
+      onPerform={perform}
+    />
+  );
 
   return createPortal(
     <div
@@ -111,7 +175,29 @@ export function ActivityPanel({
       tabIndex={-1}
     >
       <div className="activity-panel-header">
-        <span className="activity-panel-title">{t('activity.panel.title')}</span>
+        <div className="activity-tabs" role="tablist" aria-label={t('activity.tabs.label')}>
+          {(['progress', 'notifications'] as const).map(id => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              id={`activity-tab-${id}`}
+              className="activity-tab"
+              data-testid={`activity-tab-${id}`}
+              aria-selected={tab === id}
+              aria-controls={`activity-tabpanel-${id}`}
+              onClick={() => setTab(id)}
+            >
+              {t(`activity.tab.${id}`)}
+              {id === 'progress' && inProgress > 0 && (
+                <span className="activity-tab-counter activity-tab-counter-neutral" data-testid="activity-tab-in-progress">{inProgress}</span>
+              )}
+              {id === 'notifications' && unread > 0 && (
+                <span className="activity-tab-counter" data-testid="activity-tab-unread">{unread}</span>
+              )}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           className="activity-panel-close"
@@ -122,54 +208,62 @@ export function ActivityPanel({
         </button>
       </div>
 
-      <div className="activity-panel-body">
-        {ACTIVITY_COMPARTMENTS.map(({ id, alwaysShown }) => {
-          const compartmentRows = rowsOfCompartment(rows, id);
-          if (compartmentRows.length === 0 && !alwaysShown) return null;
-          const headingId = `activity-compartment-${id}`;
-          return (
-            <section
-              key={id}
-              className="activity-compartment"
-              data-compartment={id}
-              aria-labelledby={headingId}
-            >
-              <h3 id={headingId} className="activity-compartment-title">
-                {t(`activity.compartment.${id}`)}
-                <span className="activity-compartment-count">{compartmentRows.length}</span>
-              </h3>
-              {compartmentRows.length === 0 ? (
+      <div
+        className="activity-panel-body"
+        role="tabpanel"
+        id={`activity-tabpanel-${tab}`}
+        aria-labelledby={`activity-tab-${tab}`}
+      >
+        {tab === 'notifications' ? (
+          <NotificationsTab
+            onClose={onClose}
+            notifications={notifications}
+            now={now}
+            filter={filters.notifications}
+            onFilterChange={filter => changeFilter('notifications', filter)}
+          />
+        ) : (
+          <div className="activity-tabpanel" data-stale={outage ? 'true' : undefined} data-testid="progress-tab">
+            <ActivityFilterChips value={progressFilter} counts={counts} onChange={filter => changeFilter('progress', filter)} />
+            {outage && lastKnown !== null && (
+              <div className="activity-note activity-stale-note" role="status" data-testid="activity-stale">
+                {t('activity.stale.asOf', formatTimeOfDay(lastKnown))}
+              </div>
+            )}
+            <div className="activity-tabbody activity-progress-body">
+              {visibleRows.length === 0 ? (
                 <p className="activity-empty">
                   {overview ? t('activity.panel.empty') : t('activity.panel.loading')}
                 </p>
+              ) : progressFilter === 'all' ? (
+                ACTIVITY_CATEGORIES.map(category => {
+                  const section = visibleRows.filter(row => categoryOfRow(row) === category);
+                  if (section.length === 0) return null;
+                  const headingId = `activity-section-${category}`;
+                  return (
+                    <section key={category} className="activity-section" data-section={category} aria-labelledby={headingId}>
+                      <h3 id={headingId} className="activity-section-title">
+                        {t(`activity.filter.${category}`)}
+                        <span className="activity-compartment-count">{section.length}</span>
+                      </h3>
+                      <ul className="activity-list">{section.map(renderRow)}</ul>
+                    </section>
+                  );
+                })
               ) : (
-                <ul className="activity-list">
-                  {compartmentRows.map(row => (
-                    <ActivityRowItem
-                      key={row.id}
-                      row={row}
-                      now={now}
-                      stallAfterSecs={overview?.stall_after_secs ?? 0}
-                      busy={busy}
-                      error={errors[row.id]}
-                      handlers={handlers}
-                      onOpenLink={onOpenLink}
-                      onPerform={perform}
-                    />
-                  ))}
-                </ul>
+                <ul className="activity-list">{visibleRows.map(renderRow)}</ul>
               )}
-            </section>
-          );
-        })}
+            </div>
+          </div>
+        )}
       </div>
 
-      {unavailable.length > 0 && (
+      {tab === 'progress' && unavailable.length > 0 && (
         <div className="activity-note" role="status">
           {t('activity.panel.unavailable', unavailable.join(', '))}
         </div>
       )}
-      {failed && (
+      {tab === 'progress' && failed && !outage && (
         <div className="activity-note" role="alert">{t('activity.panel.loadError')}</div>
       )}
     </div>,
@@ -182,13 +276,15 @@ interface RowItemProps {
   now: number;
   stallAfterSecs: number;
   busy: ReadonlySet<string>;
+  /** The backend is unreachable: the row is the last known state and cannot be acted on. */
+  stale?: boolean;
   error?: string;
   handlers: Readonly<Record<string, ActivityActionHandler>>;
   onOpenLink: (link: ActivityLink) => void;
   onPerform: (row: ActivityRow, action: ActivityAction) => void;
 }
 
-function ActivityRowItem({ row, now, busy, error, handlers, onOpenLink, onPerform }: RowItemProps) {
+function ActivityRowItem({ row, now, busy, stale = false, error, handlers, onOpenLink, onPerform }: RowItemProps) {
   const { t } = useT();
   const started = new Date(row.started_at).getTime();
   const elapsed = formatDuration(now - started);
@@ -211,6 +307,14 @@ function ActivityRowItem({ row, now, busy, error, handlers, onOpenLink, onPerfor
       <span className="activity-row-text">
         <span className="activity-row-name">{row.title}</span>
         <span className="activity-row-meta">
+          {row.compartment !== 'running' && (
+            <>
+              <span className="activity-row-compartment" data-testid="activity-row-compartment">
+                {t(`activity.compartment.${row.compartment}`)}
+              </span>
+              <span className="activity-row-sep" aria-hidden="true">·</span>
+            </>
+          )}
           <span>{typeLabel}</span>
           <span className="activity-row-sep" aria-hidden="true">·</span>
           <span data-testid="activity-row-state">{stateLabel}</span>
@@ -286,7 +390,7 @@ function ActivityRowItem({ row, now, busy, error, handlers, onOpenLink, onPerfor
                 className="activity-action-btn"
                 data-kind={action.kind}
                 data-testid={`activity-action-${action.id}`}
-                disabled={working}
+                disabled={working || stale}
                 aria-label={t('activity.action.on', label, row.title)}
                 onClick={() => onPerform(row, action)}
               >

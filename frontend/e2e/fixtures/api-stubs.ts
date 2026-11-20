@@ -77,9 +77,9 @@ export async function stubBootEndpoints(page: Page) {
       }),
     });
   });
-  // Backend health pill polls `/api/health` every 30s. Stub a healthy
-  // reply so the BackendStatus pill stays hidden during E2E runs —
-  // tests that want to assert the offline pill override this stub.
+  // The backend monitor polls `/api/health` every 30s. Stub a healthy
+  // reply so the bell raises no outage alert during E2E runs —
+  // tests that want to assert the outage override this stub.
   await page.route('**/api/health', route =>
     route.fulfill({
       status: 200,

@@ -23,7 +23,8 @@ vi.mock('../ProjectCard', () => ({
 vi.mock('../MatrixText', () => ({ MatrixText: ({ text }: { text: string }) => <span>{text}</span> }));
 const deleteProject = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const dockerRunning = vi.hoisted(() => vi.fn().mockResolvedValue({ project_ids: [], checked_at: '2026-08-30T08:00:00Z' }));
-vi.mock('../../lib/api', () => ({ projects: { delete: deleteProject, dockerRunning } }));
+const scanProjects = vi.hoisted(() => vi.fn().mockResolvedValue([]));
+vi.mock('../../lib/api', () => ({ projects: { delete: deleteProject, dockerRunning, scan: scanProjects } }));
 
 import { ProjectList } from '../ProjectList';
 
@@ -397,6 +398,26 @@ describe('ProjectList — missing-path banner', () => {
     expect(addButton).toHaveAttribute('data-tour-id', 'new-project-btn');
     fireEvent.click(addButton);
     expect(onAddProject).toHaveBeenCalledOnce();
+  });
+
+  it('offers Detect repositories next to the add-project action (KT-1684), and opens its preview', async () => {
+    render(
+      <ProjectList
+        projects={[proj('p1', 'Alpha', '/repos/alpha', true)]}
+        discussions={[]} discussionsByProject={{}} driftByProject={{}} agents={[]} allSkills={[]} mcpConfigs={[]} workflows={[]}
+        configLanguage="fr" toast={noop} onNavigate={noop} onSetDiscPrefill={noop} onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop} onRefetch={noop} onRefetchDiscussions={noop} onRefetchSkills={noop} onRefetchDrift={noop}
+        onAddProject={noop} expandedId={null} onSetExpandedId={noop}
+      />,
+    );
+    const detect = screen.getByRole('button', { name: 'projects.detect.title' });
+    const add = screen.getByRole('button', { name: 'projects.bootstrap' });
+    expect(detect.parentElement).toBe(add.parentElement);
+    expect(scanProjects).not.toHaveBeenCalled();
+
+    fireEvent.click(detect);
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    await waitFor(() => expect(scanProjects).toHaveBeenCalledTimes(1));
   });
 
   it('separates icon-only filtering and sorting beside the shared search', () => {

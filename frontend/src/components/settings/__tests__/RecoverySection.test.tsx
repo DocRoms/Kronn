@@ -25,6 +25,7 @@ const { config } = vi.hoisted(() => ({
 vi.mock('../../../lib/api', () => ({ config }));
 
 import { RecoverySection } from '../RecoverySection';
+import { getNotifications, resetNotifications, setNotices } from '../../../lib/notifications';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length ? `${key}:${args.join(',')}` : key;
@@ -256,6 +257,102 @@ describe('RecoverySection', () => {
     config.getRecoveryStatus.mockResolvedValue({ configured: false, key_locked: false, config_holds_key: true });
     render(<RecoverySection toast={toast} t={t} />);
     expect(await screen.findByTestId('recovery-key-beside-data')).toBeTruthy();
+  });
+
+  // KT-1686
+  it('says a key beside its data in plain words, the technical detail collapsed', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ configured: false, key_locked: false, config_holds_key: true });
+    render(<RecoverySection toast={toast} t={t} />);
+    const block = await screen.findByTestId('recovery-key-beside-data');
+    expect(block.textContent).toContain('notif.protect.title');
+    const details = screen.getByTestId('recovery-key-beside-data-details') as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain('keyLocked.keyBesideData');
+  });
+
+  it('writes a phrase, and stores it only once the owner says it is kept', async () => {
+    resetNotifications();
+    setNotices('key', [{ id: 'beside-data', kind: 'key_beside_data', category: 'kronn' }]);
+    config.getRecoveryStatus.mockResolvedValue({ configured: false, key_locked: false, config_holds_key: true });
+    config.setRecovery.mockResolvedValue({ recovery_code: 'CODE-1234' });
+    render(<RecoverySection toast={toast} t={t} />);
+    fireEvent.click(await screen.findByTestId('recovery-generate'));
+    const phrase = screen.getByTestId('recovery-generated-phrase').textContent!;
+    expect(phrase).toMatch(/^([a-z2-9]{5}-){4}[a-z2-9]{5}$/);
+    expect(config.setRecovery).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('recovery-generated-stored'));
+    await waitFor(() => expect(config.setRecovery).toHaveBeenCalledWith(phrase));
+    await waitFor(() => expect(screen.queryByTestId('recovery-generated')).toBeNull());
+    expect(document.body.textContent).toContain('CODE-1234');
+    expect(document.body.textContent).not.toContain(phrase);
+    expect(screen.queryByTestId('recovery-generate')).toBeNull();
+    expect(getNotifications().notices).toHaveLength(0);
+  });
+
+  it('keeps the phrase on screen and the notice in place when the backend refuses', async () => {
+    resetNotifications();
+    setNotices('key', [{ id: 'beside-data', kind: 'key_beside_data', category: 'kronn' }]);
+    config.getRecoveryStatus.mockResolvedValue({ configured: false, key_locked: false, config_holds_key: true });
+    config.setRecovery.mockRejectedValue(new Error('disk full'));
+    render(<RecoverySection toast={toast} t={t} />);
+    fireEvent.click(await screen.findByTestId('recovery-generate'));
+    fireEvent.click(screen.getByTestId('recovery-generated-stored'));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('disk full', 'error'));
+    expect(screen.getByTestId('recovery-generated-phrase')).toBeTruthy();
+    expect(getNotifications().notices).toHaveLength(1);
+  });
+
+  it('says the phrase is active, not to create one, once it protects the key in use', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ configured: true, matches_key: true, key_locked: false, config_holds_key: true });
+    render(<RecoverySection toast={toast} t={t} />);
+    expect((await screen.findByTestId('recovery-key-beside-data-body')).textContent).toBe('settings.recovery.phraseActive');
+  });
+
+  it('drops the advice of the bell and a phrase Kronn wrote when a typed passphrase is saved', async () => {
+    resetNotifications();
+    setNotices('key', [{ id: 'beside-data', kind: 'key_beside_data', category: 'kronn' }]);
+    config.getRecoveryStatus.mockResolvedValue({ configured: false, key_locked: false, config_holds_key: true });
+    config.setRecovery.mockResolvedValue({ recovery_code: 'CODE-1234' });
+    render(<RecoverySection toast={toast} t={t} />);
+    fireEvent.click(await screen.findByTestId('recovery-generate'));
+    fireEvent.change(screen.getByTestId('recovery-passphrase'), { target: { value: 'a long passphrase' } });
+    fireEvent.change(screen.getByTestId('recovery-confirm'), { target: { value: 'a long passphrase' } });
+    fireEvent.click(screen.getByTestId('recovery-save'));
+    await waitFor(() => expect(config.setRecovery).toHaveBeenCalledWith('a long passphrase'));
+    await waitFor(() => expect(getNotifications().notices).toHaveLength(0));
+    expect(screen.queryByTestId('recovery-generated')).toBeNull();
+  });
+
+  it('says the phrase is active when the answer was lost after the backend stored it', async () => {
+    resetNotifications();
+    setNotices('key', [{ id: 'beside-data', kind: 'key_beside_data', category: 'kronn' }]);
+    config.getRecoveryStatus
+      .mockResolvedValueOnce({ configured: false, key_locked: false, config_holds_key: true })
+      .mockResolvedValue({ configured: true, matches_key: true, key_locked: false, config_holds_key: true });
+    config.setRecovery.mockRejectedValue(new Error('Failed to fetch'));
+    render(<RecoverySection toast={toast} t={t} />);
+    fireEvent.click(await screen.findByTestId('recovery-generate'));
+    fireEvent.click(screen.getByTestId('recovery-generated-stored'));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('settings.recovery.codeNotShown', 'error'));
+    expect(screen.queryByTestId('recovery-generated')).toBeNull();
+    expect(getNotifications().notices).toHaveLength(0);
+  });
+
+  it('forgets a phrase Kronn wrote on Cancel, without storing it', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ configured: false, key_locked: false, config_holds_key: true });
+    render(<RecoverySection toast={toast} t={t} />);
+    fireEvent.click(await screen.findByTestId('recovery-generate'));
+    fireEvent.click(screen.getByTestId('recovery-generated-cancel'));
+    expect(screen.queryByTestId('recovery-generated')).toBeNull();
+    expect(config.setRecovery).not.toHaveBeenCalled();
+  });
+
+  it('offers no generated phrase when one is already configured', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ configured: true, matches_key: true, key_locked: false, config_holds_key: true });
+    render(<RecoverySection toast={toast} t={t} />);
+    await screen.findByTestId('recovery-key-beside-data');
+    expect(screen.queryByTestId('recovery-generate')).toBeNull();
   });
 
   it('lists the credentials still in clear, by name', async () => {

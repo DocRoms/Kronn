@@ -115,15 +115,14 @@ fn origin_of(
 
 /// A level's approval of a Quick Exec, not yet journalled: it is granted in the
 /// very transaction that saves the line ([`store_quick_exec`]).
-pub(crate) struct PendingGrant {
-    pub(crate) origin: TrustOrigin,
-    pub(crate) subject: String,
-    pub(crate) project_id: Option<String>,
+pub struct PendingGrant {
+    pub origin: TrustOrigin,
+    pub subject: String,
+    pub project_id: Option<String>,
 }
 
 /// Why a save that counted on a level was refused.
-pub(crate) const TRUST_CHANGED: &str =
-    "The trust level changed while the Quick Exec was being saved: it \
+pub const TRUST_CHANGED: &str = "The trust level changed while the Quick Exec was being saved: it \
      was not saved. Save it again.";
 
 /// KT-1492 — under Trusted, a line an agent wrote that passes values to a CLI is
@@ -201,7 +200,7 @@ fn keep_only_a_live_trust_approval(conn: &rusqlite::Connection, saved: &mut Quic
 /// approved) or after (it withdraws the approval this save gave). An update
 /// that only retains an earlier approval re-reads it on that same connection
 /// first ([`keep_only_a_live_trust_approval`]).
-pub(crate) async fn store_quick_exec(
+pub async fn store_quick_exec(
     state: &AppState,
     item: &QuickExec,
     insert: bool,
@@ -244,8 +243,8 @@ pub(crate) async fn store_quick_exec(
 
 /// Create a Quick Exec. `by_agent` (bridge token or Kronn agent tools) drops
 /// any approval of unmodelled programs: only a human gives one (KT-1017).
-#[cfg(test)]
-pub(crate) async fn create_as(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn create_as(
     state: AppState,
     request: CreateQuickExecRequest,
     by_agent: bool,
@@ -254,7 +253,7 @@ pub(crate) async fn create_as(
 }
 
 /// [`create_as`] for an agent launched from the rooms and run of `origin`.
-pub(crate) async fn create_as_in(
+pub async fn create_as_in(
     state: AppState,
     mut request: CreateQuickExecRequest,
     by_agent: bool,
@@ -355,8 +354,8 @@ pub async fn update(
 }
 
 /// Update a Quick Exec; see [`create_as`] for `by_agent`.
-#[cfg(test)]
-pub(crate) async fn update_as(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn update_as(
     state: AppState,
     id: String,
     request: CreateQuickExecRequest,
@@ -366,7 +365,7 @@ pub(crate) async fn update_as(
 }
 
 /// [`update_as`] for an agent launched from the rooms and run of `origin`.
-pub(crate) async fn update_as_in(
+pub async fn update_as_in(
     state: AppState,
     id: String,
     mut request: CreateQuickExecRequest,
@@ -1102,7 +1101,7 @@ fn drop_stale_approval(request: &mut CreateQuickExecRequest, agent_written: Opti
 
 /// Whether a line, written by an agent, would wait for a human's approval:
 /// only such a line carries the agent's mark (KT-1017).
-pub(crate) fn needs_agent_approval(command: &str, args: &[String]) -> bool {
+pub fn needs_agent_approval(command: &str, args: &[String]) -> bool {
     matches!(
         crate::core::inline_code::first_unsafe_placeholder_with(
             command.trim(),
@@ -1153,7 +1152,7 @@ fn waiting_program(item: &QuickExec) -> Option<String> {
 
 /// The activation card, as the room reads it: a System message holding one
 /// JSON object after the `[kronn-activate:` marker.
-pub(crate) fn activation_card_content(item: &QuickExec, program: &str) -> String {
+pub fn activation_card_content(item: &QuickExec, program: &str) -> String {
     format!(
         "[kronn-activate: {}]",
         serde_json::json!({
@@ -1167,11 +1166,7 @@ pub(crate) fn activation_card_content(item: &QuickExec, program: &str) -> String
 /// Posts the one-click activation card in the room an agent saved a waiting
 /// Quick Exec from. One card per line: saving the same line again adds none,
 /// a changed line adds a new one. The save never fails for the card.
-pub(crate) async fn announce_activation(
-    state: &AppState,
-    discussion_id: Option<&str>,
-    item: &QuickExec,
-) {
+pub async fn announce_activation(state: &AppState, discussion_id: Option<&str>, item: &QuickExec) {
     let (Some(discussion_id), Some(program)) = (discussion_id, waiting_program(item)) else {
         return;
     };
@@ -1364,7 +1359,7 @@ pub async fn refuse_activation(
 
 /// The [`Trust`](crate::core::argv_roles::Trust) of a saved Quick Exec: it
 /// pins no script, so a script shape needs the approval.
-pub(crate) fn quick_exec_trust(item: &QuickExec) -> crate::core::argv_roles::Trust {
+pub fn quick_exec_trust(item: &QuickExec) -> crate::core::argv_roles::Trust {
     crate::core::argv_roles::Trust {
         approved: item.unmodelled_args_approved == Some(true),
         agent_written: item.agent_written == Some(true),
@@ -1399,7 +1394,7 @@ fn validate_request(request: &CreateQuickExecRequest) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn validate_variables(
+pub fn validate_variables(
     declarations: &[PromptVariable],
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
@@ -1569,6 +1564,9 @@ mod tests {
                         own_discussions: vec![],
                         own_run: None,
                         agent: None,
+                        room_agent_of: Vec::new(),
+                        own_execution: None,
+                        own_sessions: Vec::new(),
                     })
                 });
                 import(
@@ -1673,6 +1671,9 @@ mod tests {
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         }))
     }
 
@@ -1746,6 +1747,9 @@ mod tests {
             own_discussions: vec![discussion.into()],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         }))
     }
 
@@ -1976,6 +1980,77 @@ mod tests {
         edited.args.push("--soft".into());
         let Json(edited) = update_as(state.clone(), item.id.clone(), edited, true).await;
         assert_eq!(edited.data.unwrap().unmodelled_args_approved, None);
+    }
+
+    /// KT-1695: « Activate all » is the single activation, once per Quick
+    /// Exec: an agent is refused on each and activates none, a human's
+    /// activation settles each line it read, and a line that changed since is
+    /// refused alone, leaving the others activated.
+    #[tokio::test]
+    async fn activating_several_lines_is_the_single_human_activation_each_time() {
+        let state = state();
+        let mut lines = Vec::new();
+        for (name, args) in [
+            ("Top 5xx", vec!["logs", "get-query-results", "{{query_id}}"]),
+            ("Start query", vec!["logs", "start-query", "{{from}}"]),
+            ("Stop query", vec!["logs", "stop-query", "{{query_id}}"]),
+        ] {
+            let mut line = request("aws");
+            line.name = name.into();
+            line.args = args.into_iter().map(String::from).collect();
+            let Json(saved) = create_as(state.clone(), line, true).await;
+            lines.push(saved.data.expect("an agent's line is saved inactive"));
+        }
+        let read = |item: &QuickExec| ActivateQuickExecRequest {
+            command: item.command.clone(),
+            args: item.args.clone(),
+        };
+
+        // An agent activates none of them, whichever line it names.
+        for item in &lines {
+            let Json(by_agent) = activate(
+                State(state.clone()),
+                Path(item.id.clone()),
+                bridge(),
+                None,
+                Json(read(item)),
+            )
+            .await;
+            assert!(!by_agent.success, "{}", item.name);
+            assert_eq!(
+                stored(&state, &item.id).await.unmodelled_args_approved,
+                None
+            );
+        }
+        let Json(pending) = pending_approvals(State(state.clone())).await;
+        assert_eq!(pending.data.unwrap().len(), 3);
+
+        // The last line changed after the human read it: only it is refused.
+        let mut changed = read(&lines[2]);
+        changed.args.push("--force".into());
+        let requests = [read(&lines[0]), read(&lines[1]), changed];
+        let mut outcomes = Vec::new();
+        for (item, request) in lines.iter().zip(requests) {
+            let Json(outcome) = activate(
+                State(state.clone()),
+                Path(item.id.clone()),
+                None,
+                None,
+                Json(request),
+            )
+            .await;
+            outcomes.push(outcome.success);
+        }
+        assert_eq!(outcomes, [true, true, false]);
+        for (item, approved) in lines.iter().zip([Some(true), Some(true), None]) {
+            let stored = stored(&state, &item.id).await;
+            assert_eq!(stored.unmodelled_args_approved, approved, "{}", item.name);
+            assert_eq!(stored.agent_written, Some(true));
+        }
+        let Json(pending) = pending_approvals(State(state.clone())).await;
+        let pending = pending.data.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, lines[2].id);
     }
 
     /// KT-1490: the human activates the line they read. A line whose program

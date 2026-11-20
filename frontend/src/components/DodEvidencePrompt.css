@@ -1,0 +1,50 @@
+.dod-evidence {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-sm);
+}
+
+.dod-evidence > label {
+  display: grid;
+  gap: 4px;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+}
+
+.dod-evidence textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.dod-evidence > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.dod-evidence > div > button {
+  width: auto;
+  padding: 3px 10px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.dod-evidence > div > button[data-primary="true"] {
+  border-color: var(--kr-accent);
+  color: var(--kr-accent);
+}
+
+.dod-evidence > div > button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

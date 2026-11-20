@@ -1,0 +1,107 @@
+/* "Detect repositories" on the Projects page (KT-1684). The overlay and the
+ * dialog shell are the dashboard's (`.dash-modal*`); this file only lays out the
+ * checklist. Tokens only. */
+
+.detect-repos {
+  width: 560px;
+}
+
+.detect-repos-state {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin: 0 0 var(--kr-sp-6);
+  font-size: var(--kr-fs-base);
+  color: var(--kr-text-secondary);
+}
+
+.detect-repos-error {
+  color: var(--kr-error);
+}
+
+.detect-repos-list {
+  list-style: none;
+  margin: 0 0 var(--kr-sp-6);
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-md);
+}
+
+.detect-repos-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  border-bottom: 1px solid var(--kr-border-soft);
+}
+
+.detect-repos-row:last-child {
+  border-bottom: none;
+}
+
+.detect-repos-label {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.detect-repos-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.detect-repos-name {
+  font-size: var(--kr-fs-md);
+  font-weight: 500;
+  color: var(--kr-text-primary);
+}
+
+.detect-repos-path {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detect-repos-hide {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex-shrink: 0;
+  padding: var(--kr-sp-1) var(--kr-sp-4);
+  background: transparent;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-xl);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.detect-repos-hide:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.detect-repos-hide:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.detect-repos-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--kr-sp-4);
+}
+
+@media (pointer: coarse) {
+  .detect-repos-hide {
+    min-height: 44px;
+  }
+}
