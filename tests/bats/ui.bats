@@ -980,6 +980,36 @@ EOF
     assert_failure
 }
 
+@test "menu_choice: on EOF takes the caller's default instead of looping forever" {
+    _INTERACTIVE_MENU=false
+    pick() { KRONN_MENU_DEFAULT=1 menu_choice "How?" "Web" "CLI" < /dev/null; echo "picked=$REPLY"; }
+    run pick
+    assert_success
+    assert_output --partial "picked=1"
+}
+
+@test "menu_choice: on EOF with no default stops with an error" {
+    _INTERACTIVE_MENU=false
+    pick() { menu_choice "Action:" "Install" "Remove" < /dev/null; echo "picked=$REPLY"; }
+    run pick
+    assert_failure
+    assert_output --partial "No terminal"
+    refute_output --partial "picked="
+}
+
+@test "menu_choice: a number on stdin is taken, default or not" {
+    _INTERACTIVE_MENU=false
+    pick() { KRONN_MENU_DEFAULT=1 menu_choice "How?" "Web" "CLI" <<< "2"; echo "picked=$REPLY"; }
+    run pick
+    assert_success
+    assert_output --partial "picked=2"
+}
+
+@test "kronn: the start menus name a default for a run without a terminal" {
+    run grep -c 'KRONN_MENU_DEFAULT=1 menu_choice' "${BATS_TEST_DIRNAME}/../../kronn"
+    assert_output "2"
+}
+
 @test "ask_yn: 'y' on stdin returns 0 (yes)" {
     run bash -c "source '${PROJECT_ROOT}/lib/ui.sh'; printf 'y\n' | ask_yn 'Continue?'"
     assert_success

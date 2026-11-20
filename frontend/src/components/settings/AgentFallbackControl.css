@@ -1,0 +1,134 @@
+/* KT-1693 — the « Fallback » block of an agent card: a title, then one row per
+   mode (see FallbackRow.css). The step / discussion override and the run notice
+   share the same pill language. */
+.set-agent-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  flex: 1 1 100%;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+}
+
+.set-agent-fallback-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  font-weight: 650;
+}
+
+/* The title, and on its right the links about the models (model list, cost help). */
+.set-agent-fallback-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-2);
+}
+
+.set-agent-fallback-tools {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.set-agent-fallback-tools a {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-muted);
+  text-decoration: none;
+}
+
+.set-agent-fallback-tools a:hover {
+  color: var(--agent-color, var(--kr-accent-text));
+}
+
+/* The block sits inside the card's own content inset, the same as its header:
+   on a CLI card the block is a direct child of the card, so it carries it. */
+.set-agent-models-block {
+  padding: 0 var(--kr-sp-6) var(--kr-sp-4);
+}
+
+.set-agent-models-block:empty {
+  display: none;
+}
+
+/* An HTTP connection card has no wrapper either: same inset as its header. */
+.set-ext-api-conn > .set-agent-fallback {
+  padding: 0 var(--kr-sp-5) var(--kr-sp-5);
+}
+
+/* What the catalogue says about the pickers (loading, nothing known, stale):
+   one muted line under the block's title, not body text above the block. */
+.set-agent-fallback-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+}
+
+.set-agent-fallback-cooldown {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+}
+
+/* The override of a discussion or a step: the row, and what it does with the default. */
+.fb-override {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+}
+
+.fb-override-action {
+  height: 22px;
+  padding: 0 var(--kr-sp-3);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fb-override-action:hover:not(:disabled) {
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-hover);
+}
+
+.fb-override-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.fb-override-default {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-muted);
+}
+
+/* The room / run line when a turn or a step moved on to a fallback. */
+.fb-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-1) var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+  border: 1px dashed var(--kr-border);
+  border-radius: var(--kr-radius-md);
+}
+
+.fb-notice-from,
+.fb-notice-to {
+  font-weight: 650;
+  color: var(--kr-text-primary);
+}

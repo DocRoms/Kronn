@@ -1,7 +1,7 @@
 import type { AgentsConfig, AgentType } from '../types/generated';
 
 type AgentConfigKey = {
-  [K in keyof AgentsConfig]: AgentsConfig[K] extends { full_access: boolean } ? K : never
+  [K in keyof AgentsConfig]-?: AgentsConfig[K] extends { full_access: boolean } ? K : never
 }[keyof AgentsConfig];
 
 interface FullAccessSupport {

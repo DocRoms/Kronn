@@ -29,7 +29,7 @@ impl DispatchStatus {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value {
             "Pending" => Ok(Self::Pending),
             "Running" => Ok(Self::Running),
@@ -202,6 +202,26 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
     .map_err(Into::into)
 }
 
+/// Parse a stored `worker_agent_type` back to the typed identity: a value outside
+/// the domain is a corrupt row, surfaced as a hard error rather than silently
+/// dropping the worker's provider.
+pub fn agent_type_from_db(s: &str) -> Result<AgentType> {
+    Ok(match s {
+        "ClaudeCode" => AgentType::ClaudeCode,
+        "Codex" => AgentType::Codex,
+        "OpenCode" => AgentType::OpenCode,
+        "Vibe" => AgentType::Vibe,
+        "GeminiCli" => AgentType::GeminiCli,
+        "Kiro" => AgentType::Kiro,
+        "CopilotCli" => AgentType::CopilotCli,
+        "Ollama" => AgentType::Ollama,
+        "LiteLlm" => AgentType::LiteLlm,
+        "Nvidia" => AgentType::Nvidia,
+        "Custom" => AgentType::Custom,
+        other => anyhow::bail!("unknown worker_agent_type: {other}"),
+    })
+}
+
 /// The running native turn a room agent's bridge context names, when it is
 /// genuinely that turn: same room, same trigger, still Running, not a delegated
 /// worker's dispatch, and run by `agent`. Anything else is `None`, so a forged
@@ -219,7 +239,11 @@ pub fn running_room_agent_job(
     if job.discussion_id != discussion_id
         || job.trigger_message_id != source_message_id
         || job.status != DispatchStatus::Running
-        || super::orchestration::get_execution_for_dispatch(conn, dispatch_job_id)?.is_some()
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_executions WHERE dispatch_job_id = ?1)",
+            [dispatch_job_id],
+            |row| row.get::<_, bool>(0),
+        )?
     {
         return Ok(None);
     }
@@ -234,7 +258,7 @@ pub fn running_room_agent_job(
                 )
                 .optional()?;
             match room_agent {
-                Some(value) => super::orchestration::agent_type_from_db(&value)?,
+                Some(value) => agent_type_from_db(&value)?,
                 None => return Ok(None),
             }
         }
@@ -779,7 +803,7 @@ fn no_older_task_worker_waiting() -> String {
 
 /// Local task workers `Running` now (claimed, whether or not the runtime has
 /// started yet).
-fn running_task_workers(conn: &Connection) -> Result<i64> {
+pub fn running_task_workers(conn: &Connection) -> Result<i64> {
     conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM agent_dispatch_jobs AS running
@@ -891,6 +915,88 @@ pub fn task_worker_queue_position(conn: &Connection, id: &str) -> Result<Option<
     Ok(Some(ahead.max(0) as u32 + 1))
 }
 
+/// KT-1758 — a quota fallback's dispatch that has been `Pending` for a while,
+/// with what the room needs to say why. Read, never written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingFallbackDispatch {
+    pub dispatch_id: String,
+    pub execution_id: String,
+    pub parent_discussion_id: String,
+    /// The provider the fallback moved to, in the `agent_type_to_db` form.
+    pub provider: String,
+    pub waiting_since: DateTime<Utc>,
+    /// A backoff in the future: the dispatch is deliberately not due yet.
+    pub available_at: DateTime<Utc>,
+    pub progress_detail: Option<String>,
+    pub last_error: Option<String>,
+    /// `Running` dispatches of that same provider (its per-agent cap counts them).
+    pub provider_running: i64,
+    /// Local task workers `Running` (the `__task_workers` cap counts them).
+    pub task_workers_running: i64,
+    /// Local task workers waiting ahead of this one, in launch order.
+    pub waiting_ahead: i64,
+}
+
+/// Dispatches of an execution a quota fallback moved to another provider that
+/// have been `Pending` since before `waiting_since`, oldest first. These are the
+/// ones that were supposed to start within seconds: the room is told why they
+/// did not (see `api::orchestration::notify_waiting_fallback_dispatches`).
+pub fn list_waiting_fallback_dispatches(
+    conn: &Connection,
+    waiting_since: DateTime<Utc>,
+) -> Result<Vec<WaitingFallbackDispatch>> {
+    let provider = effective_agent("job");
+    let family = effective_agent("family");
+    let task_worker = local_task_worker_job("running");
+    let waiting = waiting_task_worker("ahead");
+    let mut statement = conn.prepare(&format!(
+        "SELECT job.id, execution.id, execution.parent_discussion_id,
+                execution.worker_agent_type, job.created_at, job.available_at,
+                job.progress_detail, job.last_error,
+                (SELECT COUNT(*) FROM agent_dispatch_jobs AS family
+                 WHERE family.status = 'Running' AND ({family}) = ({provider})),
+                (SELECT COUNT(*) FROM agent_dispatch_jobs AS running
+                 WHERE running.status = 'Running' AND {task_worker}),
+                (SELECT COUNT(*) FROM agent_dispatch_jobs AS ahead
+                 WHERE ahead.id <> job.id
+                   AND (ahead.created_at, ahead.rowid) < (job.created_at, job.rowid)
+                   AND {waiting})
+         FROM agent_dispatch_jobs AS job
+         JOIN task_executions AS execution ON execution.dispatch_job_id = job.id
+         JOIN task_execution_quota_origin AS origin
+              ON origin.task_execution_id = execution.id
+         WHERE job.status = 'Pending'
+           AND job.created_at <= ?1
+           AND execution.status = 'Working'
+           AND COALESCE(execution.worker_target_kind, '') <> 'cli'
+         ORDER BY job.created_at, job.rowid"
+    ))?;
+    let rows = statement.query_map(
+        params![
+            waiting_since.to_rfc3339(),
+            Utc::now().to_rfc3339(),
+            i64::from(MAX_DISPATCH_ATTEMPTS)
+        ],
+        |row| {
+            Ok(WaitingFallbackDispatch {
+                dispatch_id: row.get(0)?,
+                execution_id: row.get(1)?,
+                parent_discussion_id: row.get(2)?,
+                provider: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                waiting_since: parse_dt(row.get(4)?),
+                available_at: parse_dt(row.get(5)?),
+                progress_detail: row.get(6)?,
+                last_error: row.get(7)?,
+                provider_running: row.get(8)?,
+                task_workers_running: row.get(9)?,
+                waiting_ahead: row.get(10)?,
+            })
+        },
+    )?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
     claim_with_limits(conn, id, None)
 }
@@ -920,7 +1026,9 @@ pub fn claim_with_limits(
                  turn_attempts = turn_attempts + 1,
                  claimed_at = ?2,
                  updated_at = ?2,
-                 last_error = NULL,
+                 last_error = CASE
+                     WHEN last_error LIKE '{RUNTIME_UNAVAILABLE_PREFIX}%' THEN last_error
+                     ELSE NULL END,
                  progress_phase = CASE
                      WHEN progress_phase = 'queued'
                           AND substr(progress_detail, 1, length('{TASK_WORKER_QUEUED_DETAIL_PREFIX}'))
@@ -959,6 +1067,9 @@ pub fn claim_with_limits(
     .map_err(anyhow::Error::from)
     .and_then(|claimed| {
         if claimed.is_some() {
+            // KT-1689 — the worker's turn starts here, not when it was queued:
+            // the silent-worker clock restarts at the claim.
+            let _ = super::execution_activity::note_dispatch_activity(conn, id);
             return Ok(claimed);
         }
 
@@ -1186,6 +1297,10 @@ pub fn mark_agent_started(conn: &Connection, id: &str) -> Result<bool> {
             [id],
         )?;
     }
+    if changed > 0 {
+        // KT-1689 — the agent really starts: the silent-worker clock starts too.
+        let _ = super::execution_activity::note_dispatch_activity(conn, id);
+    }
     Ok(changed > 0)
 }
 
@@ -1206,7 +1321,7 @@ pub fn mark_progress(
     if changed {
         // KT-1247 — a provider/tool boundary is worker activity: it pushes the
         // silent-worker clock of the execution this dispatch belongs to.
-        let _ = super::orchestration::note_dispatch_activity(conn, id);
+        let _ = super::execution_activity::note_dispatch_activity(conn, id);
     }
     Ok(changed)
 }
@@ -1321,6 +1436,41 @@ pub fn retry_after(conn: &Connection, id: &str, delay_seconds: i64, error: &str)
     Ok(changed > 0)
 }
 
+/// KT-1758 — what `last_error` starts with after a deferral for an unavailable
+/// runtime. The claim keeps it (every other `last_error` is cleared there), so
+/// the count of consecutive deferrals survives the claim that follows each one.
+pub const RUNTIME_UNAVAILABLE_PREFIX: &str = "runtime_unavailable";
+
+/// KT-1758 — the `last_error` of the `count`-th consecutive deferral for the
+/// same `reason`. The first reads `runtime_unavailable: <reason>` as it always
+/// did; the next ones carry their count, `runtime_unavailable[3]: <reason>`.
+pub fn runtime_unavailable_marker(count: u32, reason: &str) -> String {
+    if count <= 1 {
+        format!("{RUNTIME_UNAVAILABLE_PREFIX}: {reason}")
+    } else {
+        format!("{RUNTIME_UNAVAILABLE_PREFIX}[{count}]: {reason}")
+    }
+}
+
+/// KT-1758 — the count and the reason a [`runtime_unavailable_marker`] holds.
+/// `None` for any other `last_error`. A bare `runtime_unavailable` (no reason)
+/// is one deferral with an empty reason.
+pub fn parse_runtime_unavailable(last_error: &str) -> Option<(u32, &str)> {
+    let rest = last_error.strip_prefix(RUNTIME_UNAVAILABLE_PREFIX)?;
+    let (count, rest) = match rest.strip_prefix('[') {
+        Some(counted) => {
+            let (digits, after) = counted.split_once(']')?;
+            (digits.parse::<u32>().ok()?, after)
+        }
+        None => (1, rest),
+    };
+    if rest.is_empty() {
+        return Some((count, ""));
+    }
+    let reason = rest.strip_prefix(':')?;
+    Some((count, reason.strip_prefix(' ').unwrap_or(reason)))
+}
+
 /// Return a claimed job to the durable queue when its agent runtime could not
 /// be started. Runtime availability is not an execution attempt: keep both
 /// counters unchanged so the obligation can survive until the runtime comes
@@ -1367,19 +1517,47 @@ pub fn release_unstarted_claim(conn: &Connection, id: &str, error: &str) -> Resu
     Ok(changed > 0)
 }
 
+/// KT-1758 — a dispatch that must run now: a quota fallback's. Its start is the
+/// whole point of the move, and no hold of the provider it left (the reset the
+/// refusal announced) may stand between it and a free slot — the hold applies to
+/// the agent that is held, which this dispatch is not. Only ever brings
+/// `available_at` forward, and only for a `Pending` job that has not run yet, so
+/// a backoff the dispatch earned by itself is never undone.
+pub fn make_available_now(conn: &Connection, id: &str) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE agent_dispatch_jobs SET available_at = ?2, updated_at = ?2
+         WHERE id = ?1 AND status = 'Pending' AND attempts = 0 AND available_at > ?2",
+        params![id, now],
+    )? > 0)
+}
+
+/// KT-1758 — what a cancellation leaves in `last_error`. It used to overwrite
+/// it with `cancelled`, so the reason a dispatch had been waiting (a deferred
+/// start, an audit hold, a retry) was gone when someone looked for it. The
+/// previous reason is kept: `cancelled (was: <reason>)`, or plain `cancelled`
+/// when there was none.
+const CANCELLED_KEEPING_LAST_ERROR: &str = "CASE
+    WHEN last_error IS NULL OR last_error = '' OR last_error = 'cancelled' THEN 'cancelled'
+    WHEN substr(last_error, 1, 9) = 'cancelled' THEN last_error
+    ELSE 'cancelled (was: ' || last_error || ')'
+END";
+
 pub fn cancel_for_discussion(conn: &Connection, discussion_id: &str) -> Result<u64> {
     let now = Utc::now().to_rfc3339();
     let changed = conn.execute(
-        "UPDATE agent_dispatch_jobs
+        &format!(
+            "UPDATE agent_dispatch_jobs
          SET status = 'Cancelled', completed_at = ?2, updated_at = ?2,
-             last_error = 'cancelled'
+             last_error = {CANCELLED_KEEPING_LAST_ERROR}
          WHERE id = (
              SELECT id FROM agent_dispatch_jobs
              WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
              ORDER BY CASE status WHEN 'Running' THEN 0 ELSE 1 END,
                       created_at, id
              LIMIT 1
-         )",
+         )"
+        ),
         params![discussion_id, now],
     )?;
     Ok(changed as u64)
@@ -1396,11 +1574,13 @@ pub fn cancel_for_discussion_by_id(
 ) -> Result<bool> {
     let now = Utc::now().to_rfc3339();
     let changed = conn.execute(
-        "UPDATE agent_dispatch_jobs
+        &format!(
+            "UPDATE agent_dispatch_jobs
          SET status = 'Cancelled', completed_at = ?3, updated_at = ?3,
-             last_error = 'cancelled'
+             last_error = {CANCELLED_KEEPING_LAST_ERROR}
          WHERE id = ?2 AND discussion_id = ?1
-           AND status IN ('Pending', 'Running')",
+           AND status IN ('Pending', 'Running')"
+        ),
         params![discussion_id, dispatch_id, now],
     )?;
     Ok(changed > 0)
@@ -2834,6 +3014,52 @@ mod tests {
         );
     }
 
+    /// KT-1758 — the count of consecutive deferrals rides in `last_error`, and
+    /// the claim that follows each deferral keeps it (every other `last_error`
+    /// is cleared there), so the count is still there at the next failure.
+    #[test]
+    fn the_deferral_count_survives_the_claim_that_follows_it() {
+        assert_eq!(
+            runtime_unavailable_marker(1, "spawn failed"),
+            "runtime_unavailable: spawn failed"
+        );
+        assert_eq!(
+            runtime_unavailable_marker(4, "spawn failed"),
+            "runtime_unavailable[4]: spawn failed"
+        );
+        for (count, reason) in [(1, "spawn failed"), (7, "Task worker refused: x: y")] {
+            let marker = runtime_unavailable_marker(count, reason);
+            assert_eq!(parse_runtime_unavailable(&marker), Some((count, reason)));
+        }
+        assert_eq!(
+            parse_runtime_unavailable("runtime_unavailable"),
+            Some((1, ""))
+        );
+        assert_eq!(parse_runtime_unavailable("cancelled"), None);
+        assert_eq!(parse_runtime_unavailable("runtime_unavailable[x]: y"), None);
+
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        claim(&connection, "j1").unwrap().unwrap();
+        assert!(defer_runtime_unavailable(
+            &connection,
+            "j1",
+            0,
+            &runtime_unavailable_marker(3, "spawn failed")
+        )
+        .unwrap());
+        let reclaimed = claim(&connection, "j1").unwrap().unwrap();
+        assert_eq!(
+            reclaimed.last_error.as_deref(),
+            Some("runtime_unavailable[3]: spawn failed"),
+            "the claim keeps the deferral marker"
+        );
+
+        // Any other error is still cleared at the claim, as it always was.
+        assert!(retry_after(&connection, "j1", 0, "provider_outage_retry").unwrap());
+        assert_eq!(claim(&connection, "j1").unwrap().unwrap().last_error, None);
+    }
+
     #[test]
     fn group_limit_prevents_claim_until_a_sibling_finishes() {
         let connection = connection();
@@ -3732,32 +3958,6 @@ mod tests {
         );
         assert_eq!(running_task_workers(&connection).unwrap(), 1);
         assert!(claim_capped(&connection, &queued));
-    }
-
-    /// A quota escalation settles the worker's dispatch as failed and parks the
-    /// execution for a human: its slot goes to the next in line.
-    #[test]
-    fn a_quota_escalation_frees_the_slot_of_its_worker() {
-        let connection = connection();
-        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
-        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
-        let queued = task_worker(&connection, "c", "ClaudeCode", "agent");
-        assert!(claim_capped(&connection, &a));
-        assert!(claim_capped(&connection, &b));
-        assert!(!claim_capped(&connection, &queued));
-
-        crate::db::orchestration::attach_execution_dispatch(&connection, "exec-a", &a).unwrap();
-        assert!(mark_failed(&connection, &a, "quota exhausted").unwrap());
-        crate::db::orchestration::escalate_execution_for_dispatch_quota(
-            &connection,
-            &a,
-            "ClaudeCode",
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(running_task_workers(&connection).unwrap(), 1);
-        assert!(claim_capped(&connection, &queued), "the slot is handed on");
     }
 
     /// `task_exec_reassign` cancels the replaced dispatch and queues the new

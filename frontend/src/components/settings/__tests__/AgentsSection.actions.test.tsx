@@ -32,6 +32,7 @@ const {
   effectiveAccessMock,
   setAgentMentionColorMock,
   setAgentConcurrencyMock,
+  setAgentFallbackMock,
   setAgentToolsMock,
   usageGetMock,
   getModelTiersMock,
@@ -49,6 +50,7 @@ const {
   effectiveAccessMock: vi.fn(),
   setAgentMentionColorMock: vi.fn(),
   setAgentConcurrencyMock: vi.fn(),
+  setAgentFallbackMock: vi.fn(),
   setAgentToolsMock: vi.fn(),
   usageGetMock: vi.fn(),
   getModelTiersMock: vi.fn(),
@@ -65,6 +67,7 @@ vi.mock('../../../lib/api', () => buildApiMock({
     getAgentAccessEffective: effectiveAccessMock as never,
     setAgentMentionColor: setAgentMentionColorMock as never,
     setAgentConcurrency: setAgentConcurrencyMock as never,
+    setAgentFallback: setAgentFallbackMock as never,
     setAgentTools: setAgentToolsMock as never,
     getModelTiers: getModelTiersMock as never,
   },
@@ -600,6 +603,18 @@ describe('AgentsSection — full-access switch', () => {
     expect(screen.getByTestId('agent-full-access-Vibe')).toBeTruthy();
     expect(screen.getByTestId('agent-full-access-Kiro')).toBeTruthy();
     expect(screen.queryByTestId('agent-full-access-Ollama')).toBeNull();
+  });
+
+  // A colleague could not find how to give OpenCode full access: the card
+  // showed « Restricted » and explained it only once « Edit » was open.
+  it('says on the closed card what the switch does', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentVibe', agent_type: 'Vibe', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    const what = screen.getByTestId('agent-access-what-Vibe');
+    expect(what).toHaveTextContent('config.fullAccessBadge');
+    expect(what).toHaveTextContent('config.fullAccessCardOff');
   });
 
   it('renders the permission switch reflecting full_access=false', () => {
@@ -1171,35 +1186,35 @@ describe('AgentsSection — CLI / Local / External zones', () => {
     expect(names).toEqual([['ClaudeCode', 'OpenCode'], ['Codex']]);
   });
 
-  /// The three tiers, as an external connection shows them: what runs, without
-  /// opening anything. The fold is where they change.
-  it('previews the three tiers on the card itself', async () => {
+  /// KT-1706 — the three tiers live in the card's one « Models and fallbacks » block, as the
+  /// model picker of each mode row: no separate preview block repeats them.
+  const modelOf = (agent: string, tier: string) =>
+    document.querySelector<HTMLInputElement>(`[data-model-tier-agent="${agent}"][data-model-tier="${tier}"]`);
+
+  it('shows the three tiers as the model pickers of the one models-and-fallbacks block', async () => {
     renderSection({
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
     });
     // The tiers arrive from configApi.getModelTiers, not from the props.
     await act(async () => { await Promise.resolve(); });
 
-    const preview = screen.getByTestId('agent-tier-preview-ClaudeCode');
-    const tiers = [...preview.querySelectorAll('.set-ext-api-conn-tier')].map(tier => ({
-      tier: tier.getAttribute('data-tier'),
-      model: tier.querySelector('code')?.textContent,
-    }));
-    // The built-in defaults, so the line never claims a model that is not the
-    // one the backend will run.
-    expect(tiers).toEqual([
-      { tier: 'economy', model: 'haiku' },
-      { tier: 'default', model: 'sonnet' },
-      { tier: 'reasoning', model: 'opus' },
-    ]);
-    // Same markup as a connection card: one object shown in two places.
-    expect(preview).toHaveClass('set-ext-api-conn-tiers');
+    const block = screen.getByTestId('agent-models-ClaudeCode');
+    expect(within(block).getAllByText('agents.modelsAndFallbacks')).toHaveLength(1);
+    expect(screen.queryByTestId('agent-tier-preview-ClaudeCode')).not.toBeInTheDocument();
+    for (const [mode, tier, model] of [['eco', 'economy', 'haiku'], ['standard', 'default', 'sonnet'], ['advanced', 'reasoning', 'opus']]) {
+      const row = within(block).getByTestId(`agent-fallback-ClaudeCode-${mode}`);
+      // The picker IS the model of the row, in the row.
+      expect(row.contains(modelOf('ClaudeCode', tier))).toBe(true);
+      expect(modelOf('ClaudeCode', tier)).toHaveValue(model);
+    }
+    // No second block on the card repeats them.
+    expect(document.querySelectorAll('[data-model-tier-agent="ClaudeCode"][data-model-tier="economy"]')).toHaveLength(1);
   });
 
-  it('shows an override in the preview rather than the built-in default', async () => {
+  it('shows an override in its row rather than the built-in default', async () => {
     const blankTier = { economy: null, default: null, reasoning: null };
     getModelTiersMock.mockResolvedValue({
-      claude_code: { economy: 'fable', default: null, reasoning: null },
+      claude_code: { economy: 'fable', default: null, reasoning: 'opus' },
       codex: blankTier, gemini_cli: blankTier, kiro: blankTier,
       vibe: blankTier, copilot_cli: blankTier, ollama: blankTier,
       lite_llm: blankTier, nvidia: blankTier,
@@ -1209,10 +1224,8 @@ describe('AgentsSection — CLI / Local / External zones', () => {
     });
     await act(async () => { await Promise.resolve(); });
 
-    const preview = screen.getByTestId('agent-tier-preview-ClaudeCode');
-    expect(preview.querySelector('[data-tier="economy"] code')?.textContent).toBe('fable');
-    // Untouched tiers still name the model that will actually run.
-    expect(preview.querySelector('[data-tier="reasoning"] code')?.textContent).toBe('opus');
+    expect(modelOf('ClaudeCode', 'economy')).toHaveValue('fable');
+    expect(modelOf('ClaudeCode', 'reasoning')).toHaveValue('opus');
   });
 
   /// An agent available through npx is not "installed", but it has settings —
@@ -1281,13 +1294,22 @@ describe('AgentsSection — Kronn tools switch (KT-1600)', () => {
     );
   });
 
-  it('gives LiteLLM and NVIDIA, which have no card, their own switch', async () => {
+  it('keeps the Ollama switch inside its card, with the plain help printed under it', () => {
+    renderSection({ agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })] });
+    const toggle = screen.getByTestId('agent-tools-Ollama');
+    expect(toggle.closest('.set-ollama-card')).not.toBeNull();
+    expect(screen.getByTestId('ollama-tools')).toHaveTextContent('agents.toolsHint');
+  });
+
+  it('leaves no Kronn-tools control outside a card: LiteLLM and NVIDIA live on their connection', () => {
     renderSection({ agents: [] });
-    expect((screen.getByTestId('agent-tools-LiteLlm') as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(screen.getByTestId('agent-tools-Nvidia'));
-    await waitFor(() =>
-      expect(setAgentToolsMock).toHaveBeenCalledWith({ agent: 'Nvidia', enabled: false }),
-    );
+    expect(screen.queryByTestId('external-agent-tools')).toBeNull();
+    expect(screen.queryByTestId('agent-tools-LiteLlm')).toBeNull();
+    expect(screen.queryByTestId('agent-tools-Nvidia')).toBeNull();
+    expect(document.querySelector('.set-agent-tools-defaults')).toBeNull();
+    document.querySelectorAll('.set-tools-switch').forEach(node => {
+      expect(node.closest('.set-ollama-card, .set-ext-api-form')).not.toBeNull();
+    });
   });
 
   it('gives a CLI agent no tools switch: it brings its own tools', () => {
@@ -1302,5 +1324,56 @@ describe('AgentsSection — Kronn tools switch (KT-1600)', () => {
     });
     fireEvent.click(screen.getByTestId('agent-tools-Ollama'));
     await waitFor(() => expect(toastFn).toHaveBeenCalledWith('common.actionFailed:disk full', 'error'));
+  });
+});
+
+// KT-1693 — the fallback of each mode row of an agent card, persisted through the
+// backend, which refuses a loop (or a wrong kind of mode) with its reason.
+describe('AgentsSection — per-mode fallback rows', () => {
+  const installed = (name: string, agent_type: AgentType) => makeAgent({ name, agent_type, installed: true, enabled: true });
+  const row = (agent: string, mode: string) => `agent-fallback-${agent}-${mode}`;
+
+  it('gives an agent one row per mode, offers the other installed agents and persists the row, then refetches', async () => {
+    setAgentFallbackMock.mockResolvedValue({ chains: [], cooldowns: [] });
+    const { refetchAgentAccess } = renderSection({
+      agents: [installed('Claude Code', 'ClaudeCode'), installed('Codex', 'Codex')],
+    });
+    for (const mode of ['eco', 'standard', 'advanced']) {
+      expect(await screen.findByTestId(row('ClaudeCode', mode))).toBeInTheDocument();
+    }
+    expect(within(screen.getByTestId(`${row('ClaudeCode', 'standard')}-model`)).getByRole('combobox')).toHaveValue('sonnet');
+    fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-add`));
+    const menu = screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu`);
+    expect(within(menu).getAllByRole('group').map(group => group.getAttribute('aria-label'))).toEqual(['Codex']);
+    fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu-Codex-standard`));
+    await waitFor(() =>
+      expect(setAgentFallbackMock).toHaveBeenCalledWith({
+        agent: 'ClaudeCode',
+        mode: 'standard',
+        fallback: { agent: 'Codex', model: null },
+      }),
+    );
+    await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
+  });
+
+  it('gives OpenCode its own rows, and offers it as a fallback of the other agents', async () => {
+    renderSection({
+      agents: [installed('Claude Code', 'ClaudeCode'), installed('OpenCode', 'OpenCode')],
+    });
+    expect(await screen.findByTestId(row('OpenCode', 'standard'))).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-add`));
+    const menu = screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu`);
+    expect(within(menu).getByRole('group', { name: 'OpenCode' })).toBeInTheDocument();
+  });
+
+  it('shows the refusal of the backend and does not refetch as if it had been stored', async () => {
+    setAgentFallbackMock.mockRejectedValue(new Error('Codex has full access and Claude Code does not.'));
+    const { refetchAgentAccess } = renderSection({
+      agents: [installed('Claude Code', 'ClaudeCode'), installed('Codex', 'Codex')],
+    });
+    fireEvent.click(await screen.findByTestId(`${row('ClaudeCode', 'standard')}-add`));
+    fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu-Codex-standard`));
+    expect(await screen.findByTestId(`${row('ClaudeCode', 'standard')}-refused`)).toHaveTextContent('fallback.refused');
+    expect(refetchAgentAccess).not.toHaveBeenCalled();
   });
 });

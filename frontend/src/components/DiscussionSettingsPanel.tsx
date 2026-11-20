@@ -19,6 +19,8 @@ import {
   Zap,
 } from 'lucide-react';
 import { discussions as discussionsApi } from '../lib/api';
+import { FallbackOverride } from './settings/FallbackOverride';
+import { TEXT_MODES } from '../lib/fallbackChain';
 import {
   AGENT_LABELS,
   agentSupportsIntrospection,
@@ -28,6 +30,7 @@ import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import type { ToastFn } from '../hooks/useToast';
 import type {
+  AgentFallback,
   AgentProfile,
   AgentType,
   Contact,
@@ -37,6 +40,7 @@ import type {
   DiscussionExecutionVariableRetention,
   McpConfigDisplay,
   McpIncompatibility,
+  ModeOverride,
   Project,
   Skill,
 } from '../types/generated';
@@ -90,6 +94,20 @@ export function DiscussionSettingsPanel({
   const [mcpSearch, setMcpSearch] = useState('');
   const [handoffMode, setHandoffMode] = useState<DiscussionAgentHandoffMode | null>(null);
   const [variableRetention, setVariableRetention] = useState<DiscussionExecutionVariableRetention | null>(null);
+  // KT-1693 — what this discussion overrides, per mode; a mode that is absent follows the agent's default.
+  const [fallbackOverrides, setFallbackOverrides] = useState<ModeOverride[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    discussionsApi.fallback(discussion.id)
+      .then(result => {
+        if (active) setFallbackOverrides(result?.overrides ?? []);
+      })
+      .catch(() => {
+        if (active) setFallbackOverrides([]);
+      });
+    return () => { active = false; };
+  }, [discussion.id]);
 
   useEffect(() => {
     let active = true;
@@ -274,6 +292,25 @@ export function DiscussionSettingsPanel({
             <span title={t('disc.mcps')}><Server size={11} /> {discussionMcps.length}</span>
           </div>
           {agentCollaborationControl}
+        </section>
+
+        {/* KT-1693 — the fallback of the discussion's agent, per mode, right under the agent it belongs to. */}
+        <section className="disc-settings-section" data-testid="disc-fallback-section">
+          <h3>{t('fallback.discussionTitle')}</h3>
+          <small className="disc-settings-hint">{t('fallback.discussionHint')}</small>
+          {TEXT_MODES.map(mode => (
+            <FallbackOverride
+              key={mode}
+              testId={`disc-fallback-${mode}`}
+              origin={discussion.agent}
+              mode={mode}
+              value={fallbackOverrides.find(entry => entry.mode === mode)?.chain ?? null}
+              onChange={async (next: AgentFallback[] | null) => {
+                const saved = await discussionsApi.setFallback(discussion.id, mode, next);
+                setFallbackOverrides(saved?.overrides ?? []);
+              }}
+            />
+          ))}
         </section>
 
         <DiscussionDetailsSection

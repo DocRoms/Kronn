@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Clock, Loader2, RotateCcw } from 'lucide-react';
-import { agents as agentsApi, workflows as workflowsApi } from '../../lib/api';
+import { agents as agentsApi, config as configApi, workflows as workflowsApi } from '../../lib/api';
 import { AGENT_LABELS } from '../../lib/constants';
 import { useT } from '../../lib/I18nContext';
 import { quotaPauseLabel, type QuotaWakeInfo } from '../../lib/quotaPause';
@@ -109,17 +109,39 @@ export function QuotaAgentSwitch({
     return () => { cancelled = true; };
   }, []);
 
-  const options = choices.filter(agent => agent !== current);
+  // KT-1518 — the agent's own fallback is the alternative to waiting: its
+  // first link is offered first, and preselected until the person picks another.
+  const [fallbackAgent, setFallbackAgent] = useState<AgentType | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!current) return undefined;
+    void Promise.resolve().then(() => configApi.getAgentFallback()).then(
+      (overview) => {
+        if (cancelled) return;
+        // One row per mode now: the standard one speaks for the step, else the first that has a fallback.
+        const rows = overview?.chains.filter(candidate => candidate.agent === current) ?? [];
+        const chain = rows.find(candidate => candidate.mode === 'standard') ?? rows[0];
+        setFallbackAgent(chain?.links[0]?.agent ?? null);
+      },
+      () => { /* no chain to show: the plain list stands */ },
+    );
+    return () => { cancelled = true; };
+  }, [current]);
+
+  const available = choices.filter(agent => agent !== current);
+  const offered = fallbackAgent && available.includes(fallbackAgent) ? fallbackAgent : null;
+  const options = offered ? [offered, ...available.filter(agent => agent !== offered)] : available;
   if (options.length === 0) return null;
+  const selected = picked || offered || '';
 
   const label = (agent: string) => AGENT_LABELS[agent] ?? agent;
   const apply = async () => {
-    if (!picked || busy) return;
+    if (!selected || busy) return;
     setBusy(true);
     setMessage(null);
     try {
-      await workflowsApi.switchQuotaAgent(runId, { agent: picked as AgentType });
-      setMessage({ kind: 'ok', text: t('wf.quota.switched', label(picked)) });
+      await workflowsApi.switchQuotaAgent(runId, { agent: selected as AgentType });
+      setMessage({ kind: 'ok', text: t('wf.quota.switched', label(selected)) });
       onSwitched?.();
     } catch (e) {
       setMessage({ kind: 'error', text: t('wf.quota.switchFailed', errorText(e)) });
@@ -133,18 +155,22 @@ export function QuotaAgentSwitch({
       <select
         aria-label={t('wf.quota.switchAgent')}
         title={t('wf.quota.switchAgentHint')}
-        value={picked}
+        value={selected}
         disabled={busy}
         onChange={(e) => setPicked(e.target.value)}
       >
         <option value="">{t('wf.quota.switchAgentPick')}</option>
-        {options.map(agent => <option key={agent} value={agent}>{label(agent)}</option>)}
+        {options.map(agent => (
+          <option key={agent} value={agent}>
+            {agent === offered ? `${label(agent)} (${t('wf.quota.configuredFallback')})` : label(agent)}
+          </option>
+        ))}
       </select>
       <button
         type="button"
         className="wf-quota-resume-btn"
         data-testid="quota-switch-apply"
-        disabled={!picked || busy}
+        disabled={!selected || busy}
         title={t('wf.quota.switchAgentHint')}
         onClick={() => void apply()}
       >

@@ -31,7 +31,7 @@ vi.mock('../../lib/api', () => ({
   // KT-1111 — the sidebar files assistant conversations apart.
   assistantConversations: { list: vi.fn().mockResolvedValue([]) },
   // KT-1107 — a multi-agent start checks its agents first.
-  agents: { readiness: vi.fn().mockResolvedValue([]) },
+  agents: { readiness: vi.fn().mockResolvedValue([]), detect: vi.fn().mockResolvedValue([]) },
   // 0.10.0 — ChatHeader renders <LearningsBadge> which polls learnings.pending().
   learnings: {
     pending: vi.fn().mockResolvedValue({ count: 0 }),
@@ -95,6 +95,8 @@ vi.mock('../../lib/api', () => ({
     }),
     executionVariableRetention: vi.fn().mockResolvedValue({ global_days: 30, override_days: null, effective_days: 30 }),
     workspaces: vi.fn().mockResolvedValue([]),
+    // KT-1518 — the settings panel reads the room's fallback chain override.
+    fallback: vi.fn().mockResolvedValue({}),
   },
   projects: {
     list: vi.fn().mockResolvedValue([]),
@@ -201,6 +203,10 @@ vi.mock('../../lib/api', () => ({
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
     // 0.8.6 phase 4 — NewDiscussionForm fetches the default tier on mount.
     getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
+    // KT-1518 — the settings panel's fallback override lists the agents' chains.
+    getAgentFallback: vi.fn().mockResolvedValue({ chains: [], cooldowns: [] }),
+    // KT-1693 — useFallbackData also reads the model tiers for the fallback options.
+    getModelTiers: vi.fn().mockResolvedValue({}),
   },
   media: {
     capabilities: vi.fn().mockResolvedValue({ model: 'image-model', capabilities: null }),

@@ -191,7 +191,19 @@ _menu_fallback() {
     echo
     while true; do
         printf "${BOLD}Choice [1-%d]:${RESET} " "$count"
-        read -r REPLY
+        # No input to read (an agent or a script runs the command): take the
+        # caller's default, or stop, instead of asking forever.
+        # A last line without a newline is still an answer.
+        if ! read -r REPLY && [[ -z "$REPLY" ]]; then
+            echo
+            if [[ "${KRONN_MENU_DEFAULT:-}" =~ ^[0-9]+$ ]] && (( KRONN_MENU_DEFAULT >= 1 && KRONN_MENU_DEFAULT <= count )); then
+                REPLY="$KRONN_MENU_DEFAULT"
+                printf "${GREEN}  ▸ %s${RESET} ${DIM}(no terminal: default)${RESET}\n" "$(printf "%b" "${options[$((REPLY-1))]}" | sed 's/\x1b\[[0-9;]*m//g')"
+                return 0
+            fi
+            printf "${RED}  No terminal to answer this menu: run the command from a terminal.${RESET}\n"
+            exit 1
+        fi
         # Validate input
         if [[ "$REPLY" =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= count )); then
             printf "${GREEN}  ▸ %s${RESET}\n" "$(printf "%b" "${options[$((REPLY-1))]}" | sed 's/\x1b\[[0-9;]*m//g')"

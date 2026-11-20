@@ -265,6 +265,8 @@ If an agent is not detected, install it manually (e.g. `npm install -g @anthropi
 
 You're ready to go.
 
+An agent that installs Kronn for someone cannot click through the wizard: [install-by-agent.md](install-by-agent.md) lists the same steps as commands.
+
 ### macOS — Kiro authentication is opt-in
 
 Kronn only shows an agent as installed if it's actually present (a native binary you installed, mirrored into the container). Agents you haven't installed — including Kiro — show an **Install** button instead. Agents that are merely reachable via `npx` are shown as installable too (with a "runtime OK — via npx" hint), not as installed.

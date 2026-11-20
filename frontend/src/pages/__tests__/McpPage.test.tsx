@@ -98,6 +98,7 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   effective_preferred_interface: opts?.effective_preferred_interface ?? opts?.preferred_interface ?? 'mcp',
   credential_source: opts?.credential_source ?? 'stored',
   last_probes: opts?.last_probes ?? [],
+  token_probe: false,
 });
 
 const makeProject = (id: string, name: string): Project => ({
