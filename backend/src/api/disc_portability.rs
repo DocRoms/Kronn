@@ -519,6 +519,7 @@ fn portable_task_request(
             id: Some("discussion-import".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
     };
     (request, evidence, degraded)
@@ -729,6 +730,7 @@ fn import_bundle(
         id: Some("discussion-import".into()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     };
     let mut task_ids = HashMap::new();
     for item in &envelope.plan {
@@ -1424,6 +1426,7 @@ mod tests {
                     id: Some("tester".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 };
                 let task = crate::db::planning::create_task(
                     conn,
@@ -1613,6 +1616,7 @@ mod tests {
                             id: Some("tester".into()),
                             session_id: None,
                             source_message_id: Some(source_message.id.clone()),
+                            token_declared: false,
                         },
                     },
                 )?;

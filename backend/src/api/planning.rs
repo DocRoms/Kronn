@@ -117,14 +117,86 @@ pub async fn update_task(
 }
 
 pub async fn update_dod_item(
-    State(state): State<AppState>,
-    Path((task_id, dod_id)): Path<(String, String)>,
+    state: State<AppState>,
+    path: Path<(String, String)>,
     Json(request): Json<UpdatePlanningDodItemRequest>,
 ) -> Json<ApiResponse<PlanningTaskDetail>> {
+    update_dod_item_as(
+        state,
+        None,
+        path,
+        Json(UpdateDodItemBody {
+            request,
+            source_agent: String::new(),
+            source_session_id: String::new(),
+            room_agent: None,
+        }),
+    )
+    .await
+}
+
+/// A DoD write with the principal identity the bridge derives, the same fields
+/// the execution tools send (KT-1954). Never part of a tool's input schema.
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateDodItemBody {
+    #[serde(flatten)]
+    pub request: UpdatePlanningDodItemRequest,
+    #[serde(default)]
+    pub source_agent: String,
+    #[serde(default)]
+    pub source_session_id: String,
+    /// Read leniently: a malformed identity proves nothing, it does not fail
+    /// the write of an ordinary item.
+    #[serde(default)]
+    pub room_agent: Option<serde_json::Value>,
+}
+
+pub async fn update_dod_item_as(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path((task_id, dod_id)): Path<(String, String)>,
+    Json(body): Json<UpdateDodItemBody>,
+) -> Json<ApiResponse<PlanningTaskDetail>> {
+    let bridge = bridge.map(|axum::Extension(caller)| caller);
     match state
         .db
         .with_conn(move |connection| {
-            crate::db::planning::update_dod_item(connection, &task_id, &dod_id, &request)
+            let UpdateDodItemBody {
+                mut request,
+                source_agent,
+                source_session_id,
+                room_agent,
+            } = body;
+            // Only a live check asks who the principal is: an ordinary item
+            // never depends on the state of the task's executions. Proven in
+            // the same connection turn as the write it authorises; a proof
+            // that cannot be read is no proof.
+            let principal = if crate::db::planning::dod_item_is_live_check(connection, &dod_id)? {
+                crate::api::orchestration::live_check_principal(
+                    connection,
+                    &task_id,
+                    &source_agent,
+                    &source_session_id,
+                    room_agent.and_then(|room| serde_json::from_value(room).ok()),
+                    bridge.as_ref(),
+                )
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            // The journal names the identity that was proven, whole.
+            if let Some((agent, session)) = &principal {
+                request.actor.id = Some(agent.clone());
+                request.actor.session_id = Some(session.clone());
+            }
+            crate::db::planning::update_dod_item_as(
+                connection,
+                &task_id,
+                &dod_id,
+                &request,
+                principal.is_some(),
+            )
         })
         .await
     {

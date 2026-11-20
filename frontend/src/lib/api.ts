@@ -56,6 +56,8 @@ import type {
   McpProbeResponse,
   McpRescanReport,
   McpTestAllResponse,
+  McpTokenCheckAllResponse,
+  McpTokenCheckResult,
   InviteResponse,
   MessageSearchHit,
   DiscLinkRequest,
@@ -113,6 +115,12 @@ import type {
   DbUsage,
   DbCompaction,
   SetAgentAccessRequest,
+  SetAgentFallbackRequest,
+  SetConnectionFallbackRequest,
+  DiscussionFallback,
+  AgentFallback,
+  FallbackMode,
+  FallbackOverview,
   SetAgentMentionColorRequest,
   AgentsConfig,
   AgentEffectiveAccess,
@@ -264,12 +272,13 @@ import type {
   DiscussionTokenCost,
   CreateLivePageRequest,
   LivePage,
+  LivePageDataDelta,
   LivePageDetail,
   LivePageDiscussionLink,
   LivePagePublication,
   LivePageRevision,
   LivePageRevisionSummary,
-  LivePageWorkflowLink, LivePageResource, PromoteShadowRequest,
+  LivePageWorkflowLink, LivePageResource, PromoteShadowRequest, StepShadowComparison,
   LivePagesCapability,
   PublishLivePageRequest,
   PublishLivePageResult,
@@ -312,9 +321,10 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { registerGrantMinter, strongFetch, withStrongConfirm } from './strongConfirm';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
+import { isGatewayStatus, noteBackendAnswered, noteSuspectedOutage, recordServerError } from './notifications';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
-import type { AgentFilesPolicy, LaneSeedCandidate, ProjectLaneSeeds, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, LaneSeedCandidate, ProjectLaneSeeds, ProjectWorkspace, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse, ProjectCommitPolicy } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -755,6 +765,21 @@ interface ApiResponse<T> {
   error_code?: string;
 }
 
+/**
+ * Tells the notification store what an answer means. Returns, for a failure
+ * worth a notification (a 5xx that is not a gateway answer), the call that
+ * records it once the body — the server's own message — has been read.
+ */
+function reportAnswer(status: number, method: string, path: string): ((message: string) => void) | undefined {
+  if (isGatewayStatus(status)) {
+    noteSuspectedOutage();
+    return undefined;
+  }
+  noteBackendAnswered();
+  if (status < 500) return undefined;
+  return message => recordServerError({ status, method, path, message });
+}
+
 async function api<T>(
   method: string,
   path: string,
@@ -782,9 +807,17 @@ async function api<T>(
         signal,
       });
     } catch (error) {
-      if (looksLikeBackendDown(error)) reportBackendSuspect();
+      if (looksLikeBackendDown(error)) {
+        noteSuspectedOutage();
+        reportBackendSuspect();
+      }
       throw error;
     }
+
+    // KT-1684 — the one place that feeds the bell's notifications: a gateway
+    // answer is a suspected outage, any other 5xx a grouped server error, and
+    // an answer that is neither means the backend is there.
+    const reportedFailure = reportAnswer(res.status, method, path);
 
     const contentType = res.headers.get('content-type') ?? '';
     if (!contentType.includes('application/json')) {
@@ -801,13 +834,18 @@ async function api<T>(
       const responseBody = await res.text().catch(() => '');
       const trimmed = responseBody.trim();
       const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
+      reportedFailure?.(trimmed);
       throw new Error(`Server error (HTTP ${res.status})${suffix}`);
     }
 
     const json: ApiResponse<T> = await res.json();
 
     if (!json.success) {
-      throw new ApiRequestError(json.error ?? 'Unknown API error', json.error_code);
+      if (res.status >= 500) {
+        reportedFailure?.(json.error ?? '');
+        throw new ApiRequestError(`Server error (HTTP ${res.status}) — ${json.error ?? 'Unknown API error'}`, json.error_code);
+      }
+      throw new ApiRequestError(json.error ?? 'Unknown API error', json.error_code, json);
     }
 
     return json.data as T;
@@ -979,12 +1017,22 @@ export const config = {
   /** Settings > Workers: the default review-round limit of every launch path (KT-1345). */
   getWorkers: () => api<WorkersConfig>('GET', '/config/workers'),
   saveWorkers: (workers: WorkersConfig) => api<WorkersConfig>('POST', '/config/workers', workers),
+  /** The host's KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS (seconds), or null: it only fills an unset bound. */
+  getFirstBuildEnvSecs: () => api<number | null>('GET', '/config/workers/first-build-env-secs'),
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
   getAgentAccessEffective: () => api<AgentEffectiveAccess[]>('GET', '/config/agent-access/effective'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
   setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
+  /** KT-1693 — every mode row that has a fallback, and the cooldowns still running. */
+  getAgentFallback: () => api<FallbackOverview>('GET', '/config/agent-fallback'),
+  /** Sets the whole chain of agents that take over, in order, when this one is unavailable (empty cuts it); a loop, an over-long chain or a broader access is refused with the reason. */
+  setAgentFallback: (req: SetAgentFallbackRequest) =>
+    api<FallbackOverview>('POST', '/config/agent-fallback', req),
+  /** KT-1706 — sets (or, with `null`, removes) the fallback of the image or video mode of ComfyUI (`local:comfyui`) or of a named connection (its id); a loop, an over-long chain or another kind of mode is refused with the reason. */
+  setConnectionFallback: (req: SetConnectionFallbackRequest) =>
+    api<FallbackOverview>('POST', '/config/connection-fallback', req),
   /** Kronn tool executor switch of an HTTP agent (KT-1600): `false` = off, `null` = the default (on). */
   setAgentTools: (req: { agent: AgentType; enabled: boolean | null }) => api<void>('POST', '/config/agent-tools', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>
@@ -1070,7 +1118,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; lane_seeds_copy_enabled?: boolean; lane_seeds_adopt_suggested?: boolean; lane_seeds_strong_confirm?: boolean; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; disk_stalled_build_days?: number; lane_seeds_copy_enabled?: boolean; lane_seeds_adopt_suggested?: boolean; lane_seeds_strong_confirm?: boolean; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1081,6 +1129,12 @@ export const contacts = {
   add: (invite_code: string) => api<AddContactResult>('POST', '/contacts', { invite_code }),
   delete: (id: string) => api<void>('DELETE', `/contacts/${id}`),
   inviteCode: () => api<string>('GET', '/contacts/invite-code'),
+  // A pairing code (invite code + fresh secret, KT-1650): the only thing that
+  // lets another instance add this one as a contact. It pairs a NEW contact;
+  // with a `contactId` it is issued for that existing contact (a re-pair) and
+  // pairs only it.
+  pairingCode: (contactId?: string) =>
+    api<string>('POST', '/contacts/pairing-offer', contactId ? { contact_id: contactId } : {}),
   ping: (id: string) => api<boolean>('GET', `/contacts/${id}/ping`),
   networkInfo: () => api<NetworkInfo>('GET', '/contacts/network-info'),
 };
@@ -1101,6 +1155,15 @@ export const projects = {
     api<ProjectValidationsAccess>('GET', `/projects/${encodeURIComponent(id)}/validations-access`),
   setValidationsAccess: (id: string, access: ValidationsAccess) =>
     api<ProjectValidationsAccess>('PUT', `/projects/${encodeURIComponent(id)}/validations-access`, { access }),
+  /** KT-1750 — what the repository says about who commits and whether to sign off, and what Kronn commits with. */
+  commitPolicy: (id: string) =>
+    api<ProjectCommitPolicy>('GET', `/projects/${encodeURIComponent(id)}/commit-policy`),
+  /** The project's worktree hooks, lane warm-up and commit settings (null: none stored). */
+  workspace: (id: string) =>
+    api<ProjectWorkspace | null>('GET', `/projects/${encodeURIComponent(id)}/workspace`),
+  /** Replaces the whole workspace settings: send every part back (an empty one clears them). */
+  setWorkspace: (id: string, workspace: ProjectWorkspace | null) =>
+    api<boolean>('PUT', `/projects/${encodeURIComponent(id)}/workspace`, workspace),
   /** Gitignored paths copied into each task worktree, with the last seeding (KT-1438). */
   laneSeeds: (id: string) =>
     api<ProjectLaneSeeds>('GET', `/projects/${encodeURIComponent(id)}/lane-seeds`),
@@ -1161,6 +1224,8 @@ export const projects = {
   dockerLogs: (id: string, service: string, tail = 200) =>
     api<ProjectDockerLogs>('GET', `/projects/${id}/docker/logs?service=${encodeURIComponent(service)}&tail=${tail}`),
   scan: () => api<DetectedRepo[]>('POST', '/projects/scan'),
+  /** "Hide" in Detect repositories (KT-1684): the scan never offers this path again. */
+  hideScanned: (path: string) => api<void>('POST', '/projects/scan/hide', { path }),
   create: (repo: DetectedRepo) => api<Project>('POST', '/projects', repo),
   addFolder: (req: { path: string; name?: string }) => api<Project>('POST', '/projects/add-folder', req),
   bootstrap: (req: BootstrapProjectRequest) => api<BootstrapProjectResponse>('POST', '/projects/bootstrap', req),
@@ -1959,6 +2024,11 @@ export const mcps = {
   refresh: (dryRun = false) =>
     api<McpRescanReport>('POST', `/mcps/refresh${dryRun ? '?dry_run=true' : ''}`),
   testAll: () => api<McpTestAllResponse>('POST', '/mcps/test-all'),
+  /** KT-1692 — probe one connection's token now (rate-limited server side). */
+  checkToken: (configId: string) =>
+    api<McpTokenCheckResult>('POST', `/mcps/configs/${encodeURIComponent(configId)}/check-token`),
+  /** KT-1692 — "Check all": probe every connection that has a test endpoint. */
+  checkTokens: () => api<McpTokenCheckAllResponse>('POST', '/mcps/check-tokens'),
   previewBundle: (request: PluginBundleSelectionRequest) =>
     api<PluginBundlePreview>('POST', '/mcps/bundles/preview', request),
   exportBundle: async (
@@ -2134,6 +2204,11 @@ export const discussions = {
     api<DiscussionAgentHandoffMode>('GET', `/discussions/${id}/agent-handoffs`),
   executionVariableRetention: (id: string) =>
     api<DiscussionExecutionVariableRetention>('GET', `/discussions/${id}/execution-variable-retention`),
+  /** KT-1693 — what this discussion overrides, per mode (a mode with no override follows the agent's default). */
+  fallback: (id: string) => api<DiscussionFallback>('GET', `/discussions/${id}/fallback`),
+  /** Overrides one mode: `null` removes the override (back to the default); `[]` cuts the fallback on that mode; a refused chain rejects with its reason. */
+  setFallback: (id: string, mode: FallbackMode, chainOverride: AgentFallback[] | null) =>
+    api<DiscussionFallback>('PUT', `/discussions/${id}/fallback`, { mode, chain_override: chainOverride }),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Unified "join by code": paste any `kr-join-…` token and the backend
    *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend
@@ -2889,6 +2964,8 @@ export const workflows = {
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
   promoteShadow: (id: string, req: PromoteShadowRequest) => api<Workflow>('POST', `/workflows/${id}/shadow/promote`, req),
+  /** KT-1459 — per step that ran shadows, the main execution beside what each shadow was and produced. */
+  stepShadows: (id: string, runId: string) => api<StepShadowComparison[]>('GET', `/workflows/${id}/runs/${runId}/step-shadows`),
 
   /** Trigger with SSE streaming for real-time progress.
    *  0.6.0 UX pass — accepts optional `variables` payload for workflows
@@ -3188,6 +3265,11 @@ export const pages = {
     `/pages${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
   ),
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
+  /** What changed since data revision `since` for a view showing HTML revision `revisionId`. */
+  data: (id: string, since: number, revisionId: string) => api<LivePageDataDelta>(
+    'GET',
+    `/pages/${encodeURIComponent(id)}/data?since=${since}&revision=${encodeURIComponent(revisionId)}`,
+  ),
   revisions: (id: string) => api<LivePageRevisionSummary[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
   revision: (id: string, revisionId: string) =>
     api<LivePageRevision>('GET', `/pages/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}`),
@@ -4251,7 +4333,7 @@ export const runsApi = {
 
 // ─── Disk (KT-1318) ───────────────────────────────────────────────────────────
 export type DiskKind = 'worktree' | 'lane_build_dir' | 'cache';
-export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign';
+export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign' | 'stalled';
 
 export interface DiskOwner {
   task_ref: string | null;
@@ -4264,8 +4346,10 @@ export interface DiskEntry {
   kind: DiskKind;
   path: string;
   name: string;
-  /** A floor when `bytes_are_partial`. */
+  /** Apparent bytes: blocks a cloned build dir shares with the seed are counted in full. A floor when `bytes_are_partial`. */
   bytes: number;
+  /** Real bytes (no other file shares them): what deleting really frees. Null when the file system cannot say. */
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   idle_seconds: number | null;
   owner: DiskOwner | null;
@@ -4279,13 +4363,18 @@ export interface DiskKindTotal {
   kind: DiskKind;
   entries: number;
   bytes: number;
+  /** Null as soon as one entry of the kind could not say. */
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   orphan_bytes: number;
+  orphan_unique_bytes: number;
 }
 
 export interface DiskPolicy {
   launch_min_free_gib: number;
   sweep_idle_hours: number;
+  /** Days a Blocked/Interrupted execution's build dir must be idle before it is purgeable. */
+  stalled_build_days: number;
   warning_gib: number;
   critical_gib: number;
 }
@@ -4296,7 +4385,10 @@ export interface DiskReport {
   policy: DiskPolicy;
   volumes: { project_id: string; project_name: string; path: string; available_bytes: number | null; total_bytes: number | null }[];
   totals: DiskKindTotal[];
+  apparent_bytes: number;
+  unique_bytes: number | null;
   orphan_bytes: number;
+  orphan_unique_bytes: number;
   orphan_count: number;
   entries: DiskEntry[];
 }
@@ -4305,6 +4397,7 @@ export interface DiskPurgeItem {
   path: string;
   purged: boolean;
   bytes: number;
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   reason: string | null;
 }
@@ -4313,7 +4406,10 @@ export interface DiskPurgeResult {
   mode: 'orphans' | 'entries';
   items: DiskPurgeItem[];
   freed_bytes: number;
+  /** What the volume really gained (unique bytes where known, else apparent). */
+  freed_unique_bytes: number;
   kept: number;
+  available_bytes_before: number | null;
   available_bytes_after: number | null;
 }
 

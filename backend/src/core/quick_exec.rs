@@ -65,35 +65,7 @@ pub const ALLOWED_BINARIES: &[&str] = &[
     "fastly", "glab",
 ];
 
-/// Names that are refused even if they appear in the allowlist.
-///
-/// The allowlist is a source file, so it will be edited. This is what makes DoD
-/// "no `sh -c`" hold against a future edit rather than against today's list: a
-/// shell added above is still rejected here, and the rejection names why.
-pub const DENIED_BINARIES: &[&str] = &[
-    "sh",
-    "bash",
-    "zsh",
-    "dash",
-    "ksh",
-    "fish",
-    "csh",
-    "tcsh",
-    "cmd",
-    "cmd.exe",
-    "powershell",
-    "pwsh",
-    "env",
-    "eval",
-    "xargs",
-    "nohup",
-    "setsid",
-    "sudo",
-    "doas",
-    "ssh",
-    "perl",
-    "ruby",
-];
+pub use crate::models::setup::DENIED_BINARIES;
 
 /// What a caller asks for. Every field is explicit — nothing is inherited from
 /// the server process, because an inherited cwd, environment or stdin is exactly
@@ -126,6 +98,9 @@ pub struct ValidatedSpec {
     timeout_secs: u64,
     stdin: Option<String>,
     summariser: Summariser,
+    /// KT-1751 — the resolved file of a repository-relative executable, so the
+    /// process that runs is the file that was checked.
+    local_executable: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -144,66 +119,7 @@ pub enum Summariser {
     Collected,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(rename_all = "snake_case")]
-pub enum QuickExecStatus {
-    /// Exited 0. The ONLY value that means success.
-    Passed,
-    /// Exited non-zero, or died on a signal.
-    Failed,
-    TimedOut,
-    Cancelled,
-    /// Refused before spawning. Distinct from `Failed` so "we did not run this"
-    /// is never read as "this ran and found nothing".
-    Rejected,
-}
-
-impl QuickExecStatus {
-    /// Success is exit 0 and nothing else. A timeout, a cancellation and a
-    /// rejection all produce no findings, and none of them is a pass.
-    pub fn is_success(self) -> bool {
-        matches!(self, Self::Passed)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct Diagnostic {
-    pub path: Option<String>,
-    pub line: Option<i64>,
-    pub message: String,
-}
-
-/// Where the full streams were kept. Bytes are the real size on disk; `truncated`
-/// says the process produced more than that.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct ArtifactRef {
-    pub path: String,
-    pub bytes: u64,
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct QuickExecResult {
-    pub status: QuickExecStatus,
-    /// `None` when the process died on a signal or never started. Not 0 — an
-    /// unknown exit code must not read as a clean one.
-    pub exit_code: Option<i32>,
-    pub summary: String,
-    pub failed_tests: Vec<String>,
-    pub diagnostics: Vec<Diagnostic>,
-    pub artifact: Option<ArtifactRef>,
-    pub duration_ms: u64,
-    pub stdout_bytes: u64,
-    pub stderr_bytes: u64,
-    /// Whether `failed_tests` and `diagnostics` can be treated as exhaustive.
-    /// False when a stream was truncated or never reached EOF: an empty list
-    /// drawn from a partial log is not evidence of no failures.
-    pub findings_complete: bool,
-}
+pub use crate::models::agent_jobs::{ArtifactRef, Diagnostic, QuickExecResult, QuickExecStatus};
 
 /// Why a spec was refused. Carried as a message rather than an enum because the
 /// caller shows it to a human who has to fix the spec.
@@ -224,8 +140,21 @@ pub fn validate(
     spec: &QuickExecSpec,
     allowed_roots: &[PathBuf],
 ) -> Result<ValidatedSpec, Rejection> {
+    validate_with(spec, allowed_roots, &[])
+}
+
+/// [`validate`] with the executables the project's own settings add (KT-1751):
+/// a bare name (`composer`, `go`, `pytest`) or a repository-relative path
+/// (`vendor/bin/phpunit`), exactly as the human wrote it. The denylist still
+/// refuses a shell, and a path must resolve to a file inside the working
+/// directory it runs from.
+pub fn validate_with(
+    spec: &QuickExecSpec,
+    allowed_roots: &[PathBuf],
+    extra: &[String],
+) -> Result<ValidatedSpec, Rejection> {
     let binary = spec.binary.trim();
-    check_binary(binary, ALLOWED_BINARIES)?;
+    check_binary_with(binary, ALLOWED_BINARIES, extra)?;
 
     if spec.argv.len() > MAX_ARGV {
         return Err(Rejection(format!(
@@ -258,6 +187,11 @@ pub fn validate(
         Some(value) => value,
     };
 
+    let local_executable = if binary.contains('/') {
+        Some(resolve_repo_executable(binary, &cwd)?)
+    } else {
+        None
+    };
     Ok(ValidatedSpec {
         binary: binary.to_string(),
         argv: spec.argv.clone(),
@@ -265,6 +199,55 @@ pub fn validate(
         timeout_secs,
         stdin: spec.stdin.clone(),
         summariser: spec.summariser,
+        local_executable,
+    })
+}
+
+/// A repository-relative executable, resolved: a file of the working directory
+/// itself. Canonicalised on both sides, like [`validate_cwd`], so a link that
+/// leaves the repository is refused whatever it is called — except into the
+/// main checkout's own copy of a dependency directory a lane layers (see
+/// [`in_layered_dependency_dir`]).
+fn resolve_repo_executable(binary: &str, cwd: &Path) -> Result<PathBuf, Rejection> {
+    let relative = binary.strip_prefix("./").unwrap_or(binary);
+    let real = cwd.join(relative).canonicalize().map_err(|error| {
+        Rejection(format!(
+            "`{relative}` cannot be resolved in the worktree: {error}"
+        ))
+    })?;
+    if !real.starts_with(cwd) && !in_layered_dependency_dir(relative, cwd, &real) {
+        return Err(Rejection(format!(
+            "`{relative}` resolves to {}, outside the worktree it runs in",
+            real.display()
+        )));
+    }
+    if !real.is_file() {
+        return Err(Rejection(format!("`{relative}` is not a file")));
+    }
+    Ok(real)
+}
+
+/// KT-1751 review — in a task lane, a dependency directory (`vendor`,
+/// `node_modules`, …) is layered from the main checkout: its entries link
+/// there, so a listed `vendor/phpunit/phpunit/phpunit` or
+/// `node_modules/.bin/jest` resolves outside the worktree. It is admitted when
+/// `relative` lies in such a directory AND `real` lies in the main checkout's
+/// copy of that same directory: nothing wider (a layer entry re-pointed
+/// elsewhere is still refused). The main checkout comes from the lane's path
+/// (`<repo>/.kronn/worktrees/<name>`), never from anything inside the lane.
+fn in_layered_dependency_dir(relative: &str, cwd: &Path, real: &Path) -> bool {
+    let Ok(lane) = crate::core::task_worker_env::WorkerLane::for_worktree(cwd) else {
+        return false;
+    };
+    let Some(main) = lane.main_checkout.clone() else {
+        return false;
+    };
+    lane.dependency_paths().iter().any(|dir| {
+        relative.starts_with(&format!("{dir}/"))
+            && main
+                .join(dir)
+                .canonicalize()
+                .is_ok_and(|source| real.starts_with(source))
     })
 }
 
@@ -274,30 +257,73 @@ pub fn validate(
 /// shell and still see the refusal. Without that seam, a test of the denylist
 /// passes for the wrong reason — the name is simply absent from the allowlist —
 /// and would keep passing if the denylist were deleted.
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 fn check_binary(binary: &str, allowlist: &[&str]) -> Result<(), Rejection> {
+    check_binary_with(binary, allowlist, &[])
+}
+
+/// [`check_binary`] plus the project's own entries (KT-1751). An entry matches
+/// the binary exactly, a leading `./` ignored on both sides: the human decided
+/// that name or that path, nothing around it.
+fn check_binary_with(binary: &str, allowlist: &[&str], extra: &[String]) -> Result<(), Rejection> {
     if binary.is_empty() {
         return Err(Rejection("no binary given".into()));
     }
-    // A name, not a path: an explicit path would let the caller pick any
-    // executable on the machine, which is the whole thing the allowlist prevents.
-    if binary.contains('/') || binary.contains('\\') || binary.starts_with('-') {
+    // A bare name the project lists (`composer`) is a program on the PATH and
+    // never a repository file `./composer`; a path entry never a bare name.
+    let is_path = |name: &str| name.contains('/') || name.contains('\\');
+    let listed = extra.iter().any(|entry| {
+        let entry = entry.trim();
+        is_path(entry) == is_path(binary)
+            && entry.trim_start_matches("./") == binary.trim_start_matches("./")
+    });
+    if binary.contains('/') || binary.contains('\\') {
+        // A path is an executable OF THE REPOSITORY, never any executable on the
+        // machine (which is what the allowlist prevents): relative, inside, and
+        // named by the project's own list.
+        if !is_repo_relative(binary) {
+            return Err(Rejection(format!(
+                "`{binary}` is a path or a flag — Quick Exec takes a bare allowlisted name or \
+                 a repository-relative executable the project lists"
+            )));
+        }
+        if !listed {
+            return Err(Rejection(format!(
+                "`{binary}` is a repository path that the project has not listed: add it to \
+                 the project's Validation executables (project card, Lane warm-up) to run it"
+            )));
+        }
+        return Ok(());
+    }
+    if binary.starts_with('-') {
         return Err(Rejection(format!(
             "`{binary}` is a path or a flag — Quick Exec takes a bare allowlisted name"
         )));
     }
     // Before the allowlist, so a shell added to the allowlist by a later edit is
-    // still refused.
+    // still refused — and so is one a project lists.
     if DENIED_BINARIES.contains(&binary) {
         return Err(Rejection(format!(
             "`{binary}` can execute a command line of its own — Quick Exec runs a literal argv, never a shell"
         )));
     }
-    if !allowlist.contains(&binary) {
+    if !allowlist.contains(&binary) && !listed {
         return Err(Rejection(format!(
             "`{binary}` is not in the Quick Exec allowlist"
         )));
     }
     Ok(())
+}
+
+/// `vendor/bin/phpunit`, `./tools/lint`: relative, no `..`, no empty part.
+fn is_repo_relative(path: &str) -> bool {
+    let path = path.strip_prefix("./").unwrap_or(path);
+    !path.is_empty()
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// Check a persisted one-line command (an execution's validation) BEFORE it is
@@ -313,6 +339,12 @@ fn check_binary(binary: &str, allowlist: &[&str]) -> Result<(), Rejection> {
 /// The working directory is not part of the check: a validation always starts at
 /// the root of the execution's worktree.
 pub fn check_command_line(command: &str) -> Result<(), Rejection> {
+    check_command_line_with(command, &[])
+}
+
+/// [`check_command_line`] with the executables the project's own settings add
+/// (KT-1751).
+pub fn check_command_line_with(command: &str, extra: &[String]) -> Result<(), Rejection> {
     let words: Vec<&str> = command.split_whitespace().collect();
     let Some(&binary) = words.first() else {
         return Err(Rejection("the command is empty".into()));
@@ -335,7 +367,7 @@ pub fn check_command_line(command: &str) -> Result<(), Rejection> {
              start with it as its binary"
         )));
     }
-    check_binary(binary, ALLOWED_BINARIES).map_err(|rejection| form(rejection.0))?;
+    check_binary_with(binary, ALLOWED_BINARIES, extra).map_err(|rejection| form(rejection.0))?;
     if let Some((word, syntax)) = words
         .iter()
         .find_map(|word| shell_syntax(word).map(|syntax| (*word, syntax)))
@@ -585,7 +617,7 @@ pub async fn run_confined(
 /// was spawned as its own group's leader ([`CommandConfinement::command`] puts it in a
 /// session of its own): the id of any other process may name an unrelated group.
 #[cfg(unix)]
-pub(crate) fn kill_process_group(leader: u32) {
+pub fn kill_process_group(leader: u32) {
     // SAFETY: `killpg` takes a plain process-group id.
     unsafe {
         libc::killpg(leader as libc::pid_t, libc::SIGKILL);
@@ -750,6 +782,9 @@ fn spawn_failure(binary: &str, error: &str, duration_ms: u64) -> QuickExecResult
 /// can rewrite the main checkout's `node_modules`. The name still comes from the
 /// allowlist — this only decides where that name resolves.
 fn resolve_binary(spec: &ValidatedSpec) -> PathBuf {
+    if let Some(executable) = &spec.local_executable {
+        return executable.clone();
+    }
     let local = spec
         .cwd
         .join("node_modules")
@@ -1121,3 +1156,7 @@ pub fn prune_artifacts(dir: &Path, max_total_bytes: u64) -> Result<usize> {
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "quick_exec_test.rs"]
 mod quick_exec_test;
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "quick_exec_project_test.rs"]
+mod quick_exec_project_test;

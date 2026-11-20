@@ -1727,3 +1727,25 @@ fn the_runner_of_one_job_does_not_leak_into_another() {
     let scoped = "jobs:\n  a:\n    runs-on: windows-latest\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - run: gitlint --commits HEAD~1..HEAD\n  b:\n    runs-on: windows-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n";
     assert_eq!(ci_enforced(scoped), vec!["gitlint".to_string()]);
 }
+
+#[test]
+fn the_brief_line_states_the_observed_shape_the_ticket_key_and_an_example() {
+    let mut subjects = repeated("KT-12 feat(api): add the thing", 12);
+    subjects.push("Merge branch 'x'");
+    let facts = CommitFacts::from_log(&log(&subjects));
+
+    let line = facts.brief_line().unwrap();
+
+    assert!(line.contains("the history writes"), "{line}");
+    assert!(
+        line.contains("e.g. `KT-12 feat(api): add the thing`"),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_short_history_has_no_brief_line() {
+    let facts = CommitFacts::from_log(&log(&repeated("feat(api): add the thing", 3)));
+
+    assert_eq!(facts.brief_line(), None);
+}

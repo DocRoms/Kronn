@@ -29,6 +29,19 @@ function sizeLabel(bytes: number, partial: boolean): string {
   return `${partial ? '≥ ' : ''}${formatBytes(bytes)}`;
 }
 
+/** What deleting frees: the real (unique) figure when the file system said, else the apparent one. */
+function realBytes(unique: number | null, apparent: number): number {
+  return unique ?? apparent;
+}
+
+/** The confirmation of a per-entry delete: the text depends on why it is offered. */
+function confirmKey(entry: DiskEntry): string {
+  if (entry.state === 'foreign') return 'settings.disk.confirmForeign';
+  if (entry.state === 'stalled') return 'settings.disk.confirmStalled';
+  if (entry.state === 'kept') return 'settings.disk.confirmOwnerless';
+  return 'settings.disk.confirmEntry';
+}
+
 export function DiskSection({ toast, t }: DiskSectionProps) {
   const [report, setReport] = useState<DiskReport | null>(null);
   const [loading, setLoading] = useState(false);
@@ -36,6 +49,7 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
   const [error, setError] = useState<string | null>(null);
   const [launchMin, setLaunchMin] = useState('');
   const [idleHours, setIdleHours] = useState('');
+  const [stalledDays, setStalledDays] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -45,6 +59,7 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
       setReport(next);
       setLaunchMin(String(next.policy.launch_min_free_gib));
       setIdleHours(String(next.policy.sweep_idle_hours));
+      setStalledDays(String(next.policy.stalled_build_days));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -58,11 +73,11 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
 
   const purgeOrphans = async () => {
     if (busy || !report || report.orphan_count === 0) return;
-    if (!window.confirm(t('settings.disk.confirmOrphans', report.orphan_count, formatBytes(report.orphan_bytes)))) return;
+    if (!window.confirm(t('settings.disk.confirmOrphans', report.orphan_count, formatBytes(realBytes(report.orphan_unique_bytes, report.orphan_bytes))))) return;
     setBusy(true);
     try {
       const result = await diskApi.purgeOrphans();
-      toast(t('settings.disk.purged', result.items.filter(i => i.purged).length, formatBytes(result.freed_bytes)), 'success');
+      toast(t('settings.disk.purged', result.items.filter(i => i.purged).length, formatBytes(result.freed_unique_bytes)), 'success');
       await load();
     } catch (cause) {
       toast(cause instanceof Error ? cause.message : String(cause), 'error');
@@ -73,13 +88,13 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
 
   const purgeEntry = async (entry: DiskEntry) => {
     if (busy || !entry.purgeable) return;
-    if (!window.confirm(t('settings.disk.confirmEntry', entry.path, formatBytes(entry.bytes)))) return;
+    if (!window.confirm(t(confirmKey(entry), entry.path, formatBytes(realBytes(entry.unique_bytes, entry.bytes))))) return;
     setBusy(true);
     try {
       const result = await diskApi.purgeEntries([entry.path], entry.project_id);
       const item = result.items[0];
       if (item?.purged) {
-        toast(t('settings.disk.purged', 1, formatBytes(item.bytes)), 'success');
+        toast(t('settings.disk.purged', 1, formatBytes(item.unique_bytes ?? item.bytes)), 'success');
       } else {
         toast(t('settings.disk.refused', item?.reason ?? ''), 'error');
       }
@@ -94,12 +109,13 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
   const savePolicy = async () => {
     const min = Number(launchMin);
     const hours = Number(idleHours);
-    if (!Number.isInteger(min) || min < 0 || !Number.isInteger(hours) || hours < 1) {
+    const days = Number(stalledDays);
+    if (!Number.isInteger(min) || min < 0 || !Number.isInteger(hours) || hours < 1 || !Number.isInteger(days) || days < 1) {
       toast(t('settings.disk.invalidPolicy'), 'error');
       return;
     }
     try {
-      await configApi.setServerConfig({ disk_launch_min_free_gib: min, disk_sweep_idle_hours: hours });
+      await configApi.setServerConfig({ disk_launch_min_free_gib: min, disk_sweep_idle_hours: hours, disk_stalled_build_days: days });
       toast(t('settings.disk.policySaved'), 'success');
       await load();
     } catch (cause) {
@@ -144,11 +160,24 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
               {report.totals.map(total => (
                 <div key={total.kind}>
                   <div className="text-sm text-dim">{t(`settings.disk.kind.${total.kind}`)}</div>
-                  <div className="font-semibold">{sizeLabel(total.bytes, total.bytes_are_partial)}</div>
-                  <small className="text-dim">{t('settings.disk.entries', total.entries)}</small>
+                  <div className="font-semibold">
+                    {total.unique_bytes !== null
+                      ? t('settings.disk.real', sizeLabel(total.unique_bytes, total.bytes_are_partial))
+                      : t('settings.disk.apparent', sizeLabel(total.bytes, total.bytes_are_partial))}
+                  </div>
+                  <small className="text-dim">
+                    {total.unique_bytes !== null && `${t('settings.disk.apparent', formatBytes(total.bytes))} · `}
+                    {t('settings.disk.entries', total.entries)}
+                  </small>
                 </div>
               ))}
             </div>
+
+            <p className="set-hint" data-testid="disk-size-rule">
+              {report.unique_bytes !== null &&
+                `${t('settings.disk.totalReal', formatBytes(report.unique_bytes), formatBytes(report.apparent_bytes))} — `}
+              {t('settings.disk.sizeRule')}
+            </p>
 
             <div className="flex-row gap-4 mb-8">
               <button
@@ -158,7 +187,7 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
                 data-testid="disk-purge-orphans"
               >
                 <Trash2 size={14} />
-                {t('settings.disk.purgeOrphans', report.orphan_count, formatBytes(report.orphan_bytes))}
+                {t('settings.disk.purgeOrphans', report.orphan_count, formatBytes(realBytes(report.orphan_unique_bytes, report.orphan_bytes)))}
               </button>
               <button className="set-action-btn" onClick={load} disabled={loading || busy}>
                 <RefreshCw size={14} />
@@ -186,7 +215,11 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
                       {entry.name}
                     </td>
                     <td>{entry.owner ? `${entry.owner.task_ref ?? entry.owner.execution_id.slice(0, 8)} · ${entry.owner.status}` : '—'}</td>
-                    <td className="set-db-usage-num">{sizeLabel(entry.bytes, entry.bytes_are_partial)}</td>
+                    <td className="set-db-usage-num" title={t('settings.disk.apparent', formatBytes(entry.bytes))} data-testid="disk-entry-size">
+                      {entry.unique_bytes !== null
+                        ? t('settings.disk.real', sizeLabel(entry.unique_bytes, entry.bytes_are_partial))
+                        : t('settings.disk.apparent', sizeLabel(entry.bytes, entry.bytes_are_partial))}
+                    </td>
                     <td className="set-db-usage-num">{idleLabel(entry.idle_seconds, t)}</td>
                     <td title={entry.reason ?? undefined}>{stateLabel(entry.state)}</td>
                     <td>
@@ -226,6 +259,16 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
                   value={idleHours}
                   onChange={event => setIdleHours(event.target.value)}
                   aria-label={t('settings.disk.idleHours')}
+                />
+              </label>
+              <label className="text-sm">
+                {t('settings.disk.stalledDays')}{' '}
+                <input
+                  type="number"
+                  min={1}
+                  value={stalledDays}
+                  onChange={event => setStalledDays(event.target.value)}
+                  aria-label={t('settings.disk.stalledDays')}
                 />
               </label>
               <button className="set-action-btn" onClick={savePolicy}>

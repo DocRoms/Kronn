@@ -51,7 +51,7 @@ mod tool_parity_tests;
 
 #[path = "agent_tool_gate.rs"]
 mod tool_gate;
-pub(crate) use tool_gate::TEST_STEP_RUN_ID;
+pub use tool_gate::TEST_STEP_RUN_ID;
 
 #[path = "agent_workflow_tools.rs"]
 mod workflow_tools;
@@ -381,7 +381,7 @@ fn holds_private_key(text: &str) -> bool {
 /// `workflow_workspace_tool_catalogue`: `web_fetch` would send the model off the
 /// project, `git_commit` would mutate history the audit never asked it to touch,
 /// and the discussion readers have no room to read.
-pub(crate) const AUDIT_TOOLS: &[&str] = &[
+pub const AUDIT_TOOLS: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
@@ -431,7 +431,7 @@ fn fail(call: &ToolCall, message: impl Into<String>) -> ToolOutcome {
 /// the default. Core tools stay directly available for discovery. Loaded families
 /// remain available for the run. Quick Prompt batch launch and deletion are omitted
 /// to prevent unbounded fan-out and removal of saved run history.
-pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
+pub const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
     (
         "pages",
         "find, create and update shared live Pages for workflow data: `page_list`, `page_get`, `page_create`, `page_update_html`, `page_add_dataset`",
@@ -501,7 +501,7 @@ pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
 
 /// Use full declarations by default. Native-model measurements in docs/research/
 /// showed lower success with tiering; keep it opt-in via KRONN_TIERED_TOOLS=1.
-pub(crate) fn tiered_tools_enabled() -> bool {
+pub fn tiered_tools_enabled() -> bool {
     explicit_tiering(
         crate::core::child_env::var("KRONN_TIERED_TOOLS")
             .ok()
@@ -530,7 +530,7 @@ fn family_of(name: &str) -> Option<&'static str> {
         .map(|(family, _, _)| *family)
 }
 
-pub(crate) fn declarations_for_family(family: &str) -> Vec<Value> {
+pub fn declarations_for_family(family: &str) -> Vec<Value> {
     let Some((_, _, names)) = TOOL_FAMILIES.iter().find(|(id, _, _)| *id == family) else {
         return Vec::new();
     };
@@ -572,7 +572,7 @@ fn tools_load_declaration() -> Value {
 }
 
 /// The catalogue as it stands before the tiers are applied.
-pub(crate) fn full_discussion_catalogue() -> Vec<Value> {
+pub fn full_discussion_catalogue() -> Vec<Value> {
     let mut catalogue = tool_catalogue();
     catalogue.extend(workspace_tool_catalogue());
     catalogue.extend(orchestration_tool_catalogue());
@@ -581,7 +581,7 @@ pub(crate) fn full_discussion_catalogue() -> Vec<Value> {
 }
 
 /// Split a catalogue into what a run starts with, plus the index.
-pub(crate) fn tiered(catalogue: Vec<Value>) -> Vec<Value> {
+pub fn tiered(catalogue: Vec<Value>) -> Vec<Value> {
     let mut core: Vec<Value> = catalogue
         .into_iter()
         .filter(|tool| {
@@ -1230,7 +1230,7 @@ fn derived_media_idempotency_key(discussion_id: &str, arguments: &Value) -> Stri
         .collect()
 }
 
-pub(crate) fn is_orchestration_tool(name: &str) -> bool {
+pub fn is_orchestration_tool(name: &str) -> bool {
     orchestration_tool_catalogue()
         .iter()
         .any(|tool| tool["function"]["name"] == name)
@@ -1371,6 +1371,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Required sentinel proving the current tool contract was transported. scoped requires worker_scope; generic forbids it."},
                 "worker_scope": worker_scope_schema.clone(),
                 "validations": validations_schema("Optional: the gates you will launch with. A command that could never run (shell syntax, a binary off the allowlist) makes launchable false, with the form that runs."),
+                "base_rev": {"type": "string", "description": "Optional: the integration branch you will launch with. A branch checked out in the owner's working checkout or in a worktree Kronn does not own makes launchable false. Absent: the room's declared integration branch is checked."},
                 "max_review_rounds": max_review_rounds_schema()
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
@@ -1383,7 +1384,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker": {"type": "object"},
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Must exactly match the preflighted scope intent."},
                 "worker_scope": worker_scope_schema,
-                "base_rev": {"type": "string"},
+                "base_rev": {"type": "string", "description": "The integration branch: the task branch is cut from it and integrates back into it. Absent: the room's declared integration branch (its campaign target); with none declared the launch is refused, it never defaults to `main`. A branch checked out in the owner's working checkout is refused."},
                 "idempotency_key": {"type": "string"},
                 "validations": validations_schema("Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest. Refused at launch when a command could never run."),
                 "max_review_rounds": max_review_rounds_schema(),
@@ -2798,6 +2799,7 @@ impl KronnToolExecutor {
                     Err(error) => return fail(call, error),
                 };
                 let parent = discussion_id;
+                let base_rev = required_string(call, "base_rev");
                 crate::api::orchestration::reclaim_finished_worktrees_for_launch(
                     &self.state.db,
                     &task_reference,
@@ -2813,6 +2815,11 @@ impl KronnToolExecutor {
                             &task_reference,
                             &parent,
                             &worker,
+                        )?;
+                        crate::api::orchestration::integration_target_preparation(
+                            conn,
+                            &mut preparation,
+                            base_rev.as_deref(),
                         )?;
                         preparation.warnings.extend(full_suite_warnings);
                         preparation.default_max_review_rounds =
@@ -3245,6 +3252,7 @@ impl KronnToolExecutor {
                             id: Some(self.actor_id.clone()),
                             session_id: self.actor_session_id(),
                             source_message_id: self.source_message_id.clone(),
+                            token_declared: false,
                         };
                         match crate::api::orchestration::extend_execution_review_rounds(
                             &self.state,
@@ -3267,6 +3275,7 @@ impl KronnToolExecutor {
                             id: Some(self.actor_id.clone()),
                             session_id: self.actor_session_id(),
                             source_message_id: self.source_message_id.clone(),
+                            token_declared: false,
                         };
                         match crate::api::orchestration::replace_execution_validations(
                             &self.state.db,
@@ -3797,7 +3806,7 @@ impl KronnToolExecutor {
                                 &canonical_path,
                             )?
                         else {
-                            return Ok(false);
+                            return Ok(None);
                         };
                         native_execution_for_caller(
                             conn,
@@ -3807,15 +3816,25 @@ impl KronnToolExecutor {
                             source_message_id.as_deref(),
                             false,
                         )?;
-                        Ok(true)
+                        // Which hooks Kronn may run for this commit (KT-1745).
+                        let project_id =
+                            crate::db::discussion_workspaces::get_managed_for_execution(
+                                conn,
+                                &execution.id,
+                            )?
+                            .map(|workspace| workspace.project_id);
+                        let hooks =
+                            crate::db::projects::worker_commit_hooks(conn, project_id.as_deref());
+                        Ok(Some((execution.base_sha, hooks)))
                     })
                     .await;
-                if !matches!(authorised, Ok(true)) {
+                // The pinned base the doc citations are compared with (KT-1721).
+                let Ok(Some((base_sha, hooks))) = authorised else {
                     return fail(
                         call,
                         "git_commit is available only to the exact active native worker in its managed task worktree",
                     );
-                }
+                };
                 let Some(files) = call.arguments["files"].as_array() else {
                     return fail(call, "missing array field `files`");
                 };
@@ -3835,9 +3854,22 @@ impl KronnToolExecutor {
                 let Some(message) = call.arguments["message"].as_str() else {
                     return fail(call, "missing required field `message`");
                 };
-                match ws::git_commit_payload(&canonical_root, &files, message) {
-                    Ok(payload) => ok(call, payload),
-                    Err(message) => fail(call, message),
+                let message = message.to_string();
+                let committed = tokio::task::spawn_blocking(move || {
+                    ws::git_commit_payload_reanchoring_docs_with_hooks(
+                        &canonical_root,
+                        &files,
+                        &message,
+                        None,
+                        base_sha.as_deref(),
+                        hooks,
+                    )
+                })
+                .await;
+                match committed {
+                    Ok(Ok(payload)) => ok(call, payload),
+                    Ok(Err(message)) => fail(call, message),
+                    Err(error) => fail(call, format!("git_commit task failed: {error}")),
                 }
             }
             "find_files" => match call.arguments["pattern"].as_str() {
@@ -3998,7 +4030,7 @@ impl KronnToolExecutor {
 
     /// The rooms and run this agent was launched from, for its trust level
     /// (KT-1492).
-    pub(crate) fn trust_origin(&self) -> crate::db::trust::TrustOrigin {
+    pub fn trust_origin(&self) -> crate::db::trust::TrustOrigin {
         crate::db::trust::TrustOrigin {
             discussion_ids: self
                 .disc_id
@@ -4043,6 +4075,7 @@ impl KronnToolExecutor {
             id: Some(self.actor_id.clone()),
             session_id: self.actor_session_id(),
             source_message_id: self.source_message_id.clone(),
+            token_declared: false,
         }
     }
 
@@ -4066,7 +4099,7 @@ impl KronnToolExecutor {
 
     /// Test seam for `resolve_config_id`, which is otherwise only reachable
     /// through a live tool call.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn resolve_config_id_pub(&self, slug: &str) -> Option<String> {
         self.resolve_config_id(slug).await
     }
@@ -4488,20 +4521,20 @@ fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 const ROOM_SCOPE_NOT_HERE: &str = "room_scope is for a room's own agent. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a worker reaches its task's project only.";
 
 /// Both reaches, as an agent needs them (KT-1341).
-pub(crate) const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), plan (planning only: create and edit tasks there, `project_ids` naming it; its files stay read-only; formerly called write) or code (plan, and you edit that project's checkout like your own: one project, never every project, and never its secrets (`.env*`, keys, `.mcp.json`, MCP configs), its Git config and hooks or its agent settings; the grant is applied for Claude Code only, a full-access agent ignores the room scope and the grant is not enforced for it), or every project in read or plan. room_scope() returns the grants, the pending requests, the journal and `requestable`: the names of the registered projects not granted that you may ask for (the prompt never names them). When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself, unless the human set this room, its workflow or the instance to Trusted or Full access: then a request on a registered project comes back `granted_by_trust` and is journalled. Otherwise do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
+pub const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), plan (planning only: create and edit tasks there, `project_ids` naming it; its files stay read-only; formerly called write) or code (plan, and you edit that project's checkout like your own: one project, never every project, and never its secrets (`.env*`, keys, `.mcp.json`, MCP configs), its Git config and hooks or its agent settings; the grant is applied for Claude Code only, a full-access agent ignores the room scope and the grant is not enforced for it), or every project in read or plan. room_scope() returns the grants, the pending requests, the journal and `requestable`: the names of the registered projects not granted that you may ask for (the prompt never names them). When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself, unless the human set this room, its workflow or the instance to Trusted or Full access: then a request on a registered project comes back `granted_by_trust` and is journalled. Otherwise do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
 
 /// Version reading, shared word for word with the bridge's manuals (KT-1341).
-pub(crate) const SKILL_GET_MANUAL: &str = "skill_get({skill_id}) returns the skill whole; a custom skill adds `versions`: version_index, created_at and current, newest first, without bodies. skill_get({skill_id: `custom-x@N`}) returns version N whole. Builtin skills have no versions. `custom-x@N` in the skill_ids of a step, a Quick Prompt or a discussion loads that version, frozen; the bare id follows every edit, and saving refuses a version that does not exist. A project's skill and its versions are read only where that project is in reach. Restoring a version is a human action, in the skill's version history. Pinning and shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
+pub const SKILL_GET_MANUAL: &str = "skill_get({skill_id}) returns the skill whole; a custom skill adds `versions`: version_index, created_at and current, newest first, without bodies. skill_get({skill_id: `custom-x@N`}) returns version N whole. Builtin skills have no versions. `custom-x@N` in the skill_ids of a step, a Quick Prompt or a discussion loads that version, frozen; the bare id follows every edit, and saving refuses a version that does not exist. A project's skill and its versions are read only where that project is in reach. Restoring a version is a human action, in the skill's version history. Pinning and shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
 
 /// Skill writes, shared word for word with the bridge's manuals.
-pub(crate) const SKILL_CREATE_MANUAL: &str = "skill_create({name, description, icon, category, content}) saves a custom skill as version 1 and returns it with its id, custom-<slug>. category is Language, Domain or Business; content is the markdown body agents load. It lands in this room's or workflow's project: project_id may name that project only, and a room without a project creates a global skill only once a human granted it « General · write ». allowed_tools pre-approve agent tools, so only a human sets them: a skill an agent creates has none. Bind it in skill_ids as custom-<slug> (follows every edit) or custom-<slug>@1 (frozen).";
+pub const SKILL_CREATE_MANUAL: &str = "skill_create({name, description, icon, category, content}) saves a custom skill as version 1 and returns it with its id, custom-<slug>. category is Language, Domain or Business; content is the markdown body agents load. It lands in this room's or workflow's project: project_id may name that project only, and a room without a project creates a global skill only once a human granted it « General · write ». allowed_tools pre-approve agent tools, so only a human sets them: a skill an agent creates has none. Bind it in skill_ids as custom-<slug> (follows every edit) or custom-<slug>@1 (frozen).";
 
-pub(crate) const SKILL_UPDATE_MANUAL: &str = "skill_update({skill_id, ...}) changes only the fields passed (name, description, icon, category, content, license) and keeps the others, its project and allowed_tools included. Each save that changes the skill adds a version; one that changes nothing adds none. A step, Quick Prompt or discussion pinned to custom-x@N keeps loading version N, while an enabled workflow loading the bare custom-x is disabled until a human enables it again. Writable: a custom skill of this room's or workflow's project; in a room without a project, the global skills it created once granted « General · write »; never a builtin skill. To try the new version on real runs, a human picks it in the workflow's Shadow runs settings. Restoring a version and deleting a skill are human actions.";
+pub const SKILL_UPDATE_MANUAL: &str = "skill_update({skill_id, ...}) changes only the fields passed (name, description, icon, category, content, license) and keeps the others, its project and allowed_tools included. Each save that changes the skill adds a version; one that changes nothing adds none. A step, Quick Prompt or discussion pinned to custom-x@N keeps loading version N, while an enabled workflow loading the bare custom-x is disabled until a human enables it again. Writable: a custom skill of this room's or workflow's project; in a room without a project, the global skills it created once granted « General · write »; never a builtin skill. To try the new version on real runs, a human picks it in the workflow's Shadow runs settings. Restoring a version and deleting a skill are human actions.";
 
-pub(crate) const QP_GET_MANUAL: &str = "qp_get({qp_id}) returns the Quick Prompt whole with its `versions`: version_index, created_at and current, newest first, without bodies; each save adds one, v1 is its creation. qp_get({qp_id, version: N}) returns version N whole: its template, variables and bindings as saved then. A step cannot pin a Quick Prompt version; only a workflow's shadow loads another one (shadow.quick_prompt_versions, set by a human). A project's Quick Prompt and its versions are read only where that project is in reach. Deleting a version is a human action. Shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
+pub const QP_GET_MANUAL: &str = "qp_get({qp_id}) returns the Quick Prompt whole with its `versions`: version_index, created_at and current, newest first, without bodies; each save adds one, v1 is its creation. qp_get({qp_id, version: N}) returns version N whole: its template, variables and bindings as saved then. A step cannot pin a Quick Prompt version; only a shadow of a step loads another one (its quick_prompt_versions, set by a human). A project's Quick Prompt and its versions are read only where that project is in reach. Deleting a version is a human action. Shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
 
 /// What a workflow author must know of shadow runs, refs and pins.
-pub(crate) const WORKFLOW_VARIANTS_MANUAL: &str = "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a shadow run skips it, an unmarked one acts twice. Use {{run.variant}} (normal or shadow) in every branch name or path both runs would share, and {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. `custom-x@N` in skill_ids pins a skill version. The shadow config is human-only: workflow_get shows it, no agent tool sets it; point the user to the workflow editor's Shadow runs settings, and to the Resources panel of a Page the workflow feeds to promote a version. Details: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
+pub const WORKFLOW_VARIANTS_MANUAL: &str = "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a step shadow never runs it and the step cannot carry shadows. Write {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. An export carries a custom skill named by its whole id anywhere in a step; any other pasted id is not exported. `custom-x@N` in skill_ids pins a skill version. Step shadows are human-only: workflow_get shows each step's shadows, no agent tool sets them and a save keeps the stored ones; a shadow re-runs only its step beside the main execution, on the same input, with another agent, model, prompt or skills (or none, to measure determinism), and never runs a Gate or a step marked external_effect, nor fails or delays the main step; a step's optional shadow_merge (human-only too) waits for the shadows it selects, condenses them with the main output and verifies every point, and its result becomes the step's output; point the user to the step editor's Shadows section, and to the Resources panel of a Page the workflow feeds to promote a version. Details: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
 
 fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[
@@ -4606,6 +4639,14 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              agent_list, `worker_scope_intent` (`generic`, or `scoped` with a `worker_scope`), and \
              optionally the `validations` you will launch with. Only `launchable: true` permits a \
              matching task_exec_launch.\n\n\
+             **Integration target** — pass the `base_rev` you will launch with, or leave it out \
+             to check the room's declared integration branch (its campaign target). A branch \
+             checked out in the owner's working checkout, or in a worktree Kronn does not own, \
+             makes the answer `launchable: false` with reason \
+             `integration_target_owner_checkout` or `integration_target_foreign_worktree`: \
+             integration writes into the checkout that holds the branch. With no `base_rev` \
+             and no declared branch the answer carries an `integration_target_undeclared` \
+             warning, and task_exec_launch refuses: it never defaults to `main`.\n\n\
              **Review rounds** — `max_review_rounds` (prepare and launch) is the number of \
              `request_changes` rounds before the execution escalates: an integer from 1 to 1000 \
              or `\"unlimited\"` (no cap; a looping review burns tokens until a stall or a \
@@ -4887,9 +4928,7 @@ fn api_call_request(
 /// already takes from workflows (`ExtractSpec`). A bare JSONPath string is
 /// accepted as its `path`: local models write that as often as the object, and
 /// refusing it costs a turn to teach a spelling.
-pub(crate) fn api_call_extract(
-    arguments: &Value,
-) -> Result<Option<crate::models::ExtractSpec>, String> {
+pub fn api_call_extract(arguments: &Value) -> Result<Option<crate::models::ExtractSpec>, String> {
     let path_error =
         "`extract` needs a JSONPath in `path`, e.g. {\"path\": \"$.data[*]['name','id']\"}";
     let spec = match arguments.get("extract") {
@@ -4968,7 +5007,7 @@ fn message_tail(
 /// records — and a local model's context is the scarce resource: one unbounded
 /// result pushes the conversation out of the window and the turn fails or
 /// loses its instructions.
-pub(crate) const API_CALL_RESULT_MAX_BYTES: usize = 16 * 1024;
+pub const API_CALL_RESULT_MAX_BYTES: usize = 16 * 1024;
 
 /// Bound an `api_call` outcome to `max_bytes` of serialised `data`.
 ///
@@ -6780,4 +6819,19 @@ mod tests {
         );
         assert_eq!(summary, "Generate an image or a video.");
     }
+}
+
+inventory::submit! {
+    crate::core::uplink_state::WorkflowRoomTools(KronnToolExecutor::workflow_room_arc)
+}
+
+fn loadable_declarations() -> Vec<Value> {
+    TOOL_FAMILIES
+        .iter()
+        .flat_map(|(family, _, _)| declarations_for_family(family))
+        .collect()
+}
+inventory::submit! { crate::core::uplink::LoadableToolDeclarations(loadable_declarations) }
+inventory::submit! {
+    crate::core::uplink_state::WorkflowTestTools(KronnToolExecutor::workflow_test_arc)
 }

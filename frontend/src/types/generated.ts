@@ -376,6 +376,15 @@ mention_color?: string | null,
  */
 base_url?: string | null,
 /**
+ * KT-1693 — what takes over when THIS agent is unavailable on the provider
+ * side (rate limit, quota or credits spent, outage, CLI not authenticated),
+ * one row per mode (eco / standard / advanced / decision / image / video):
+ * at most one fallback per mode, off by default. When the fallback is itself
+ * unavailable, the fallback set on ITS own row applies. A discussion or a
+ * workflow step may override a mode.
+ */
+mode_fallbacks?: Array<ModeFallback>,
+/**
  * Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
  * Tools are on by default: `Some(false)` withholds them from every model
  * of this agent (for one that cannot take tool calls); `None` and
@@ -501,6 +510,23 @@ export type AgentEffectiveAccess = { agent: AgentType, full_access: boolean,
  */
 reason?: string, };
 
+/**
+ * KT-1693 — one fallback: the agent and, optionally, the model that takes over.
+ */
+export type AgentFallback = { agent: AgentType,
+/**
+ * A specific model on the fallback. `None`: the mode below (else the SAME
+ * mode as the interrupted turn), resolved on the fallback agent (a model
+ * name is provider-specific, so the failing agent's model is never carried
+ * over).
+ */
+model?: string | null,
+/**
+ * The mode of the model the fallback runs on. `None`: the mode of the row
+ * (or of the turn) it replaces. Must be of the same kind as that mode.
+ */
+mode?: FallbackMode | null, };
+
 export type AgentFilesPolicy = "repo" | "outside";
 
 export type AgentProfile = { id: string, name: string, persona_name: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, is_builtin: boolean,
@@ -605,12 +631,6 @@ idle_limit_ms: number | null, stopped: AgentRunStop | null, };
  */
 export type AgentRunStop = "finished" | "failed" | "cancelled" | "idle" | "timed_out";
 
-export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_code: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
-/**
- * Per-agent model tier overrides (Economy/Reasoning model names).
- */
-model_tiers: ModelTiersConfig, };
-
 export type AgentSettings = {
 /**
  * Explicit model override (expert mode). Takes priority over tier.
@@ -640,11 +660,30 @@ connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: nu
  * launch exactly; a declaration replaces the catalogue, the MCP servers
  * and the CLI's skill listing with what it names.
  */
-tools?: StepTools, };
+tools?: StepTools,
+/**
+ * KT-1693 — this step's own fallback, for the mode the step runs in (its
+ * tier: eco, standard or advanced). `None`: the row of the agent applies;
+ * `Some(empty)`: no fallback for this step; links: they replace the row,
+ * then the rows of the fallbacks go on.
+ */
+fallback?: Array<AgentFallback>, };
 
 export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
 export type AgentUsageSummary = { agent_type: string, total_tokens: number, message_count: number, by_project: Array<AgentProjectUsage>, };
+
+export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_code: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
+/**
+ * Per-agent model tier overrides (Economy/Reasoning model names).
+ */
+model_tiers: ModelTiersConfig,
+/**
+ * KT-1706 — what takes over a mode of a named HTTP connection (or the image or
+ * video mode of ComfyUI) when its provider cannot serve a request. Kept apart
+ * from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
+ */
+connection_fallbacks?: Array<ConnectionFallback>, };
 
 export type AiAuditStatus = "NoTemplate" | "TemplateInstalled" | "Bootstrapped" | "Audited" | "Validated";
 
@@ -880,9 +919,19 @@ export type ArtifactBundle = { kind: string, version: number, exported_at: strin
  */
 referenced_skills?: Array<BundledSkill>,
 /**
+ * KT-1843 — custom directives and profiles the steps and the bundled
+ * Quick objects bind; an import reuses the local one that says the same.
+ */
+referenced_directives?: Array<Directive>, referenced_profiles?: Array<AgentProfile>,
+/**
  * Literal credentials replaced before export; locations only, never values.
  */
-redacted_fields?: Array<RedactedField>, };
+redacted_fields?: Array<RedactedField>,
+/**
+ * KT-1843 — what the exported content names and the file does not hold;
+ * shown before the file leaves.
+ */
+not_carried?: Array<NotCarried>, };
 
 export type ArtifactBundleDataset = { name: string, kind: LivePageDatasetKind,
 /**
@@ -932,7 +981,11 @@ embed_origins: Array<ArtifactImportEmbedOrigin>,
 /**
  * What the import does with each bundled custom skill (KT-1446).
  */
-skills: Array<SkillImportDecision>, };
+skills: Array<SkillImportDecision>,
+/**
+ * What the import does with each bundled directive and profile (KT-1843).
+ */
+bindings: Array<BindingImportDecision>, };
 
 export type ArtifactImportRequest = { content: string, project_id?: string | null, choices?: Array<ArtifactImportChoice>,
 /**
@@ -954,6 +1007,10 @@ allow_embed_origins?: Array<string>,
 skill_choices?: Array<SkillImportChoice>, };
 
 export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>, skills: Array<SkillImportDecision>,
+/**
+ * What the import did with each bundled directive and profile (KT-1843).
+ */
+bindings: Array<BindingImportDecision>,
 /**
  * Origins this import added to the allowed sites.
  */
@@ -1551,6 +1608,11 @@ export type AuditTodo = { file: string, line: number, text: string, };
 export type AuditTokenBreakdown = { uncached_input?: number, input_as_reported?: number, output?: number, cache_read?: number, cache_write?: number, total_with_cache?: number, };
 
 /**
+ * Why Kronn disabled a workflow on its own (KT-1037).
+ */
+export type AutoDisableReason = "agent_edit" | "dependency_edited_by_agent" | "created_by_agent" | "imported";
+
+/**
  * A workflow Kronn disabled on its own and no human has enabled since.
  */
 export type AutoDisabledWorkflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, reason: AutoDisableReason, disabled_at: string,
@@ -1562,11 +1624,6 @@ disabled_by: string,
  * What changed, in a few words ("steps changed by Codex").
  */
 summary: string, };
-
-/**
- * Why Kronn disabled a workflow on its own (KT-1037).
- */
-export type AutoDisableReason = "agent_edit" | "dependency_edited_by_agent" | "created_by_agent" | "imported";
 
 /**
  * Auto-trigger regex buckets declared in a skill's frontmatter YAML.
@@ -1673,6 +1730,25 @@ parent_workflow_id: string | null, parent_workflow_name: string | null,
 parent_run_sequence: number | null, };
 
 /**
+ * One bundled directive or profile as an import preview shows it (KT-1843):
+ * reused when a local custom one says the same thing, created otherwise.
+ */
+export type BindingImportDecision = { kind: BindingKind, source_id: string, name: string,
+/**
+ * `reuse` or `create`.
+ */
+action: SkillImportAction,
+/**
+ * The local entry reused.
+ */
+existing_id: string | null, };
+
+/**
+ * What a bundled binding is (KT-1843).
+ */
+export type BindingKind = "directive" | "profile";
+
+/**
  * The saved Quick Exec behind a blocker, and the program it hands run values to.
  */
 export type BlockedQuickExec = { id: string, name: string,
@@ -1757,14 +1833,14 @@ source_of_truth: boolean,
  */
 last_commit: string | null, };
 
-export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
-
-export type BriefingDocsDirSource = "project_override" | "existing" | "global_default" | "default";
-
 /**
  * The state the user gives a location. `Unknown` is an unanswered state.
  */
 export type BriefingDocState = "unknown" | "recent" | "old" | "obsolete" | "partial" | "reference";
+
+export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
+
+export type BriefingDocsDirSource = "project_override" | "existing" | "global_default" | "default";
 
 export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, };
 
@@ -1918,7 +1994,7 @@ export type BundleChildWorkflow = { bundle_id: string, name: string, project_id:
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, shadow?: WorkflowShadow, refs?: { [key in string]: ResourceRef }, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, refs?: { [key in string]: ResourceRef }, };
 
 /**
  * One artifact that was created by the bundle endpoint. The
@@ -1967,28 +2043,6 @@ default_headers?: Array<ApiDefaultHeader>,
  * Endpoint the "Test" button calls (see `ApiSpec::test_endpoint`).
  */
 test_endpoint?: string, };
-
-/**
- * A custom skill carried by a workflow or Page export (KT-1446): the file as
- * stored, so the importer recreates it byte for byte.
- */
-export type BundledSkill = {
-/**
- * The id on the exporting Kronn (`custom-<slug>`).
- */
-id: string, name: string,
-/**
- * The newest version index on the exporting Kronn, when it has a history.
- */
-version?: number,
-/**
- * Hex sha256 of `content`.
- */
-sha256: string,
-/**
- * The skill file (frontmatter + body), without any project scope.
- */
-content: string, };
 
 /**
  * One Quick API declared inside a bundle.
@@ -2050,6 +2104,28 @@ export type BundleTask = { reference: string, title: string, status: string,
 dod_progress: string | null, };
 
 export type BundleWorkflowCreated = { id: string, name: string, };
+
+/**
+ * A custom skill carried by a workflow or Page export (KT-1446): the file as
+ * stored, so the importer recreates it byte for byte.
+ */
+export type BundledSkill = {
+/**
+ * The id on the exporting Kronn (`custom-<slug>`).
+ */
+id: string, name: string,
+/**
+ * The newest version index on the exporting Kronn, when it has a history.
+ */
+version?: number,
+/**
+ * Hex sha256 of `content`.
+ */
+sha256: string,
+/**
+ * The skill file (frontmatter + body), without any project scope.
+ */
+content: string, };
 
 /**
  * The reviewer a campaign names at creation. A delivery is never addressed to
@@ -2234,6 +2310,12 @@ detail?: string | null,
  */
 notice?: string | null, };
 
+/**
+ * The fallback of one mode row, for display: its own link, the links inherited
+ * through the rows of the fallbacks, or the reason it is refused.
+ */
+export type ChainView = { agent: AgentType, mode: FallbackMode, links: Array<LinkView>, inherited: Array<InheritedView>, error?: string, };
+
 export type CheckBriefingDocRequest = { path: string, };
 
 /**
@@ -2261,12 +2343,14 @@ current_line: number | null, };
 /**
  * Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
  * host the room behind this invite code?". Authenticated by `from_invite_code`
- * matching one of our contacts — the same self-auth credential as the WS
- * Presence handshake (so this endpoint is exempt from the bearer middleware).
+ * naming one of our contacts AND `secret`, the per-contact secret it was paired
+ * with — the same credential as the WS Presence handshake (so this endpoint is
+ * exempt from the bearer middleware).
  */
 export type ClaimByTokenRequest = { token: string,
 /**
- * The CALLING peer's own invite code — must match a known contact here.
+ * The CALLING peer's own invite code — names a known contact here. It is
+ * public: it proves nothing without `secret`.
  */
 from_invite_code: string, };
 
@@ -2525,6 +2609,21 @@ downloadable: boolean, };
  */
 export type CommentDiscussionQuestionRequest = { idempotency_key: string, text: string, };
 
+/**
+ * One resolved policy, with where each half comes from.
+ */
+export type CommitPolicyView = { name: string, email: string,
+/**
+ * `setting`, `kronn_config`, `repository`, `conditional`, `kronn_global`, `global` or
+ * `fallback`.
+ */
+identity_source: string, signoff: boolean,
+/**
+ * `setting`, `kronn_config`, `briefing`, `dco_file`, `commit_msg_hook`,
+ * `history`, `kronn_global` or `default`.
+ */
+signoff_source: string, };
+
 export type CompareImprovementAvailability = "available" | "different_prompts" | "missing_prompt" | "no_shared_quick_prompt";
 
 export type ComparePromptCompatibility = "identical" | "different" | "missing";
@@ -2545,6 +2644,30 @@ export type ConfirmTrustProofRequest = { code: string,
  * The human-admin secret, as for starting the enrolment.
  */
 admin_secret?: string | null, };
+
+/**
+ * The fallback of one media row, for display: its own link, the links inherited
+ * through the rows of the fallbacks, or why it is refused.
+ */
+export type ConnectionChainView = { owner: string, mode: FallbackMode, links: Array<ConnectionLinkView>, inherited: Array<ConnectionLinkView>, error?: string, };
+
+/**
+ * KT-1706 — the fallback of one mode of an owner (a connection id, or
+ * `local:comfyui` for `image` and `video`).
+ */
+export type ConnectionFallback = { owner: string, row: FallbackMode, fallback: ConnectionFallbackTarget, };
+
+/**
+ * KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
+ * id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
+ * model; without one, the model that target has in its own slot of the mode.
+ */
+export type ConnectionFallbackTarget = { connection: string, model?: string | null, };
+
+/**
+ * One link as Settings shows it.
+ */
+export type ConnectionLinkView = { connection: string, model?: string, transport: FallbackTransport, };
 
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
 
@@ -2640,6 +2763,15 @@ created_at: string,
  * The file's bytes are in the archive as `context-files/<id>`.
  */
 has_blob: boolean, };
+
+/**
+ * An agent left alone until `until`: new turns go straight to its fallback.
+ */
+export type Cooldown = { agent: AgentType, until: string,
+/**
+ * A [`Trigger::code`].
+ */
+reason: string, };
 
 export type CorrectionKind = "recheck" | "replace_or_remove" | "remove_section" | "check_or_anchor";
 
@@ -2849,7 +2981,7 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, shadow?: WorkflowShadow, refs?: { [key in string]: ResourceRef }, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, refs?: { [key in string]: ResourceRef }, };
 
 /**
  * Where a plugin's outbound API credential actually comes from, computed
@@ -3072,6 +3204,59 @@ free_bytes: number,
  * folding the tail is the chart's decision, not the measurement's.
  */
 tables: Array<DbTableUsage>, };
+
+/**
+ * KT-1367 — what a `Decide` step asks its decision model.
+ */
+export type DecideConfig = {
+/**
+ * What the model reads, templated like a prompt (`{{steps.x.output}}`).
+ */
+state: string,
+/**
+ * Asked in one call, 1 to 64.
+ */
+questions: Array<DecideQuestion>,
+/**
+ * Below this confidence an answer is not trusted: the step emits
+ * `<id>_unsure` and `low_confidence` instead. `None` = the default of
+ * each question kind, measured in docs/research.
+ */
+min_confidence?: number,
+/**
+ * KT-1697 — this step's own decision model. `None` = the configured
+ * Decision model (`model_tiers.ollama.decision`). Without `connection_id`
+ * it is a local Ollama model.
+ */
+model?: string,
+/**
+ * KT-1697 — the external API connection `model` comes from. Only an
+ * OpenRouter connection has a documented decision contract
+ * (`POST /api/v1/systemone`); a step on a connection that is gone or can no
+ * longer serve `model` is flagged by readiness and refused at run time,
+ * never swapped.
+ */
+connection_id?: string, };
+
+export type DecideKind = "noul" | "choice" | "score";
+
+/**
+ * One typed question. Its answer becomes the signal `<id>_<answer>`.
+ */
+export type DecideQuestion = {
+/**
+ * Lowercase letters, digits and `_`; unique in the step.
+ */
+id: string, kind: DecideKind, instructions: string,
+/**
+ * `choice`: 2 to 26 options, id → what it means. `noul`: optional
+ * meanings of `true` and `false`.
+ */
+options?: { [key in string]: string },
+/**
+ * `score`: 2 to 10 levels, lowest first.
+ */
+levels?: Array<string>, };
 
 /**
  * 0.7.0 Phase 4 — payload for `POST /api/workflows/:id/runs/:run_id/decide`.
@@ -3412,31 +3597,6 @@ export type DiscLoadOtherQuery = { disc_id: string, from?: number | null, to?: n
 
 export type DiscLoadOtherResponse = { disc_id: string, title: string, total_messages: number, from_idx: number, to_idx: number, messages: Array<DiscLoadOtherMessage>, };
 
-export type DiscoveredHostMcp = { source_file: string, scope: HostScope, name: string, transport: McpTransport,
-/**
- * Env variable **names** declared by the entry. Values are never
- * surfaced through this struct (even though the file already exposes
- * them locally) so the API response is safe to log.
- */
-env_keys: Array<string>, managed_by_kronn: KronnOwnership, };
-
-export type DiscoveredKey = { provider: string, source: string, suggested_name: string, already_exists: boolean, };
-
-export type DiscoverKeysResponse = { discovered: Array<DiscoveredKey>, imported_count: number, };
-
-export type DiscoverReposRequest = { source_ids?: Array<string>, };
-
-export type DiscoverReposResponse = { repos: Array<RemoteRepo>, sources: Array<string>, available_sources: Array<RepoSource>, errors: Array<DiscoverSourceError>, };
-
-/**
- * 0.8.7 — per-source failure surfaced to the user (GitLab silently
- * returning 0 repos because the token expired was the trigger ; the
- * front-end now renders a chip with the error so the user knows WHY
- * a source produced no results, instead of guessing the integration
- * is broken).
- */
-export type DiscoverSourceError = { source_id: string, source_label: string, provider: string, message: string, };
-
 /**
  * LIKE-based full-text search across disc titles + message content.
  * Cheap-and-cheerful (no FTS5 wiring): finds the N most recent discs
@@ -3514,6 +3674,49 @@ export type DiscUnlinkRequest = { disc_id: string,
  * do implicitly: it is reserved for an explicit human "detach this thread".
  */
 source_agent?: string | null, source_session_id?: string | null, };
+
+export type DiscWorkspaceBlocker = { kind: string, message: string, };
+
+export type DiscWorkspaceHistoryLeaseRequest = { source_agent: string, source_session_id: string,
+/**
+ * `acquire` (or idempotent renewal) / `release`.
+ */
+action: string, backup_ref?: string | null, };
+
+export type DiscWorkspaceHistoryLeaseResponse = { acquired: boolean, advisory: boolean, lease: WorkspaceHistoryLease | null, blocker: DiscWorkspaceBlocker | null, };
+
+export type DiscWorkspaceQuery = { source_agent: string, source_session_id: string, };
+
+export type DiscWorkspaceSetRequest = { source_agent: string, source_session_id: string, workspace_path: string, task_ref?: string | null, };
+
+export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blockers: Array<DiscWorkspaceBlocker>, };
+
+export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
+
+export type DiscoverKeysResponse = { discovered: Array<DiscoveredKey>, imported_count: number, };
+
+export type DiscoverReposRequest = { source_ids?: Array<string>, };
+
+export type DiscoverReposResponse = { repos: Array<RemoteRepo>, sources: Array<string>, available_sources: Array<RepoSource>, errors: Array<DiscoverSourceError>, };
+
+/**
+ * 0.8.7 — per-source failure surfaced to the user (GitLab silently
+ * returning 0 repos because the token expired was the trigger ; the
+ * front-end now renders a chip with the error so the user knows WHY
+ * a source produced no results, instead of guessing the integration
+ * is broken).
+ */
+export type DiscoverSourceError = { source_id: string, source_label: string, provider: string, message: string, };
+
+export type DiscoveredHostMcp = { source_file: string, scope: HostScope, name: string, transport: McpTransport,
+/**
+ * Env variable **names** declared by the entry. Values are never
+ * surfaced through this struct (even though the file already exposes
+ * them locally) so the API response is safe to log.
+ */
+env_keys: Array<string>, managed_by_kronn: KronnOwnership, };
+
+export type DiscoveredKey = { provider: string, source: string, suggested_name: string, already_exists: boolean, };
 
 export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType,
 /**
@@ -3801,6 +4004,17 @@ export type DiscussionExportEnvelope = { kind: string, version: number, exported
  * writing `"exported_by": null`.
  */
 exported_by?: PortableExporterIdentity | null, };
+
+export type DiscussionFallback = {
+/**
+ * The modes this discussion overrides. A mode that is absent follows the
+ * default of the agent the turn starts on; an empty chain is "no fallback".
+ */
+overrides: Array<ModeOverride>,
+/**
+ * Each override as the editor shows it (gaps, inherited links, refusal).
+ */
+views: Array<ChainView>, };
 
 /**
  * KT-74 — provenance of an imported discussion, as the sidebar needs it.
@@ -4301,18 +4515,6 @@ message_bytes: number, };
 export type DiscussionWeightConfig = { enabled: boolean, amber_bytes: number, red_bytes: number, };
 
 /**
- * Batch answer. `weights` is SPARSE and indexed by discussion id: an id that
- * was requested but holds nothing is absent, which the UI must render as
- * "empty" rather than as a zero it could confuse with a failed load.
- */
-export type DiscussionWeightsResponse = { weights: { [key in string]: DiscussionWeightView }, thresholds: WeightThresholds,
-/**
- * True when the configured pair was unusable and the defaults took over.
- * Surfaced rather than hidden, so a bad config is visible.
- */
-thresholds_from_defaults: boolean, };
-
-/**
  * One discussion's weight with its graded level, as served to the UI.
  */
 export type DiscussionWeightView = { total_bytes: number, reclaimable_bytes: number, level: WeightLevel, discussion_id: string,
@@ -4330,6 +4532,18 @@ extracted_text_bytes: number,
  */
 message_bytes: number, };
 
+/**
+ * Batch answer. `weights` is SPARSE and indexed by discussion id: an id that
+ * was requested but holds nothing is absent, which the UI must render as
+ * "empty" rather than as a zero it could confuse with a failed load.
+ */
+export type DiscussionWeightsResponse = { weights: { [key in string]: DiscussionWeightView }, thresholds: WeightThresholds,
+/**
+ * True when the configured pair was unusable and the defaults took over.
+ * Surfaced rather than hidden, so a bad config is visible.
+ */
+thresholds_from_defaults: boolean, };
+
 export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string,
 /**
  * Managed-worktree lineage (KT-318, migration 127). Populated only for a
@@ -4338,24 +4552,6 @@ export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: num
  * CLI-declared `external` workspace.
  */
 parent_discussion_id: string | null, base_sha: string | null, task_execution_id: string | null, created_at: string, updated_at: string, };
-
-export type DiscWorkspaceBlocker = { kind: string, message: string, };
-
-export type DiscWorkspaceHistoryLeaseRequest = { source_agent: string, source_session_id: string,
-/**
- * `acquire` (or idempotent renewal) / `release`.
- */
-action: string, backup_ref?: string | null, };
-
-export type DiscWorkspaceHistoryLeaseResponse = { acquired: boolean, advisory: boolean, lease: WorkspaceHistoryLease | null, blocker: DiscWorkspaceBlocker | null, };
-
-export type DiscWorkspaceQuery = { source_agent: string, source_session_id: string, };
-
-export type DiscWorkspaceSetRequest = { source_agent: string, source_session_id: string, workspace_path: string, task_ref?: string | null, };
-
-export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blockers: Array<DiscWorkspaceBlocker>, };
-
-export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
 
 export type DocProvenanceReport = { docs: Array<DocProvenanceStatus>, to_reconfirm: number,
 /**
@@ -4379,6 +4575,8 @@ kronn_writes: Array<KronnWrite>,
  */
 changes: Array<ProvenanceChange>, };
 
+export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
+
 /**
  * Which rule picked the folder.
  */
@@ -4397,8 +4595,6 @@ site_generator: string | null,
  * `<folder>/legacy/` already exists: Kronn never merges into it.
  */
 legacy_exists: boolean, };
-
-export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
 
 /**
  * What changed since a previous audit — KT-194 drift.
@@ -4481,11 +4677,6 @@ http_status: number, failures: number,
 successes: number, last_seen: string, };
 
 /**
- * Who authorised an enrolment. There is deliberately no anonymous variant.
- */
-export type EnrolledBy = "admin" | "human";
-
-/**
  * The presented secret never appears in a URL or a query string — a path is
  * logged by every proxy in the world, and a body is not.
  */
@@ -4501,6 +4692,11 @@ authority: string, role: GrantRole, label: string, };
  * hash.
  */
 export type EnrolResponse = { credential: HumanCredential, secret: string, };
+
+/**
+ * Who authorised an enrolment. There is deliberately no anonymous variant.
+ */
+export type EnrolledBy = "admin" | "human";
 
 /**
  * One piece of evidence backing a claim. `kind` mirrors the citable source
@@ -4586,11 +4782,52 @@ export type ExecScriptFileStatus = { path: string, state: ExecScriptFileState, c
 export type ExecScriptStatusRequest = { project_id?: string, files: Array<ExecScriptFile>, };
 
 /**
+ * What one execution brought to the merged result.
+ */
+export type ExecutionContribution = {
+/**
+ * `main` or `shadow:<id>`.
+ */
+execution: string,
+/**
+ * Points it found that the merged result keeps and that no execution
+ * before it in the list found.
+ */
+kept: number,
+/**
+ * Of those kept, the points only this execution found.
+ */
+unique: number,
+/**
+ * Points it found that another execution already brought.
+ */
+duplicate: number,
+/**
+ * Points it found that could not be verified and were not published.
+ */
+dropped_unverified: number, };
+
+/**
  * Compact sidebar edge. The canonical relation already lives on
  * `task_executions`; this projection avoids overloading the workflow-run FK on
  * discussions or making clients fetch every execution detail separately.
  */
 export type ExecutionDiscussionLink = { execution_id: string, orchestration_run_id: string, task_id: string, task_reference: string, task_title: string, parent_discussion_id: string, sub_discussion_id: string, status: TaskExecutionStatus, };
+
+/**
+ * What one execution of a step loaded: what the comparison header sets side
+ * by side to say what differs.
+ */
+export type ExecutionIdentity = { agent: string, model?: string, connection_id?: string,
+/**
+ * `qp-id@N` for a Quick Prompt version, `inline:<hash>` for a prompt
+ * written in the step or the shadow.
+ */
+prompt: string,
+/**
+ * The skills the execution loads, versions pinned as `custom-x@3`.
+ */
+skills: Array<string>, };
 
 /**
  * Durable decision produced by boot reconciliation. `Interrupted` remains the
@@ -4599,7 +4836,7 @@ export type ExecutionDiscussionLink = { execution_id: string, orchestration_run_
  */
 export type ExecutionRecoveryAction = "resume_provisioning" | "resume_worker" | "await_review" | "await_human" | "rebuild_candidate" | "run_validations" | "apply_fast_forward" | "idempotent_close" | "block_dirty_target" | "block_missing_workspace" | "block_missing_discussion" | "block_agent_unavailable";
 
-export type ExecutionTimeoutKind = "activity" | "total_duration" | "review_wait" | "human_wait";
+export type ExecutionTimeoutKind = "activity" | "total_duration" | "review_wait" | "human_wait" | "queue_wait";
 
 /**
  * One value a configuration-only export withheld.
@@ -4697,10 +4934,38 @@ fail_on_empty: boolean, };
 export type Faithfulness = "entailment" | "neutral" | "contradiction";
 
 /**
+ * What a fallback cannot give that the agent it replaces could: a stable code,
+ * so the UI translates the warning instead of showing an English sentence.
+ */
+export type FallbackGap = "no_mcp_tools" | "no_write_access" | "no_image_input" | "capped_context";
+
+/**
+ * KT-1693 — a mode of an agent: the kind of work one model of it serves. The
+ * three text modes are the quality tiers (`ModelTier`); decision, image and
+ * video are capabilities, never tiers.
+ */
+export type FallbackMode = "eco" | "standard" | "advanced" | "decision" | "image" | "video";
+
+/**
+ * What Settings > Agents shows: every mode row that has a fallback, and who is
+ * on cooldown.
+ */
+export type FallbackOverview = { chains: Array<ChainView>, cooldowns: Array<Cooldown>,
+/**
+ * KT-1706 — the rows of the named HTTP connections and the image and video rows of ComfyUI.
+ */
+media: Array<ConnectionChainView>, };
+
+/**
+ * How an agent is reached; shown as a badge on every fallback pill.
+ */
+export type FallbackTransport = "cli" | "http" | "local";
+
+/**
  * Body of `POST /api/disc/fetch-file` (F8). A peer that received a
  * `FileAttached` announcement calls this to pull the binary of a context file
- * it doesn't have. Authenticated by `from_invite_code` matching a contact
- * (same trust model as `claim-by-token`).
+ * it doesn't have. Authenticated by `from_invite_code` naming a contact and its
+ * pairing `secret` (same trust model as `claim-by-token`).
  */
 export type FetchFileRequest = { file_id: string, from_invite_code: string, };
 
@@ -4755,12 +5020,6 @@ export type GitBlameQuery = { path: string, };
 
 export type GitBlameResponse = { path: string, lines: Array<GitBlameLine>, };
 
-export type GitBranchesResponse = { current_branch: string, default_branch: string, branches: Array<GitBranchSummary>, commits: Array<GitGraphCommit>,
-/**
- * True when more commits exist than the bounded graph returned here.
- */
-truncated: boolean, };
-
 export type GitBranchRequest = { name: string, };
 
 export type GitBranchResponse = { branch: string, };
@@ -4774,6 +5033,12 @@ name: string,
  * Full ref name, retained so the backend never has to reconstruct it.
  */
 ref_name: string, commit: string, subject: string, author: string, committed_at: number, is_current: boolean, is_remote: boolean, upstream: string | null, ahead: number, behind: number, };
+
+export type GitBranchesResponse = { current_branch: string, default_branch: string, branches: Array<GitBranchSummary>, commits: Array<GitGraphCommit>,
+/**
+ * True when more commits exist than the bounded graph returned here.
+ */
+truncated: boolean, };
 
 /**
  * KT-67 — what an annotated line is actually about. `git blame` gives a hash
@@ -4854,44 +5119,6 @@ export type GitFileStatus = { path: string, status: string, staged: boolean, };
 
 export type GitGraphCommit = { hash: string, short_hash: string, parents: Array<string>, refs: Array<string>, subject: string, author: string, committed_at: number, };
 
-/**
- * What a project persists: whether its agents receive a GitHub token, and from where.
- */
-export type GithubConnectionMode = "not_connected" | "gh_login" | "stored_token";
-
-/**
- * What the UI shows: the persisted mode plus whether the machine has a token.
- */
-export type GithubConnectionState = "not_connected" | "available_but_off" | "connected_gh_login" | "connected_stored_token";
-
-export type GithubMachineTokenSource = "environment" | "gh_cli";
-
-/**
- * The scope a token actually has, as GitHub reported it.
- */
-export type GithubScope = {
-/**
- * False when GitHub could not be asked or did not say; `reason` explains.
- */
-verified: boolean, token_kind: GithubTokenKind, login: string | null,
-/**
- * OAuth scopes (`X-OAuth-Scopes`) of a classic or OAuth token.
- */
-scopes: Array<string>,
-/**
- * Repositories a fine-grained token can reach (`owner/name`).
- */
-repositories: Array<string>, repositories_truncated: boolean,
-/**
- * The token reaches every repository of the account (e.g. classic `repo`).
- */
-broad: boolean, reason: string | null, checked_at: string, };
-
-/**
- * Read from the token prefix only; GitHub documents these prefixes.
- */
-export type GithubTokenKind = "classic" | "oauth" | "fine_grained" | "app" | "unknown";
-
 export type GitPushResponse = { success: boolean, message: string, };
 
 export type GitStatusResponse = { branch: string, default_branch: string, is_default_branch: boolean, files: Array<GitFileStatus>,
@@ -4964,6 +5191,44 @@ export type GitSwitchBranchRequest = { branch: string, };
 
 export type GitWorkspaceProvenance = { workspace_id: string | null, ownership: string, state: string, path: string | null, branch: string, base_sha: string | null, head_sha: string | null, integrated_sha: string | null, task_execution_id: string | null, task_reference: string | null, };
 
+/**
+ * What a project persists: whether its agents receive a GitHub token, and from where.
+ */
+export type GithubConnectionMode = "not_connected" | "gh_login" | "stored_token";
+
+/**
+ * What the UI shows: the persisted mode plus whether the machine has a token.
+ */
+export type GithubConnectionState = "not_connected" | "available_but_off" | "connected_gh_login" | "connected_stored_token";
+
+export type GithubMachineTokenSource = "environment" | "gh_cli";
+
+/**
+ * The scope a token actually has, as GitHub reported it.
+ */
+export type GithubScope = {
+/**
+ * False when GitHub could not be asked or did not say; `reason` explains.
+ */
+verified: boolean, token_kind: GithubTokenKind, login: string | null,
+/**
+ * OAuth scopes (`X-OAuth-Scopes`) of a classic or OAuth token.
+ */
+scopes: Array<string>,
+/**
+ * Repositories a fine-grained token can reach (`owner/name`).
+ */
+repositories: Array<string>, repositories_truncated: boolean,
+/**
+ * The token reaches every repository of the account (e.g. classic `repo`).
+ */
+broad: boolean, reason: string | null, checked_at: string, };
+
+/**
+ * Read from the token prefix only; GitHub documents these prefixes.
+ */
+export type GithubTokenKind = "classic" | "oauth" | "fine_grained" | "app" | "unknown";
+
 export type GrantDiscussionProjectRequest = {
 /**
  * The project to open; omitted with `all: true`.
@@ -5018,6 +5283,97 @@ export type HumanCitationTodo = { section: string, citation: CitationStatus, };
  * is safe to return.
  */
 export type HumanCredential = { id: string, label: string, role: GrantRole, enrolled_by: EnrolledBy, created_at: string, revoked_at: string | null, revoked_reason: string | null, };
+
+export type ImportBundlePreview = { bundle_id: string, already_imported: boolean, includes_values: boolean,
+/**
+ * The file was a single-plugin JSON from the old per-plugin export.
+ */
+legacy: boolean, plugins: Array<ImportPreviewPlugin>, };
+
+export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
+
+export type ImportDiscussionRequest = { content: string, project_id?: string | null, };
+
+export type ImportPluginBundleReport = { bundle_id: string, already_imported: boolean, imported_config_ids: Array<string>,
+/**
+ * Human-readable rows for the post-import scope assignment UI. Kept in
+ * addition to `imported_config_ids` for backwards API compatibility.
+ */
+imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
+
+export type ImportPluginBundleRequest = { content: string, passphrase?: string | null,
+/**
+ * Source config ids whose bundled custom arguments the importer accepted.
+ * They replace the plugin's whole command line, so every other plugin's
+ * arguments are dropped.
+ */
+accept_args_for?: Array<string>,
+/**
+ * Values the importer typed for the placeholders of a configuration-only
+ * bundle, by source config id then placeholder key (KT-1040).
+ */
+placeholder_values?: Record<string, Record<string, string>>, };
+
+/**
+ * One plugin as the import would treat it, before anything is written.
+ */
+export type ImportPreviewPlugin = { source_config_id: string, label: string, server_name: string,
+/**
+ * The command line the plugin runs today (catalogue), for stdio plugins.
+ */
+usual_args: Array<string> | null,
+/**
+ * The bundle's proposed command line, secret-looking parts masked.
+ */
+proposed_args: Array<string> | null, args_differ: boolean, importable: boolean, issue: string | null,
+/**
+ * Base URL of a custom API-only plugin; only its origin when the rest is withheld.
+ */
+base_url: string | null,
+/**
+ * Names of the headers a custom API plugin sends on every call; never their values.
+ */
+default_header_names: Array<string>,
+/**
+ * Values a configuration-only export withheld, for the importer to fill.
+ */
+placeholders: Array<ExportPlaceholder>, };
+
+export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
+/**
+ * Replace the Kronn copy even when it holds edits the repository does
+ * not have. Without it such an import is refused.
+ */
+overwrite_kronn_changes?: boolean, };
+
+/**
+ * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
+ */
+export type ImportQuickApiRequest = { content: string, project_id?: string | null, };
+
+export type ImportQuickExecRequest = { content: string, project_id?: string | null, };
+
+/**
+ * 0.7.0 UX pass — payload for `POST /api/quick-prompts/import`.
+ */
+export type ImportQuickPromptRequest = { content: string, project_id?: string | null, };
+
+export type ImportResult = { warnings: Array<string>, invalid_paths: Array<string>, };
+
+/**
+ * 0.7.0 UX pass — payload for `POST /api/workflows/import`.
+ * `content` is the raw JSON of a `WorkflowExportEnvelope` (string
+ * rather than nested object so the frontend can `JSON.parse` once
+ * from the dropped file and pass it through). `project_id` is the
+ * importer's project to attach the workflow to — `None` keeps it
+ * unattached (the user picks a project later via the wizard).
+ */
+export type ImportWorkflowRequest = { content: string, project_id?: string | null,
+/**
+ * How each bundled skill in conflict is settled (KT-1446); a conflict
+ * without a choice gets a copy.
+ */
+skill_choices?: Array<SkillImportChoice>, };
 
 /**
  * `required: false` is the explicit "none" the contract asks for, so an
@@ -5114,98 +5470,7 @@ dedup_key: string, title: string,
  */
 highlight: string, context?: string | null, impact: string, action_required: ImportantAction, references: ImportantReferences, };
 
-export type ImportBundlePreview = { bundle_id: string, already_imported: boolean, includes_values: boolean,
-/**
- * The file was a single-plugin JSON from the old per-plugin export.
- */
-legacy: boolean, plugins: Array<ImportPreviewPlugin>, };
-
-export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
-
-export type ImportDiscussionRequest = { content: string, project_id?: string | null, };
-
 export type ImportedPluginConfig = { config_id: string, server_id: string, label: string, server_name: string, };
-
-export type ImportPluginBundleReport = { bundle_id: string, already_imported: boolean, imported_config_ids: Array<string>,
-/**
- * Human-readable rows for the post-import scope assignment UI. Kept in
- * addition to `imported_config_ids` for backwards API compatibility.
- */
-imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
-
-export type ImportPluginBundleRequest = { content: string, passphrase?: string | null,
-/**
- * Source config ids whose bundled custom arguments the importer accepted.
- * They replace the plugin's whole command line, so every other plugin's
- * arguments are dropped.
- */
-accept_args_for?: Array<string>,
-/**
- * Values the importer typed for the placeholders of a configuration-only
- * bundle, by source config id then placeholder key (KT-1040).
- */
-placeholder_values?: Record<string, Record<string, string>>, };
-
-/**
- * One plugin as the import would treat it, before anything is written.
- */
-export type ImportPreviewPlugin = { source_config_id: string, label: string, server_name: string,
-/**
- * The command line the plugin runs today (catalogue), for stdio plugins.
- */
-usual_args: Array<string> | null,
-/**
- * The bundle's proposed command line, secret-looking parts masked.
- */
-proposed_args: Array<string> | null, args_differ: boolean, importable: boolean, issue: string | null,
-/**
- * Base URL of a custom API-only plugin; only its origin when the rest is withheld.
- */
-base_url: string | null,
-/**
- * Names of the headers a custom API plugin sends on every call; never their values.
- */
-default_header_names: Array<string>,
-/**
- * Values a configuration-only export withheld, for the importer to fill.
- */
-placeholders: Array<ExportPlaceholder>, };
-
-export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
-/**
- * Replace the Kronn copy even when it holds edits the repository does
- * not have. Without it such an import is refused.
- */
-overwrite_kronn_changes?: boolean, };
-
-/**
- * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
- */
-export type ImportQuickApiRequest = { content: string, project_id?: string | null, };
-
-export type ImportQuickExecRequest = { content: string, project_id?: string | null, };
-
-/**
- * 0.7.0 UX pass — payload for `POST /api/quick-prompts/import`.
- */
-export type ImportQuickPromptRequest = { content: string, project_id?: string | null, };
-
-export type ImportResult = { warnings: Array<string>, invalid_paths: Array<string>, };
-
-/**
- * 0.7.0 UX pass — payload for `POST /api/workflows/import`.
- * `content` is the raw JSON of a `WorkflowExportEnvelope` (string
- * rather than nested object so the frontend can `JSON.parse` once
- * from the dropped file and pass it through). `project_id` is the
- * importer's project to attach the workflow to — `None` keeps it
- * unattached (the user picks a project later via the wizard).
- */
-export type ImportWorkflowRequest = { content: string, project_id?: string | null,
-/**
- * How each bundled skill in conflict is settled (KT-1446); a conflict
- * without a choice gets a copy.
- */
-skill_choices?: Array<SkillImportChoice>, };
 
 /**
  * A discussion's in-app tokens with the cache told apart from the real input.
@@ -5240,6 +5505,12 @@ cache_write_tokens: number | null, output_tokens: number, };
  */
 export type InFlightAgentResponse = { message_id: string, content: string, started_at?: string | null, agent_type?: AgentType | null, model?: string | null, trigger_message_id?: string | null, connection_id?: string | null, dispatch?: ActiveAgentDispatch | null, };
 
+/**
+ * A fallback reached through another agent's row: it is not set here but on
+ * `source`'s card (« set on <agent>'s card »).
+ */
+export type InheritedView = { source: AgentType, link: LinkView, };
+
 export type InstructionFile = { path: string,
 /**
  * `None` when the file could not be read. NOT 0 — an unreadable file is not
@@ -5260,6 +5531,11 @@ redirects_to: Array<string>, };
  * without a schema migration on the discriminator.
  */
 export type IntegrationStrategy = "two_phase_ff_only";
+
+/**
+ * Who holds the integration target branch (KT-1688).
+ */
+export type IntegrationTargetState = "kronn_worktree" | "not_checked_out" | "owner_checkout" | "foreign_worktree" | "unresolved";
 
 /**
  * A `kronn-question` fence that no card could be recorded from.
@@ -5391,6 +5667,65 @@ export type LaneSeedsLastRun = { execution_id: string, at: string, seeds: Array<
  * Kronn).
  */
 export type LaneSeedsSource = "project" | "adopted" | "none";
+
+/**
+ * KT-1742 — how a worker lane is warmed: its compiler environment, whether the
+ * seed it is cloned from is aligned with that environment, the command that
+ * builds it, and the time that build may take.
+ *
+ * Set once globally (`[workers.lane_warm]`, Settings > Workers) and optionally
+ * per project (`ProjectWorkspace::lane_warm`, stored with the project). A field
+ * left `None` inherits: the project from the global entry, the global entry
+ * from what Kronn detects in the repository. Nothing here is specific to one
+ * language or repository.
+ */
+export type LaneWarmConfig = {
+/**
+ * Build the seed (the project's own main-checkout target) once with the
+ * lane's compiler environment, so a lane cloned from it reuses it. Default:
+ * on.
+ */
+seed_alignment?: boolean,
+/**
+ * The environment the lane's builds run with for the C compiler, one
+ * `NAME=value` per entry. `None` = detected (on macOS, the target-scoped
+ * `CFLAGS_<triple>=-save-temps=obj` when the project builds C through the
+ * `cc` crate, nothing otherwise); an empty list = none at all.
+ */
+compiler_env?: Array<string>,
+/**
+ * A shell command that replaces the detected first build (run in the
+ * worktree root, same bound, same event). The way to warm a project that is
+ * not a Cargo one: `composer install`, `npm ci`. `None` = detected.
+ */
+first_build_command?: string,
+/**
+ * The first build's time limit, in minutes. `None` = 60.
+ */
+first_build_timeout_min?: number,
+/**
+ * Which Rust workspace roots of the project to warm, as directories
+ * relative to the repository (`.` for the root itself). `None` = every root
+ * found from the manifests. A project's own setting only: the global entry
+ * cannot name directories of a repository it does not know.
+ */
+rust_roots?: Array<string>,
+/**
+ * KT-1747 — the dependency directories a lane layers read-only from the main
+ * checkout (`node_modules`, `vendor`, `Pods`, … at any depth), as
+ * directories relative to the repository. `None` = the ones detected from
+ * the manifests; a list = exactly those; an empty list = none. A project's
+ * own setting only, like `rust_roots`.
+ */
+dependency_dirs?: Array<string>,
+/**
+ * KT-1751 — the executables this project's validations may run beyond
+ * Kronn's own allowlist: a bare name (`composer`, `go`, `pytest`) or a
+ * repository-relative path (`vendor/bin/phpunit`). The human's decision for
+ * one project, set in its workspace settings: no agent tool writes it and the
+ * global entry is not read for it. A shell is never accepted.
+ */
+validation_executables?: Array<string>, };
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**
@@ -5525,6 +5860,25 @@ export type LearningScope = "user" | "project";
  */
 export type LearningStatus = "pending" | "validated" | "rejected" | "stale" | "promoted" | "promoting";
 
+export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: LivePageDiscussionRelation | null, };
+
+export type LinkMcpConfigRequest = { project_ids: Array<string>, };
+
+export type LinkPlanningDiscussionRequest = { discussion_id: string, placement?: PlanningPlacement, is_primary?: boolean, position?: number | null, actor?: PlanningActor, };
+
+/**
+ * One fallback as the Settings card shows it.
+ */
+export type LinkView = { agent: AgentType, model?: string,
+/**
+ * The mode of the model it runs on.
+ */
+mode: FallbackMode, transport: FallbackTransport,
+/**
+ * What a turn could need that this link cannot give, as warnings.
+ */
+gaps: Array<FallbackGap>, };
+
 /**
  * A companion repository linked to a project. The `location` is
  * either a filesystem path (preferred — gives the agent direct
@@ -5573,12 +5927,6 @@ export type LinkedRepoDocStatus = { id: string, ai_doc: LinkedRepoAiDoc,
  * Path of the entry point relative to the repository, when there is one.
  */
 doc_path: string | null, };
-
-export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: LivePageDiscussionRelation | null, };
-
-export type LinkMcpConfigRequest = { project_ids: Array<string>, };
-
-export type LinkPlanningDiscussionRequest = { discussion_id: string, placement?: PlanningPlacement, is_primary?: boolean, position?: number | null, actor?: PlanningActor, };
 
 /**
  * The lint result attached to an agent message.
@@ -5747,6 +6095,14 @@ fingerprint: string | null, refusal: LivePageActionTrustRefusal | null, trust: L
  */
 active: boolean, };
 
+/**
+ * `GET /api/pages/{id}/data`: what an open view needs to catch up with the
+ * Page. `full` carries the whole Page whenever the publication journal cannot
+ * account for every revision the reader missed; otherwise `datasets` holds
+ * only the datasets that changed since the reader's revision.
+ */
+export type LivePageDataDelta = { page: LivePage, full: LivePageDetail | null, datasets: Array<LivePageDatasetView>, };
+
 export type LivePageDataset = { id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 
 export type LivePageDatasetKind = "snapshot" | "time_series" | "collection";
@@ -5803,7 +6159,8 @@ export type LivePageDiscussionLink = { discussion_id: string, title: string, rel
 export type LivePageDiscussionRelation = "created_from" | "attached";
 
 /**
- * One successful data refresh recorded in the Page publication ledger.
+ * One data refresh that changed a dataset, recorded in the Page publication
+ * ledger; a refresh that changed nothing is not recorded.
  * Workflow fields remain optional because Pages may also be published
  * directly and workflow deletion preserves the historical publication.
  */
@@ -5819,19 +6176,29 @@ export type LivePageResource = {
 kind: string, id: string, name: string, latest_version: number | null, uses: Array<LivePageResourceUse>, };
 
 /**
- * One step that loads a Page resource, with the version each lane loads.
+ * The version one shadow of a step tests for a resource a Page's workflow uses.
+ */
+export type LivePageResourceShadow = { shadow_id: string, label: string,
+/**
+ * A skill id (`custom-x@3`), `v3` for a Quick Prompt version, or an empty
+ * string when the shadow drops the skill.
+ */
+version: string, };
+
+/**
+ * One step that loads a Page resource, with the version each of its shadows loads.
  */
 export type LivePageResourceUse = { workflow_id: string, workflow_name: string, step_name: string,
 /**
- * What the normal run loads: a skill id (`custom-x@3` when pinned) or,
- * for a Quick Prompt, `None` (its current version).
+ * What the normal execution loads: a skill id (`custom-x@3` when pinned)
+ * or, for a Quick Prompt, `None` (its current version).
  */
 normal: string | null,
 /**
- * What the workflow's shadow run loads instead, when its shadow is on
- * and names this resource.
+ * What each enabled shadow of the step loads instead, when it names this
+ * resource (KT-1459).
  */
-shadow: string | null, };
+shadows: Array<LivePageResourceShadow>, };
 
 export type LivePageRevision = { id: string, page_id: string, revision: number, html: string, created_by_agent: string | null, created_at: string, };
 
@@ -5841,8 +6208,6 @@ export type LivePageRevision = { id: string, page_id: string, revision: number, 
  * when it is compared (#252).
  */
 export type LivePageRevisionSummary = { id: string, page_id: string, revision: number, html_size_bytes: number, created_by_agent: string | null, created_at: string, };
-
-export type LivePagesCapability = { activated: boolean, activated_at: string | null, };
 
 /**
  * Live workflow configurations that publish into this Page. A Page is not
@@ -5857,6 +6222,8 @@ export type LivePageWrite = { dataset: string, operation: LivePageWriteOperation
 value: any, observed_at: string | null, dedupe_key: string | null, key_field: string | null, };
 
 export type LivePageWriteOperation = "replace" | "append" | "upsert" | "clear";
+
+export type LivePagesCapability = { activated: boolean, activated_at: string | null, };
 
 /**
  * A per-DoD coverage claim. `dod_id` references the task's DoD item; the schema
@@ -5971,7 +6338,18 @@ last_probes: Array<McpLastProbe>,
  * (401/403 auth error, failed token refresh); cleared by the next
  * successful call.
  */
-auth_failure?: McpAuthFailure, };
+auth_failure?: McpAuthFailure,
+/**
+ * KT-1692 — true when Kronn can probe this connection's token (a declared
+ * or selected test endpoint). Without one the card shows the last good
+ * call instead of a check.
+ */
+token_probe: boolean,
+/**
+ * KT-1692 — the last proactive check and the last time the token worked.
+ * `None` when the connection was never probed and never called.
+ */
+token_check?: McpTokenCheck, };
 
 /**
  * KT-829 — one config's probe outcome inside a `POST /api/mcps/test-all` run.
@@ -6185,6 +6563,48 @@ export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
  */
 export type McpTestAllResponse = { results: Array<McpConfigProbeResult>, };
 
+/**
+ * The proactive check of one connection (KT-1692).
+ */
+export type McpTokenCheck = {
+/**
+ * RFC3339 time of the last probe; `None` when never probed.
+ */
+checked_at?: string, outcome?: McpTokenCheckOutcome,
+/**
+ * What the probe said, redacted and truncated.
+ */
+detail: string,
+/**
+ * RFC3339 time of the last good probe or real call.
+ */
+last_good_at?: string, };
+
+/**
+ * `POST /api/mcps/check-tokens`.
+ */
+export type McpTokenCheckAllResponse = { results: Array<McpTokenCheckResult>, };
+
+/**
+ * What a proactive token probe found (KT-1692).
+ */
+export type McpTokenCheckOutcome = "ok" | "refused" | "inconclusive";
+
+/**
+ * `POST /api/mcps/configs/{id}/check-token` and `POST /api/mcps/check-tokens`
+ * (KT-1692): one connection's answer.
+ */
+export type McpTokenCheckResult = { config_id: string,
+/**
+ * The stored check after this request.
+ */
+check: McpTokenCheck,
+/**
+ * True when the probe was skipped because the connection was probed a
+ * moment ago: `check` is then the previous answer.
+ */
+rate_limited: boolean, };
+
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
 /**
@@ -6266,7 +6686,13 @@ reference_asset_id?: string | null,
 /**
  * What those images are for. Meaningless — and refused — without an asset.
  */
-reference_mode?: MediaReferenceMode | null, comfyui_reference_context?: ComfyReferenceContext, };
+reference_mode?: MediaReferenceMode | null, comfyui_reference_context?: ComfyReferenceContext,
+/**
+ * KT-1706 — the sources (ComfyUI, connection ids) this generation was already
+ * handed over from because they could not serve it, so a fallback never
+ * comes back to one of them. Written by the runner only.
+ */
+fallback_from?: Array<string>, };
 
 /**
  * Coarse provider phase, for progress reporting.
@@ -6330,6 +6756,34 @@ export type MergeFileDiff = { path: string,
  * `None` on a read-only plan.
  */
 outcome: WriteOutcome | null, imported_sections: number, diff: string, };
+
+/**
+ * One point of an execution's output (a finding, a claim) and what became of
+ * it: which executions found it, whether it was verified, why it was dropped.
+ */
+export type MergePoint = { id: string, summary: string,
+/**
+ * The point as the execution worded it: a dropped point's text never
+ * appears in the merged result.
+ */
+text?: string,
+/**
+ * `main` and `shadow:<id>`.
+ */
+found_by: Array<string>, verdict: PointVerdict, verified: boolean,
+/**
+ * What confirmed it: the file and line, the output read.
+ */
+evidence?: string,
+/**
+ * Why it was dropped or calibrated.
+ */
+reason?: string, duplicate_of?: string, };
+
+/**
+ * How a merge stands.
+ */
+export type MergeStatus = "waiting" | "condensing" | "merged" | "skipped" | "rejected" | "failed";
 
 /**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
@@ -6425,6 +6879,25 @@ reason?: string, };
  * both sides compare the same strings. A failure is an API error instead.
  */
 export type MigrateDocsStatus = "migrated" | "already_migrated" | "not_applicable";
+
+/**
+ * A selected shadow that did not contribute, and why.
+ */
+export type MissingShadow = { shadow_id: string, label: string, reason: string, };
+
+/**
+ * KT-1693 — the fallback set on one mode row of an agent.
+ */
+export type ModeFallback = { row: FallbackMode, fallback: AgentFallback, };
+
+/**
+ * A discussion's own fallback for one mode.
+ */
+export type ModeOverride = { mode: FallbackMode,
+/**
+ * The links that replace the default of the mode; empty is "no fallback".
+ */
+chain: Array<AgentFallback>, };
 
 export type ModelAvailability = "available" | "unavailable";
 
@@ -6664,6 +7137,20 @@ detected_ips: Array<DetectedIp>, };
  * policy table has no row for them, and each is held by its own gate.
  */
 export type NeverCovered = "credentials" | "trust_settings" | "destructive_confirmations" | "peer_inheritance";
+
+/**
+ * An object the exported content names and the file does not hold.
+ */
+export type NotCarried = {
+/**
+ * `skill`, `directive`, `profile`, `page`, `workflow`, `quick_prompt`,
+ * `quick_api` or `quick_exec`.
+ */
+kind: string, id: string,
+/**
+ * Where it is named, e.g. `Review › write_ctx` (workflow, then step).
+ */
+named_in: string, };
 
 /**
  * Configuration for a `StepType::Notify` webhook step. Rendered at run-time
@@ -7466,6 +7953,11 @@ export type PluginInterface = "api" | "mcp" | "cli";
 export type PluginKind = "mcp" | "api" | "hybrid" | "cli";
 
 /**
+ * What the condense pass decided about one point.
+ */
+export type PointVerdict = "kept" | "duplicate" | "dropped_unverified";
+
+/**
  * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
  * `disc_meta` and `peer-join` instead of living as an implicit convention
  * in each agent's prompt. Agents walk `poll_backoff_seconds` while the
@@ -7576,7 +8068,7 @@ export type Project = { id: string, name: string, path: string, repo_url: string
  * Total tech-debt entries detected in the project's docs tree:
  * one count per file under `docs/tech-debt/` plus one count per
  * table row in `docs/inconsistencies-tech-debt.md`. Computed by
- * `scanner::count_tech_debt` and surfaced as a badge on the
+ * `td_index::count_tech_debt` and surfaced as a badge on the
  * project card so users see at a glance how many TD items remain
  * to address. Not persisted in DB.
  */
@@ -7633,6 +8125,34 @@ outside_dir?: string,
  * Repository files Kronn took its entries back out of during this change.
  */
 cleaned?: Array<string>, };
+
+export type ProjectCommitPolicy = {
+/**
+ * What the card saved.
+ */
+settings: ProjectCommitSettings,
+/**
+ * What the project inherits when its card says nothing: the repository's
+ * own answers, then Settings > Workers', then the machine's git config.
+ */
+detected: CommitPolicyView,
+/**
+ * What Kronn commits with: the settings over the detection.
+ */
+effective: CommitPolicyView,
+/**
+ * The effective identity is the global git config's, which no project
+ * decided: a personal address on a repository that may not be personal.
+ */
+global_identity: boolean, };
+
+/**
+ * KT-1750 — the commit identity and sign-off of a project, set in its card.
+ * The identity is both fields or none: a name without an address (or the
+ * reverse) is refused when saved. Nothing set means "use what the repository
+ * itself says".
+ */
+export type ProjectCommitSettings = { name?: string | null, email?: string | null, signoff: SignoffSetting, };
 
 export type ProjectDockerAction = "start" | "stop" | "restart";
 
@@ -7811,6 +8331,13 @@ export type ProjectRepositoryResourceLevel = "usable_without_kronn" | "kronn_req
 export type ProjectRepositoryResourceMutation = { kind: ProjectRepositoryResourceKind, id: string, slug: string, status: ProjectRepositoryResourceStatus, approved: boolean, };
 
 /**
+ * Synchronization state between the repository and Kronn's database for one
+ * resource, following the same vocabulary for every kind (skills included).
+ * Exactly one is true at a time so the UI shows exactly one primary action.
+ */
+export type ProjectRepositoryResourceStatus = "repository_only" | "kronn_only" | "up_to_date" | "repository_newer" | "kronn_newer" | "conflict" | "approval_required" | "native_skill";
+
+/**
  * Read-only projection of the skills, automations and artifacts attached to a
  * project and their alignment with the repository's `kronn/` directory.
  */
@@ -7830,13 +8357,6 @@ can_write_repository: boolean, can_write_repository_reason?: RepositoryWriteBloc
  * changed, not committed" count.
  */
 uncommitted_managed_paths: Array<string>, };
-
-/**
- * Synchronization state between the repository and Kronn's database for one
- * resource, following the same vocabulary for every kind (skills included).
- * Exactly one is true at a time so the UI shows exactly one primary action.
- */
-export type ProjectRepositoryResourceStatus = "repository_only" | "kronn_only" | "up_to_date" | "repository_newer" | "kronn_newer" | "conflict" | "approval_required" | "native_skill";
 
 export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null,
 /**
@@ -7969,22 +8489,50 @@ docker_error?: string, };
  * Project defaults for worktree preparation hooks. Workflow hooks override them
  * field by field; omitted fields inherit the project value.
  */
-export type ProjectWorkspace = { hooks: WorkspaceHooks, };
+export type ProjectWorkspace = { hooks: WorkspaceHooks,
+/**
+ * KT-1742 — this project's lane warm-up settings; a field left unset
+ * inherits the global `[workers.lane_warm]` entry.
+ */
+lane_warm: LaneWarmConfig,
+/**
+ * KT-1748 — absolute directories whose worktrees Kronn manages for this
+ * project, added to the global Settings > Workers list and the built-in roots.
+ */
+managed_worktree_roots?: Array<string>,
+/**
+ * KT-1750 — who Kronn's commits are attributed to and whether they are
+ * signed off, when the owner decided it rather than leaving it detected.
+ */
+commit?: ProjectCommitSettings,
+/**
+ * Which git hooks Kronn's own commits and merges for a worker run
+ * (KT-1745). Only a human sets it; absent means [`WorkerCommitHooks::Off`].
+ */
+worker_commit_hooks?: WorkerCommitHooks, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
 export type ProjectWriteAccessStatus = "Writable" | "ReadOnly" | "Missing" | "Unknown";
 
 /**
- * What the normal lane takes over from the shadow (KT-1450): the tested
- * version of a skill in every step that loads it, or the tested version of a
- * Quick Prompt made its current one. The shadow's override goes away.
+ * What the normal execution takes over from a shadow (KT-1450): the tested
+ * version of a skill in the step that carries the shadow, or the tested
+ * version of a Quick Prompt pinned there. The shadow's override goes away.
  */
 export type PromoteShadowRequest = {
 /**
  * `skill` or `quick_prompt`.
  */
-kind: string, id: string, };
+kind: string, id: string,
+/**
+ * The step carrying the shadow (id or name).
+ */
+step: string,
+/**
+ * The shadow that tested it; optional while the step has one shadow.
+ */
+shadow?: string, };
 
 export type PromptVariable = { name: string, label: string, placeholder: string,
 /**
@@ -8103,13 +8651,13 @@ pending_proposal_count: number,
  */
 pending_item_count: number, };
 
+export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
+
 /**
  * A correction Kronn proposes. Nothing is applied by itself: the agent pass
  * the human launches carries it out, and the human validates the result.
  */
 export type ProposedCorrection = { kind: CorrectionKind, reference: string, proposal: string, };
-
-export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
 
 export type ProvenanceChange = {
 /**
@@ -8714,6 +9262,8 @@ newer_than_local: boolean,
  */
 resumable: boolean, briefing_changed: boolean, td_total: number, td_settled: number, validated_at: string | null, validated_by: string | null, };
 
+export type RepoSource = { id: string, label: string, provider: string, };
+
 export type ReportTelemetryRequest = {
 /**
  * The CLI's own durable session id, as sent at join. Resolved to the Kronn
@@ -8872,8 +9422,6 @@ missing: boolean, };
  * translates, never a raw error message.
  */
 export type RepositoryWriteBlocker = "kronn_path_is_file" | "repository_read_only" | "repository_unreadable";
-
-export type RepoSource = { id: string, label: string, provider: string, };
 
 /**
  * A secret name a resource requires (`secret://NAME` in its file, listed in
@@ -9425,7 +9973,12 @@ scan_depth: number,
  * Default AI doc folder, relative to each project root (KT-263). `None`
  * keeps the historical detection (`docs/` → `doc/` → `ai/`).
  */
-default_docs_dir?: string, };
+default_docs_dir?: string,
+/**
+ * Repositories the owner hid from "Detect repositories" (KT-1684), by
+ * path: a hidden one is reported `hidden` by the scan and never offered again.
+ */
+hidden_repos: Array<string>, };
 
 export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
@@ -9609,6 +10162,12 @@ disk_launch_min_free_gib: number,
  * live worktree, before a sweep (boot, periodic, pressure) may remove it.
  */
 disk_sweep_idle_hours: number,
+/**
+ * KT-1691 — days a Blocked or Interrupted execution's lane build dir must
+ * have been unwritten before it becomes purgeable (by a confirmed
+ * per-entry delete, never by a sweep). Its worktree and branch stay.
+ */
+disk_stalled_build_days: number,
 /**
  * Maximum concurrent agent processes (default: 5)
  */
@@ -9812,7 +10371,12 @@ disk_launch_min_free_gib: number,
 /**
  * KT-1318 - hours a lane build dir must be idle before a sweep may take it.
  */
-disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+disk_sweep_idle_hours: number,
+/**
+ * KT-1691 - days a Blocked/Interrupted execution's build dir must be idle
+ * before it becomes purgeable.
+ */
+disk_stalled_build_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
  * KT-1438 - copy lane seeds into task worktrees (default on).
  */
@@ -9904,6 +10468,12 @@ export type SetAgentConcurrencyRequest = { agent: AgentType,
  */
 concurrency?: number | null, };
 
+export type SetAgentFallbackRequest = { agent: AgentType, mode: FallbackMode,
+/**
+ * The fallback of this mode row; `None` removes it.
+ */
+fallback?: AgentFallback | null, };
+
 export type SetAgentMentionColorRequest = { agent: AgentType,
 /**
  * `None` or an empty string restores the built-in color.
@@ -9962,6 +10532,22 @@ endpoint?: string | null,
 install_dir?: string | null, image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
 
 export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
+
+export type SetConnectionFallbackRequest = { owner: string, mode: FallbackMode,
+/**
+ * The fallback of this row; `None` removes it.
+ */
+fallback?: ConnectionFallbackTarget | null, };
+
+export type SetDiscussionFallbackRequest = {
+/**
+ * The mode whose override is set.
+ */
+mode: FallbackMode,
+/**
+ * `None` removes the override (back to the default); `Some([])` cuts it.
+ */
+chain_override?: Array<AgentFallback> | null, };
 
 export type SetMediaReferenceLimitRequest = { connection_id: string, model: string, modality: MediaModality, max_input_references?: number | null, };
 
@@ -10037,19 +10623,6 @@ acknowledged_vault_unprotected?: boolean,
  */
 proof?: string | null, };
 
-export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agents_detected: Array<AgentDetection>, scan_paths_set: boolean, repos_detected: Array<DetectedRepo>, default_scan_path: string | null,
-/**
- * Paths actually scanned, exposed to diagnose empty results and missing mounts.
- */
-scan_paths_explored: Array<string>,
-/**
- * config.toml could not be read at this start and was kept aside: the
- * notice the wizard shows (where it is, key and data intact).
- */
-config_set_aside: string | null, };
-
-export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
-
 /**
  * Validate a workflow's scope as it is now; an empty list clears it.
  */
@@ -10066,6 +10639,133 @@ confirm?: string | null,
  * The scope fingerprint the human's screen showed.
  */
 expected_fingerprint?: string | null, };
+
+export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agents_detected: Array<AgentDetection>, scan_paths_set: boolean, repos_detected: Array<DetectedRepo>, default_scan_path: string | null,
+/**
+ * Paths actually scanned, exposed to diagnose empty results and missing mounts.
+ */
+scan_paths_explored: Array<string>,
+/**
+ * config.toml could not be read at this start and was kept aside: the
+ * notice the wizard shows (where it is, key and data intact).
+ */
+config_set_aside: string | null, };
+
+export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
+
+/**
+ * The agent a shadow runs its step on instead of the step's own.
+ */
+export type ShadowAgent = { agent: AgentType, model?: string,
+/**
+ * The named HTTP connection (local Ollama, LiteLLM, OpenRouter…) the
+ * agent talks to, when the agent type alone does not say which.
+ */
+connection_id?: string, reasoning_effort?: string, };
+
+/**
+ * What a shadow may spend before it is stopped. A stopped shadow never fails
+ * or delays its step.
+ */
+export type ShadowBudget = {
+/**
+ * Also the generation cap handed to an agent that takes one; checked on
+ * the tokens the shadow spent when it ends.
+ */
+max_tokens?: number,
+/**
+ * Wall-clock limit of the shadow, enforced: it replaces the workflow's
+ * timeout for the shadow, so a slow local model may run longer than the
+ * main step, which never waits for it.
+ */
+max_duration_secs?: number, max_cost_usd?: number, };
+
+/**
+ * One execution of a step, as the comparison shows it.
+ */
+export type ShadowExecution = {
+/**
+ * `None` for the main execution.
+ */
+shadow_id?: string, label: string, status: ShadowStatus, identity: ExecutionIdentity, output: string, tokens_used?: number, duration_ms?: number, cost_usd?: number,
+/**
+ * The model the execution resolved, when it ran.
+ */
+model?: string,
+/**
+ * Why a budget, the time limit or a skip ended the shadow, when one did.
+ */
+stopped?: string, };
+
+/**
+ * The optional merge of a step (KT-1544): the main execution and the shadows
+ * it selects are condensed into one result, which becomes the step's output.
+ * Without it a step with shadows only compares them (KT-1459).
+ *
+ * The merge waits for the selected shadows up to `timeout_secs`, goes on with
+ * those that finished and says which are missing. A condense pass (an Agent)
+ * then dedups the points, verifies each against the code and records which
+ * executions found it: a point it cannot verify is never published.
+ */
+export type ShadowMerge = {
+/**
+ * Off keeps the setting saved without merging.
+ */
+enabled: boolean,
+/**
+ * The shadows that merge with the main execution, by id; empty means every
+ * shadow of the step.
+ */
+shadows?: Array<string>,
+/**
+ * How long to wait for the selected shadows; unset is
+ * `DEFAULT_SHADOW_MERGE_TIMEOUT_SECS`.
+ */
+timeout_secs?: number,
+/**
+ * The agent of the condense pass, usually the strongest model; unset runs
+ * it on the step's own agent.
+ */
+agent?: ShadowAgent, };
+
+/**
+ * The merge of one step, as the run view shows it.
+ */
+export type ShadowMergeReport = { status: MergeStatus,
+/**
+ * The shadows the merge selected, by id.
+ */
+selected: Array<string>,
+/**
+ * The shadows whose output went into the condense pass.
+ */
+contributors: Array<string>,
+/**
+ * The selected shadows that did not make it, with the reason.
+ */
+missing: Array<MissingShadow>, timeout_secs: number, points: Array<MergePoint>, contributions: Array<ExecutionContribution>,
+/**
+ * Why the main output stayed, or anything the reader should know.
+ */
+note?: string,
+/**
+ * The condense pass's own spend: hosted tokens the merge cost.
+ */
+tokens_used?: number, cost_usd?: number, model?: string, duration_ms?: number,
+/**
+ * The merged result: the step's output when `status` is `merged`.
+ */
+merged_output: string, };
+
+/**
+ * The prompt a shadow loads instead of its step's own.
+ */
+export type ShadowPrompt = { "type": "quick_prompt", id: string, version?: number, } | { "type": "inline", template: string, };
+
+/**
+ * How a stored execution stands.
+ */
+export type ShadowStatus = "running" | "success" | "failed" | "skipped" | "over_budget" | "timed_out" | "interrupted";
 
 /**
  * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
@@ -10084,6 +10784,11 @@ export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "succe
  * One gone path the stale block listed, in its doc's section.
  */
 export type ShownPath = { doc: string, section: string, path: string, };
+
+/**
+ * Whether the commits Kronn makes for a project carry a `Signed-off-by`.
+ */
+export type SignoffSetting = "auto" | "always" | "never";
 
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
@@ -10174,9 +10879,9 @@ resolution?: SkillConflictResolution, };
 
 export type SkillMigrationAction = "move" | "duplicate";
 
-export type SkillMigrationBlocked = { path: string, reason: SkillMigrationBlockReason, };
-
 export type SkillMigrationBlockReason = "symlink" | "unreadable" | "reserved_slug" | "target_occupied" | "too_large";
+
+export type SkillMigrationBlocked = { path: string, reason: SkillMigrationBlockReason, };
 
 export type SkillMigrationConflict = { slug: string, target: string,
 /**
@@ -10358,12 +11063,6 @@ export type SourceOriginKind = "checkout" | "worktree";
 export type SourceProvenance = "human_validated" | "ai_generated";
 
 /**
- * "Sources clean" badge, recomputed on every read. Distinct from the dated
- * "audit complete" milestone (`validated_at` in `.kronn.json`).
- */
-export type SourcesState = "unknown" | "clean" | "needs_reverification";
-
-/**
  * One source's contribution, or a stated reason it has none.
  */
 export type SourceState = { "state": "ready",
@@ -10380,6 +11079,12 @@ metrics: Array<Metric>, } | { "state": "unavailable", diagnosis: string, remedy:
  * Result of mechanically verifying one `[src: …]` marker.
  */
 export type SourceStatus = "verified" | "not_found" | "out_of_bounds" | "empty_ref" | "outside_project" | "unchecked" | "rejected";
+
+/**
+ * "Sources clean" badge, recomputed on every read. Distinct from the dated
+ * "audit complete" milestone (`validated_at` in `.kronn.json`).
+ */
+export type SourcesState = "unknown" | "clean" | "needs_reverification";
 
 export type StartAgentBackgroundJobRequest = {
 /**
@@ -10622,6 +11327,63 @@ terminal_stop?: string | null,
 output_bytes?: number, };
 
 /**
+ * A shadow of a step (KT-1449, KT-1459): the step runs once more beside the
+ * main execution, on exactly the same input, with what the shadow changes. A
+ * shadow that changes nothing measures the determinism of the step's agent.
+ * Only the main output continues the workflow; a shadow never runs a step that
+ * acts outside Kronn and never fails or delays the main step.
+ */
+export type StepShadow = {
+/**
+ * Short slug, unique in the step: the key of the shadow's column in the
+ * comparison.
+ */
+id: string,
+/**
+ * Shown in the comparison; the id when empty.
+ */
+label: string,
+/**
+ * Off keeps the shadow saved without running it.
+ */
+enabled: boolean,
+/**
+ * Only runs of these projects get this shadow; empty means every run.
+ */
+project_ids?: Array<string>,
+/**
+ * One run in N gets this shadow. Unset or 1 is every run.
+ */
+sample_every?: number,
+/**
+ * The agent, model and connection the shadow runs on.
+ */
+agent?: ShadowAgent,
+/**
+ * The prompt the shadow loads.
+ */
+prompt?: ShadowPrompt,
+/**
+ * Skill replaced in the shadow: `custom-x` → `custom-x@3`, or any other
+ * skill id; an empty replacement drops the skill. Matched on the base id
+ * of what the step loads.
+ */
+skills?: Record<string, string>,
+/**
+ * Quick Prompt version the shadow loads instead of the current one.
+ */
+quick_prompt_versions?: Record<string, number>, budget?: ShadowBudget, };
+
+/**
+ * The main execution of a step and its shadows.
+ */
+export type StepShadowComparison = { step_name: string, result_index: number, main: ShadowExecution, shadows: Array<ShadowExecution>,
+/**
+ * The merge of the step's executions, when the step carries one (KT-1544).
+ */
+merge?: ShadowMergeReport, };
+
+/**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
  */
 export type StepTools = {
@@ -10635,7 +11397,7 @@ cli: Array<string>,
  */
 kronn_internal: Array<string>, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" } | { "type": "DelegateSubtasks" } | { "type": "TaskBoard" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" } | { "type": "DelegateSubtasks" } | { "type": "TaskBoard" } | { "type": "Decide" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -10810,7 +11572,12 @@ export type TaskExecutionAuditEvent = { id: string, action: string, from_status:
  * sourced from the orchestration aggregate; task DoD, manifests, validations
  * and telemetry are joined here so clients never reconstruct lineage from chat.
  */
-export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>,
+export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null,
+/**
+ * KT-1688 — the integration target's worktree and who owns it, so a wrong
+ * target shows before the integration, not at it.
+ */
+integration_target?: TaskExecutionIntegrationTarget, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>,
 /**
  * Every CLI session the worker ran, attempts and relaunches included, oldest
  * first (KT-911). Empty for a worker with no CLI session (HTTP providers).
@@ -10880,6 +11647,15 @@ cached_prompt_tokens: number, cache_reported_turns: number,
  * Sum over the `cache_write_reported_turns` that reported a cache write only.
  */
 cache_write_prompt_tokens: number, cache_write_reported_turns: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
+
+/**
+ * Where an execution's integration will land, visible before it happens.
+ */
+export type TaskExecutionIntegrationTarget = { branch: string,
+/**
+ * The worktree that holds `branch`; absent when none does.
+ */
+worktree?: string, state: IntegrationTargetState, };
 
 /**
  * A resolved TaskExecution + its lineage, answerable in one query (DoD-4):
@@ -11186,11 +11962,6 @@ export type TdTaskItem = { td_id: string, theme: string, state: TdTaskState, tas
 reason: string | null, };
 
 /**
- * `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
- */
-export type TdTasksOutcome = { created: number, already_linked: number, skipped: number, themes: Array<TdTaskTheme>, items: Array<TdTaskItem>, };
-
-/**
  * What the conversion did with one tech-debt sheet (KT-1167).
  */
 export type TdTaskState = "created" | "already_linked" | "skipped";
@@ -11199,6 +11970,11 @@ export type TdTaskState = "created" | "already_linked" | "skipped";
  * The parent task grouping the sheets of one theme.
  */
 export type TdTaskTheme = { theme: string, label: string, task_reference: string, created: boolean, };
+
+/**
+ * `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
+ */
+export type TdTasksOutcome = { created: number, already_linked: number, skipped: number, themes: Array<TdTaskTheme>, items: Array<TdTaskItem>, };
 
 /**
  * The rule that lets a project be validated without the discussion marker:
@@ -11231,13 +12007,13 @@ attributed: number,
  */
 attributed_without_counters: number, };
 
-export type TemplateMergeAccepted = { branch: string, commit: string, committed: Array<string>, };
-
 export type TemplateMergeAcceptRequest = {
 /**
  * Repo-relative files to commit; the others stay uncommitted in the worktree.
  */
 paths: Array<string>, };
+
+export type TemplateMergeAccepted = { branch: string, commit: string, committed: Array<string>, };
 
 export type TemplateMergeRequest = { base?: MergeBase, };
 
@@ -11428,17 +12204,6 @@ is_empty: boolean,
 error: string | null, };
 
 /**
- * KT-1246 — the worker's explicit statement of whether any test was actually
- * executed, and which. Replaces a sentence at the end of a report: a reviewer
- * reads `executed` and `which` instead of inferring them from `tests`.
- */
-export type TestsExecuted = { executed: boolean,
-/**
- * The commands (or suites) that ran. Empty exactly when `executed` is false.
- */
-which: Array<string>, };
-
-/**
  * A test verdict in a [`DeliveryManifestV1`].
  */
 export type TestStatus = "pass" | "fail" | "skipped";
@@ -11456,6 +12221,17 @@ mock_variables?: { [key in string]: string } | null,
  * Dry run: agent describes what it would do without executing any write actions
  */
 dry_run?: boolean, };
+
+/**
+ * KT-1246 — the worker's explicit statement of whether any test was actually
+ * executed, and which. Replaces a sentence at the end of a report: a reviewer
+ * reads `executed` and `which` instead of inferring them from `tests`.
+ */
+export type TestsExecuted = { executed: boolean,
+/**
+ * The commands (or suites) that ran. Empty exactly when `executed` is false.
+ */
+which: Array<string>, };
 
 /**
  * A move the audit suggests. Never applied.
@@ -11480,6 +12256,8 @@ export type TokenInjection = "BearerHeader" | { "CustomHeader": { name: string, 
 
 export type TokenOverride = { provider: string, token: string, };
 
+export type TokenUsageSummary = { total_tokens: number, total_cost: CostAggregate, discussion_tokens: number, workflow_tokens: number, by_provider: Array<ProviderUsage>, by_project: Array<ProjectUsage>, top_discussions: Array<UsageEntry>, top_workflows: Array<UsageEntry>, daily_history: Array<DailyUsage>, };
+
 export type TokensConfig = {
 /**
  * Legacy fields — kept for backward compat when reading old config.toml
@@ -11489,8 +12267,6 @@ anthropic?: string | null, openai?: string | null, google?: string | null,
  * All API keys (new multi-key system)
  */
 keys: Array<ApiKey>, disabled_overrides: Array<string>, };
-
-export type TokenUsageSummary = { total_tokens: number, total_cost: CostAggregate, discussion_tokens: number, workflow_tokens: number, by_provider: Array<ProviderUsage>, by_project: Array<ProjectUsage>, top_discussions: Array<UsageEntry>, top_workflows: Array<UsageEntry>, daily_history: Array<DailyUsage>, };
 
 export type TourDemoDiscussionResponse = { discussion_id: string, created: boolean,
 /**
@@ -11890,7 +12666,12 @@ export type UpdateLivePageDatasetRequest = { max_points?: number, max_age_days?:
 
 export type UpdateLivePageDatasetResult = { dataset: LivePageDataset, points_removed: number, data_revision: number, };
 
-export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
+export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null,
+/**
+ * The HTML revision this edit started from. When given and no longer
+ * the Page's current one, the save is refused instead of overwriting.
+ */
+base_revision_id?: string, };
 
 export type UpdateLivePageRequest = { title?: string | null,
 /**
@@ -11954,10 +12735,6 @@ project_scope?: WorkflowProjectScope | null,
  * `null` returns to the global retention; omitted keeps it.
  */
 retention?: WorkflowRetention | null,
-/**
- * `null` removes the shadow variant; omitted keeps it.
- */
-shadow?: WorkflowShadow | null,
 /**
  * Replaces every named ref when present; omitted keeps them.
  */
@@ -12068,14 +12845,6 @@ export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_comple
 export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
 
 /**
- * Where Kronn writes a project's agent files (KT-971).
- * How far a project's integration validations reach beyond the lane sandbox
- * (KT-1433). Only a human sets it: the Docker socket is the host's root, and
- * `Full` runs the worker's tree with the backend's own rights.
- */
-export type ValidationsAccess = "sandbox" | "docker" | "full";
-
-/**
  * Where a validation state comes from (KT-1199): the run this instance
  * recorded, or the committed run state of the repository (a colleague's run
  * after a fetch or a rebase).
@@ -12108,6 +12877,14 @@ started_by: string | null, validated_by: string | null, validated_at: string | n
  * reads the filesystem, is decided by the POST itself).
  */
 can_validate: boolean, blocked: ValidationBlock | null, };
+
+/**
+ * Where Kronn writes a project's agent files (KT-971).
+ * How far a project's integration validations reach beyond the lane sandbox
+ * (KT-1433). Only a human sets it: the Docker socket is the host's root, and
+ * `Full` runs the worker's tree with the backend's own rights.
+ */
+export type ValidationsAccess = "sandbox" | "docker" | "full";
 
 /**
  * The gone prose paths of one section that no acknowledgement accepted.
@@ -12327,6 +13104,14 @@ export type WeightLevel = "green" | "amber" | "red";
 export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
 
 /**
+ * Which of the repository's git hooks Kronn runs when it commits or merges for
+ * a worker (KT-1745). Kronn makes those commits itself, outside the worker's OS
+ * sandbox and with the host user's rights, so a hook that lives in the worker's
+ * writable worktree (husky's relative `core.hooksPath`) is worker-written code.
+ */
+export type WorkerCommitHooks = "off" | "sandboxed";
+
+/**
  * Observed network connectivity, kept apart from `configured` (an address is
  * saved) and `available` (Kronn would attempt a launch).
  */
@@ -12394,7 +13179,50 @@ max_concurrent_task_workers: number,
  * « heavy output » warning in the run view and on the workflow card.
  * The run itself is never refused.
  */
-heavy_output_kb: number, };
+heavy_output_kb: number,
+/**
+ * KT-1718 — the time, in minutes, a Claude task worker's shell command may
+ * run when it names no limit of its own (`BASH_DEFAULT_TIMEOUT_MS`).
+ */
+bash_default_timeout_min: number,
+/**
+ * KT-1718 — the longest a Claude task worker's shell command may run, even
+ * when it asks for more (`BASH_MAX_TIMEOUT_MS`). Claude Code's own cap is
+ * 10 minutes: a cold test-profile build outlasts it, and the worker loses
+ * the turn. Keep it below the generation limit (`agent_global_timeout_min`),
+ * which cuts the whole turn whatever a command is allowed.
+ */
+bash_max_timeout_min: number,
+/**
+ * KT-1750 — file names an operating system or a file manager drops in any
+ * folder (`.DS_Store`, `Thumbs.db`, …): they never count as a worker's
+ * changes, so they block neither a delivery nor the cleanup of a checkout,
+ * and are excluded from `git status` in every lane Kronn creates. A name,
+ * or a name with one `*` standing for any run of characters; an empty list
+ * means none.
+ */
+os_junk_patterns: Array<string>,
+/**
+ * KT-1748 — absolute directories whose worktrees Kronn manages, on top of the
+ * built-in roots (`<repo>/.kronn/worktrees`, `~/.kronn/autocode-worktrees`). A
+ * branch checked out under one may be an integration target; the owner's own
+ * checkout never is. A project can name more of its own.
+ */
+managed_worktree_roots: Array<string>,
+/**
+ * KT-1750 — who the commits Kronn makes are attributed to, and whether they
+ * carry a `Signed-off-by`, for every project that neither sets its own in
+ * its card nor has a repository that says (its own `user.name` /
+ * `user.email`, a DCO file or hook, a signed history). Nothing set: the
+ * machine's git identity, reported, and no sign-off. A TOML table: after the
+ * plain values.
+ */
+commit?: ProjectCommitSettings,
+/**
+ * KT-1742 — how every project's lane is warmed unless the project says
+ * otherwise. Last field: a TOML table goes after the plain values.
+ */
+lane_warm: LaneWarmConfig, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
@@ -12471,11 +13299,6 @@ project_scope?: WorkflowProjectScope,
  * the global retention. `None` inherits it.
  */
 retention?: WorkflowRetention,
-/**
- * KT-1449 — a shadow run started alongside each normal one, with other
- * skill/QP versions and its external effects skipped. Human-only.
- */
-shadow?: WorkflowShadow,
 /**
  * KT-1448 — named references to Kronn objects, rendered by steps as
  * `{{refs.<name>}}` and remapped by export/import like other dependencies.
@@ -12650,10 +13473,20 @@ referenced_workflows?: Array<Workflow>,
  */
 referenced_skills?: Array<BundledSkill>,
 /**
+ * KT-1843 — custom directives and profiles the steps and the bundled
+ * Quick objects bind; an import reuses the local one that says the same.
+ */
+referenced_directives?: Array<Directive>, referenced_profiles?: Array<AgentProfile>,
+/**
  * Fields whose literal secret was replaced before export (never the
  * value). An importer shows them so nothing silently runs without them.
  */
-redacted_fields?: Array<RedactedField>, };
+redacted_fields?: Array<RedactedField>,
+/**
+ * KT-1843 — what the exported content names and the file does not hold;
+ * shown before the file leaves.
+ */
+not_carried?: Array<NotCarried>, };
 
 export type WorkflowExportPage = { id: string, slug: string, title: string, html: string, created_by_agent: string | null, datasets: Array<WorkflowExportPageDataset>, };
 
@@ -12692,6 +13525,10 @@ loop_detection_max_revisits?: number | null, };
  * (KT-1446), for the import dialog.
  */
 export type WorkflowImportPreview = { skills: Array<SkillImportDecision>,
+/**
+ * What the import does with each bundled directive and profile (KT-1843).
+ */
+bindings: Array<BindingImportDecision>,
 /**
  * Skills the steps name that neither this Kronn nor the file has.
  */
@@ -12743,7 +13580,11 @@ success_days?: number,
  */
 failure_days?: number, };
 
-export type WorkflowRun = { id: string, workflow_id: string, status: RunStatus, trigger_context: any, step_results: Array<StepResult>, tokens_used: number, workspace_path: string | null, started_at: string, finished_at: string | null,
+export type WorkflowRun = { id: string, workflow_id: string, status: RunStatus, trigger_context: any, step_results: Array<StepResult>, tokens_used: number,
+/**
+ * What the run's shadows spent, on top of `tokens_used` (KT-1957).
+ */
+shadow_tokens_used: number, workspace_path: string | null, started_at: string, finished_at: string | null,
 /**
  * Linear workflow run vs batch fan-out. Default "linear" for backward
  * compatibility with existing runs created before Phase 1b.
@@ -12868,26 +13709,6 @@ export type WorkflowScopeEntry = { project_id: string, project_name: string | nu
 
 export type WorkflowScopeItem = { project_id: string, access: ScopeAccess, };
 
-/**
- * The shadow variant of a workflow (KT-1449). Each normal run of a matching
- * project also starts a shadow run on the same inputs; steps flagged
- * `external_effect` are skipped there, so it can be compared without acting.
- */
-export type WorkflowShadow = { enabled: boolean,
-/**
- * Only runs of these projects get a shadow; empty means every run.
- */
-project_ids?: Array<string>,
-/**
- * Skill replaced in the shadow run: `custom-x` → `custom-x@3`, or any
- * other skill id. Matched on the base id of what the step loads.
- */
-skills?: Record<string, string>,
-/**
- * Quick Prompt version the shadow run loads instead of the current one.
- */
-quick_prompt_versions?: Record<string, number>, };
-
 export type WorkflowStep = {
 /**
  * Durable opaque identity of this step. `name` remains the editable
@@ -12906,9 +13727,19 @@ id?: string | null, name: string, step_type: StepType, description?: string | nu
 on_timeout?: ConditionAction | null, stall_timeout_secs?: number | null, retry?: RetryConfig | null, delay_after_secs?: number | null, skill_ids?: Array<string>,
 /**
  * KT-1449 — the step acts outside Kronn (posts, writes, sends): a shadow
- * run skips it.
+ * never runs it, and it cannot carry shadows.
  */
-external_effect?: boolean, profile_ids?: Array<string>, directive_ids?: Array<string>,
+external_effect?: boolean,
+/**
+ * KT-1459 — the shadows of this step: each re-runs only this step beside
+ * the main execution, on the same input. Human-only.
+ */
+shadows?: Array<StepShadow>,
+/**
+ * KT-1544 — optional: condense the main execution with the selected
+ * shadows into the step's output. Off by default; human-only.
+ */
+shadow_merge?: ShadowMerge, profile_ids?: Array<string>, directive_ids?: Array<string>,
 /**
  * Id of the Quick Prompt to fan out. Required for BatchQuickPrompt steps.
  */
@@ -12983,7 +13814,7 @@ quick_api_id?: string | null,
 quick_prompt_id?: string | null,
 /**
  * Version of `quick_prompt_id` the step loads; unset follows its latest
- * version. A shadow run may still test another one.
+ * version. A shadow of the step may still test another one.
  */
 quick_prompt_version?: number | null,
 /**
@@ -13246,6 +14077,10 @@ page_publish?: PublishPageDataConfig | null,
  */
 task_board?: TaskBoardConfig,
 /**
+ * KT-1367 — for `StepType::Decide`.
+ */
+decide?: DecideConfig,
+/**
  * 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
  * workflow to run as a nested child. Required for that step type
  * (enforced at save). `None` for every other step type. Mirrors the
@@ -13400,7 +14235,11 @@ export type WriteState = "ok" | "failed" | "unknown";
 /**
  * Real-time message exchanged between Kronn instances via WebSocket.
  */
-export type WsMessage = { "type": "presence", from_pseudo: string, from_invite_code: string, online: boolean, } | { "type": "ping", timestamp: number, } | { "type": "pong", timestamp: number, } | { "type": "chat_message", shared_discussion_id: string, message_id: string, from_pseudo: string, from_avatar_email: string | null, from_invite_code: string, content: string, timestamp: number,
+export type WsMessage = { "type": "presence", from_pseudo: string,
+/**
+ * The sender's public address. It names the contact; it proves nothing.
+ */
+from_invite_code: string, online: boolean, } | { "type": "ping", timestamp: number, } | { "type": "pong", timestamp: number, } | { "type": "chat_message", shared_discussion_id: string, message_id: string, from_pseudo: string, from_avatar_email: string | null, from_invite_code: string, content: string, timestamp: number,
 /**
  * Author role + agent identity, so a federated AGENT reply lands as
  * an Agent message (with its CLI name) on the peer instead of a

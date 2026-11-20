@@ -180,11 +180,70 @@ mod tests {
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
+            // The fixture's repositories are not under the agent's own $TMPDIR:
+            // they stand for the owner's checkout.
+            .env("TMPDIR", fx.shims.as_os_str())
             .env_remove(CONFIRM_ENV);
         if confirmed {
             command.env(CONFIRM_ENV, "1");
         }
         command.output().expect("shim runs")
+    }
+
+    /// `guarded` with the agent's `$TMPDIR` set to `tmpdir`.
+    fn guarded_with_tmpdir(fx: &Fixture, dir: &Path, args: &[&str], tmpdir: &Path) -> Output {
+        Command::new(fx.shims.join("git"))
+            .args(args)
+            .current_dir(dir)
+            .env(
+                "PATH",
+                path_with_front(&fx.shims, std::env::var_os("PATH").as_deref()),
+            )
+            .env("TMPDIR", tmpdir)
+            .env_remove(CONFIRM_ENV)
+            .output()
+            .expect("shim runs")
+    }
+
+    /// KT-1719 — a throwaway repository under the agent's own `$TMPDIR` (a
+    /// test fixture) is not the owner's checkout: checkout, switch, reset and
+    /// stash pass. A `$TMPDIR` that is `/`, the home folder or above it exempts
+    /// nothing.
+    #[test]
+    fn a_scratch_repository_under_the_agents_tmpdir_is_not_guarded() {
+        let fx = fixture();
+        let tmp = fx.main.parent().unwrap().to_path_buf();
+        let out = guarded_with_tmpdir(&fx, &fx.main, &["checkout", "--detach"], &tmp);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(symbolic_head(&fx.main), "", "HEAD detached");
+        for args in [
+            &["switch", "-c", "feature"][..],
+            &["reset", "--hard", "HEAD"],
+            &["stash"],
+        ] {
+            let out = guarded_with_tmpdir(&fx, &fx.main, args, &tmp);
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        for wide in [Path::new("/").to_path_buf(), dirs_home()] {
+            let out = guarded_with_tmpdir(&fx, &fx.main, &["checkout", "--detach"], &wide);
+            assert!(
+                refused(&out).contains("main checkout"),
+                "a $TMPDIR of {} must exempt nothing",
+                wide.display()
+            );
+        }
+    }
+
+    fn dirs_home() -> PathBuf {
+        std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
     }
 
     fn head(dir: &Path) -> String {
@@ -253,6 +312,236 @@ mod tests {
             "the owner's uncommitted work must survive"
         );
         assert_eq!(symbolic_head(&fx.main), "refs/heads/main");
+    }
+
+    /// KT-1753 — `restore .`, `clean` and a forced `branch` discard the owner's
+    /// uncommitted work or move a branch as surely as `reset --hard`: refused in
+    /// the main checkout, while their harmless forms pass.
+    #[test]
+    fn restore_the_whole_tree_clean_and_forced_branch_are_refused_in_the_main_checkout() {
+        let fx = fixture();
+        std::fs::write(fx.main.join("a.txt"), "uncommitted").unwrap();
+        std::fs::write(fx.main.join("u.txt"), "untracked").unwrap();
+        git(&fx.main, &["branch", "other"]);
+        git(&fx.main, &["branch", "plain"]);
+
+        for (args, name) in [
+            (vec!["restore", "."], "restore"),
+            (vec!["restore", ":/"], "restore"),
+            (
+                vec!["restore", "--source=HEAD", "--worktree", "."],
+                "restore",
+            ),
+            (vec!["-C", ".", "restore", "."], "restore"),
+            (vec!["clean", "-fdx"], "clean"),
+            (vec!["clean", "-fd"], "clean"),
+            (vec!["clean", "-f"], "clean"),
+            (vec!["branch", "-f", "other", "HEAD"], "branch"),
+            (vec!["branch", "--force", "other", "HEAD"], "branch"),
+            (vec!["branch", "-D", "other"], "branch"),
+            (vec!["branch", "-fd", "other"], "branch"),
+        ] {
+            let out = guarded(&fx, &fx.main, &args, false);
+            let message = refused(&out);
+            assert!(
+                message.contains(&format!("refused 'git {name}'")),
+                "{args:?}: {message}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(fx.main.join("a.txt")).unwrap(),
+            "uncommitted"
+        );
+        assert!(fx.main.join("u.txt").is_file(), "untracked file survives");
+        assert!(
+            git(&fx.main, &["branch", "--list", "other"]).stdout.len() > 1,
+            "the branch survives"
+        );
+
+        // The harmless forms pass through.
+        for args in [
+            vec!["restore", "--staged", "."],
+            vec!["restore", "a.txt"],
+            vec!["clean", "-n"],
+            vec!["clean", "-nd"],
+            vec!["clean", "--dry-run", "-x"],
+            vec!["branch"],
+            vec!["branch", "--show-current"],
+            vec!["branch", "-vv"],
+            vec!["branch", "-d", "other"],
+            // KT-1753 (Y4): an option's value is not an option: `-refname` is a
+            // sort key, not `-f`.
+            vec!["branch", "--sort", "-refname"],
+            vec!["branch", "--sort=-committerdate"],
+            vec!["branch", "--format", "%(refname:short)"],
+            vec!["branch", "--contains", "HEAD"],
+            vec!["branch", "--merged", "main"],
+            vec!["branch", "-m", "plain", "renamed"],
+        ] {
+            let out = guarded(&fx, &fx.main, &args, false);
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// KT-1753 (Y4) — the same whole-tree restore written another way: a trailing
+    /// slash, `./.`, the `:/*` and `:(top)` pathspecs, the top level's own path,
+    /// `..` from a sub-directory, and a forced rename or copy of a branch.
+    #[test]
+    fn the_other_spellings_of_the_destructive_forms_are_refused_too() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.main.join("sub/deep")).unwrap();
+        std::fs::write(fx.main.join("a.txt"), "uncommitted").unwrap();
+        git(&fx.main, &["branch", "other"]);
+        let top = fx.main.canonicalize().unwrap();
+        let top = top.to_str().unwrap();
+
+        for (dir, args, name) in [
+            (fx.main.clone(), vec!["restore", "./"], "restore"),
+            (fx.main.clone(), vec!["restore", "./."], "restore"),
+            (fx.main.clone(), vec!["restore", "--", "./"], "restore"),
+            (fx.main.clone(), vec!["restore", "--", "."], "restore"),
+            (fx.main.clone(), vec!["restore", ":/*"], "restore"),
+            (fx.main.clone(), vec!["restore", ":/."], "restore"),
+            (fx.main.clone(), vec!["restore", ":(top)"], "restore"),
+            (fx.main.clone(), vec!["restore", ":(top)*"], "restore"),
+            (fx.main.clone(), vec!["restore", top], "restore"),
+            (fx.main.clone(), vec!["restore", "sub/.."], "restore"),
+            (fx.main.join("sub"), vec!["restore", ".."], "restore"),
+            (fx.main.join("sub"), vec!["restore", "../"], "restore"),
+            (fx.main.join("sub"), vec!["restore", "../."], "restore"),
+            (
+                fx.main.join("sub/deep"),
+                vec!["restore", "../.."],
+                "restore",
+            ),
+            (
+                fx.main.join("sub"),
+                vec!["restore", "--source=HEAD", "--", ".."],
+                "restore",
+            ),
+            (fx.main.clone(), vec!["branch", "-M", "renamed"], "branch"),
+            (
+                fx.main.clone(),
+                vec!["branch", "-C", "other", "copy"],
+                "branch",
+            ),
+            (
+                fx.main.clone(),
+                vec!["branch", "--move", "--force", "other", "renamed"],
+                "branch",
+            ),
+            (
+                fx.main.clone(),
+                vec!["branch", "--copy", "--force", "other", "copy"],
+                "branch",
+            ),
+            (
+                fx.main.clone(),
+                vec!["branch", "-m", "-f", "other", "main"],
+                "branch",
+            ),
+        ] {
+            let out = guarded(&fx, &dir, &args, false);
+            let message = refused(&out);
+            assert!(
+                message.contains(&format!("refused 'git {name}'")),
+                "{args:?} in {}: {message}",
+                dir.display()
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(fx.main.join("a.txt")).unwrap(),
+            "uncommitted"
+        );
+
+        // A path under the top level, or a file above the sub-directory, is a
+        // narrower restore and passes.
+        for (dir, args) in [
+            (fx.main.join("sub"), vec!["restore", "../a.txt"]),
+            (fx.main.clone(), vec!["restore", "sub/../a.txt"]),
+            (fx.main.clone(), vec!["restore", "a.txt"]),
+        ] {
+            let out = guarded(&fx, &dir, &args, false);
+            assert!(
+                out.status.success(),
+                "{args:?} in {}: {}",
+                dir.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// KT-1753 review (blue) — a restore whose pathspecs only EXCLUDE paths
+    /// covers the rest of the tree, and one that reads its pathspecs from a file
+    /// cannot be judged: both are refused in the main checkout. An exclude next
+    /// to a real path stays a narrow restore.
+    #[test]
+    fn an_exclude_only_or_file_fed_restore_is_refused_in_the_main_checkout() {
+        let fx = fixture();
+        std::fs::write(fx.main.join("a.txt"), "uncommitted").unwrap();
+        std::fs::write(fx.main.join("list.txt"), ".\n").unwrap();
+
+        for args in [
+            vec!["restore", ":!README.md"],
+            vec!["restore", ":^README.md"],
+            vec!["restore", "--", ":(exclude)README.md"],
+            vec!["restore", "-s", "HEAD", ":!README.md"],
+            // The top-level magic in front of the exclude one.
+            vec!["restore", ":/!README.md"],
+            vec!["restore", ":/^README.md"],
+            vec!["restore", "--", ":/!README.md"],
+            vec!["restore", "--pathspec-from-file=list.txt"],
+            vec!["restore", "--pathspec-from-file", "list.txt"],
+        ] {
+            let out = guarded(&fx, &fx.main, &args, false);
+            let message = refused(&out);
+            assert!(
+                message.contains("refused 'git restore'"),
+                "{args:?}: {message}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(fx.main.join("a.txt")).unwrap(),
+            "uncommitted"
+        );
+
+        let out = guarded(&fx, &fx.main, &["restore", "a.txt", ":!README.md"], false);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// KT-1753 — the same commands are an agent's own business in its linked
+    /// worktree, and the human's confirmation lets them through in the main one.
+    #[test]
+    fn restore_clean_and_branch_force_are_free_in_a_worktree_and_with_the_confirmation() {
+        let fx = fixture();
+        std::fs::write(fx.linked.join("u.txt"), "scratch").unwrap();
+        let out = guarded(&fx, &fx.linked, &["clean", "-fd"], false);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!fx.linked.join("u.txt").exists());
+
+        std::fs::write(fx.main.join("a.txt"), "uncommitted").unwrap();
+        let out = guarded(&fx, &fx.main, &["restore", "."], true);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(fx.main.join("a.txt")).unwrap(),
+            "one"
+        );
     }
 
     #[test]
@@ -379,6 +668,8 @@ mod tests {
             .args(args)
             .current_dir(dir)
             .env("PATH", path)
+            // The fixture stands for the owner's checkout, not a scratch repo.
+            .env("TMPDIR", &first)
             .env_remove(CONFIRM_ENV)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

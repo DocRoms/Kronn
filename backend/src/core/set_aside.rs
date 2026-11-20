@@ -276,9 +276,13 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
         ["tts_voices", _] => Text,
         ["disabled_agents" | "unlocked_profiles" | "disabled_auto_skills", "[]"] => Text,
         ["embed_allowed_origins", "[]"] => Url,
-        ["workers", "default_max_review_rounds" | "max_concurrent_task_workers" | "heavy_output_kb"] => {
-            Number
-        }
+        ["workers", "default_max_review_rounds"
+        | "max_concurrent_task_workers"
+        | "heavy_output_kb"
+        | "bash_default_timeout_min"
+        | "bash_max_timeout_min"] => Number,
+        ["workers", "os_junk_patterns", "[]"] => Text,
+        ["workers", "commit", "name" | "email" | "signoff"] => Text,
         ["workers", "review_rounds_unlimited"] => Flag,
         ["workers", "background_priority"] => Flag,
         ["tokens", "disabled_overrides", "[]"] => Text,
@@ -354,6 +358,7 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
             | "disk_warning_gib"
             | "disk_launch_min_free_gib"
             | "disk_sweep_idle_hours"
+            | "disk_stalled_build_days"
             | "max_concurrent_agents"
             | "agent_stall_timeout_min"
             | "agent_global_timeout_min"
@@ -565,15 +570,9 @@ pub fn clear_credentials_in(text: &str) -> Vec<ClearCredential> {
 
 /// The canonical `encryption_secret` a config text carries, if it is a key.
 fn key_in(text: &str) -> Option<String> {
-    text.parse::<toml::Table>()
-        .ok()
-        .and_then(|t| {
-            t.get("encryption_secret")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .or_else(|| config::salvage_key_line(text))
-        .and_then(|k| crypto::canonical_secret(&k).ok())
+    // The same rule as for a copy: a text that parses is decided by its
+    // top-level value, an `encryption_secret` under a table is no key.
+    crate::core::config_copies::key_of(text)
 }
 
 /// The `(kind, value)` pairs `stored_credentials` holds and `key` decrypts.

@@ -21,6 +21,146 @@ use super::AgentType;
 pub struct ProjectWorkspace {
     #[serde(default)]
     pub hooks: crate::models::WorkspaceHooks,
+    /// KT-1742 — this project's lane warm-up settings; a field left unset
+    /// inherits the global `[workers.lane_warm]` entry.
+    #[serde(default)]
+    pub lane_warm: crate::models::LaneWarmConfig,
+    /// KT-1748 — absolute directories whose worktrees Kronn manages for this
+    /// project, added to the global Settings > Workers list and the built-in roots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_worktree_roots: Vec<String>,
+    /// KT-1750 — who Kronn's commits are attributed to and whether they are
+    /// signed off, when the owner decided it rather than leaving it detected.
+    #[serde(default, skip_serializing_if = "ProjectCommitSettings::is_default")]
+    pub commit: ProjectCommitSettings,
+    /// Which git hooks Kronn's own commits and merges for a worker run
+    /// (KT-1745). Only a human sets it; absent means [`WorkerCommitHooks::Off`].
+    #[serde(default, skip_serializing_if = "WorkerCommitHooks::is_default")]
+    pub worker_commit_hooks: WorkerCommitHooks,
+}
+
+impl ProjectWorkspace {
+    /// Nothing to store: no hook, no hook policy, no managed root, no lane
+    /// warm-up setting and no commit setting.
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+            && self.worker_commit_hooks.is_default()
+            && self.managed_worktree_roots.is_empty()
+            && self.lane_warm.is_empty()
+            && self.commit.is_default()
+    }
+}
+
+/// Whether the commits Kronn makes for a project carry a `Signed-off-by`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SignoffSetting {
+    /// Detected: the briefing, a DCO file or hook, the recent history.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+/// KT-1750 — the commit identity and sign-off of a project, set in its card.
+/// The identity is both fields or none: a name without an address (or the
+/// reverse) is refused when saved. Nothing set means "use what the repository
+/// itself says".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectCommitSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub signoff: SignoffSetting,
+}
+
+impl ProjectCommitSettings {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The explicit identity, when both halves are set.
+    pub fn identity(&self) -> Option<(&str, &str)> {
+        let name = self.name.as_deref()?.trim();
+        let email = self.email.as_deref()?.trim();
+        (!name.is_empty() && !email.is_empty()).then_some((name, email))
+    }
+
+    /// Trim the fields and drop an empty one; what a form must never persist is
+    /// the `Err`.
+    pub fn normalized(mut self) -> Result<Self, String> {
+        let clean = |value: Option<String>| {
+            value
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        self.name = clean(self.name);
+        self.email = clean(self.email);
+        match (&self.name, &self.email) {
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                return Err("the commit name and e-mail go together: set both or neither".into());
+            }
+            (Some(name), Some(email)) => {
+                if name.len() > 200 || name.chars().any(|c| c.is_control() || c == '<' || c == '>')
+                {
+                    return Err(
+                        "the commit name cannot contain `<`, `>` or control characters and is \
+                         limited to 200 characters"
+                            .into(),
+                    );
+                }
+                let (local, domain) = email.split_once('@').unwrap_or_default();
+                if email.len() > 254
+                    || local.is_empty()
+                    || !domain.contains('.')
+                    || email
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control() || c == '<' || c == '>')
+                {
+                    return Err("the commit e-mail is not a valid address".into());
+                }
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// Which of the repository's git hooks Kronn runs when it commits or merges for
+/// a worker (KT-1745). Kronn makes those commits itself, outside the worker's OS
+/// sandbox and with the host user's rights, so a hook that lives in the worker's
+/// writable worktree (husky's relative `core.hooksPath`) is worker-written code.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WorkerCommitHooks {
+    /// No hook runs. The DCO sign-off is added by Kronn itself.
+    #[default]
+    Off,
+    /// The repository's gating hook (`pre-commit`, `pre-merge-commit`) runs
+    /// inside the lane's OS sandbox, never as the host user. Refused when the
+    /// host has no sandbox. A stored `main_checkout` (the unconfined mode this
+    /// setting briefly had, which ran worker-reachable binaries as the host)
+    /// reads as this value: a configured hook runs confined or not at all.
+    #[serde(alias = "main_checkout")]
+    Sandboxed,
+}
+
+impl WorkerCommitHooks {
+    pub fn is_default(&self) -> bool {
+        *self == Self::Off
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Sandboxed => "sandboxed",
+        }
+    }
 }
 
 /// Where Kronn writes a project's agent files (KT-971).
@@ -101,7 +241,7 @@ pub struct Project {
     /// Total tech-debt entries detected in the project's docs tree:
     /// one count per file under `docs/tech-debt/` plus one count per
     /// table row in `docs/inconsistencies-tech-debt.md`. Computed by
-    /// `scanner::count_tech_debt` and surfaced as a badge on the
+    /// `td_index::count_tech_debt` and surfaced as a badge on the
     /// project card so users see at a glance how many TD items remain
     /// to address. Not persisted in DB.
     #[serde(default)]
@@ -1817,7 +1957,7 @@ pub struct DiscoverReposResponse {
 pub struct AuditInfo {
     #[serde(default)]
     #[ts(optional)]
-    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
+    pub template_update: Option<TemplateUpdate>,
     pub files: Vec<AuditFileInfo>,
     pub todos: Vec<AuditTodo>,
     #[serde(default)]
@@ -1855,7 +1995,7 @@ pub struct AuditTodo {
 pub struct DriftCheckResponse {
     #[serde(default)]
     #[ts(optional)]
-    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
+    pub template_update: Option<TemplateUpdate>,
     pub audit_date: Option<String>,
     pub stale_sections: Vec<DriftSection>,
     pub fresh_sections: Vec<String>,
@@ -2512,6 +2652,21 @@ pub struct BriefingProjectAnswers {
     pub notes: std::collections::BTreeMap<BriefingFact, String>,
 }
 
+/// Machine-readable copy of the answers, one line, invisible once rendered.
+pub const ANSWERS_PREFIX: &str = "<!-- kronn:project-answers v1 ";
+pub const ANSWERS_SUFFIX: &str = " -->";
+
+/// The answers recorded in a briefing, if any.
+pub fn parse_answers(notes: &str) -> Option<BriefingProjectAnswers> {
+    notes.lines().find_map(|line| {
+        let json = line
+            .trim()
+            .strip_prefix(ANSWERS_PREFIX)?
+            .strip_suffix(ANSWERS_SUFFIX)?;
+        serde_json::from_str(json).ok()
+    })
+}
+
 /// A project fact a briefing note can be attached to (KT-1196).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -2700,4 +2855,64 @@ pub struct ProjectRule {
 #[serde(default)]
 pub struct BriefingProjectRules {
     pub rules: Vec<ProjectRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateRename {
+    pub from: String,
+    pub to: String,
+    /// An occupied destination is preserved and needs human reconciliation.
+    pub conflict: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateUpdate {
+    pub available: bool,
+    pub installed_version: Option<String>,
+    pub current_version: Option<String>,
+    pub missing_files: Vec<PlaceholderDoc>,
+    pub renames: Vec<TemplateRename>,
+    /// Removed upstream paths whose successor cannot be proven uniquely.
+    pub unresolved_files: Vec<String>,
+    pub spec_modified: bool,
+}
+
+impl ProjectRepositoryResourceKind {
+    pub fn identity_kind(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Workflow => "workflow",
+            Self::QuickPrompt => "quick_prompt",
+            Self::QuickApi => "quick_api",
+            Self::QuickExec => "quick_exec",
+            Self::Artifact => "artifact",
+        }
+    }
+
+    pub fn level(self) -> ProjectRepositoryResourceLevel {
+        match self {
+            Self::Skill | Self::QuickPrompt | Self::QuickExec => {
+                ProjectRepositoryResourceLevel::UsableWithoutKronn
+            }
+            Self::Workflow | Self::QuickApi | Self::Artifact => {
+                ProjectRepositoryResourceLevel::KronnRequired
+            }
+        }
+    }
+
+    pub fn paths(self, slug: &str) -> Vec<String> {
+        match self {
+            Self::Skill => vec![format!(".agents/skills/{slug}/SKILL.md")],
+            Self::Workflow => vec![format!("kronn/workflows/{slug}.yaml")],
+            Self::QuickPrompt => vec![format!("kronn/prompts/{slug}.md")],
+            Self::QuickApi => vec![format!("kronn/quick-apis/{slug}.yaml")],
+            Self::QuickExec => vec![format!("kronn/quick-execs/{slug}.yaml")],
+            Self::Artifact => vec![
+                format!("kronn/artifacts/{slug}/artifact.yaml"),
+                format!("kronn/artifacts/{slug}/index.html"),
+            ],
+        }
+    }
 }

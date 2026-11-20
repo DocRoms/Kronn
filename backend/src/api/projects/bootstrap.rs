@@ -37,10 +37,7 @@ pub async fn bootstrap(
 
 /// Why `agent` cannot run a bootstrap, mirroring the form's `canAudit`: an
 /// audit-capable type that is installed (or reachable), enabled and signed in.
-pub(crate) fn bootstrap_agent_refusal(
-    agent: &AgentType,
-    detected: &[AgentDetection],
-) -> Option<String> {
+pub fn bootstrap_agent_refusal(agent: &AgentType, detected: &[AgentDetection]) -> Option<String> {
     if !crate::api::audit::agent_can_audit(agent) {
         return Some(format!(
             "{agent:?} cannot run a bootstrap: it has no file tools Kronn can scope to the new project."
@@ -67,7 +64,7 @@ pub(crate) fn bootstrap_agent_refusal(
 
 /// `bootstrap` under a caller-chosen project id and agent detection, so a test
 /// can hold that project's audit lease or stand in for the host's agents.
-pub(crate) async fn bootstrap_as(
+pub async fn bootstrap_as(
     state: AppState,
     req: BootstrapProjectRequest,
     project_id: String,
@@ -290,6 +287,8 @@ async fn bootstrap_in(
     {
         return Json(ApiResponse::err(format!("DB error: {}", e)));
     }
+    // KT-1751: the project owns its tree from now on.
+    crate::core::task_worker_lane_settings::register_project(std::path::Path::new(&project.path));
 
     // Sync .mcp.json for the new project if MCPs were linked
     if !req.mcp_config_ids.is_empty() {
@@ -308,6 +307,8 @@ async fn bootstrap_in(
                 tracing::error!("Failed to sync MCP config for new project: {e}");
             }
         }
+    } else {
+        super::sync_new_project(&state, &project_id, &project.path).await;
     }
 
     // 4. Get language
@@ -723,8 +724,8 @@ mod prompt_tests {
 }
 
 /// An installed, enabled, signed-in detection of `agent`, for tests.
-#[cfg(test)]
-pub(crate) fn usable_for_tests(agent: AgentType) -> AgentDetection {
+#[cfg(any(test, feature = "test-support"))]
+pub fn usable_for_tests(agent: AgentType) -> AgentDetection {
     AgentDetection {
         name: format!("{agent:?}"),
         agent_type: agent,

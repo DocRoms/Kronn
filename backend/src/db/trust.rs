@@ -217,20 +217,88 @@ fn workflow_of_run(conn: &Connection, run_id: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// The lowest level a human gave a room up the delegation chain of `room`: a
+/// worker's room was opened from its principal's (KT-1964). A branch stops at
+/// the first room that has a setting; a room several rooms delegated to is
+/// held to the lowest of them. A chain too long to follow is held to Standard.
+fn delegating_room_level(conn: &Connection, room: &str) -> Result<Option<(TrustLevel, String)>> {
+    let mut seen = vec![room.to_owned()];
+    let mut frontier = vec![room.to_owned()];
+    let mut lowest: Option<(TrustLevel, String)> = None;
+    while let Some(current) = frontier.pop() {
+        let mut statement = conn.prepare_cached(
+            "SELECT DISTINCT parent_discussion_id FROM task_executions \
+             WHERE sub_discussion_id = ?1 LIMIT 65",
+        )?;
+        let parents: Vec<String> = statement
+            .query_map([&current], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for parent in parents {
+            if seen.contains(&parent) {
+                continue;
+            }
+            if seen.len() >= DELEGATION_ROOMS {
+                return Ok(Some((TrustLevel::Standard, parent)));
+            }
+            seen.push(parent.clone());
+            match get_setting(conn, TrustScope::Room, Some(&parent))?.level {
+                Some(level) => {
+                    if lowest.as_ref().is_none_or(|(kept, _)| level < *kept) {
+                        lowest = Some((level, parent));
+                    }
+                }
+                None => frontier.push(parent),
+            }
+        }
+    }
+    Ok(lowest)
+}
+
+/// How many rooms of a delegation chain are read before giving up.
+const DELEGATION_ROOMS: usize = 64;
+
 /// The level in force for `origin`: the narrowest explicit setting (a room,
 /// then the workflow, then the instance), else Standard. When an agent's
 /// rooms disagree, the lowest of their levels wins. The workflow is the one
 /// `origin` runs in (a run, or a workflow's own launch): a room that merely
-/// edits a workflow never takes that workflow's level.
+/// edits a workflow never takes that workflow's level. A worker's room with no
+/// setting of its own is held to the level a human gave the room that
+/// delegated to it: that level lowers what the worker would get, never raises it.
 pub fn effective(conn: &Connection, origin: &TrustOrigin) -> Result<EffectiveTrust> {
     let mut room: Option<(TrustLevel, String)> = None;
+    let mut delegated: Option<(TrustLevel, String)> = None;
+    let lower = |kept: &mut Option<(TrustLevel, String)>, level: TrustLevel, id: String| {
+        if kept.as_ref().is_none_or(|(lowest, _)| level < *lowest) {
+            *kept = Some((level, id));
+        }
+    };
     for id in &origin.discussion_ids {
-        if let Some(level) = get_setting(conn, TrustScope::Room, Some(id))?.level {
-            if room.as_ref().is_none_or(|(lowest, _)| level < *lowest) {
-                room = Some((level, id.clone()));
+        match get_setting(conn, TrustScope::Room, Some(id))?.level {
+            Some(level) => lower(&mut room, level, id.clone()),
+            None => {
+                if let Some((level, parent)) = delegating_room_level(conn, id)? {
+                    lower(&mut delegated, level, parent);
+                }
             }
         }
     }
+    let resolved = effective_unbounded(conn, origin, room)?;
+    Ok(match delegated {
+        Some((level, id)) if level < resolved.level => EffectiveTrust {
+            level,
+            source: TrustScope::Room,
+            source_id: Some(id),
+            explicit: true,
+        },
+        _ => resolved,
+    })
+}
+
+fn effective_unbounded(
+    conn: &Connection,
+    origin: &TrustOrigin,
+    room: Option<(TrustLevel, String)>,
+) -> Result<EffectiveTrust> {
     if let Some((level, id)) = room {
         return Ok(EffectiveTrust {
             level,
@@ -576,7 +644,7 @@ fn take_back(
                 return Ok(());
             };
             // Already revoked by a human: nothing is left to take back.
-            let _ = crate::db::discussion_scope::revoke(
+            let _ = crate::db::discussion_scope_grants::revoke(
                 conn,
                 room,
                 object_id,
@@ -589,31 +657,12 @@ fn take_back(
     Ok(())
 }
 
-/// A room or a workflow is deleted (or a batch of them): `work` runs, then
-/// every grant is judged again against the level now in force — the deleted
-/// scopes' settings went with them (trigger), so what they alone covered is
-/// taken back — all in one transaction on the one connection. The deletion and
-/// the withdrawal stand or fall together: a failed withdrawal rolls the
-/// deletion back (the scope keeps its setting and its grants, nothing is left
-/// approved without a level behind it), and a deletion that fails withdraws
-/// nothing. Inside a transaction the caller already holds, `work` and the
-/// withdrawal simply join it.
-pub fn delete_and_withdraw<T>(
-    conn: &Connection,
-    by: &str,
-    work: impl FnOnce(&Connection) -> Result<T>,
-) -> Result<T> {
-    if !conn.is_autocommit() {
-        let out = work(conn)?;
-        withdraw(conn, by)?;
-        return Ok(out);
-    }
-    let tx = conn.unchecked_transaction()?;
-    let out = work(&tx)?;
-    withdraw(&tx, by)?;
-    tx.commit()?;
-    Ok(out)
+pub use crate::core::uplink::delete_and_withdraw;
+
+fn withdraw_for_deletion(conn: &Connection, by: &str) -> Result<()> {
+    withdraw(conn, by).map(|_| ())
 }
+inventory::submit! { crate::core::uplink::TrustWithdrawal(withdraw_for_deletion) }
 
 /// Rows kept in the journal, and days they are kept. An active grant is
 /// exempt: it is what a lowered level withdraws.

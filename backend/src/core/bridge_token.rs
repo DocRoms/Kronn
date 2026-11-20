@@ -72,6 +72,9 @@ pub struct BridgeGrant {
     pub scope: BridgeScope,
     /// Discussions this launch created through the bridge: its own too.
     adopted: Mutex<Vec<String>>,
+    /// The CLI sessions this launch joined or resumed through the bridge: the
+    /// only ones it holds, whatever session a later request names (KT-1962).
+    sessions: Mutex<Vec<i64>>,
     /// The project frozen on first use: `Some(None)` = bound to no project.
     bound: Mutex<Option<Option<String>>>,
     expires_at: Instant,
@@ -94,6 +97,23 @@ impl BridgeGrant {
             own.extend(adopted.iter().cloned());
         }
         own
+    }
+
+    /// Record a session this launch just joined or resumed.
+    pub fn adopt_session(&self, session_pk: i64) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            if !sessions.contains(&session_pk) {
+                sessions.push(session_pk);
+            }
+        }
+    }
+
+    /// The sessions this launch joined or resumed.
+    pub fn own_sessions(&self) -> Vec<i64> {
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.clone())
+            .unwrap_or_default()
     }
 
     /// Record a discussion this launch just created.
@@ -162,6 +182,13 @@ pub struct BridgeCaller {
     pub own_run: Option<String>,
     /// The agent and model Kronn launched.
     pub agent: Option<crate::core::api_access::AgentIdentity>,
+    /// The rooms this launch is the agent of. A step or a worker runs in a
+    /// room without being its agent: it has none (KT-1270).
+    pub room_agent_of: Vec<String>,
+    /// The task execution this launch is the worker of, when it is one.
+    pub own_execution: Option<String>,
+    /// The CLI sessions this launch joined or resumed through the bridge.
+    pub own_sessions: Vec<i64>,
 }
 
 impl BridgeCaller {
@@ -281,6 +308,7 @@ pub fn mint_with_lifetime(
         id: id.clone(),
         scope,
         adopted: Mutex::new(Vec::new()),
+        sessions: Mutex::new(Vec::new()),
         bound: Mutex::new(None),
         expires_at: Instant::now() + lifetime,
     });
@@ -386,6 +414,9 @@ impl Kind {
 pub enum Role {
     Target,
     Ref,
+    /// Changed like a target, and the grant must own it whatever the route's
+    /// rule: the room of a session the caller only names (KT-1963).
+    Owned,
 }
 
 /// One id a request names.
@@ -954,6 +985,14 @@ pub fn prepare_body_in(
     let Some(body) = body else {
         return Ok(None);
     };
+    // Every rule below reads and rewrites fields by name. A struct also reads
+    // from a JSON array, field by position: such a body would cross the gate
+    // unseen, so no bridge route takes one.
+    if !body.is_object() {
+        return Err(Refusal(
+            "a bridge token sends a JSON object as its request body".into(),
+        ));
+    }
     let mut body = body.clone();
     let mut changed = false;
     if let Some(fields) = body
@@ -996,6 +1035,8 @@ pub fn prepare_body_in(
             }
             if let Some(actor) = actor.as_object_mut() {
                 actor.insert("kind".into(), serde_json::json!("agent"));
+                // The session it names is its own claim: it authorises nothing.
+                actor.insert("token_declared".into(), serde_json::json!(true));
                 // An agent actor must name itself; a token that did not is
                 // recorded as a bridge agent.
                 let named = actor
@@ -1665,13 +1706,48 @@ impl Residence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal(pub String);
 
+/// What the active grants of a set of discussions open, the primary project
+/// excepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrantedProjects {
+    pub read: HashSet<String>,
+    /// Projects whose planning the room changes (`plan` and `code`).
+    pub write: HashSet<String>,
+    /// Projects whose checkout the room's agent edits (`code`, KT-1491). Always
+    /// also in `write` and `read`; a code grant opens nothing more in Kronn's
+    /// tools than a plan grant does.
+    pub code: HashSet<String>,
+    /// Every project, at most `plan`: `code` names one project.
+    pub all: Option<crate::models::discussion_scope::ScopeAccess>,
+    /// A room without a project may write the general resources.
+    pub general: bool,
+    /// The general resources these rooms created, as `(kind, id)`: the only
+    /// ones « General · write » lets their agents edit.
+    pub general_own: HashSet<(String, String)>,
+}
+
+impl GrantedProjects {
+    /// Everything `other` opens, added to `self`.
+    pub fn merge(&mut self, other: GrantedProjects) {
+        self.read.extend(other.read);
+        self.write.extend(other.write);
+        self.code.extend(other.code);
+        self.general |= other.general;
+        self.general_own.extend(other.general_own);
+        self.all = match (self.all, other.all) {
+            (Some(a), Some(b)) => Some(a.stronger(b)),
+            (a, b) => a.or(b),
+        };
+    }
+}
+
 /// What a token reaches (KT-1270): its frozen project, plus the projects a
 /// human granted to its rooms. Grants never reach credentials, never run a
 /// shared resource elsewhere, and a project-less token reaches none of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reach {
     pub bound: Option<String>,
-    pub granted: crate::db::discussion_scope::GrantedProjects,
+    pub granted: GrantedProjects,
 }
 
 impl Reach {
@@ -1898,7 +1974,10 @@ pub fn authorize_in(
             let read_only = reach.reads(id) && route.rule != Rule::Effect;
             return Err(Refusal(project_refusal(&grant.scope, read_only)));
         }
-        if kind == Kind::Discussion && route.rule == Rule::Own && !grant.owns_discussion(id) {
+        if kind == Kind::Discussion
+            && (route.rule == Rule::Own || named.role == Role::Owned)
+            && !grant.owns_discussion(id)
+        {
             return Err(Refusal(
                 "a bridge token may only write to its own discussion".into(),
             ));
@@ -1916,7 +1995,9 @@ pub fn authorize_in(
         };
         let allowed = match (route.rule, named.role) {
             (Rule::Effect, _) => effect_allowed(grant, route, kind, id, &place, bound),
-            (Rule::Write | Rule::Own, Role::Target) => writable(grant, kind, id, &place, reach),
+            (Rule::Write | Rule::Own, Role::Target | Role::Owned) => {
+                writable(grant, kind, id, &place, reach)
+            }
             _ => visible_for_read_in(grant, kind, id, &place, reach),
         };
         if !allowed {
@@ -1986,7 +2067,11 @@ pub fn residence(
         // Same resolution as the orchestration tools: an execution id, or a
         // task reference standing for its active or latest execution.
         let Some(execution) =
-            crate::api::orchestration::resolve_task_execution_reference(conn, execution_id)?
+            (crate::core::uplink::required::<crate::core::uplink::TaskExecutionLookup>()?.0)(
+                conn,
+                execution_id,
+                crate::core::uplink::ExecutionOf::Reference,
+            )?
         else {
             return Ok(None);
         };
@@ -2375,12 +2460,13 @@ pub fn credential_targets(
             out.push(found.map_or_else(unresolved, |disc| {
                 NamedId::new(Kind::Discussion, disc, Role::Target)
             }));
-            // Joining ends the named session in every other room: each of
-            // them must be one the token may write.
+            // Joining ends the named session in every other room. A session
+            // id is readable by the whole project, so each of those rooms
+            // must be the grant's own: a worker never moves its principal.
             out.extend(
                 session_rooms()?
                     .into_iter()
-                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Target)),
+                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Owned)),
             );
         }
         "/api/discussions/peer-resume" | "/api/discussions/orchestrator-return-resume" => {
@@ -2398,11 +2484,12 @@ pub fn credential_targets(
                 NamedId::new(Kind::Discussion, disc, Role::Target)
             }));
         }
+        // Leaving for a session: only one that runs in the grant's own room.
         "/api/discussions/peer-leave" => {
             out.extend(
                 session_rooms()?
                     .into_iter()
-                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Target)),
+                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Owned)),
             );
         }
         // Acting on the room of a joined session: that room must be in

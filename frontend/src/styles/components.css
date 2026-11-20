@@ -381,6 +381,31 @@ select.input option {
   color: var(--kr-text-muted);
 }
 
+/* ── KT-1742 lane warm-up fields (Settings > Workers + project card) ─────
+   One group per field: label, control, help, then the next group a full step
+   below, so a label never sits against the previous field's help line. */
+.lane-warm-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-8);
+}
+.lane-warm-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+.lane-warm-group > p {
+  margin: 0;
+}
+.lane-warm-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+.lane-warm-field .label {
+  margin-bottom: 0;
+}
+
 /* ── Section title ──────────────────────────────────────────────────────── */
 .section-title {
   font-size: var(--kr-fs-xs);
@@ -717,7 +742,7 @@ select.input option {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--kr-z-modal);
 }
 
 .disc-invite-modal {

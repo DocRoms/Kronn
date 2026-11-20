@@ -1,7 +1,29 @@
 use super::*;
 use crate::core::background_priority::Priority;
+use crate::core::project_toolchains::CargoMetadata;
+use crate::core::task_worker_env::ProcessProbeRunner;
 use crate::core::task_worker_env::Provisioned;
-use crate::core::task_worker_lane_warm::{warm_lane, BuildGate, FirstBuild, WarmStartSettings};
+use crate::core::task_worker_lane_warm::{
+    warm_lane, BuildGate, FirstBuild, WarmHost, WarmStartSettings,
+};
+
+fn no_metadata(_: &Path) -> Result<CargoMetadata, String> {
+    Err("no cargo metadata in a sandbox test".into())
+}
+
+/// A warm host that aligns nothing and resolves nothing: these tests are about
+/// what the confined runner does with the first build.
+fn warm_host() -> WarmHost<'static> {
+    WarmHost {
+        seed_alignment: false,
+        compiler_env: Vec::new(),
+        first_build_command: None,
+        rust_roots: None,
+        metadata: &no_metadata,
+        seed_runner: &ProcessProbeRunner,
+        lock_wait: Duration::from_millis(10),
+    }
+}
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -70,6 +92,7 @@ fn probe(program: &str, args: &[&str], cwd: &Path) -> ProbeCommand {
 fn provisioned() -> Provisioned {
     Provisioned {
         frontend_deps: crate::core::task_worker_env::FrontendDeps::NotApplicable,
+        dependency_layers: Vec::new(),
         cargo_home_ready: false,
         shared_cargo_home: None,
         warnings: Vec::new(),
@@ -131,6 +154,42 @@ fn the_writable_set_is_the_lanes_roots_and_its_temp_dir_and_no_global_temp() {
             "{profile}"
         );
     }
+}
+
+/// KT-1736: Apple clang puts a `.S` source's preprocess temp in the per-user
+/// Darwin temp dir (`/private/var/folders/…/T`), whatever `TMPDIR` says. The fix
+/// keeps that file in the lane (`CFLAGS_<target>=-save-temps=obj`, KT-1742), it does not open the
+/// directory: no profile of a lane ever grants a `/var/folders` path outside the
+/// lane's own roots.
+#[test]
+fn the_profile_never_opens_the_per_user_darwin_temp_dir() {
+    let layout = layout();
+    let policy = policy_of(&layout);
+    let writable = policy.writable();
+    let profile = seatbelt_profile(&writable);
+    // The fixture's layout lives in `tempfile::tempdir()`, i.e. under
+    // `/private/var/folders` on a normal macOS host: a path is "outside the
+    // lane" only when it is not below one of the policy's own writable roots.
+    let outside_lane = |path: &str| {
+        (path.starts_with("/var/folders") || path.starts_with("/private/var/folders"))
+            && !writable
+                .iter()
+                .any(|root| Path::new(path).starts_with(root))
+    };
+    for line in profile.lines().filter(|line| line.contains("(subpath")) {
+        let quoted = line.split('"').nth(1).unwrap_or("");
+        assert!(!outside_lane(quoted), "{line}");
+    }
+    // The host's own temp dir (the real `DARWIN_USER_TEMP_DIR` when TMPDIR is
+    // unset) is never granted, unless it is itself under a lane root.
+    let host_temp = real_path(&std::env::temp_dir());
+    if !writable.iter().any(|root| host_temp.starts_with(root)) {
+        let grant = format!("(subpath \"{}\")", host_temp.display());
+        assert!(!profile.contains(&grant), "{grant} in {profile}");
+    }
+    // The lane's own temp dir stays the only scratch: TMPDIR points into a root.
+    let tmp = real_path(&policy.temp_dir);
+    assert!(writable.iter().any(|root| tmp.starts_with(root)));
 }
 
 /// The text of the `(allow <operation> …)` forms of `profile`.
@@ -569,6 +628,7 @@ fn the_lane_first_build_on_a_host_whose_launcher_is_missing_is_refused_with_its_
         &lane,
         &provisioned(),
         &settings,
+        &warm_host(),
         &BuildGate::new(),
         &runner,
         &|_, _| Ok(()),
@@ -662,6 +722,7 @@ fn a_relaunch_after_the_worker_changed_its_build_never_reaches_a_process_unconfi
             &lane,
             &provisioned(),
             &settings,
+            &warm_host(),
             &BuildGate::new(),
             &runner,
             &|_, _| Ok(()),
@@ -703,6 +764,150 @@ fn a_relaunch_after_the_worker_changed_its_build_never_reaches_a_process_unconfi
         // wrapping to the process runner, which starts it behind the launcher.
         assert_eq!(call.priority, Priority::Background, "{call:?}");
     }
+}
+
+/// KT-1742 — a project's declared first-build command (`npm ci`, `composer
+/// install`) executes the worktree's own scripts, which the worker writes. The
+/// process Kronn starts for it is the OS sandbox, never the shell.
+#[test]
+fn a_declared_first_build_command_only_ever_runs_inside_the_os_sandbox() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join("package.json"), "{}").unwrap();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let inner = Recorder::new();
+    let runner = SandboxedProbeRunner::new(
+        Ok(SandboxPolicy::for_lane(&lane)),
+        Some(Mechanism::Seatbelt),
+        inner.clone(),
+    );
+    let settings = WarmStartSettings::resolve(Some("1"), Some("1"), Some("60"), 4);
+    let mut host = warm_host();
+    host.first_build_command = Some("npm ci".into());
+
+    let record = warm_lane(
+        &lane,
+        &provisioned(),
+        &settings,
+        &host,
+        &BuildGate::new(),
+        &runner,
+        &|_, _| Ok(()),
+        |_| {},
+    );
+
+    assert!(
+        matches!(record.first_build, FirstBuild::Succeeded { .. }),
+        "{record:?}"
+    );
+    let calls = inner.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].program, SANDBOX_EXEC, "{:?}", calls[0]);
+    assert!(calls[0].args[1].contains("(deny default)"));
+    assert_eq!(
+        &calls[0].args[calls[0].args.len() - 3..],
+        ["sh", "-c", "npm ci"],
+        "the shell only starts inside the sandbox command"
+    );
+}
+
+/// KT-1742 — a host with no usable sandbox runs no declared command: the
+/// record says why, nothing reached a process, and nothing is marked warm.
+#[test]
+fn a_declared_first_build_command_on_a_host_without_a_sandbox_is_refused_and_reported() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join("package.json"), "{}").unwrap();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let inner = Recorder::new();
+    let runner = SandboxedProbeRunner::new(Ok(SandboxPolicy::for_lane(&lane)), None, inner.clone());
+    let settings = WarmStartSettings::resolve(Some("1"), Some("1"), Some("60"), 4);
+    let mut host = warm_host();
+    host.first_build_command = Some("npm ci".into());
+
+    let record = warm_lane(
+        &lane,
+        &provisioned(),
+        &settings,
+        &host,
+        &BuildGate::new(),
+        &runner,
+        &|_, _| Ok(()),
+        |_| {},
+    );
+
+    let FirstBuild::Failed { detail, .. } = &record.first_build else {
+        panic!("expected a refusal, got {record:?}");
+    };
+    assert!(detail.contains("not run"), "{detail}");
+    assert!(inner.calls().is_empty(), "no process was started");
+    assert!(
+        !lane.cargo_target_dir.join(".kronn-warm.json").exists(),
+        "nothing is marked warm"
+    );
+}
+
+/// KT-1742 — and under the REAL OS sandbox, a declared command that writes
+/// outside the lane's roots is stopped by the OS, and the event reports it.
+#[test]
+fn a_declared_first_build_command_writing_outside_the_lane_is_denied_by_the_os_and_reported() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    std::fs::write(layout.worktree.join("package.json"), "{}").unwrap();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let outside_dir = outside_dir();
+    let outside = outside_dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("escaped.txt");
+    let inside = layout.worktree.join("inside.txt");
+    let runner = SandboxedProbeRunner::new(
+        Ok(SandboxPolicy::for_lane(&lane)),
+        Some(mechanism),
+        Arc::new(ProcessProbeRunner),
+    );
+    let settings = WarmStartSettings::resolve(Some("1"), Some("1"), Some("60"), 4);
+    let mut host = warm_host();
+    host.first_build_command = Some(format!(
+        "echo x > {inside:?} && echo x > {outside:?}",
+        inside = inside.display().to_string(),
+        outside = outside.display().to_string()
+    ));
+
+    let record = warm_lane(
+        &lane,
+        &provisioned(),
+        &settings,
+        &host,
+        &BuildGate::new(),
+        &runner,
+        &|_, _| Ok(()),
+        |_| {},
+    );
+
+    assert!(
+        matches!(record.first_build, FirstBuild::Failed { .. }),
+        "the write outside the lane must fail the command: {record:?}"
+    );
+    assert!(!outside.exists(), "the escape reached the host's disk");
+    assert!(inside.exists(), "a write inside the lane is still allowed");
+    assert!(
+        !lane.cargo_target_dir.join(".kronn-warm.json").exists() || read_failed_command_mark(&lane),
+        "a command that failed is never marked built"
+    );
+    let json = serde_json::to_value(&record).unwrap();
+    assert_eq!(json["first_build"]["outcome"], "failed");
+    assert_eq!(json["crates"][0]["path"], "command");
+}
+
+/// Whether the lane's marker holds only a failed `command` entry.
+fn read_failed_command_mark(lane: &WorkerLane) -> bool {
+    let bytes = std::fs::read(lane.cargo_target_dir.join(".kronn-warm.json")).unwrap();
+    let marker: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    marker["roots"]
+        .as_array()
+        .is_some_and(|roots| roots.iter().all(|root| root["state"] == "failed"))
 }
 
 /// KT-1633: the sandboxed runner hands the process level the priority the
@@ -916,7 +1121,7 @@ fn build_under_the_os_sandbox(
 fn outside_dir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(".kronn-sandbox-test-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .tempdir_in(crate::BACKEND_DIR)
         .unwrap()
 }
 
@@ -1514,7 +1719,7 @@ fn vitest_loads_the_worker_config_under_the_os_sandbox() {
     let Some(mechanism) = live_mechanism() else {
         return;
     };
-    let installed = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let installed = Path::new(crate::BACKEND_DIR)
         .join("..")
         .join("frontend")
         .join("node_modules");
@@ -1721,4 +1926,124 @@ fn the_os_sandbox_reaches_the_docker_socket_only_when_the_policy_opens_it() {
         "the opened socket must be reachable: {open:?}"
     );
     assert!(listener.accept().is_ok(), "the connection never arrived");
+}
+
+// ── KT-1745: the worktree's `.git` pointer is read-only to the worker ────
+
+#[test]
+fn the_worktrees_git_pointer_is_denied_to_a_confined_command() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join(".git"), "gitdir: /registered\n").unwrap();
+    let policy = policy_of(&layout);
+    let pointer = layout.worktree.canonicalize().unwrap().join(".git");
+    assert_eq!(policy.read_only, vec![layout.worktree.join(".git")]);
+    let command = probe("true", &[], &layout.worktree);
+
+    // Seatbelt: a write deny on the file, after every allow so it wins.
+    let seatbelt = confine(Mechanism::Seatbelt, &policy, &command);
+    let profile = &seatbelt.args[1];
+    let deny = format!(
+        "(deny file-write*\n  (literal {})\n)",
+        seatbelt_literal(&pointer)
+    );
+    let at = profile.find(&deny).unwrap_or_else(|| panic!("{profile}"));
+    assert!(at > profile.find("(allow file-write*").unwrap());
+
+    // Bubblewrap: bound read-only over itself, before the namespace flags.
+    let bwrap = confine(Mechanism::Bubblewrap, &policy, &command).args;
+    let text = pointer.to_string_lossy().into_owned();
+    let bind = bwrap
+        .windows(3)
+        .position(|w| w[0] == "--ro-bind" && w[1] == text && w[2] == text)
+        .expect("the pointer is bound read-only");
+    assert!(bind < bwrap.iter().position(|a| a == "--unshare-net").unwrap());
+}
+
+#[test]
+fn a_confined_command_cannot_rewrite_or_replace_the_git_pointer() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    let pointer = layout.worktree.join(".git");
+    std::fs::write(&pointer, "gitdir: /registered\n").unwrap();
+    let run = |script: &str| {
+        let command = probe("sh", &["-c", script], &layout.worktree);
+        SandboxedProbeRunner::new(
+            Ok(policy_of(&layout)),
+            Some(mechanism),
+            Arc::new(ProcessProbeRunner),
+        )
+        .run(&command)
+    };
+
+    assert!(!run("echo 'gitdir: /evil' > .git").success);
+    assert!(!run("rm -f .git && echo 'gitdir: /evil' > .git").success);
+    assert!(!run("mv .git .git.bak").success);
+    assert_eq!(
+        std::fs::read_to_string(&pointer).unwrap(),
+        "gitdir: /registered\n"
+    );
+    // The rest of the worktree stays writable.
+    assert!(run("echo ok > other.txt").success);
+    assert!(layout.worktree.join("other.txt").exists());
+}
+
+// ── KT-1745 round 4: nested `.git` — only the repositories that exist ────
+
+#[test]
+fn only_the_nested_repositories_that_exist_are_denied_not_every_git_path() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join(".git"), "gitdir: /registered\n").unwrap();
+    std::fs::create_dir_all(layout.worktree.join("lib/.git")).unwrap();
+    let policy = policy_of(&layout);
+    let command = probe("true", &[], &layout.worktree);
+    let seatbelt = confine(Mechanism::Seatbelt, &policy, &command);
+    let profile = &seatbelt.args[1];
+    let root = layout.worktree.canonicalize().unwrap();
+    let denies = |parent: &Path| {
+        profile.contains(&format!(
+            "^{}/\\.[gG][iI][tT](/.*)?$",
+            seatbelt_regex_escape(parent)
+        ))
+    };
+    assert!(denies(&root), "{profile}");
+    assert!(denies(&root.join("lib")), "{profile}");
+    // A repository the worker may create (`git init vendor/pkg`, a Composer
+    // source install, terraform git modules) is not matched by any deny: no
+    // `any depth` rule is left.
+    assert!(!denies(&root.join("vendor/pkg")), "{profile}");
+    assert!(!profile.contains("(.*/)?"), "{profile}");
+}
+
+#[test]
+fn a_confined_command_can_create_a_nested_repository_but_not_rewrite_an_existing_one() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    std::fs::write(layout.worktree.join(".git"), "gitdir: /registered\n").unwrap();
+    std::fs::create_dir_all(layout.worktree.join("lib/.git")).unwrap();
+    std::fs::write(layout.worktree.join("lib/.git/config"), "[core]\n").unwrap();
+    let run = |script: &str| {
+        let command = probe("sh", &["-c", script], &layout.worktree);
+        SandboxedProbeRunner::new(
+            Ok(policy_of(&layout)),
+            Some(mechanism),
+            Arc::new(ProcessProbeRunner),
+        )
+        .run(&command)
+    };
+    // What `git init vendor/pkg` does: make the directory, then `.git` in it.
+    assert!(run(
+        "mkdir -p vendor/pkg/.git/objects && echo 'ref: refs/heads/main' > vendor/pkg/.git/HEAD"
+    )
+    .success);
+    assert!(layout.worktree.join("vendor/pkg/.git/HEAD").exists());
+    // An existing nested repository's configuration stays the registered one.
+    assert!(!run("echo '[filter w]' >> lib/.git/config").success);
+    assert_eq!(
+        std::fs::read_to_string(layout.worktree.join("lib/.git/config")).unwrap(),
+        "[core]\n"
+    );
 }

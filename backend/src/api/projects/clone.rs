@@ -49,32 +49,7 @@ fn https_to_ssh(url: &str) -> Option<String> {
     Some(format!("git@{}:{}", host, path))
 }
 
-/// Mask `scheme://userinfo@host` credentials in a string so a PAT embedded in a
-/// clone URL never leaks into an error message or a log line. Conservative:
-/// collapses the characters between `://` and the next `@` (when there's no `/`
-/// in between, i.e. it's really userinfo) to `***`.
-pub(crate) fn redact_url_credentials(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(pos) = rest.find("://") {
-        out.push_str(&rest[..pos + 3]);
-        let after = &rest[pos + 3..];
-        // The userinfo terminator `@` must come before any `/` (path start).
-        let at = after.find('@');
-        let slash = after.find('/');
-        match (at, slash) {
-            (Some(a), maybe_slash) if maybe_slash.map(|sl| a < sl).unwrap_or(true) => {
-                out.push_str("***");
-                rest = &after[a..]; // keep `@host...`
-            }
-            _ => {
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
+pub use crate::core::secret_scrub::redact_url_credentials;
 
 /// Build an ordered list of clone URLs to try, most-likely-to-succeed first.
 ///
@@ -321,6 +296,9 @@ pub async fn clone_project(
     {
         return Json(ApiResponse::err(format!("DB error: {}", e)));
     }
+    // KT-1751: the project owns its tree from now on.
+    crate::core::task_worker_lane_settings::register_project(std::path::Path::new(&project.path));
+    super::sync_new_project(&state, &project.id, &project.path).await;
 
     // Auto-detect skills
     let detected = crate::api::audit::detect_project_skills(&host_path);
@@ -519,7 +497,11 @@ pub async fn clone_and_remap(
         .await
     {
         Ok(true) => {
-            super::docs_location::rekey(&state, &id, &project.path, Some(&project_path)).await
+            super::docs_location::rekey(&state, &id, &project.path, Some(&project_path)).await;
+            crate::core::task_worker_lane_settings::rekey_project(
+                std::path::Path::new(&project.path),
+                std::path::Path::new(&project_path),
+            );
         }
         Ok(false) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {e}"))),

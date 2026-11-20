@@ -30,7 +30,7 @@ const ALLOWED_RESOLUTIONS: [&str; 3] = ["480p", "720p", "1080p"];
 /// Ceiling for a source image. Providers reject oversized inputs anyway; being
 /// refused here costs nothing, being refused there costs a round trip and,
 /// depending on the provider, a submission.
-pub(crate) const MAX_REFERENCE_BYTES: u64 = 12 * 1024 * 1024;
+pub const MAX_REFERENCE_BYTES: u64 = 12 * 1024 * 1024;
 /// Ceiling for all the source images of one request together.
 const MAX_REFERENCE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -335,6 +335,7 @@ pub async fn generate(
         comfyui_reference_context: references
             .as_ref()
             .and_then(|(_, _, context)| context.clone()),
+        fallback_from: Vec::new(),
     };
     if idempotency_key.is_some() {
         let existing_lookup = job_id.clone();
@@ -481,7 +482,7 @@ fn usable_connections(
     }
 }
 
-pub(crate) fn idempotent_job_id(connection_id: &str, key: &str) -> String {
+pub fn idempotent_job_id(connection_id: &str, key: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"kronn-media-launch-v1\0");
     digest.update(connection_id.as_bytes());
@@ -772,7 +773,7 @@ fn media_discussion(
 /// The room a workflow Agent step's generations land in (KT-1605), opened
 /// before the first one so the references it imports and its jobs share it:
 /// empty, in the workflow's project, listed with the run when there is one.
-pub(crate) fn insert_step_media_room(
+pub fn insert_step_media_room(
     conn: &rusqlite::Connection,
     title: &str,
     project_id: Option<String>,
@@ -1700,7 +1701,6 @@ const CAPABILITY_UNKNOWN_TTL_SECS: i64 = 60;
 /// Forgets every cached catalogue answer. Tests call it first: a mock server
 /// may reuse a port a previous test's catalogue was cached under.
 #[doc(hidden)]
-#[cfg(any(test, feature = "test-support"))]
 pub fn clear_capability_cache() {
     if let Some(cache) = CAPABILITY_CACHE.get() {
         if let Ok(mut guard) = cache.lock() {
@@ -1742,7 +1742,7 @@ fn store_capabilities(
 /// fail. Everything offered now comes from the provider's own answer.
 /// One media source by id: the local ComfyUI for its reserved id (when a
 /// slot is set), else the stored connection.
-pub(crate) async fn connection_by_id(
+pub async fn connection_by_id(
     state: &AppState,
     id: &str,
 ) -> anyhow::Result<Option<crate::models::ExternalApiConnection>> {
@@ -1791,7 +1791,7 @@ pub async fn model_capabilities(
 /// The model this connection would actually use for one modality, or `None`
 /// when none is configured — which is a different answer from "configured but
 /// advertising nothing".
-pub(crate) fn configured_media_model(
+pub fn configured_media_model(
     connection: &crate::models::ExternalApiConnection,
     modality: MediaModality,
 ) -> Option<String> {
@@ -1808,7 +1808,7 @@ pub(crate) fn configured_media_model(
 /// Shared with the worker catalogue rather than re-derived there: an agent must
 /// read the exact envelope the launcher shows, and a second derivation would
 /// eventually be a second answer.
-pub(crate) async fn advertised_capabilities(
+pub async fn advertised_capabilities(
     state: &AppState,
     connection: &crate::models::ExternalApiConnection,
     model: &str,

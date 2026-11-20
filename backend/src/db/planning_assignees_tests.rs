@@ -103,6 +103,7 @@ fn agent_actor(agent: &str, session: &str) -> PlanningActor {
         id: Some(agent.into()),
         session_id: Some(session.into()),
         source_message_id: None,
+        token_declared: false,
     }
 }
 

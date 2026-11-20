@@ -2,7 +2,7 @@
 //!
 //! These files are compiled against the library without `cfg(test)`, so the
 //! guard the library's own tests get from `cfg(test)` reaches them through
-//! `KRONN_TEST_NO_REAL_AGENTS`, set for the whole binary by `tests/it.rs`.
+//! `arm_real_agent_guard_for_tests`, called for the whole binary by `tests/it.rs`.
 
 use std::path::{Path, PathBuf};
 

@@ -670,6 +670,11 @@ async fn start_backend(
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
     // Before any request resolves a project's AI doc folder (KT-263).
     kronn::arm_docs_locations(&database).await?;
+    // KT-1751 fourth review — before the first launch: every project registered
+    // and its lane entry published, as the standalone backend does.
+    if let Err(e) = kronn::arm_lane_settings(&database, &app_config.workers.lane_warm).await {
+        tracing::warn!("project lane settings not loaded: {e:#}");
+    }
 
     // Same LAN guard as the standalone backend: never serve the network with
     // an unauthenticated API.
@@ -862,6 +867,10 @@ async fn start_backend(
         state.db.clone(),
     ));
     tokio::spawn(async move { learning_sweep.start().await });
+
+    // KT-1692 — probe every API connection's token at start and once a day, so
+    // an expired or revoked one is flagged before a workflow needs it.
+    kronn::core::token_checks::spawn_scheduler(state.clone());
 
     // KT-984 — periodic, chunked run retention. Mirror of the spawn in
     // backend/src/main.rs (feature in the lib, spawn per-binary).

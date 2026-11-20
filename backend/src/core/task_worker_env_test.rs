@@ -38,6 +38,16 @@ impl Fixture {
         std::fs::write(self.worktree.join("frontend").join("package.json"), "{}").unwrap();
         std::fs::create_dir_all(self.worktree.join("backend")).unwrap();
         std::fs::write(self.worktree.join("backend").join("Cargo.toml"), "").unwrap();
+        // Kronn's own shape: its backend configures nextest.
+        std::fs::create_dir_all(self.worktree.join("backend").join(".config")).unwrap();
+        std::fs::write(
+            self.worktree
+                .join("backend")
+                .join(".config")
+                .join("nextest.toml"),
+            "",
+        )
+        .unwrap();
     }
 
     fn lane(&self) -> WorkerLane {
@@ -733,6 +743,173 @@ fn the_lane_leaves_the_main_checkout_and_the_worktree_clean() {
     assert_eq!(git(&fx.repo, &["status", "--porcelain"]), "");
 }
 
+/// KT-1595 round 5 (NEW-2): provisioning runs on every worker launch, so after
+/// an agent. A worker that rewrote `<lane>/.git` to name another repository
+/// must not get Kronn's exclude rules appended there.
+#[test]
+fn a_lane_whose_git_pointer_was_moved_gets_no_exclude_written_elsewhere() {
+    let fx = fixture();
+    std::fs::write(fx.repo.join(".gitignore"), "node_modules/\n.kronn/\n").unwrap();
+    std::fs::create_dir_all(fx.repo.join("frontend")).unwrap();
+    std::fs::write(fx.repo.join("frontend").join("package.json"), "{}").unwrap();
+    git(&fx.repo, &["init", "-q", "-b", "main"]);
+    git(&fx.repo, &["add", "-A"]);
+    git(&fx.repo, &["commit", "-q", "-m", "init"]);
+    std::fs::remove_dir_all(&fx.worktree).unwrap();
+    git(
+        &fx.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "kt-1246",
+            fx.worktree.to_str().unwrap(),
+        ],
+    );
+    fx.with_main_node_modules();
+    let victim = tempfile::tempdir().unwrap();
+    let victim = victim.path().canonicalize().unwrap();
+    git(&victim, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        fx.worktree.join(".git"),
+        format!("gitdir: {}\n", victim.join(".git").display()),
+    )
+    .unwrap();
+    let home = fake_cargo_home(true);
+
+    fx.lane().provision(&caches_of(&home, &fx));
+
+    let exclude = std::fs::read_to_string(victim.join(".git/info/exclude")).unwrap_or_default();
+    assert!(
+        !exclude.contains("node_modules") && !exclude.contains("target"),
+        "another repository's exclude was written: {exclude}"
+    );
+    // The registered checkout's own rule is still written, from the registry
+    // and not from what the lane's pointer says.
+    let main_exclude = std::fs::read_to_string(fx.repo.join(".git/info/exclude")).unwrap();
+    assert!(main_exclude.contains("/target/wt-*/"), "{main_exclude}");
+}
+
+/// KT-1595 round 7 (B3): a registered checkout that is itself a LINKED
+/// worktree keeps `info/exclude` in the main repository's git directory. The
+/// lane rules go there, resolved from the registered checkout (never the lane),
+/// instead of being dropped because `<checkout>/.git` is a file.
+#[test]
+fn a_registered_linked_worktree_gets_the_lane_excludes_in_the_common_dir() {
+    let main = tempfile::tempdir().unwrap();
+    let main = main.path().canonicalize().unwrap();
+    std::fs::write(main.join(".gitignore"), "node_modules/\n.kronn/\n").unwrap();
+    std::fs::create_dir_all(main.join("frontend")).unwrap();
+    std::fs::write(main.join("frontend").join("package.json"), "{}").unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-q", "-m", "init"]);
+    let holder = tempfile::tempdir().unwrap();
+    let registered = holder.path().canonicalize().unwrap().join("registered");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "reg",
+            registered.to_str().unwrap(),
+        ],
+    );
+    assert!(registered.join(".git").is_file());
+    let lane = registered
+        .join(".kronn")
+        .join("worktrees")
+        .join("task-kt-1246-abc12345");
+    git(
+        &registered,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "kt-1246",
+            lane.to_str().unwrap(),
+        ],
+    );
+    let bin = registered
+        .join("frontend")
+        .join("node_modules")
+        .join(".bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("vitest"), "#!/bin/sh\n").unwrap();
+    let home = fake_cargo_home(true);
+    let lane_env = WorkerLane::for_worktree(&lane).unwrap();
+    assert_eq!(
+        lane_env.main_checkout.as_deref(),
+        Some(registered.as_path())
+    );
+    let caches = SharedCaches::from_roots(Some(home.path()), None, None, None, Some(&registered));
+
+    let provisioned = lane_env.provision(&caches);
+
+    let exclude = std::fs::read_to_string(main.join(".git/info/exclude")).unwrap_or_default();
+    assert!(exclude.contains("/target/wt-*/"), "{exclude}");
+    assert!(
+        !provisioned
+            .warnings
+            .iter()
+            .any(|w| w.contains("cannot ignore")),
+        "{:?}",
+        provisioned.warnings
+    );
+}
+
+/// KT-1595 round 7 (B3): a project below the repository top has no `.git` of
+/// its own. The lane rule is written to the repository's exclude, anchored
+/// under the project's prefix, instead of being dropped.
+#[test]
+fn a_project_below_the_repo_top_gets_the_lane_exclude_under_its_prefix() {
+    let top = tempfile::tempdir().unwrap();
+    let top = top.path().canonicalize().unwrap();
+    let project = top.join("app");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("README.md"), "x\n").unwrap();
+    git(&top, &["init", "-q", "-b", "main"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-q", "-m", "init"]);
+    let lane = project
+        .join(".kronn")
+        .join("worktrees")
+        .join("task-kt-1246-abc12345");
+    git(
+        &top,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "kt-1246",
+            lane.to_str().unwrap(),
+        ],
+    );
+    let home = fake_cargo_home(true);
+    let lane_env = WorkerLane::for_worktree(&lane).unwrap();
+    assert_eq!(lane_env.main_checkout.as_deref(), Some(project.as_path()));
+    let caches = SharedCaches::from_roots(Some(home.path()), None, None, None, Some(&project));
+
+    let provisioned = lane_env.provision(&caches);
+
+    let exclude = std::fs::read_to_string(top.join(".git/info/exclude")).unwrap_or_default();
+    assert!(exclude.contains("/app/target/wt-*/"), "{exclude}");
+    assert!(
+        !provisioned
+            .warnings
+            .iter()
+            .any(|w| w.contains("cannot ignore")),
+        "{:?}",
+        provisioned.warnings
+    );
+    assert!(!project.join(".git").exists());
+}
+
 #[test]
 fn shared_caches_keep_only_what_exists() {
     let fx = fixture();
@@ -821,6 +998,44 @@ fn a_failing_nextest_marks_rust_unavailable_and_says_why() {
     // The offline fetch is not attempted once nextest is known missing.
     // nextest, then the frontend's two probes; never the offline fetch.
     assert_eq!(runner.calls.lock().unwrap().len(), 3);
+}
+
+/// KT-1747 review — a Cargo project that does not configure nextest tests with
+/// `cargo test`: a host without nextest must not turn its Rust line red (the
+/// brief would then tell the worker to skip tests that run).
+#[test]
+fn a_cargo_project_that_does_not_configure_nextest_is_probed_for_cargo_test() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(
+        fx.worktree.join("redis-flush").join("Cargo.toml"),
+        "[package]\nname = \"redis-flush\"\n",
+    )
+    .unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::failing_on("nextest");
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(
+        capabilities.rust_tests.available,
+        "{:?}",
+        capabilities.rust_tests
+    );
+    assert!(
+        capabilities.rust_tests.reason.contains("cargo test"),
+        "{}",
+        capabilities.rust_tests.reason
+    );
+    let calls = runner.calls.lock().unwrap();
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.args.iter().any(|arg| arg == "nextest")),
+        "nextest was probed for a project that does not use it"
+    );
 }
 
 #[test]
@@ -925,6 +1140,112 @@ fn a_project_without_cargo_or_frontend_reports_not_applicable() {
     assert!(runner.calls.lock().unwrap().is_empty());
 }
 
+/// KT-1747 — the probes follow the project's own toolchain roots, not Kronn's
+/// layout. A root Node app (a front-end repository), a Cargo crate in a
+/// sub-directory (a PHP project with a Rust helper).
+#[test]
+fn a_root_node_app_has_its_vitest_probed_where_it_lives() {
+    let fx = fixture();
+    std::fs::write(fx.worktree.join("package.json"), "{}").unwrap();
+    std::fs::write(fx.worktree.join("yarn.lock"), "").unwrap();
+    std::fs::write(fx.worktree.join("Makefile"), "test:\n\ttrue\n").unwrap();
+    std::fs::create_dir_all(fx.worktree.join("application")).unwrap();
+    std::fs::write(fx.worktree.join("application/composer.json"), "{}").unwrap();
+    let bin = fx.repo.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("vitest"), "#!/bin/sh\n").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(capabilities.frontend_tests.available, "{capabilities:?}");
+    assert!(
+        capabilities
+            .frontend_tests
+            .reason
+            .contains("runs from node_modules"),
+        "{}",
+        capabilities.frontend_tests.reason
+    );
+    assert!(capabilities.rust_tests.is_not_applicable());
+    let calls = runner.calls.lock().unwrap();
+    assert_eq!(calls[0].cwd, fx.worktree);
+}
+
+#[test]
+fn a_node_app_that_does_not_use_vitest_is_not_told_its_tests_are_unavailable() {
+    let fx = fixture();
+    std::fs::write(fx.worktree.join("package.json"), "{}").unwrap();
+    let bin = fx.repo.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("jest"), "#!/bin/sh\n").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(
+        capabilities.frontend_tests.is_not_applicable(),
+        "{capabilities:?}"
+    );
+    assert!(runner.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_cargo_crate_in_a_sub_directory_is_probed_in_its_own_directory() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(fx.worktree.join("redis-flush/Cargo.toml"), "").unwrap();
+    std::fs::create_dir_all(fx.worktree.join("tools/second")).unwrap();
+    std::fs::write(fx.worktree.join("tools/second/Cargo.toml"), "").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(capabilities.rust_tests.available, "{capabilities:?}");
+    let calls = runner.calls.lock().unwrap();
+    let fetches: Vec<_> = calls
+        .iter()
+        .filter(|call| call.args.first().is_some_and(|arg| arg == "fetch"))
+        .map(|call| call.cwd.clone())
+        .collect();
+    assert_eq!(
+        fetches,
+        [
+            fx.worktree.join("redis-flush"),
+            fx.worktree.join("tools/second")
+        ]
+    );
+}
+
+#[test]
+fn an_unreachable_crate_among_several_names_itself() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(fx.worktree.join("redis-flush/Cargo.toml"), "").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::failing_on("fetch");
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(!capabilities.rust_tests.available);
+    assert!(
+        capabilities.rust_tests.reason.contains("redis-flush"),
+        "{}",
+        capabilities.rust_tests.reason
+    );
+}
+
 #[test]
 fn an_unpreparable_lane_is_unverified_not_an_error() {
     let scratch = tempfile::tempdir().unwrap();
@@ -976,4 +1297,127 @@ fn the_process_runner_reports_success_failure_and_a_missing_program() {
     let missing = runner.run(&probe("kronn-no-such-program-kt-1246", &[]));
     assert!(!missing.success);
     assert!(missing.detail.contains("cannot start"), "{missing:?}");
+}
+
+/// KT-1736 — the warm-up's first build failed with a reason that was the last 300
+/// bytes of cargo's output (`… -c aes-xts-enc.S warning: build failed`): the
+/// compiler's own message, printed far above, was lost. The first error lines of
+/// the output are kept beside the tail.
+#[cfg(unix)] // runs a shell script through sh
+#[test]
+fn a_failed_probe_keeps_its_first_error_lines_beside_the_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = "echo 'warning: unused import: `std::error::Error`' >&2; \
+                  echo 'warning: aws-lc-sys@0.44.0: clang: error: unable to make temporary file' >&2; \
+                  i=0; while [ $i -lt 200 ]; do echo \"   Compiling filler-$i v0.1.0 with a long enough line\" >&2; i=$((i+1)); done; \
+                  echo 'warning: build failed, waiting for other jobs to finish...' >&2; exit 101";
+    let outcome = ProcessProbeRunner.run(&ProbeCommand {
+        program: "sh".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: dir.path().to_path_buf(),
+        env: Vec::new(),
+        timeout: Duration::from_secs(20),
+        priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
+    });
+    assert!(!outcome.success, "{outcome:?}");
+    assert!(outcome.detail.contains("101"), "{outcome:?}");
+    assert!(
+        outcome
+            .detail
+            .contains("clang: error: unable to make temporary file"),
+        "the compiler's message is kept: {outcome:?}"
+    );
+    assert!(
+        !outcome.detail.contains("unused import"),
+        "a warning that merely names `error` is not an error line: {outcome:?}"
+    );
+    assert!(
+        outcome.detail.contains("build failed"),
+        "the tail is still there: {outcome:?}"
+    );
+}
+
+#[test]
+fn an_error_line_is_told_from_a_line_that_names_the_word() {
+    for error in [
+        "error: failed to run custom build command for `aws-lc-sys v0.44.0`",
+        "error[E0432]: unresolved import",
+        "warning: aws-lc-sys@0.44.0: clang: error: no such file",
+        "fatal error: 'openssl/base.h' file not found",
+        "  error occurred in cc-rs: command did not execute successfully",
+        "thread 'main' panicked at build.rs:3:5:",
+    ] {
+        assert!(is_error_line(error), "{error}");
+    }
+    for fine in [
+        "warning: unused import: `std::error::Error`",
+        "   Compiling thiserror v2.0.0",
+        "warning: failed to parse serde attribute",
+    ] {
+        assert!(!is_error_line(fine), "{fine}");
+    }
+}
+
+#[test]
+fn a_long_error_line_keeps_its_start_and_its_end() {
+    let line = format!(
+        "error occurred: \"cc\" {} \"-c\" \"aes-xts-enc.S\"",
+        "-O0 ".repeat(400)
+    );
+    let clipped = clip_error_line(&line);
+    assert!(
+        clipped.chars().count() <= PROBE_ERROR_LINE_CHARS + 3,
+        "{clipped}"
+    );
+    assert!(clipped.starts_with("error occurred"), "{clipped}");
+    assert!(clipped.ends_with("\"-c\" \"aes-xts-enc.S\""), "{clipped}");
+}
+
+#[test]
+fn the_failure_reason_does_not_repeat_what_the_tail_already_shows() {
+    let first = vec!["error: boom".to_string(), "error: other".to_string()];
+    assert_eq!(
+        failure_detail(&first, "error: boom then the end"),
+        "first errors: error: other | last output: error: boom then the end"
+    );
+    assert_eq!(failure_detail(&[], "just a tail"), "just a tail");
+    assert_eq!(
+        failure_detail(&["error: boom".to_string()], "error: boom"),
+        "error: boom"
+    );
+}
+
+/// KT-1718 — Claude Code caps a shell command at 10 minutes unless
+/// `BASH_MAX_TIMEOUT_MS` says otherwise, and a cold test-profile build outlasts
+/// that. Kronn sets both variables itself, the default never above the maximum.
+#[test]
+fn a_claude_task_worker_gets_the_shell_limits_of_the_settings() {
+    assert_eq!(
+        bash_timeout_env(900_000, 3_600_000),
+        [
+            ("BASH_DEFAULT_TIMEOUT_MS", "900000".to_string()),
+            ("BASH_MAX_TIMEOUT_MS", "3600000".to_string()),
+        ]
+    );
+    assert_eq!(
+        bash_timeout_env(7_200_000, 3_600_000)[0].1,
+        "3600000",
+        "a default above the maximum is lowered to it"
+    );
+
+    // They win over what the backend was started with.
+    let mut command = std::process::Command::new("true");
+    command.env("BASH_MAX_TIMEOUT_MS", "1000");
+    apply_bash_timeouts(&mut command);
+    let env: std::collections::HashMap<_, _> = command
+        .get_envs()
+        .filter_map(|(name, value)| {
+            Some((name.to_str()?.to_string(), value?.to_str()?.to_string()))
+        })
+        .collect();
+    let default_ms: u64 = env["BASH_DEFAULT_TIMEOUT_MS"].parse().unwrap();
+    let max_ms: u64 = env["BASH_MAX_TIMEOUT_MS"].parse().unwrap();
+    assert!(max_ms > 600_000, "above Claude Code's own 10 minute cap");
+    assert!(default_ms <= max_ms);
 }

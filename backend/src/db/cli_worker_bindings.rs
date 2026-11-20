@@ -25,6 +25,7 @@ fn audit(conn: &Connection, execution_id: &str, session_pk: i64, action: &str) -
             id: Some("orchestrator".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
         serde_json::json!({ "cli_session_id": session_pk }),
     )
@@ -33,7 +34,7 @@ fn audit(conn: &Connection, execution_id: &str, session_pk: i64, action: &str) -
 /// Called only after the exact offer target and source binding have been
 /// validated. Composes in accept_worker_offer's transaction: no accepted offer
 /// or phase-2 transfer can exist without its durable return identity.
-pub(crate) fn pin(
+pub fn pin(
     conn: &Connection,
     execution_id: &str,
     session_pk: i64,
@@ -75,7 +76,7 @@ pub(crate) fn pin(
 /// Return only the pinned worker's ownership, in the caller's transaction.
 /// Legacy executions may use an exact matching active key, but an unresolved
 /// identity must never be guessed from other bindings in the child room.
-pub(crate) fn return_to_origin(
+pub fn return_to_origin(
     conn: &Connection,
     execution_id: &str,
     session_pk: i64,
@@ -190,7 +191,7 @@ pub(crate) fn return_to_origin(
 /// Resume only an exact CLI session whose orchestrator-recorded execution has
 /// already returned it from `expected_child` to its origin. This is separate
 /// from ordinary peer resume so its expected-room refusal stays unchanged.
-pub(crate) fn resume_after_orchestrator_return(
+pub fn resume_after_orchestrator_return(
     conn: &Connection,
     agent_type: &str,
     resume_token: &str,

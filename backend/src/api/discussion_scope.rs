@@ -340,14 +340,18 @@ pub async fn file_request(
         .and_then(|axum::Extension(caller)| caller.agent.as_ref())
         .map(|agent| format!("@{:?}", agent.agent_type))
         .unwrap_or_else(|| "@agent".into());
+    let asker = bridge
+        .as_ref()
+        .map(|axum::Extension(caller)| crate::db::trust::TrustOrigin::from_caller(caller));
     match state
         .db
         .with_conn(move |conn| {
             // An unknown name is filed like a known one: the reply never says
             // whether a project the token cannot read exists.
             let project_id = discussion_scope::resolve_project(conn, &request.project)?;
-            discussion_scope::file_request_with_trust(
+            discussion_scope::file_request_as(
                 conn,
+                asker.as_ref(),
                 &discussion_id,
                 project_id.as_deref(),
                 &request.project,

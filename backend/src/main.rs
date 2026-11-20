@@ -12,6 +12,14 @@ use kronn::{
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 fn main() -> anyhow::Result<()> {
+    // The crates below the top one call up through hooks: a provider left out
+    // of the link must stop the server here, not fail a request later.
+    let missing = kronn::missing_uplinks();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "this binary was linked without {}",
+        missing.join(", ")
+    );
     let args: Vec<String> = std::env::args().skip(1).collect();
     match kronn::core::cli_args::cli_action(&args) {
         kronn::core::cli_args::CliAction::Run => {}
@@ -21,6 +29,17 @@ fn main() -> anyhow::Result<()> {
         }
         kronn::core::cli_args::CliAction::PrintHelp => {
             println!("{}", kronn::core::cli_args::HELP);
+            return Ok(());
+        }
+        kronn::core::cli_args::CliAction::CleanGitConfig => {
+            let file = kronn::core::git_global_config::global_config_path()
+                .ok_or_else(|| anyhow::anyhow!("cannot locate the global git config"))?;
+            kronn::core::git_global_config::cleanup_interactive(
+                &file,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+            )
+            .map_err(anyhow::Error::msg)?;
             return Ok(());
         }
         kronn::core::cli_args::CliAction::Refuse(reason) => anyhow::bail!(reason),
@@ -41,7 +60,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     let data_dir_lock = config::acquire_data_dir_lock()?;
 
     // Load config before tracing init so `debug_mode` can influence the
-    // tracing filter's default level; `config::load()` emits no logs.
+    // tracing filter's default level; `config::load()` logs no config text (kind and position only).
     // Also arms the process timezone and anti-hallucination mode, shared with the desktop boot.
     let mut app_config = kronn::load_startup_config().await?;
 
@@ -102,12 +121,6 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     tracing::info!("tracing initialized — filter: {}", filter_src);
     tracing::info!("timezone: {}", kronn::core::timezone::current());
     kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
-    if kronn::core::cmd::ignored_test_flag() {
-        tracing::warn!(
-            "{} is set but only test builds read it: ignored, agent CLIs stay available",
-            kronn::core::cmd::NO_REAL_AGENTS_ENV
-        );
-    }
 
     tracing::info!("Kronn — Entering the grid...");
     if app_config.server.debug_mode {
@@ -393,6 +406,26 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         Err(e) => tracing::warn!("Registry sync failed: {}", e),
     }
 
+    // KT-1750 — the commit identity and sign-off each project card set, before the
+    // first worker commit or merge of this boot reads them.
+    match state
+        .db
+        .with_read_conn(kronn::db::projects::list_projects)
+        .await
+    {
+        Ok(projects) => {
+            for project in projects {
+                if let Some(workspace) = project.workspace {
+                    kronn::core::commit_policy::register_project(
+                        &kronn::core::scanner::resolve_host_path(&project.path),
+                        &workspace.commit,
+                    );
+                }
+            }
+        }
+        Err(e) => tracing::warn!("project commit settings not loaded: {e}"),
+    }
+
     // Durable agent-dispatch recovery runs before the legacy awaiting scan.
     // A Running row means the process died mid-turn; return it to Pending so
     // the worker can either resume execution or observe an already-persisted
@@ -408,6 +441,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             config.server.disk_launch_min_free_gib,
             config.server.disk_sweep_idle_hours,
         );
+        kronn::core::disk_usage::set_stalled_build_days(config.server.disk_stalled_build_days);
         // KT-1438 — the lane-seed switches, before the first worktree of this boot.
         kronn::core::task_worker_lane_seeds::set_seed_policy(
             config.server.lane_seeds_copy_enabled,
@@ -415,6 +449,22 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         );
         // KT-1633 — the background-priority switch, before the first worker of this boot.
         kronn::core::background_priority::set_enabled(config.workers.background_priority);
+        // KT-1718 — the shell limits of a Claude task worker, before the first one.
+        kronn::core::task_worker_env::set_bash_timeouts(&config.workers);
+        kronn::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
+        // KT-1750 — the commit identity and sign-off every project inherits.
+        kronn::core::commit_policy::set_global_settings(&config.workers.commit);
+        // KT-1748 — the managed worktree roots, before the first launch of this boot.
+        kronn::core::worktree::set_global_managed_worktree_roots(&config.workers);
+        // KT-1742 — how lanes are warmed: the global entry now, each project's own
+        // below, before the first lane of this boot.
+        kronn::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
+    }
+    // KT-1751 fourth review — every project registered and its lane entry
+    // published, shared with the desktop boot.
+    let lane_warm = state.config.read().await.workers.lane_warm.clone();
+    if let Err(error) = kronn::arm_lane_settings(&state.db, &lane_warm).await {
+        tracing::warn!("project lane settings not loaded: {error}");
     }
     // KT-1633 — ask the host once whether its priority launcher runs, off the
     // async path, before recovery can dispatch a worker. A spawn only reads the answer.
@@ -914,6 +964,10 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         state.db.clone(),
     ));
     tokio::spawn(async move { learning_sweep.start().await });
+
+    // KT-1692 — probe every API connection's token at start and once a day, so
+    // an expired or revoked one is flagged before a workflow needs it.
+    kronn::core::token_checks::spawn_scheduler(state.clone());
 
     // 0.8.11 (B6) — periodic DB backup (default every 24h, keep 7). Targets
     // KRONN_BACKUP_DIR (a host-mounted dir outside the data volume) when set;

@@ -1238,3 +1238,75 @@ fn lowering_the_level_names_the_rooms_that_lost_a_code_grant() {
     );
     assert!(crate::db::trust::rooms_losing_code(&[]).is_empty());
 }
+
+/// KT-1964: the level that decides a request is the asking launch's, so a room
+/// it opened itself, or a run of a lower workflow, lends it nothing.
+#[test]
+fn a_request_is_decided_at_the_level_of_the_launch_that_asks() {
+    use crate::db::trust::TrustOrigin;
+    use crate::models::{TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
+    trust(
+        &conn,
+        TrustScope::Room,
+        Some("general"),
+        TrustLevel::Standard,
+    );
+    let asker = TrustOrigin {
+        discussion_ids: vec!["general".into(), "room".into()],
+        ..TrustOrigin::default()
+    };
+    let file = |asker: Option<&TrustOrigin>| {
+        file_request_as(
+            &conn,
+            asker,
+            "room",
+            Some("p2"),
+            "p2",
+            ScopeAccess::Read,
+            "needed",
+            "@claude",
+        )
+        .unwrap()
+    };
+    let (filed, granted) = file(Some(&asker));
+    assert!(matches!(filed, Filed::New(_)));
+    assert_eq!(granted, None);
+    assert!(granted_projects(&conn, &room()).unwrap().read.is_empty());
+    // A launch of that room alone is granted, as before.
+    let (_, granted) = file(Some(&TrustOrigin::room("room")));
+    assert_eq!(granted, Some(TrustLevel::Trusted));
+}
+
+/// The asker's workflow never raises what the room would give.
+#[test]
+fn a_run_of_a_wider_workflow_does_not_open_a_request_the_room_would_not() {
+    use crate::db::trust::TrustOrigin;
+    use crate::models::{TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Standard);
+    trust(&conn, TrustScope::Workflow, Some("wf"), TrustLevel::Trusted);
+    let asker = TrustOrigin {
+        discussion_ids: vec!["room".into()],
+        workflow_id: Some("wf".into()),
+        ..TrustOrigin::default()
+    };
+    assert_eq!(
+        crate::db::trust::effective(&conn, &asker).unwrap().level,
+        TrustLevel::Trusted
+    );
+    let (filed, granted) = file_request_as(
+        &conn,
+        Some(&asker),
+        "room",
+        Some("p2"),
+        "p2",
+        ScopeAccess::Read,
+        "needed",
+        "@claude",
+    )
+    .unwrap();
+    assert!(matches!(filed, Filed::New(_)));
+    assert_eq!(granted, None);
+}
