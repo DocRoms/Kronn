@@ -172,7 +172,7 @@ for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:6160-6170#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:16283-16564#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:16296-16577#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:707-735#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)

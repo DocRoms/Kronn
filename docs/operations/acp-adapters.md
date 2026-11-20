@@ -50,7 +50,7 @@ the permissive container marker from workers.
 [src: file: backend/src/agents/runner.rs:5154-5182#adapter_task_worker_args]
 [src: file: backend/src/agents/runner.rs:3941-3959#task_worker_route_policy]
 [src: file: backend/src/agents/runner.rs:4565#acp_resume_id]
-[src: file: backend/src/agents/runner.rs:15128-15138#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:15136-15146#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/tests/adapter_worker_policy.rs:335-446#worker]
 
 Each adapter permits one active prompt at a time; sequential turns still resume

@@ -148,7 +148,7 @@ execution beside its shadows.
 
 - **a header per execution** says what differs from the others (agent, model,
   prompt version, skill versions) and groups what is identical;
-  [src: file: frontend/src/lib/shadowRuns.ts:69#compareIdentities]
+  [src: file: frontend/src/lib/shadowRuns.ts:96-97#compareIdentities]
 - **tokens, cost and duration** of each, and how far a shadow is from the main
   execution;
 - **the output of each shadow against the main one**, with a line diff where
@@ -156,10 +156,10 @@ execution beside its shadows.
   Each execution is named with its agent and model. JSON fields are compared
   in alphabetical order at every depth, so two models that write the same
   fields in another order are not shown as different; lists keep their order.
-  [src: file: frontend/src/lib/shadowRuns.ts:95-104#withSortedKeys]
+  [src: file: frontend/src/lib/shadowRuns.ts:120-129#withSortedKeys]
 - **a determinism summary** when some shadows are identical to the step: how many
   distinct outputs there are out of N+1.
-  [src: file: frontend/src/lib/shadowRuns.ts:158#determinism]
+  [src: file: frontend/src/lib/shadowRuns.ts:184-186#determinism]
 
 While a shadow is still going, the comparison refreshes and shows it as running.
 
@@ -232,7 +232,7 @@ the workflow card and the token statistics show the same tokens, steps plus
 shadows (KT-1957): each run stores what its shadows spent, recounted whenever
 one of them finishes. The MCP status and wait answers keep the steps' tokens,
 next to the steps they list.
-[src: file: frontend/src/lib/shadowRuns.ts:308-313#mergeTally]
+[src: file: frontend/src/lib/shadowRuns.ts:336-341#mergeTally]
 
 ## Show the shadows on a Page
 

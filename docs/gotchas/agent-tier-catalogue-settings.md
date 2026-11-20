@@ -252,7 +252,7 @@ Unavailable known entries remain disabled. Clearing an override is explicit
 and leaves tier resolution to the caller/backend.
 [src: file: frontend/src/components/ModelCatalogPicker.tsx:21-71#ModelCatalogPicker]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:309-315#ModelCatalogPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4540-4555#ModelCatalogPicker]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4543-4558#ModelCatalogPicker]
 
 Reasoning choices come from the effective model's `reasoning_modes`, not a
 fixed low/medium/high list. An existing value absent from that list is retained
@@ -306,7 +306,7 @@ configuration. The callback updates only the compensation step, not the main
 pipeline. Search, exact connection namespaces, provenance and unavailable tiers
 therefore share the existing picker behavior.
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:334-363#renderAgentTierPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:5021-5024#updateRb]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:5025-5028#updateRb]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:334-338#renderAgentTierPicker]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.coverage.test.tsx:984-1048#recover]
 
