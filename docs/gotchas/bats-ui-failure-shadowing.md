@@ -33,5 +33,5 @@ The banner now gets a controlled VERSION fixture; the CLI corrections preserve
 omitted-argument host detection, configured MCP precedence, and the full middle
 dot separator. These are bounded corrections, not relaxed assertions.
 [src: file: tests/bats/ui.bats:112-120]
-[src: file: lib/ui.sh:326-328#is_macos_host]
+[src: file: lib/ui.sh:338-340#is_macos_host]
 [src: file: lib/repos.sh:53-71]
