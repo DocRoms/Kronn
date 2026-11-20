@@ -117,6 +117,20 @@ fn only_scheme(literal: &str) -> bool {
     })
 }
 
+/// Whether `text` writes more than once a key that names a secret.
+fn repeats_a_secret_key(text: &str, parsed: &serde_json::Value) -> bool {
+    match parsed {
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            (secret_name(key) && text.matches(&format!("\"{key}\"")).count() > 1)
+                || repeats_a_secret_key(text, value)
+        }),
+        serde_json::Value::Array(items) => {
+            items.iter().any(|item| repeats_a_secret_key(text, item))
+        }
+        _ => false,
+    }
+}
+
 fn suspicious(context: &str) -> bool {
     crate::core::redact::looks_like_secret(context)
         || crate::core::redact::redact_for_audit_artifact(context).1 > 0
@@ -221,7 +235,9 @@ impl Scope<'_> {
             found: &mut probe,
         }
         .json(String::new(), None, &mut parsed);
-        !probe.is_empty()
+        // A key written twice keeps its last value only once parsed: the
+        // first may be the literal.
+        !probe.is_empty() || repeats_a_secret_key(text, &parsed)
     }
 
     fn json(&mut self, path: String, key: Option<&str>, value: &mut serde_json::Value) {
@@ -317,7 +333,7 @@ fn redact_steps<'a>(
         if let Some(body) = step.api_body.as_mut() {
             scope.json("api_body".into(), None, body);
         }
-        // A key typed straight into the path (`/v1/hook/<key>`).
+        // A value shaped like a key typed straight into the path.
         if let Some(path) = step.api_endpoint_path.as_mut() {
             scope.text("api_endpoint_path", path);
         }
@@ -346,7 +362,8 @@ fn redact_steps<'a>(
         let secret_on_stdin = step
             .exec_args
             .iter()
-            .any(|arg| arg.starts_with('-') && arg.contains("stdin") && secret_name(arg));
+            .flat_map(|arg| arg.split_whitespace())
+            .any(|word| word.starts_with('-') && word.contains("stdin") && secret_name(word));
         if let Some(stdin) = step.exec_stdin.as_mut() {
             if secret_on_stdin && !literal_part(stdin).is_empty() {
                 scope.mask(stdin, "exec_stdin".into());

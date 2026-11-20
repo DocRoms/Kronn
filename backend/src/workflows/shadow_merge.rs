@@ -571,11 +571,10 @@ fn run_worktrees(
 /// counts when the worktree still points back at it: a stale entry whose
 /// folder was removed and made again as an ordinary directory names nothing.
 fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
-    /// A small regular file read as text; a link is not followed.
-    fn pointer(file: &Path) -> Option<String> {
-        let meta = std::fs::symlink_metadata(file).ok()?;
-        (meta.is_file() && meta.len() <= 4096).then_some(())?;
-        std::fs::read_to_string(file).ok()
+    /// A small regular file of `dir` read as text; a link is not followed.
+    fn pointer(dir: &Path, name: &str) -> Option<String> {
+        let bytes = crate::core::rooted_io::read_capped(dir, Path::new(name), 4096).ok()?;
+        String::from_utf8(bytes).ok()
     }
     let registry = checkout.join(".git").join("worktrees");
     let Ok(entries) = std::fs::read_dir(&registry) else {
@@ -585,7 +584,7 @@ fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
         .flatten()
         .filter_map(|entry| {
             let entry = entry.path();
-            let recorded = PathBuf::from(pointer(&entry.join("gitdir"))?.trim());
+            let recorded = PathBuf::from(pointer(&entry, "gitdir")?.trim());
             // `worktree.useRelativePaths` records it relative to the entry.
             let recorded = if recorded.is_relative() {
                 entry.join(recorded)
@@ -594,7 +593,7 @@ fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
             };
             (recorded.file_name()? == ".git").then_some(())?;
             let worktree = recorded.parent()?.canonicalize().ok()?;
-            let back = pointer(&worktree.join(".git"))?;
+            let back = pointer(&worktree, ".git")?;
             let back = PathBuf::from(back.trim().strip_prefix("gitdir:")?.trim());
             let back = if back.is_relative() {
                 worktree.join(back)

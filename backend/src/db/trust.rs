@@ -228,7 +228,7 @@ fn delegating_room_level(conn: &Connection, room: &str) -> Result<Option<(TrustL
     while let Some(current) = frontier.pop() {
         let mut statement = conn.prepare_cached(
             "SELECT DISTINCT parent_discussion_id FROM task_executions \
-             WHERE sub_discussion_id = ?1",
+             WHERE sub_discussion_id = ?1 LIMIT 65",
         )?;
         let parents: Vec<String> = statement
             .query_map([&current], |row| row.get(0))?

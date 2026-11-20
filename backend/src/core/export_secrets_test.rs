@@ -363,6 +363,25 @@ fn masks_secrets_no_shape_gives_away_and_the_sibling_fields_of_a_step() {
     assert_eq!(fallback["token"], REDACTED);
     assert_eq!(fallback["count"], 0);
 
+    // The flag inside a shell line, and a key written twice.
+    let mut shell = WorkflowStep {
+        name: "shell".into(),
+        exec_command: Some("sh".into()),
+        exec_args: vec!["-c".into(), "tool --password-stdin".into()],
+        exec_stdin: Some("hunter2".into()),
+        notify_config: Some(NotifyConfig {
+            url: "{{hook}}".into(),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: r#"{"api_key": "abc123", "api_key": "{{KEY}}"}"#.into(),
+        }),
+        ..WorkflowStep::default()
+    };
+    let mut found = vec![];
+    redact_steps("wf-1", "Nightly", std::iter::once(&mut shell), &mut found);
+    assert_eq!(shell.exec_stdin.as_deref(), Some(REDACTED));
+    assert_eq!(shell.notify_config.unwrap().body_template, REDACTED);
+
     // A body or a stdin that holds no secret stays as typed.
     let mut plain = WorkflowStep {
         name: "plain".into(),
