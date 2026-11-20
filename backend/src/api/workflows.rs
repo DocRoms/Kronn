@@ -38,7 +38,7 @@ type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 ///   non-empty, ≤ 64 chars, ASCII word chars + dot only. Anything
 ///   else is logged + skipped to keep `{{path/../etc}}` style keys
 ///   out of the template context.
-pub(crate) fn build_manual_trigger_obj(
+pub fn build_manual_trigger_obj(
     provided_vars: &::std::collections::HashMap<String, String>,
     triggered_at: chrono::DateTime<chrono::Utc>,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -352,8 +352,8 @@ fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
 /// "no constraint" (logged, never blocks a launch). This is the net that
 /// stops a typo like `7152` (vs `EW-7152`) from reaching the API as a
 /// literal path param and 404ing.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn validate_launch_variables(
+#[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+pub fn validate_launch_variables(
     declared: &[crate::models::PromptVariable],
     provided: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
@@ -448,7 +448,7 @@ fn validate_required_fields_per_type(steps: &[WorkflowStep]) -> Result<(), Strin
 /// Max nesting depth for SubWorkflow steps (Phase 1, spec §4.3). A chain
 /// `A → B → C → D → E → F` (depth 6) is refused — well beyond any sane
 /// decomposition and the cheap rampart if cycle detection is ever bypassed.
-pub(crate) const MAX_SUBWORKFLOW_DEPTH: usize = 5;
+pub const MAX_SUBWORKFLOW_DEPTH: usize = 5;
 
 /// 2026-06-11 (Phase 1) — PURE validation of the SubWorkflow graph rooted at
 /// the workflow being saved. Detects cycles (`A → B → A`, incl. self), over-
@@ -460,7 +460,7 @@ pub(crate) const MAX_SUBWORKFLOW_DEPTH: usize = 5;
 /// placeholder that matches no existing reference — no cycle is possible
 /// for a not-yet-existent id). `start_steps` are its NEW steps (for an
 /// update, these override whatever stale version sits in `graph`).
-pub(crate) fn validate_sub_workflow_graph(
+pub fn validate_sub_workflow_graph(
     start_id: &str,
     start_steps: &[WorkflowStep],
     graph: &std::collections::HashMap<String, Vec<WorkflowStep>>,
@@ -535,7 +535,7 @@ fn validate_child_variable_mappings(
 /// A TriggerWorkflow target must exist, and every mapped variable must be
 /// declared by the child. `start_id` names the workflow being saved, whose
 /// new declarations are `own`: a workflow may trigger itself.
-pub(crate) fn validate_child_targets(
+pub fn validate_child_targets(
     start_id: &str,
     own: &Workflow,
     steps: &[WorkflowStep],
@@ -629,7 +629,7 @@ async fn validate_sub_workflow_graph_db(
 /// Re-validates, with `start_id`'s new steps, every workflow that reaches it
 /// through SubWorkflow steps: editing a child later must not give a parent a
 /// Gate, a cycle or too deep a nesting.
-pub(crate) fn validate_sub_workflow_parents(
+pub fn validate_sub_workflow_parents(
     start_id: &str,
     start_steps: &[WorkflowStep],
     workflows: &[Workflow],
@@ -679,7 +679,7 @@ pub(crate) fn validate_sub_workflow_parents(
 /// The sub-workflow rules for a workflow imported from a repository's
 /// `kronn/` folder. Targets this instance does not know are skipped here: the
 /// repository names them by another instance's ids.
-pub(crate) fn validate_imported_sub_workflow_graph(
+pub fn validate_imported_sub_workflow_graph(
     imported: &Workflow,
     workflows: &[Workflow],
 ) -> Result<(), String> {
@@ -710,7 +710,25 @@ pub(crate) fn validate_imported_sub_workflow_graph(
 /// between what blocks a save and what the card flags). Exec/JsonData are
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
-pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+pub fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+    // KT-1518 — a step's own fallback chain: no loop, not too long.
+    if let Some(chain) = s
+        .agent_settings
+        .as_ref()
+        .and_then(|settings| settings.fallback.as_deref())
+    {
+        crate::core::agent_fallback::check_shape(
+            Some(&s.agent),
+            Some(crate::models::FallbackMode::from_tier(
+                s.agent_settings
+                    .as_ref()
+                    .and_then(|settings| settings.tier)
+                    .unwrap_or_default(),
+            )),
+            chain,
+        )
+        .map_err(|e| format!("Step « {} »: {e}", s.name))?;
+    }
     crate::core::skill_versions::validate_pins(&s.skill_ids)
         .map_err(|e| format!("Step « {} »: {e}", s.name))?;
     match (s.quick_prompt_version, s.quick_prompt_id.as_deref()) {
@@ -1011,6 +1029,17 @@ pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), Stri
                 }
             }
         }
+        StepType::Decide => {
+            let Some(config) = s.decide.as_ref() else {
+                return Err(format!(
+                    "Step Decide « {} » : `decide` est obligatoire.",
+                    s.name
+                ));
+            };
+            if let Some(problem) = crate::workflows::decide_step::config_problem(config) {
+                return Err(format!("Step Decide « {} » : {problem}.", s.name));
+            }
+        }
         StepType::TaskBoard => {
             use crate::models::TaskBoardOperation as Op;
             let Some(config) = s.task_board.as_ref() else {
@@ -1113,7 +1142,7 @@ pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), Stri
 /// API plugins / endpoints up-front, without re-fetching each workflow's full
 /// step list. (Exec/JsonData config issues are NOT counted here — they're
 /// validated separately and rarely the architect's gap.)
-pub(crate) fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
+pub fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
     steps
         .iter()
         .filter(|s| validate_step_required_fields(s).is_err())
@@ -1251,13 +1280,13 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
 /// step's declared script files (KT-918), so a changed hash is not "unchanged".
 /// The last element is the step's human approval of unmodelled programs: a
 /// change to it makes the line new.
-pub(crate) type KeptLine = (bool, usize, UnsafeExecStep, Vec<ExecScriptFile>, bool);
+pub type KeptLine = (bool, usize, UnsafeExecStep, Vec<ExecScriptFile>, bool);
 
 /// The unsafe lines a stored workflow already holds. An update that leaves
 /// one of them exactly as it is (same chain, position, step name, phase,
 /// source, command and args) is not blocked by it; it stays flagged and
 /// refused at run time until the user applies a fix.
-pub(crate) fn kept_lines(steps: &[WorkflowStep], on_failure: &[WorkflowStep]) -> Vec<KeptLine> {
+pub fn kept_lines(steps: &[WorkflowStep], on_failure: &[WorkflowStep]) -> Vec<KeptLine> {
     let chain = |steps: &[WorkflowStep], rollback: bool| {
         steps
             .iter()
@@ -1834,13 +1863,23 @@ async fn validate_saved_quick_exec_refs(
     Ok(())
 }
 
-/// Shared by the MCP bridge and native HTTP agents; kept out of every-turn
-/// declarations so the canonical authoring contract is paid only on demand.
+/// The shared contracts a caller may fetch whole through `workflow_step_schema`
+/// (`section`); the default contract only summarises them.
+pub const STEP_SCHEMA_SECTIONS: [&str; 3] = [
+    "template_vars",
+    "data_pipeline_contract",
+    "authoring_doctrine",
+];
+
+/// The complete authoring contract: every per-type note, runtime contract and
+/// example, plus the shared sections. Too big to hand out by default (KT-1681:
+/// it sat 18 tokens under the 32768 MLX window), so it is the source both the
+/// lean default and the on-demand reads (`step_schema_view`) are cut from.
 ///
 /// The closed set of step types and the authoring doctrine come from the code,
 /// not from the JSON file: the list cannot lag the enum, and the doctrine is
 /// the very text the `workflow-architect` guide carries (KT-1216).
-pub(crate) fn canonical_step_schema() -> serde_json::Value {
+pub fn full_step_schema() -> serde_json::Value {
     let mut schema: serde_json::Value =
         serde_json::from_str(include_str!("workflow_step_schema.json"))
             .expect("versioned workflow step schema is valid JSON");
@@ -1850,9 +1889,121 @@ pub(crate) fn canonical_step_schema() -> serde_json::Value {
     schema
 }
 
+/// A field entry's name: `"api_method (default GET)"` is `api_method`.
+fn field_name(entry: &serde_json::Value) -> serde_json::Value {
+    let text = entry.as_str().unwrap_or_default();
+    serde_json::json!(text.split(" (").next().unwrap_or(text))
+}
+
+/// What `workflow_step_schema` serves with no argument, derived from the full
+/// contract so the two cannot drift: per step type the required fields, the
+/// names of the optional ones and `more`, the keys only a `step_type` read
+/// carries (notes, runtime contracts, example); the closed set, the shape rules,
+/// the triggers, the pipeline order and the doctrine whole (KT-1216); the
+/// template variables as their syntax and the namespace names.
+///
+/// This is what the 32768 clamp test measures: the contract an agent always
+/// pays for. The detail is paid only for the types it composes.
+pub fn canonical_step_schema() -> serde_json::Value {
+    let full = full_step_schema();
+    let mut fields = serde_json::Map::new();
+    for (name, contract) in full["fields_by_type"].as_object().into_iter().flatten() {
+        let optional: Vec<serde_json::Value> = contract["optional"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(field_name)
+            .collect();
+        let more: Vec<&str> = contract
+            .as_object()
+            .into_iter()
+            .flat_map(|object| object.keys())
+            .map(String::as_str)
+            .filter(|key| !["required", "optional"].contains(key))
+            .collect();
+        fields.insert(
+            name.clone(),
+            serde_json::json!({
+                "required": contract["required"],
+                "optional": optional,
+                "more": more,
+            }),
+        );
+    }
+    let namespaces: Vec<&str> = full["template_vars"]["namespaces"]
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.keys())
+        .map(String::as_str)
+        .collect();
+    serde_json::json!({
+        "shape": full["shape"],
+        "read_first": full["read_first"],
+        "how_to_read": "Per type: `required` fields and the NAMES of the `optional` ones. Before composing a step of a type, call workflow_step_schema({step_type}): it returns that type's whole contract (the `more` keys: notes, runtime contracts, the working `example`, what each optional field takes). Shared contracts: workflow_step_schema({section}) with template_vars (every template namespace and the time grammar), data_pipeline_contract or authoring_doctrine.",
+        "step_types_closed_set": full["step_types_closed_set"],
+        "fields_by_type": fields,
+        "discovery_rule": full["discovery_rule"],
+        "triggers": full["triggers"],
+        "template_vars": {
+            "syntax": full["template_vars"]["syntax"],
+            "namespaces": namespaces,
+            "full": "workflow_step_schema({section: \"template_vars\"})",
+        },
+        "data_pipeline_contract": full["data_pipeline_contract"],
+        "authoring_doctrine": full["authoring_doctrine"],
+    })
+}
+
+/// One read of the authoring contract: the lean default, one step type's whole
+/// contract (`step_type`) or one shared section whole (`section`). The HTTP
+/// route, the native tool and the MCP bridge all serve it.
+pub fn step_schema_view(
+    step_type: Option<&str>,
+    section: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    if let Some(kind) = step_type {
+        let full = full_step_schema();
+        let contract = full["fields_by_type"].get(kind).ok_or_else(|| {
+            format!(
+                "Unknown step_type {kind}; call workflow_step_schema with no arguments for the closed set"
+            )
+        })?;
+        return Ok(serde_json::json!({
+            "shape": full["shape"],
+            "step_type": kind,
+            "contract": contract,
+        }));
+    }
+    if let Some(section) = section {
+        if !STEP_SCHEMA_SECTIONS.contains(&section) {
+            return Err(
+                "section must be template_vars, data_pipeline_contract or authoring_doctrine"
+                    .into(),
+            );
+        }
+        return Ok(serde_json::json!({
+            "section": section,
+            "contract": full_step_schema()[section],
+        }));
+    }
+    Ok(canonical_step_schema())
+}
+
+/// Optional narrowing of GET /api/workflows/step-schema.
+#[derive(Debug, Default, Deserialize)]
+pub struct StepSchemaQuery {
+    pub step_type: Option<String>,
+    pub section: Option<String>,
+}
+
 /// GET /api/workflows/step-schema
-pub async fn step_schema() -> Json<ApiResponse<serde_json::Value>> {
-    Json(ApiResponse::ok(canonical_step_schema()))
+pub async fn step_schema(
+    Query(query): Query<StepSchemaQuery>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    match step_schema_view(query.step_type.as_deref(), query.section.as_deref()) {
+        Ok(view) => Json(ApiResponse::ok(view)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
 }
 
 /// GET /api/workflows
@@ -1865,7 +2016,7 @@ pub async fn list(
 
 /// The workflow list, with each `last_run` taken from the runs `visibility`
 /// admits (`None`: every run, for a human).
-pub(crate) async fn list_with_visibility(
+pub async fn list_with_visibility(
     state: &AppState,
     visibility: Option<crate::db::workflows::RunVisibility>,
 ) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
@@ -1891,6 +2042,8 @@ pub(crate) async fn list_with_visibility(
                     .into_iter()
                     .map(|exec| (exec.id.clone(), exec))
                     .collect();
+            // The decision models Ollama lists and the connections serve, for the Decide steps' own models.
+            let decision_models = crate::workflows::readiness::installed_decision_models(conn);
             // The run's gate renders and hashes an imported workflow: a child
             // several cards reach is checked once per list, not once per card.
             let mut approvals: std::collections::HashMap<String, Result<Option<String>, String>> =
@@ -1911,6 +2064,7 @@ pub(crate) async fn list_with_visibility(
                             &wf,
                             &by_id,
                             &quick_execs,
+                            decision_models.as_ref(),
                             &mut approval,
                         ),
                     );
@@ -2009,7 +2163,7 @@ pub async fn readiness(
 
 /// The readiness of a saved workflow against every workflow it may call; a
 /// failed load is reported as such, never as ready.
-pub(crate) async fn workflow_readiness(state: &AppState, wf: &Workflow) -> WorkflowReadiness {
+pub async fn workflow_readiness(state: &AppState, wf: &Workflow) -> WorkflowReadiness {
     // The run's repository-approval gate reads the database, so the check
     // runs on the same connection as the workflow list.
     let root = wf.clone();
@@ -2134,14 +2288,14 @@ async fn resolve_saved_references(
 /// save leaves an empty script hash empty, so the step refuses to run until
 /// a human saves it (KT-918).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkflowWriter {
+pub enum WorkflowWriter {
     Human,
     Agent,
 }
 
 /// Drop every human approval of unmodelled programs: an agent never gives
 /// one, and an import that may come from one never carries one (KT-1017).
-pub(crate) fn clear_human_approvals(steps: &mut [WorkflowStep]) {
+pub fn clear_human_approvals(steps: &mut [WorkflowStep]) {
     for step in steps {
         step.exec_unmodelled_args_approved = None;
         step.exec_approved_by_trust = None;
@@ -2152,7 +2306,7 @@ pub(crate) fn clear_human_approvals(steps: &mut [WorkflowStep]) {
 /// tracked by: `main`, `setup`, `stdin` and every CollectApiData source. The
 /// identity carries the step type and the pinned scripts, so flipping the type
 /// or re-pinning a script is a change of the line.
-pub(crate) fn line_identities(step: &WorkflowStep) -> Vec<(String, serde_json::Value)> {
+pub fn line_identities(step: &WorkflowStep) -> Vec<(String, serde_json::Value)> {
     let step_type = serde_json::to_value(&step.step_type).unwrap_or_default();
     let scripts = serde_json::to_value(&step.exec_script_files).unwrap_or_default();
     let mut lines = Vec::new();
@@ -2204,7 +2358,7 @@ pub(crate) fn line_identities(step: &WorkflowStep) -> Vec<(String, serde_json::V
 /// `kronn/` import, unsealed restore), a script hash this instance did not
 /// store for the same step and path is blanked: only a human's approval pins
 /// it again, from the file on disk.
-pub(crate) fn blank_unpinned_hashes(steps: &mut [WorkflowStep], stored: &[WorkflowStep]) {
+pub fn blank_unpinned_hashes(steps: &mut [WorkflowStep], stored: &[WorkflowStep]) {
     for step in steps {
         let known = stored.iter().find(|known| known.name == step.name);
         for file in &mut step.exec_script_files {
@@ -2224,7 +2378,7 @@ pub(crate) fn blank_unpinned_hashes(steps: &mut [WorkflowStep], stored: &[Workfl
 
 /// A step's fields that its type never reads are dropped, so they cannot be
 /// approved unseen and come alive when the type changes.
-pub(crate) fn drop_foreign_fields(steps: &mut [WorkflowStep]) {
+pub fn drop_foreign_fields(steps: &mut [WorkflowStep]) {
     for step in steps {
         if !matches!(step.step_type, StepType::Exec) {
             step.exec_command = None;
@@ -2242,7 +2396,7 @@ pub(crate) fn drop_foreign_fields(steps: &mut [WorkflowStep]) {
 
 /// An agent's save keeps a stored approval only on a step whose command
 /// lines are exactly the ones a human approved; any other step loses it.
-pub(crate) fn keep_human_approvals(steps: &mut [WorkflowStep], stored: &[WorkflowStep]) {
+pub fn keep_human_approvals(steps: &mut [WorkflowStep], stored: &[WorkflowStep]) {
     for step in steps {
         step.exec_unmodelled_args_approved = stored
             .iter()
@@ -2281,7 +2435,7 @@ fn keep_only_live_trust_marks(steps: &mut [WorkflowStep], current: &[WorkflowSte
 /// writer, a changed or new one takes this save's, so a human edit
 /// re-attributes only the line it changed. Never read from the request. Only
 /// an agent's line whose values then need a human carries the mark.
-pub(crate) fn mark_line_writers(
+pub fn mark_line_writers(
     steps: &mut [WorkflowStep],
     stored: &[WorkflowStep],
     writer: WorkflowWriter,
@@ -2331,7 +2485,7 @@ pub(crate) fn mark_line_writers(
 
 /// The steps an agent wrote that wait for a human's approval, as a notice
 /// for whoever saved them (KT-1017).
-pub(crate) fn awaiting_approval_notice(wf: &Workflow) -> Option<String> {
+pub fn awaiting_approval_notice(wf: &Workflow) -> Option<String> {
     let names: Vec<&str> = wf
         .steps
         .iter()
@@ -2372,7 +2526,7 @@ async fn with_awaiting_notice(
 
 /// An approval no line of its step needs any more is dropped, so it never
 /// covers what the step becomes later.
-pub(crate) fn clear_stale_approvals(steps: &mut [WorkflowStep]) {
+pub fn clear_stale_approvals(steps: &mut [WorkflowStep]) {
     for step in steps {
         if step.exec_unmodelled_args_approved != Some(true) {
             continue;
@@ -2392,7 +2546,7 @@ pub(crate) fn clear_stale_approvals(steps: &mut [WorkflowStep]) {
 /// would wait for a human are approved at once, each grant journalled. A step
 /// the level does not cover (Standard, an unreadable setting) keeps waiting.
 /// The workflow's own level, and the launch's room, are consulted.
-pub(crate) async fn approve_exec_steps_by_trust(
+pub async fn approve_exec_steps_by_trust(
     state: &AppState,
     mut response: ApiResponse<Workflow>,
     origin: &crate::db::trust::TrustOrigin,
@@ -2533,7 +2687,7 @@ async fn finish_agent_save(
 
 /// Who a bridge-token caller is, for the record of an automatic disable:
 /// the agent of the launch's discussion, else "an agent". `None` for a human.
-pub(crate) async fn agent_label(
+pub async fn agent_label(
     state: &AppState,
     bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     marker: &crate::core::bridge_token::AgentMark,
@@ -2565,11 +2719,11 @@ pub(crate) async fn agent_label(
 }
 
 /// Who an automatic disable names when the agent is unknown.
-pub(crate) const AN_AGENT: &str = "an agent";
+pub const AN_AGENT: &str = "an agent";
 
 /// Records why Kronn disabled these workflows on its own (KT-1037); a
 /// failure is logged, never surfaced: the disable itself already happened.
-pub(crate) async fn record_auto_disable(
+pub async fn record_auto_disable(
     state: &AppState,
     ids: Vec<String>,
     reason: AutoDisableReason,
@@ -2641,7 +2795,7 @@ pub async fn reenable(
     reenable_as_human(state, req.ids).await
 }
 
-pub(crate) async fn reenable_as_human(
+pub async fn reenable_as_human(
     state: AppState,
     ids: Vec<String>,
 ) -> Json<ApiResponse<Vec<Workflow>>> {
@@ -2668,12 +2822,12 @@ pub(crate) async fn reenable_as_human(
 }
 
 /// Why an agent cannot resume a disabled workflow's run.
-pub(crate) const AGENT_RESUME_REFUSAL: &str = "This workflow is disabled, so its run can only \
+pub const AGENT_RESUME_REFUSAL: &str = "This workflow is disabled, so its run can only \
      be resumed by a human: ask the user to review the workflow and resume it from Kronn.";
 
 /// Lets a test run another write between an update's read and its write.
-#[cfg(test)]
-pub(crate) mod before_write_hook {
+#[cfg(any(test, feature = "test-support"))]
+pub mod before_write_hook {
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
 
@@ -2681,7 +2835,7 @@ pub(crate) mod before_write_hook {
     static PAUSES: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
 
     /// The next update of `workflow_id` signals `reached`, then waits for `resume`.
-    pub(crate) fn arm(workflow_id: &str) -> (Arc<Notify>, Arc<Notify>) {
+    pub fn arm(workflow_id: &str) -> (Arc<Notify>, Arc<Notify>) {
         let (reached, resume) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         PAUSES
             .lock()
@@ -2726,8 +2880,8 @@ fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
 
 /// Why an agent cannot change a workflow's retention (KT-1100): the purge
 /// applies it at once, enabled or not, so only a human may set what it deletes.
-/// POST /api/workflows/:id/shadow/promote — the normal lane takes over the
-/// version the shadow tested (KT-1450). Human-only: no bridge route.
+/// POST /api/workflows/:id/shadow/promote — the step takes over the version its
+/// shadow tested (KT-1450). Human-only: no bridge route.
 pub async fn promote_shadow(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2749,35 +2903,57 @@ pub async fn promote_shadow(
     }
 }
 
-pub(crate) const AGENT_SHADOW_REFUSAL: &str = "A shadow variant starts extra runs: an \
-     agent cannot set or change it. Ask the user to set it in Kronn (workflow editor, \
-     \"Shadow runs\").";
+pub const AGENT_SHADOW_REFUSAL: &str = "A step shadow runs the step once more beside \
+     the main execution, and its merge condenses them into the step's output: an agent \
+     cannot set or change either. Ask the user to set it in Kronn \
+     (workflow editor, the step's \"Shadows\").";
 
-/// A shadow variant names skills that exist in that version and QP versions
-/// from 1 (KT-1449).
-fn validate_shadow(shadow: &WorkflowShadow) -> Result<(), String> {
-    let replacements: Vec<String> = shadow.skills.values().cloned().collect();
-    crate::core::skill_versions::validate_pins(&replacements)
-        .map_err(|e| format!("Shadow: {e}"))?;
-    if let Some((id, _)) = shadow.quick_prompt_versions.iter().find(|(_, n)| **n == 0) {
-        return Err(format!(
-            "Shadow: Quick Prompt {id} has no version 0, versions start at 1"
-        ));
-    }
-    Ok(())
+/// The shadows of steps a person saves name skills that exist in that version,
+/// QP versions from 1, and only sit on Agent steps that stay inside Kronn
+/// (KT-1449, KT-1459).
+fn validate_shadows(steps: &[WorkflowStep]) -> Result<(), String> {
+    crate::workflows::shadow::validate(steps)
 }
 
-pub(crate) const AGENT_RETENTION_REFUSAL: &str = "Run retention is a human decision: an \
+/// Whether any of the steps carries a shadow.
+fn carries_shadows(steps: &[WorkflowStep]) -> bool {
+    steps
+        .iter()
+        .any(|step| !step.shadows.is_empty() || step.shadow_merge.is_some())
+}
+
+/// GET /api/workflows/:id/runs/:run_id/step-shadows — per step that ran shadows,
+/// the main execution beside what each shadow was and produced (KT-1459).
+pub async fn run_step_shadows(
+    State(state): State<AppState>,
+    Path((id, run_id)): Path<(String, String)>,
+) -> Json<ApiResponse<Vec<crate::workflows::shadow::StepShadowComparison>>> {
+    let result = state
+        .db
+        .with_read_conn(move |conn| {
+            let run = crate::db::workflows::get_run(conn, &run_id)?
+                .filter(|run| run.workflow_id == id)
+                .ok_or_else(|| anyhow::anyhow!("Run not found"))?;
+            crate::workflows::shadow::comparisons(conn, &run)
+        })
+        .await;
+    match result {
+        Ok(steps) => Json(ApiResponse::ok(steps)),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
+pub const AGENT_RETENTION_REFUSAL: &str = "Run retention is a human decision: an \
      agent cannot change it on an existing workflow. Ask the user to set it in Kronn \
      (workflow editor, \"Run retention\").";
 
 /// Why an agent cannot turn a workflow on (KT-1037, KT-1017): a Cron or
 /// Tracker trigger would then run its content with no human in the loop.
-pub(crate) const AGENT_ENABLE_REFUSAL: &str = "Enabling a workflow is a human decision: \
+pub const AGENT_ENABLE_REFUSAL: &str = "Enabling a workflow is a human decision: \
      ask the user to review it and click \"Enable\" in Kronn (Workflows). Workflows an agent \
      creates or edits stay disabled until then.";
 
-pub(crate) async fn create_as(
+pub async fn create_as(
     state: AppState,
     req: CreateWorkflowRequest,
     writer: WorkflowWriter,
@@ -2787,7 +2963,7 @@ pub(crate) async fn create_as(
 }
 
 /// [`create_as`] naming the agent for the record of its disabled workflow.
-pub(crate) async fn create_as_labeled(
+pub async fn create_as_labeled(
     state: AppState,
     req: CreateWorkflowRequest,
     writer: WorkflowWriter,
@@ -2891,11 +3067,13 @@ async fn create_written(
             return Json(ApiResponse::err(e));
         }
     }
-    if let Some(ref shadow) = req.shadow {
+    if carries_shadows(&req.steps) || carries_shadows(&req.on_failure) {
         if writer == WorkflowWriter::Agent {
             return Json(ApiResponse::err(AGENT_SHADOW_REFUSAL));
         }
-        if let Err(e) = validate_shadow(shadow) {
+        if let Err(e) =
+            validate_shadows(&req.steps).and_then(|()| validate_shadows(&req.on_failure))
+        {
             return Json(ApiResponse::err(e));
         }
     }
@@ -3002,7 +3180,6 @@ async fn create_written(
     }
     let wf = Workflow {
         retention: req.retention,
-        shadow: req.shadow,
         pinned: false,
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -3176,7 +3353,7 @@ pub async fn create_autocode_issue(
 
 /// [`create_autocode_issue`] against a given `PATH`, so the refusal is testable
 /// without touching the process environment.
-pub(crate) async fn install_autocode_issue(
+pub async fn install_autocode_issue(
     state: AppState,
     params: crate::workflows::autocode_issue_template::AutocodeIssueParams,
     path: Option<&std::ffi::OsStr>,
@@ -3252,7 +3429,7 @@ pub async fn update(
     Json(finish_agent_save(&state, response, &bridge).await)
 }
 
-pub(crate) async fn update_as(
+pub async fn update_as(
     state: AppState,
     id: String,
     req: UpdateWorkflowRequest,
@@ -3263,7 +3440,7 @@ pub(crate) async fn update_as(
 }
 
 /// [`update_as`] naming the agent for the record of a disable it caused.
-pub(crate) async fn update_as_labeled(
+pub async fn update_as_labeled(
     state: AppState,
     id: String,
     req: UpdateWorkflowRequest,
@@ -3290,7 +3467,7 @@ pub struct UpdateWorkflowStepRequest {
 }
 
 /// The step list with one step's fields replaced, or why it cannot be.
-pub(crate) fn patch_step(
+pub fn patch_step(
     mut steps: Vec<WorkflowStep>,
     req: &UpdateWorkflowStepRequest,
 ) -> Result<Vec<WorkflowStep>, String> {
@@ -3334,7 +3511,7 @@ pub(crate) fn patch_step(
 
 /// Every field name `WorkflowStep` deserializes, read from serde's own list so
 /// it can never drift from the struct.
-pub(crate) fn step_field_names() -> &'static [&'static str] {
+pub fn step_field_names() -> &'static [&'static str] {
     use serde::de::{Error, Visitor};
     struct Probe<'a>(&'a mut &'static [&'static str]);
     impl<'de> serde::Deserializer<'de> for Probe<'_> {
@@ -3395,7 +3572,7 @@ pub async fn update_step(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_write_hook::pause(&format!("{id}#step-read")).await;
     let (list, key) = if req.on_failure {
         (existing.on_failure, "on_failure")
@@ -3459,13 +3636,23 @@ async fn update_written(
     {
         return Json(ApiResponse::err(AGENT_RETENTION_REFUSAL));
     }
-    if writer == WorkflowWriter::Agent
-        && req
-            .shadow
-            .as_ref()
-            .is_some_and(|shadow| *shadow != existing.shadow)
-    {
-        return Json(ApiResponse::err(AGENT_SHADOW_REFUSAL));
+    // Shadows are human-only: an agent that sends the steps back with the
+    // shadows it read keeps them, one that sets or changes them is refused.
+    if writer == WorkflowWriter::Agent {
+        let changed = |steps: &Option<Vec<WorkflowStep>>, stored: &[WorkflowStep]| {
+            steps.as_ref().is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    (!step.shadows.is_empty() || step.shadow_merge.is_some()) && {
+                        let mut kept = vec![step.clone()];
+                        crate::workflows::shadow::keep_stored_shadows(&mut kept, stored);
+                        kept[0].shadows != step.shadows || kept[0].shadow_merge != step.shadow_merge
+                    }
+                })
+            })
+        };
+        if changed(&req.steps, &existing.steps) || changed(&req.on_failure, &existing.on_failure) {
+            return Json(ApiResponse::err(AGENT_SHADOW_REFUSAL));
+        }
     }
     // An agent's change to what an enabled workflow executes would run under
     // the human's earlier activation: compared below, it disables the workflow.
@@ -3480,9 +3667,11 @@ async fn update_written(
     if writer == WorkflowWriter::Agent {
         if let Some(steps) = req.steps.as_mut() {
             keep_human_approvals(steps, &existing.steps);
+            crate::workflows::shadow::keep_stored_shadows(steps, &existing.steps);
         }
         if let Some(on_failure) = req.on_failure.as_mut() {
             keep_human_approvals(on_failure, &existing.on_failure);
+            crate::workflows::shadow::keep_stored_shadows(on_failure, &existing.on_failure);
         }
     }
     if let Some(steps) = req.steps.as_mut() {
@@ -3577,8 +3766,13 @@ async fn update_written(
             return Json(ApiResponse::err(e));
         }
     }
-    if let Some(Some(ref shadow)) = req.shadow {
-        if let Err(e) = validate_shadow(shadow) {
+    if let Some(steps) = req.steps.as_deref() {
+        if let Err(e) = validate_shadows(steps) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+    if let Some(on_failure) = req.on_failure.as_deref() {
+        if let Err(e) = validate_shadows(on_failure) {
             return Json(ApiResponse::err(e));
         }
     }
@@ -3674,7 +3868,6 @@ async fn update_written(
     let mut updated = Workflow {
         refs: req.refs.unwrap_or(existing.refs),
         retention: req.retention.unwrap_or(existing.retention),
-        shadow: req.shadow.unwrap_or(existing.shadow),
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
         project_id: req.project_id.unwrap_or(existing.project_id),
@@ -3781,7 +3974,7 @@ async fn update_written(
         return Json(ApiResponse::err(e));
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_write_hook::pause(&updated.id).await;
     let w = updated.clone();
     // A human turning it on has reviewed it: the record of why Kronn turned
@@ -3839,7 +4032,14 @@ async fn update_written(
                 {
                     updated.enabled = stored.enabled;
                     updated.retention = stored.retention;
-                    updated.shadow = stored.shadow;
+                    crate::workflows::shadow::keep_stored_shadows(
+                        &mut updated.steps,
+                        &stored.steps,
+                    );
+                    crate::workflows::shadow::keep_stored_shadows(
+                        &mut updated.on_failure,
+                        &stored.on_failure,
+                    );
                 }
             }
             if let (true, Some((by, summary))) = (was_enabled, auto_disable_summary) {
@@ -3936,7 +4136,7 @@ const WORKFLOW_EXPORT_KIND: &str = "kronn.workflow";
 /// #10 — the non-empty `sub_workflow_id`s referenced by a step list's
 /// SubWorkflow and TriggerWorkflow steps. Used to bundle (export) and remap
 /// (import) the child workflow graph. Pure + unit-tested.
-pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
+pub fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
     steps
         .iter()
         .filter(|s| {
@@ -3950,7 +4150,7 @@ pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
+pub fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
     sub_workflow_child_ids(&workflow.steps)
         .into_iter()
         .chain(sub_workflow_child_ids(&workflow.on_failure))
@@ -3959,7 +4159,7 @@ pub(crate) fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String
 
 /// The workflows an export carries with `workflow`: its sub-workflows and
 /// the workflows its refs name (KT-1448).
-pub(crate) fn workflow_bundled_child_ids(workflow: &Workflow) -> Vec<String> {
+pub fn workflow_bundled_child_ids(workflow: &Workflow) -> Vec<String> {
     workflow_sub_workflow_child_ids(workflow)
         .into_iter()
         .chain(crate::workflows::refs::ids_of(&workflow.refs, ResourceRefKind::Workflow).cloned())
@@ -3967,19 +4167,23 @@ pub(crate) fn workflow_bundled_child_ids(workflow: &Workflow) -> Vec<String> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct WorkflowDependencyIds {
-    pub(crate) quick_prompts: std::collections::BTreeSet<String>,
-    pub(crate) quick_apis: std::collections::BTreeSet<String>,
-    pub(crate) quick_execs: std::collections::BTreeSet<String>,
-    pub(crate) pages: std::collections::BTreeSet<String>,
+pub struct WorkflowDependencyIds {
+    pub quick_prompts: std::collections::BTreeSet<String>,
+    pub quick_apis: std::collections::BTreeSet<String>,
+    pub quick_execs: std::collections::BTreeSet<String>,
+    pub pages: std::collections::BTreeSet<String>,
     /// Every skill a step or a ref names (KT-1446); only custom ones travel.
-    pub(crate) skills: std::collections::BTreeSet<String>,
+    pub skills: std::collections::BTreeSet<String>,
+    /// Custom skill ids a step only names: a JsonData value (#273), or an id
+    /// written in a script, a prompt or any other text of the step (KT-1843).
+    /// Exported when such a skill exists; no step loads them, so none is "missing".
+    pub payload_skills: std::collections::BTreeSet<String>,
 }
 
 /// Collect every saved resource referenced by the complete workflow graph.
 /// Dynamic Page ids cannot be bundled because their destination only exists at
 /// run time; static ids/slugs are included and remapped during import.
-pub(crate) fn workflow_dependency_ids<'a>(
+pub fn workflow_dependency_ids<'a>(
     workflows: impl IntoIterator<Item = &'a Workflow>,
 ) -> WorkflowDependencyIds {
     let mut dependencies = WorkflowDependencyIds::default();
@@ -4010,12 +4214,30 @@ pub(crate) fn workflow_dependency_ids<'a>(
                 dependencies.quick_apis.insert(id.to_string());
             }
         }
-        if let Some(shadow) = &workflow.shadow {
-            dependencies.skills.extend(shadow.skills.keys().cloned());
-            dependencies.skills.extend(shadow.skills.values().cloned());
-        }
         for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
             dependencies.skills.extend(step.skill_ids.iter().cloned());
+            for shadow in &step.shadows {
+                dependencies.skills.extend(shadow.skills.keys().cloned());
+                dependencies
+                    .skills
+                    .extend(shadow.skills.values().filter(|id| !id.is_empty()).cloned());
+                if let Some(crate::models::ShadowPrompt::QuickPrompt { id, .. }) = &shadow.prompt {
+                    dependencies.quick_prompts.insert(id.clone());
+                }
+            }
+            if let Some(payload) = &step.json_data_payload {
+                crate::core::skill_bundle::ids_in_payload(
+                    payload,
+                    &mut dependencies.payload_skills,
+                );
+            }
+            if let Ok(value) = serde_json::to_value(step) {
+                let mut texts = Vec::new();
+                crate::workflows::refs::collect_texts(&value, &mut texts);
+                for text in texts {
+                    crate::core::skill_bundle::ids_in_text(text, &mut dependencies.payload_skills);
+                }
+            }
             if let Some(id) = step
                 .quick_prompt_id
                 .as_deref()
@@ -4192,6 +4414,7 @@ pub async fn export_workflow(
                 }
             }
             let mut skills = dependencies.skills;
+            skills.extend(dependencies.payload_skills);
             for qp in &qps {
                 skills.extend(qp.skill_ids.iter().cloned());
             }
@@ -4227,6 +4450,49 @@ pub async fn export_workflow(
     for exec in &mut referenced_quick_execs {
         crate::core::export_secrets::redact_quick_exec(exec, &mut redacted_fields);
     }
+    let referenced_skills = crate::core::skill_bundle::bundle_skills(&skill_ids);
+    let known = match state
+        .db
+        .with_conn(crate::core::export_report::KnownIds::load)
+        .await
+    {
+        Ok(known) => known,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
+    };
+    let (referenced_directives, referenced_profiles) = crate::core::binding_bundle::bundle_for(
+        &std::iter::once(&exported)
+            .chain(&referenced_workflows)
+            .collect::<Vec<_>>(),
+        &referenced_quick_prompts.iter().collect::<Vec<_>>(),
+        &referenced_quick_apis.iter().collect::<Vec<_>>(),
+    );
+    let carried = crate::core::export_report::Carried {
+        skills: referenced_skills.iter().map(|s| s.id.clone()).collect(),
+        directives: referenced_directives.iter().map(|d| d.id.clone()).collect(),
+        profiles: referenced_profiles.iter().map(|p| p.id.clone()).collect(),
+        objects: std::iter::once(exported.id.clone())
+            .chain(referenced_workflows.iter().map(|w| w.id.clone()))
+            .chain(referenced_quick_prompts.iter().map(|q| q.id.clone()))
+            .chain(referenced_quick_apis.iter().map(|q| q.id.clone()))
+            .chain(referenced_quick_execs.iter().map(|q| q.id.clone()))
+            .chain(referenced_pages.iter().map(|p| p.id.clone()))
+            .collect(),
+    };
+    let not_carried = crate::core::export_report::not_carried(
+        &std::iter::once(&exported)
+            .chain(&referenced_workflows)
+            .collect::<Vec<_>>(),
+        &referenced_quick_prompts.iter().collect::<Vec<_>>(),
+        &referenced_quick_apis.iter().collect::<Vec<_>>(),
+        &carried,
+        &known,
+    );
     let envelope = WorkflowExportEnvelope {
         kind: WORKFLOW_EXPORT_KIND.to_string(),
         version: EXPORT_VERSION,
@@ -4237,8 +4503,11 @@ pub async fn export_workflow(
         referenced_quick_execs,
         referenced_pages,
         referenced_workflows,
-        referenced_skills: crate::core::skill_bundle::bundle_skills(&skill_ids),
+        referenced_skills,
+        referenced_directives,
+        referenced_profiles,
         redacted_fields,
+        not_carried,
     };
 
     // Sanitised filename: `<workflow_name>.kronn-workflow.json`. Replace
@@ -4283,13 +4552,27 @@ pub async fn export_workflow(
 /// Validate one workflow from an import bundle exactly like a fresh create
 /// (POST /api/workflows). Applied to the root AND every bundled child so a
 /// malformed child can't slip in. Returns a user-facing error string.
-pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
+pub fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
     validate_workflow_for_import_keeping(wf, &[])
+}
+
+/// [`validate_workflow_for_import`] for a workflow arriving with the skills
+/// `bundled`: a version pinned to one of them exists only once the import has
+/// created it, so it is not looked up among this instance's skills.
+pub fn validate_workflow_for_import_bundled(
+    wf: &Workflow,
+    bundled: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let mut wf = wf.clone();
+    for step in wf.steps.iter_mut().chain(wf.on_failure.iter_mut()) {
+        step.skill_ids.retain(|id| !bundled.contains(id));
+    }
+    validate_workflow_for_import(&wf)
 }
 
 /// The foreach file of every SubWorkflow step stays a plain worktree-relative
 /// path, for write paths that do not run the full step checks.
-pub(crate) fn validate_foreach_files(wf: &Workflow) -> Result<(), String> {
+pub fn validate_foreach_files(wf: &Workflow) -> Result<(), String> {
     for step in wf.steps.iter().chain(wf.on_failure.iter()) {
         if let Some(file) = step.sub_workflow_foreach_file.as_deref() {
             crate::workflows::sub_workflow_step::validate_foreach_file(file)
@@ -4301,7 +4584,7 @@ pub(crate) fn validate_foreach_files(wf: &Workflow) -> Result<(), String> {
 
 /// The Exec rules of a workflow definition (allowlist, commands, inline-code
 /// interpolation), for write paths that do not run the full import checks.
-pub(crate) fn validate_exec_definition(wf: &Workflow) -> Result<(), String> {
+pub fn validate_exec_definition(wf: &Workflow) -> Result<(), String> {
     validate_exec_allowlist(&wf.exec_allowlist)?;
     validate_exec_steps(&wf.steps, &wf.exec_allowlist)?;
     validate_exec_steps_keeping(&wf.on_failure, &wf.exec_allowlist, &[], true)
@@ -4309,7 +4592,7 @@ pub(crate) fn validate_exec_definition(wf: &Workflow) -> Result<(), String> {
 
 /// [`validate_workflow_for_import`] for a re-import over a stored workflow:
 /// its unchanged unsafe lines (see [`kept_lines`]) do not block the import.
-pub(crate) fn validate_workflow_for_import_keeping(
+pub fn validate_workflow_for_import_keeping(
     wf: &Workflow,
     kept: &[KeptLine],
 ) -> Result<(), String> {
@@ -4362,7 +4645,7 @@ pub(crate) fn validate_workflow_for_import_keeping(
 /// clone); rebinds a dangling/foreign one to a matching local config; leaves it
 /// untouched when no local config exists (the user then picks in the UI).
 /// Best-effort: a DB hiccup on one step never aborts the import.
-pub(crate) fn rebind_api_configs(
+pub fn rebind_api_configs(
     conn: &rusqlite::Connection,
     steps: &mut [WorkflowStep],
     project_id: Option<&str>,
@@ -4391,7 +4674,7 @@ pub(crate) fn rebind_api_configs(
     }
 }
 
-pub(crate) fn rebind_quick_api_config(
+pub fn rebind_quick_api_config(
     conn: &rusqlite::Connection,
     quick_api: &mut QuickApi,
     project_id: Option<&str>,
@@ -4413,7 +4696,7 @@ pub(crate) fn rebind_quick_api_config(
 
 /// Point the literal Page targets of exported workflow copies at the page id,
 /// so a step naming a renamed page's former slug still matches the bundle.
-pub(crate) fn canonicalize_exported_page_refs(
+pub fn canonicalize_exported_page_refs(
     conn: &rusqlite::Connection,
     workflows: &mut [Workflow],
 ) -> anyhow::Result<()> {
@@ -4437,7 +4720,7 @@ pub(crate) fn canonicalize_exported_page_refs(
     Ok(())
 }
 
-pub(crate) fn remap_workflow_step_dependencies(
+pub fn remap_workflow_step_dependencies(
     step: &mut WorkflowStep,
     quick_prompts: &std::collections::HashMap<String, String>,
     quick_apis: &std::collections::HashMap<String, String>,
@@ -4549,9 +4832,14 @@ fn missing_skills<'a>(
         .into_iter()
         .map(|skill| skill.id)
         .collect();
+    // A pin (`custom-x@3`) is known only when that version exists here.
+    let unknown = |id: &str| match crate::core::skill_versions::split_pin(id) {
+        Ok((_, Some(_))) => crate::core::skill_versions::pinned_skill(id).is_none(),
+        _ => !known.contains(id),
+    };
     named
         .into_iter()
-        .filter(|id| !id.starts_with("repository:") && !bundled.contains(id) && !known.contains(id))
+        .filter(|id| !id.starts_with("repository:") && !bundled.contains(id) && unknown(id))
         .collect()
 }
 
@@ -4615,8 +4903,16 @@ pub async fn import_workflow_preview(
         &envelope.referenced_quick_prompts,
         &bundled,
     );
+    let bindings = match crate::core::binding_bundle::plan(
+        &envelope.referenced_directives,
+        &envelope.referenced_profiles,
+    ) {
+        Ok(bindings) => bindings,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
     Json(ApiResponse::ok(WorkflowImportPreview {
         skills,
+        bindings,
         missing_skills,
     }))
 }
@@ -4647,6 +4943,13 @@ async fn import_workflow_written(
         .iter()
         .map(|skill| skill.id.clone())
         .collect();
+    // KT-1843 — bundled directives and profiles are checked now and written
+    // with the skills, once every check below has passed.
+    let (bundled_directives, bundled_profiles) =
+        (envelope.referenced_directives, envelope.referenced_profiles);
+    if let Err(error) = crate::core::binding_bundle::plan(&bundled_directives, &bundled_profiles) {
+        return Json(ApiResponse::err(error));
+    }
 
     // #10 — the import BUNDLE = the root workflow + its (transitive) sub-workflow
     // children (`referenced_workflows`, empty on legacy single-workflow exports).
@@ -4679,7 +4982,7 @@ async fn import_workflow_written(
 
     // Validate every workflow in the bundle like a fresh create.
     for w in &all_wfs {
-        if let Err(e) = validate_workflow_for_import(w) {
+        if let Err(e) = validate_workflow_for_import_bundled(w, &bundled_skill_ids) {
             return Json(ApiResponse::err(e));
         }
     }
@@ -4916,9 +5219,18 @@ async fn import_workflow_written(
         Ok(ids) => ids,
         Err(error) => return Json(ApiResponse::err(error)),
     };
+    let binding_ids =
+        match crate::core::binding_bundle::apply(&bundled_directives, &bundled_profiles) {
+            Ok(ids) => ids,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     for w in &mut prepared {
         for step in w.steps.iter_mut().chain(w.on_failure.iter_mut()) {
             crate::core::skill_bundle::remap_ids(&mut step.skill_ids, &skill_ids);
+            binding_ids.remap(&mut step.profile_ids, &mut step.directive_ids);
+            if let Some(payload) = step.json_data_payload.as_mut() {
+                crate::core::skill_bundle::remap_payload(payload, &skill_ids);
+            }
         }
         crate::workflows::shadow::remap_imported(w, &skill_ids, &qp_id_remap);
         for reference in w.refs.values_mut() {
@@ -4931,6 +5243,10 @@ async fn import_workflow_written(
     }
     for qp in &mut qps_to_insert {
         crate::core::skill_bundle::remap_ids(&mut qp.skill_ids, &skill_ids);
+        binding_ids.remap(&mut qp.profile_ids, &mut qp.directive_ids);
+    }
+    for qa in &mut qas_to_insert {
+        binding_ids.remap(&mut qa.profile_ids, &mut qa.directive_ids);
     }
     let missing_notice = missing_skills_notice(&missing_skills(
         prepared.iter(),
@@ -5036,7 +5352,7 @@ async fn import_workflow_written(
 /// encrypted execution-variable snapshot, never in `trigger_context`.
 /// Legacy callers that send no body still work — `Option<Json<...>>` ➜
 /// `None` → no variables → exactly the previous behaviour.
-pub(crate) async fn start_manual_run(
+pub async fn start_manual_run(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
@@ -5054,7 +5370,7 @@ pub(crate) async fn start_manual_run(
 /// through here: workflow lookup, the variable preflight that writes the
 /// encrypted snapshot `execute_run` requires, then the atomic
 /// concurrency-checked insert of the Pending run.
-pub(crate) async fn create_manual_run(
+pub async fn create_manual_run(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
@@ -5075,7 +5391,7 @@ pub(crate) async fn create_manual_run(
 /// Same admission path as [`create_manual_run`], with a caller-reserved run id.
 /// Question resumption claims this id before crossing the async launch boundary,
 /// so an idempotent resolution retry cannot create a second workflow run.
-pub(crate) async fn create_manual_run_with_id(
+pub async fn create_manual_run_with_id(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
@@ -5099,7 +5415,7 @@ pub(crate) async fn create_manual_run_with_id(
 /// the workflow as read for it (before project resolution): what will execute.
 /// The third argument is the repository profiles the run will pin (KT-920),
 /// read before the transaction: the admission compares those very snapshots.
-pub(crate) type RunAdmission = Box<
+pub type RunAdmission = Box<
     dyn FnOnce(
             &rusqlite::Connection,
             &Workflow,
@@ -5110,7 +5426,7 @@ pub(crate) type RunAdmission = Box<
 
 /// [`create_manual_run_with_id`] with an admission: when given, the check, the
 /// insert and the KT-1096 pin of that exact definition commit together (KT-1029).
-pub(crate) async fn create_manual_run_admitted(
+pub async fn create_manual_run_admitted(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
@@ -5129,6 +5445,12 @@ pub(crate) async fn create_manual_run_admitted(
         .ok_or_else(|| "Workflow not found".to_string())?;
     if !wf.enabled {
         return Err("Workflow is disabled — enable it before triggering".into());
+    }
+    if let Some(refusal) = crate::workflows::decide_step::launch_refusal(
+        &wf,
+        &state.config.read().await.agents.model_tiers,
+    ) {
+        return Err(refusal);
     }
     let as_read = wf.clone();
     crate::workflows::template::refuse_reserved_names(
@@ -5226,6 +5548,7 @@ pub(crate) async fn create_manual_run_admitted(
         trigger_context: Some(serde_json::Value::Object(trigger_obj)),
         step_results: vec![],
         tokens_used: 0,
+        shadow_tokens_used: 0,
         workspace_path: None,
         started_at: now,
         finished_at: None,
@@ -5304,7 +5627,7 @@ pub(crate) async fn create_manual_run_admitted(
 
 /// KT-1025 — a launcher's agent choices for `workflow`: each names an Agent
 /// step, and each chosen agent is installed, enabled and accepts the model.
-pub(crate) async fn admit_step_agents(
+pub async fn admit_step_agents(
     state: &AppState,
     workflow: &Workflow,
     requested: &StepAgents,
@@ -5364,7 +5687,7 @@ pub(crate) async fn admit_step_agents(
 
 /// The same check for a launcher that has not created the run yet (a
 /// discussion or Live Page action), so a refusal leaves the card launchable.
-pub(crate) async fn precheck_step_agents(
+pub async fn precheck_step_agents(
     state: &AppState,
     workflow_id: &str,
     requested: &StepAgents,
@@ -5417,7 +5740,7 @@ fn validate_initial_run_state(
 
 /// Runs a run created by [`create_manual_run`] in the background. An
 /// `execute_run` error leaves it Failed with the reason, never Running.
-pub(crate) fn spawn_manual_run(
+pub fn spawn_manual_run(
     state: &AppState,
     wf: Workflow,
     mut run: WorkflowRun,
@@ -5891,14 +6214,16 @@ pub async fn test_step(
     let http_endpoints = crate::models::setup::HttpEndpoints::from_agents(&agents);
     // A press of Test is its own scope for the media guard, and a dry run
     // starts no generation: it would bill, and a preamble does not stop that.
-    let native_tools = Some(
-        crate::api::agent_tools::KronnToolExecutor::workflow_test_arc(
+    let native_tools = crate::core::uplink::linked::<crate::core::uplink_state::WorkflowTestTools>(
+    )
+    .map(|tools| {
+        (tools.0)(
             state.clone(),
             req.project_id.clone(),
             req.step.name.clone(),
             req.dry_run,
-        ),
-    );
+        )
+    });
 
     // In dry_run mode, prepend a simulation preamble. The preamble is
     // adaptive so it does not fight the output contract downstream steps rely on:
@@ -5998,7 +6323,7 @@ pub struct ListRunsQuery {
 
 /// The runs a bridge caller may see (its project's, or its own run); `None`
 /// for a human caller.
-pub(crate) fn run_visibility(
+pub fn run_visibility(
     bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
 ) -> Option<crate::db::workflows::RunVisibility> {
     bridge
@@ -6218,7 +6543,7 @@ pub async fn cron_preview(Json(req): Json<CronPreviewRequest>) -> Json<ApiRespon
     )
 }
 
-pub(crate) fn cron_preview_at(
+pub fn cron_preview_at(
     req: &CronPreviewRequest,
     default_tz: chrono_tz::Tz,
     now: chrono::DateTime<Utc>,
@@ -6583,7 +6908,7 @@ pub async fn resume_interrupted(
     .await
 }
 
-pub(crate) async fn resume_interrupted_as(
+pub async fn resume_interrupted_as(
     state: AppState,
     run_id: String,
     caller: WorkflowWriter,
@@ -6704,7 +7029,7 @@ pub async fn switch_quota_agent(
     }
 }
 
-pub(crate) async fn switch_quota_agent_inner(
+pub async fn switch_quota_agent_inner(
     state: &AppState,
     run_id: String,
     choice: StepAgentOverride,
@@ -7097,7 +7422,7 @@ pub async fn test_worktree(
     // and a duplicate branch would conflict). The operator can then
     // experiment freely; deleting the worktree leaves the original
     // preserved branch untouched.
-    let output = match crate::core::cmd::async_git_cmd()
+    let output = match crate::core::cmd::async_git_cmd() // lane-git-allow: registered checkout
         .args(["worktree", "add", "--detach"])
         .arg(&test_dir)
         .arg(&branch.head_sha)
@@ -7205,7 +7530,7 @@ pub async fn delete_test_worktree(
         return Json(ApiResponse::ok(()));
     }
 
-    let output = match crate::core::cmd::async_git_cmd()
+    let output = match crate::core::cmd::async_git_cmd() // lane-git-allow: registered checkout
         .args(["worktree", "remove", "--force"])
         .arg(&test_dir)
         .current_dir(&repo_path)
@@ -7538,6 +7863,8 @@ pub async fn suggestions(
                     mcp_config_ids: vec![],
                     skill_ids: vec![],
                     external_effect: false,
+                    shadows: Vec::new(),
+                    shadow_merge: None,
                     profile_ids: vec![],
                     directive_ids: vec![],
                     batch_quick_prompt_id: None,
@@ -7582,6 +7909,7 @@ pub async fn suggestions(
                     transform_data: None,
                     page_publish: None,
                     task_board: None,
+                    decide: None,
                     sub_workflow_id: None,
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
@@ -7611,7 +7939,7 @@ pub async fn suggestions(
 ///     silently produced workflows whose `{{steps.X.data}}` never resolved.
 ///   - `FreeText`: legacy preamble (plan of execution). Nothing downstream
 ///     relies on the format, so a descriptive response is fine.
-pub(crate) fn build_dry_run_preamble(output_format: &StepOutputFormat) -> &'static str {
+pub fn build_dry_run_preamble(output_format: &StepOutputFormat) -> &'static str {
     match output_format {
         // TypedSchema and Structured share the dry-run preamble — both
         // need the LLM to keep the envelope shape, the only difference is
@@ -7921,10 +8249,6 @@ pub async fn test_api_call(
         error,
     }))
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "workflow_readiness_tests.rs"]
-mod readiness_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
@@ -8517,6 +8841,8 @@ mod tests {
             mcp_config_ids: vec![],
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -8561,6 +8887,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -9132,6 +9459,9 @@ mod tests {
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         }));
         let Json(by_bridge) = create(State(state.clone()), bridge, None, Json(request())).await;
         let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
@@ -9212,6 +9542,9 @@ mod tests {
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         }));
         let Json(by_bridge) = create(State(state.clone()), bridge, None, Json(request())).await;
         let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
@@ -9254,6 +9587,9 @@ mod tests {
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         }));
         let Json(by_bridge) = create(
             State(state.clone()),
@@ -9882,7 +10218,6 @@ mod tests {
         Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: "src-id-original".into(),
@@ -10110,6 +10445,8 @@ mod tests {
         child.id = "child-id".into();
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10120,6 +10457,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![child],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
@@ -10132,6 +10470,8 @@ mod tests {
         // Legacy single-workflow exports stay byte-compatible (field skipped).
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10142,6 +10482,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -10154,6 +10495,8 @@ mod tests {
     fn export_envelope_serializes_with_kind_and_version() {
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10164,6 +10507,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("\"kind\":\"kronn.workflow\""));
@@ -10181,6 +10525,8 @@ mod tests {
         // when no QPs are bundled — common case for solo dev workflows.
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10191,6 +10537,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -10761,6 +11108,9 @@ mod tests {
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         }));
         let Json(refused) = reenable(
             State(state.clone()),
@@ -10815,6 +11165,8 @@ mod tests {
         wf.steps = vec![emit];
         let content = serde_json::to_string(&WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10825,6 +11177,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         })
         .unwrap();
         let Json(imported) = import_workflow(
@@ -11249,6 +11602,8 @@ mod tests {
         wf.steps = vec![emit];
         let content = serde_json::to_string(&WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -11259,6 +11614,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         })
         .unwrap();
         let imported = import_workflow(
@@ -11319,6 +11675,8 @@ mod tests {
         wf.steps = vec![plan];
         let envelope = |wf: Workflow| WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -11329,6 +11687,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let import = |wf: Workflow, by_agent: bool| {
             let state = state.clone();
@@ -11341,6 +11700,9 @@ mod tests {
                         own_discussions: vec![],
                         own_run: None,
                         agent: None,
+                        room_agent_of: Vec::new(),
+                        own_execution: None,
+                        own_sessions: Vec::new(),
                     })
                 });
                 import_workflow(
@@ -11444,6 +11806,8 @@ mod tests {
         // it doesn't know about).
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION + 1,
             exported_at: chrono::Utc::now(),
@@ -11454,6 +11818,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
@@ -12030,6 +12395,7 @@ mod tests {
         step.prompt_template = "Write the verdict".into();
         step.agent = AgentType::ClaudeCode;
         let tools = |cli: &[&str], kronn: &[&str]| crate::models::AgentSettings {
+            fallback: None,
             model: None,
             tier: None,
             connection_id: None,

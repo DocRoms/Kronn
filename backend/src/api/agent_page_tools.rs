@@ -349,6 +349,7 @@ impl KronnToolExecutor {
                                     .actor_type
                                     .as_ref()
                                     .map(crate::db::discussions::format_agent_type),
+                                base_revision_id: None,
                             }),
                         )
                         .await;

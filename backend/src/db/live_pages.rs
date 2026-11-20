@@ -5,15 +5,15 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::models::{
-    CreateLivePageDataset, LivePage, LivePageDataset, LivePageDatasetKind, LivePageDatasetPoint,
-    LivePageDatasetView, LivePageDetail, LivePageDiscussionLink, LivePageDiscussionRelation,
-    LivePagePublication, LivePageRevision, LivePageRevisionSummary, LivePageWorkflowLink,
-    LivePageWriteOperation, LivePagesCapability, PublishLivePageRequest, PublishLivePageResult,
-    UpdateLivePageRequest,
+    CreateLivePageDataset, LivePage, LivePageDataDelta, LivePageDataset, LivePageDatasetKind,
+    LivePageDatasetPoint, LivePageDatasetView, LivePageDetail, LivePageDiscussionLink,
+    LivePageDiscussionRelation, LivePagePublication, LivePageRevision, LivePageRevisionSummary,
+    LivePageWorkflowLink, LivePageWriteOperation, LivePagesCapability, PublishLivePageRequest,
+    PublishLivePageResult, UpdateLivePageRequest,
 };
 
 #[path = "live_page_datasets.rs"]
-pub(crate) mod datasets;
+pub mod datasets;
 pub use datasets::*;
 
 pub fn list_live_page_workflows(
@@ -52,7 +52,8 @@ pub fn list_live_page_workflows(
     Ok(Some(links))
 }
 
-/// Return the newest successful Page publications, newest data revision first.
+/// Return the newest Page publications that changed data, newest data
+/// revision first; one that changed nothing is not journaled.
 /// Resolving the Page first preserves the API distinction between an existing
 /// Page with no refresh yet and an unknown Page id/slug.
 pub fn list_live_page_publications(
@@ -127,7 +128,7 @@ pub fn create_live_page(
 
 /// Add a complete Page to a caller-owned transaction. The caller commits the
 /// whole bundle; this helper must never make part of an import durable alone.
-pub(crate) fn create_live_page_in_transaction(
+pub fn create_live_page_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     page: &LivePage,
     revision: &LivePageRevision,
@@ -257,7 +258,7 @@ pub(crate) fn create_live_page_in_transaction(
          VALUES (1, ?1)",
         [page.created_at.to_rfc3339()],
     )?;
-    crate::db::live_page_actions::ingest_page_actions(tx, &page.id, &revision.id, &revision.html)?;
+    ingest_page_actions(tx, &page.id, &revision.id, &revision.html)?;
     Ok(())
 }
 
@@ -542,9 +543,50 @@ pub fn update_live_page_html(
     html: &str,
     created_by_agent: Option<&str>,
 ) -> Result<LivePageRevision> {
+    update_live_page_html_from(conn, page_id, html, created_by_agent, None)
+}
+
+/// A save refused because the Page's HTML moved past the revision the edit
+/// started from. Carries the current revision id, `None` for a Page left
+/// without one.
+#[derive(Debug)]
+pub struct HtmlRevisionConflict(pub Option<String>);
+
+impl std::fmt::Display for HtmlRevisionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The Page HTML changed since this edit started: ")?;
+        match &self.0 {
+            Some(current) => write!(f, "its current revision is {current}"),
+            None => f.write_str("it has no current revision"),
+        }
+    }
+}
+
+impl std::error::Error for HtmlRevisionConflict {}
+
+/// Saves a new HTML revision. With `base_revision_id`, only if that is still
+/// the Page's current revision: the check and the write share a transaction.
+pub fn update_live_page_html_from(
+    conn: &Connection,
+    page_id: &str,
+    html: &str,
+    created_by_agent: Option<&str>,
+    base_revision_id: Option<&str>,
+) -> Result<LivePageRevision> {
     let tx = conn.unchecked_transaction()?;
     let canonical_page_id =
         resolve_live_page_id(&tx, page_id)?.ok_or_else(|| anyhow!("Page not found"))?;
+    if let Some(base) = base_revision_id {
+        // The column is nullable: no revision is a state, never the base.
+        let current: Option<String> = tx.query_row(
+            "SELECT current_revision_id FROM live_pages WHERE id = ?1",
+            [&canonical_page_id],
+            |row| row.get(0),
+        )?;
+        if current.as_deref() != Some(base) {
+            return Err(HtmlRevisionConflict(current).into());
+        }
+    }
     let next_revision: i64 = tx.query_row(
         "SELECT COALESCE(MAX(revision), 0) + 1 FROM live_page_revisions WHERE page_id = ?1",
         [&canonical_page_id],
@@ -575,12 +617,7 @@ pub fn update_live_page_html(
         "UPDATE live_pages SET current_revision_id = ?2, updated_at = ?3 WHERE id = ?1",
         params![canonical_page_id, revision.id, now.to_rfc3339()],
     )?;
-    crate::db::live_page_actions::ingest_page_actions(
-        &tx,
-        &canonical_page_id,
-        &revision.id,
-        &revision.html,
-    )?;
+    ingest_page_actions(&tx, &canonical_page_id, &revision.id, &revision.html)?;
     tx.commit()?;
     Ok(revision)
 }
@@ -604,6 +641,32 @@ pub fn get_live_page_summary(conn: &Connection, page_id: &str) -> Result<Option<
         .optional()?)
 }
 
+/// The page, its current revision and its dataset definitions, without any
+/// published value: `current` is always `None` and no point is read.
+pub fn get_live_page_definition(
+    conn: &Connection,
+    page_id: &str,
+) -> Result<Option<(LivePage, LivePageRevision, Vec<LivePageDataset>)>> {
+    let Some(page) = get_live_page_summary(conn, page_id)? else {
+        return Ok(None);
+    };
+    let revision = conn.query_row(
+        "SELECT id, page_id, revision, html, created_by_agent, created_at
+           FROM live_page_revisions WHERE id = ?1",
+        [&page.current_revision_id],
+        map_revision,
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, page_id, name, kind, NULL, schema_json,
+                max_points, max_age_days, updated_at
+           FROM live_page_datasets WHERE page_id = ?1 ORDER BY name COLLATE NOCASE",
+    )?;
+    let datasets = stmt
+        .query_map([&page.id], map_dataset)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some((page, revision, datasets)))
+}
+
 pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePageDetail>> {
     let page = get_live_page_summary(conn, page_id)?;
     let Some(page) = page else {
@@ -616,16 +679,35 @@ pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePage
         map_revision,
     )?;
 
+    let views = dataset_views(conn, &page.id, None)?;
+    let slug_aliases = list_live_page_slug_aliases(conn, &page.id)?;
+    Ok(Some(LivePageDetail {
+        page,
+        revision,
+        datasets: views,
+        slug_aliases,
+    }))
+}
+
+/// The datasets of a Page with their points, by name; `only` keeps the named ones.
+fn dataset_views(
+    conn: &Connection,
+    page_id: &str,
+    only: Option<&HashSet<String>>,
+) -> Result<Vec<LivePageDatasetView>> {
     let mut stmt = conn.prepare(
         "SELECT id, page_id, name, kind, current_json, schema_json,
                 max_points, max_age_days, updated_at
            FROM live_page_datasets WHERE page_id = ?1 ORDER BY name COLLATE NOCASE",
     )?;
     let datasets = stmt
-        .query_map([&page.id], map_dataset)?
+        .query_map([page_id], map_dataset)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut views = Vec::with_capacity(datasets.len());
     for dataset in datasets {
+        if only.is_some_and(|names| !names.contains(&dataset.name)) {
+            continue;
+        }
         let points = if dataset.kind == LivePageDatasetKind::TimeSeries {
             list_dataset_points(conn, &dataset.id)?
         } else {
@@ -648,13 +730,80 @@ pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePage
             data_size_bytes,
         });
     }
-    let slug_aliases = list_live_page_slug_aliases(conn, &page.id)?;
-    Ok(Some(LivePageDetail {
-        page,
-        revision,
-        datasets: views,
-        slug_aliases,
+    Ok(views)
+}
+
+/// What a reader holding data revision `since` and showing HTML revision
+/// `html_revision` misses: the datasets changed since then, or the full
+/// state when the publication journal does not account for every revision in
+/// between. `html_revision: None` is a reader that holds no HTML.
+pub fn read_live_page_data(
+    conn: &Connection,
+    page_ref: &str,
+    since: Option<u64>,
+    html_revision: Option<&str>,
+) -> Result<Option<LivePageDataDelta>> {
+    // One snapshot: the revision, the journal and the datasets agree.
+    let tx = conn.unchecked_transaction()?;
+    let Some(page) = get_live_page_summary(&tx, page_ref)? else {
+        return Ok(None);
+    };
+    let same_html = html_revision.is_none_or(|held| held == page.current_revision_id);
+    let changed = match since {
+        Some(since) if same_html => datasets_changed_since(&tx, &page, since)?,
+        _ => None,
+    };
+    if let Some(changed) = changed {
+        let datasets = dataset_views(&tx, &page.id, Some(&changed))?;
+        // A journaled name with no dataset left: the journal no longer describes the Page.
+        if datasets.len() == changed.len() {
+            return Ok(Some(LivePageDataDelta {
+                page,
+                full: None,
+                datasets,
+            }));
+        }
+    }
+    let full = get_live_page(&tx, &page.id)?.ok_or_else(|| anyhow!("Page not found"))?;
+    Ok(Some(LivePageDataDelta {
+        page: full.page.clone(),
+        full: Some(full),
+        datasets: Vec::new(),
     }))
+}
+
+/// The datasets publications changed after revision `since`, or `None` when
+/// a revision in between has no journal row: a dataset added or deleted,
+/// points pruned by new limits, a journal row gone, or a `since` the Page
+/// never reached.
+fn datasets_changed_since(
+    conn: &Connection,
+    page: &LivePage,
+    since: u64,
+) -> Result<Option<HashSet<String>>> {
+    if since > page.data_revision {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT changed_datasets_json FROM live_page_publications
+          WHERE page_id = ?1 AND data_revision > ?2 AND data_revision <= ?3",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                page.id,
+                i64::try_from(since).context("Page data revision exceeds SQLite range")?,
+                i64::try_from(page.data_revision)
+                    .context("Page data revision exceeds SQLite range")?,
+            ],
+            |row| parse_string_vec_sql(row.get(0)?, 0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // `UNIQUE(page_id, data_revision)`: as many rows as revisions means none is missing.
+    if u64::try_from(rows.len())? != page.data_revision - since {
+        return Ok(None);
+    }
+    Ok(Some(rows.into_iter().flatten().collect()))
 }
 
 /// Attach one dataset to an already-created Page. `create_live_page` only
@@ -765,6 +914,8 @@ pub fn add_live_page_dataset(
             )?;
         }
     }
+    // No journal row describes an added dataset: readers take the full state.
+    datasets::bump_data_revision(&tx, &canonical_page_id)?;
     tx.commit()?;
 
     Ok(LivePageDataset {
@@ -840,10 +991,14 @@ pub fn publish_live_page(
                     );
                 }
                 let changed = dataset.current.as_ref() != Some(&write.value);
-                tx.execute(
-                    "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![dataset.id, serde_json::to_string(&write.value)?, published_at.to_rfc3339()],
-                )?;
+                // An equal value is not written: a reader that skips this
+                // dataset still holds every field of it.
+                if changed {
+                    tx.execute(
+                        "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![dataset.id, serde_json::to_string(&write.value)?, published_at.to_rfc3339()],
+                    )?;
+                }
                 changed
             }
             LivePageWriteOperation::Append => {
@@ -883,11 +1038,14 @@ pub fn publish_live_page(
                     points_added += changed as u32;
                 }
                 points_removed += enforce_retention(&tx, &dataset)? as u32;
-                tx.execute(
-                    "UPDATE live_page_datasets SET updated_at = ?2 WHERE id = ?1",
-                    params![dataset.id, published_at.to_rfc3339()],
-                )?;
-                points_added > added_before || points_removed > removed_before
+                let changed = points_added > added_before || points_removed > removed_before;
+                if changed {
+                    tx.execute(
+                        "UPDATE live_page_datasets SET updated_at = ?2 WHERE id = ?1",
+                        params![dataset.id, published_at.to_rfc3339()],
+                    )?;
+                }
+                changed
             }
             LivePageWriteOperation::Clear => {
                 let removed = tx.execute(
@@ -901,14 +1059,16 @@ pub fn publish_live_page(
                     _ => None,
                 };
                 let changed = removed > 0 || dataset.current != emptied;
-                tx.execute(
-                    "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![
-                        dataset.id,
-                        emptied.as_ref().map(serde_json::to_string).transpose()?,
-                        published_at.to_rfc3339()
-                    ],
-                )?;
+                if changed {
+                    tx.execute(
+                        "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![
+                            dataset.id,
+                            emptied.as_ref().map(serde_json::to_string).transpose()?,
+                            published_at.to_rfc3339()
+                        ],
+                    )?;
+                }
                 changed
             }
             LivePageWriteOperation::Upsert => {
@@ -923,10 +1083,12 @@ pub fn publish_live_page(
                 let current = dataset.current.unwrap_or_else(|| serde_json::json!([]));
                 let merged = upsert_collection(current.clone(), &write.value, key_field)?;
                 let changed = merged != current;
-                tx.execute(
-                    "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![dataset.id, serde_json::to_string(&merged)?, published_at.to_rfc3339()],
-                )?;
+                if changed {
+                    tx.execute(
+                        "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![dataset.id, serde_json::to_string(&merged)?, published_at.to_rfc3339()],
+                    )?;
+                }
                 changed
             }
         };
@@ -951,34 +1113,42 @@ pub fn publish_live_page(
         .collect::<Vec<_>>();
     let content_changed = !changed_datasets.is_empty();
 
-    let data_revision = current_revision
-        .checked_add(1)
-        .ok_or_else(|| anyhow!("Page data revision overflow"))?;
+    // A publication that changes nothing dates the refresh and stops there:
+    // the revision and the journal only move with the data.
+    let data_revision = if content_changed {
+        current_revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("Page data revision overflow"))?
+    } else {
+        current_revision
+    };
     tx.execute(
         "UPDATE live_pages SET data_revision = ?2, updated_at = ?3, last_published_at = ?3
           WHERE id = ?1",
         params![canonical_page_id, data_revision, published_at.to_rfc3339()],
     )?;
-    tx.execute(
-        "INSERT INTO live_page_publications (
-             id, page_id, data_revision, workflow_id, workflow_run_id,
-             datasets_json, changed_datasets_json, unchanged_datasets_json,
-             points_added, points_removed, published_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![
-            Uuid::new_v4().to_string(),
-            canonical_page_id,
-            data_revision,
-            request.workflow_id,
-            request.workflow_run_id,
-            serde_json::to_string(&updated)?,
-            serde_json::to_string(&changed_datasets)?,
-            serde_json::to_string(&unchanged_datasets)?,
-            points_added,
-            points_removed,
-            published_at.to_rfc3339(),
-        ],
-    )?;
+    if content_changed {
+        tx.execute(
+            "INSERT INTO live_page_publications (
+                 id, page_id, data_revision, workflow_id, workflow_run_id,
+                 datasets_json, changed_datasets_json, unchanged_datasets_json,
+                 points_added, points_removed, published_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                Uuid::new_v4().to_string(),
+                canonical_page_id,
+                data_revision,
+                request.workflow_id,
+                request.workflow_run_id,
+                serde_json::to_string(&updated)?,
+                serde_json::to_string(&changed_datasets)?,
+                serde_json::to_string(&unchanged_datasets)?,
+                points_added,
+                points_removed,
+                published_at.to_rfc3339(),
+            ],
+        )?;
+    }
     tx.commit()?;
 
     Ok(PublishLivePageResult {
@@ -1178,7 +1348,7 @@ fn parse_string_vec_sql(value: String, column: usize) -> rusqlite::Result<Vec<St
 }
 
 #[cfg(all(test, feature = "full-tests"))]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::models::{LivePageWrite, LivePageWriteOperation};
 
@@ -1438,6 +1608,10 @@ mod tests {
         assert!(!unchanged.content_changed);
         assert!(unchanged.changed_datasets.is_empty());
         assert_eq!(unchanged.unchanged_datasets, vec!["summary"]);
+        assert_eq!(
+            unchanged.data_revision, 4,
+            "nothing changed, no new revision"
+        );
 
         let publications = list_live_page_publications(&conn, &page.slug, 3)
             .unwrap()
@@ -1448,7 +1622,8 @@ mod tests {
                 .iter()
                 .map(|publication| publication.data_revision)
                 .collect::<Vec<_>>(),
-            vec![5, 4, 3]
+            vec![4, 3, 2],
+            "a publication that changed nothing is not journaled"
         );
         assert!(publications
             .iter()
@@ -1456,10 +1631,9 @@ mod tests {
         assert!(publications
             .iter()
             .all(|publication| publication.workflow_name.as_deref() == Some("Adobe refresh")));
-        assert!(!publications[0].content_changed);
-        assert_eq!(publications[0].unchanged_datasets, vec!["summary"]);
-        assert!(publications[1].content_changed);
-        assert_eq!(publications[1].changed_datasets, vec!["summary"]);
+        assert!(publications
+            .iter()
+            .all(|publication| publication.changed_datasets == vec!["summary"]));
         assert!(list_live_page_publications(&conn, "missing-page", 3)
             .unwrap()
             .is_none());
@@ -2003,7 +2177,6 @@ mod tests {
         let workflow = crate::models::Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             id: "wf-old-slug".into(),
             name: "Feeder".into(),
@@ -2048,150 +2221,46 @@ mod tests {
     }
 }
 
-/// The Quick Prompts and skills behind a Page (KT-1450): those its publishing
-/// workflows, the workflows its actions launch, and their sub-workflows use,
-/// with what each lane (normal, shadow) loads.
+/// Per enabled shadow of a step, what `pick` says it loads for a resource.
+pub fn shadow_versions(
+    step: &crate::models::WorkflowStep,
+    pick: impl Fn(&crate::models::StepShadow) -> Option<String>,
+) -> Vec<crate::models::LivePageResourceShadow> {
+    step.shadows
+        .iter()
+        .filter(|shadow| shadow.enabled)
+        .filter_map(|shadow| {
+            Some(crate::models::LivePageResourceShadow {
+                shadow_id: shadow.id.clone(),
+                label: shadow.display_label().to_string(),
+                version: pick(shadow)?,
+            })
+        })
+        .collect()
+}
+
+/// The Quick Prompts and skills behind a Page (KT-1450), listed by the crate
+/// that reads the Page's actions.
 pub fn list_live_page_resources(
     conn: &Connection,
     page_id_or_slug: &str,
 ) -> Result<Option<Vec<crate::models::LivePageResource>>> {
-    use crate::db::discussion_actions::DiscussionActionKind;
-    use crate::models::{LivePageResource, LivePageResourceUse, Workflow};
-    let Some(detail) = get_live_page(conn, page_id_or_slug)? else {
-        return Ok(None);
-    };
-    let Some(links) = list_live_page_workflows(conn, &detail.page.id)? else {
-        return Ok(None);
-    };
-    let all: HashMap<String, Workflow> = crate::db::workflows::list_workflows(conn)?
-        .into_iter()
-        .map(|workflow| (workflow.id.clone(), workflow))
-        .collect();
-    let mut queue: Vec<String> = links.into_iter().map(|link| link.id).collect();
-    let mut direct_prompts = Vec::new();
-    let html = &detail.revision.html;
-    for (_, range) in crate::db::live_page_actions::page_action_block_ranges(html) {
-        let Ok(action) =
-            serde_json::from_str::<crate::db::discussion_actions::ActionFence>(&html[range])
-        else {
-            continue;
-        };
-        match action.kind {
-            DiscussionActionKind::Workflow => queue.push(action.target_id),
-            DiscussionActionKind::QuickPrompt => direct_prompts.push(action.target_id),
-            _ => {}
-        }
+    (crate::core::uplink::required::<crate::core::uplink::PageResources>()?.0)(
+        conn,
+        page_id_or_slug,
+    )
+}
+
+/// The actions a revision's HTML declares, stored with it by the crate that
+/// knows them.
+fn ingest_page_actions(
+    conn: &Connection,
+    page_id: &str,
+    revision_id: &str,
+    html: &str,
+) -> Result<()> {
+    match crate::core::uplink::linked::<crate::core::uplink::PageActionIngest>() {
+        Some(hook) => (hook.0)(conn, page_id, revision_id, html),
+        None => Ok(()),
     }
-    let mut seen = HashSet::new();
-    let mut found: Vec<LivePageResource> = Vec::new();
-    let mut add = |kind: &str,
-                   id: &str,
-                   name: String,
-                   latest: Option<u32>,
-                   used: Option<LivePageResourceUse>| {
-        let index = match found.iter().position(|r| r.kind == kind && r.id == id) {
-            Some(index) => index,
-            None => {
-                found.push(LivePageResource {
-                    kind: kind.into(),
-                    id: id.into(),
-                    name,
-                    latest_version: latest,
-                    uses: Vec::new(),
-                });
-                found.len() - 1
-            }
-        };
-        if let Some(used) = used {
-            found[index].uses.push(used);
-        }
-    };
-    let prompt_name = |id: &str| -> Result<(String, Option<u32>, Vec<String>)> {
-        let qp = crate::db::quick_prompts::get_quick_prompt(conn, id)?;
-        let latest = crate::db::quick_prompts::current_version_index(conn, id)?;
-        Ok(match qp {
-            Some(qp) => (qp.name, latest, qp.skill_ids),
-            None => (id.to_string(), latest, Vec::new()),
-        })
-    };
-    let skill_name = |base: &str| {
-        crate::core::skills::get_skill(base)
-            .map(|skill| skill.name)
-            .unwrap_or_else(|| base.to_string())
-    };
-    for id in &direct_prompts {
-        let (name, latest, _) = prompt_name(id)?;
-        add("quick_prompt", id, name, latest, None);
-    }
-    while let Some(workflow_id) = queue.pop() {
-        if !seen.insert(workflow_id.clone()) {
-            continue;
-        }
-        let Some(workflow) = all.get(&workflow_id) else {
-            continue;
-        };
-        let shadow = workflow.shadow.as_ref().filter(|s| s.enabled);
-        for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
-            if let Some(child) = &step.sub_workflow_id {
-                queue.push(child.clone());
-            }
-            let mut skills = step.skill_ids.clone();
-            for qp_id in step
-                .quick_prompt_id
-                .iter()
-                .chain(step.batch_quick_prompt_id.iter())
-            {
-                let (name, latest, qp_skills) = prompt_name(qp_id)?;
-                // Only `quick_prompt_id` takes a pinned version, never the batch prompt.
-                let pinned = step
-                    .quick_prompt_version
-                    .filter(|_| step.quick_prompt_id.as_ref() == Some(qp_id));
-                if skills.is_empty() {
-                    skills = match pinned {
-                        Some(index) => {
-                            crate::db::quick_prompts::get_quick_prompt_version(conn, qp_id, index)?
-                                .map(|version| version.skill_ids)
-                                .unwrap_or(qp_skills)
-                        }
-                        None => qp_skills,
-                    };
-                }
-                let used = LivePageResourceUse {
-                    workflow_id: workflow.id.clone(),
-                    workflow_name: workflow.name.clone(),
-                    step_name: step.name.clone(),
-                    normal: pinned.map(|index| format!("v{index}")),
-                    shadow: shadow
-                        .and_then(|s| s.quick_prompt_versions.get(qp_id))
-                        .map(|n| format!("v{n}")),
-                };
-                add("quick_prompt", qp_id, name, latest, Some(used));
-            }
-            for skill_id in skills {
-                let base = crate::core::skill_versions::split_pin(&skill_id)
-                    .map(|(base, _)| base.to_string())
-                    .unwrap_or_else(|_| skill_id.clone());
-                let used = LivePageResourceUse {
-                    workflow_id: workflow.id.clone(),
-                    workflow_name: workflow.name.clone(),
-                    step_name: step.name.clone(),
-                    normal: Some(skill_id.clone()),
-                    shadow: shadow.and_then(|s| {
-                        s.skills
-                            .get(&skill_id)
-                            .or_else(|| s.skills.get(&base))
-                            .cloned()
-                    }),
-                };
-                let latest = crate::core::skill_versions::newest_index(&base);
-                add("skill", &base, skill_name(&base), latest, Some(used));
-            }
-        }
-    }
-    found.sort_by(|a, b| {
-        a.kind
-            .cmp(&b.kind)
-            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    Ok(Some(found))
 }

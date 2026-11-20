@@ -431,3 +431,19 @@ describe('api — a stopped backend', () => {
     stop();
   });
 });
+
+describe('a refused request', () => {
+  it('hands the refusal its whole answer, for the fields beside the message', async () => {
+    const answer = { success: false, data: null, error: 'changed', error_code: 'conflict', current_revision_id: 'rev-3' };
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 409,
+      headers: { get: (name: string) => name === 'content-type' ? 'application/json' : null },
+      json: () => Promise.resolve(answer),
+    });
+    const { pages } = await import('../api');
+
+    const refusal = await pages.updateHtml('page-1', { html: '<p>x</p>', created_by_agent: null }).catch((cause: unknown) => cause);
+
+    expect(refusal).toMatchObject({ name: 'ApiRequestError', code: 'conflict', message: 'changed', body: answer });
+  });
+});

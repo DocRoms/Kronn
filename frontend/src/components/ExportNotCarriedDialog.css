@@ -1,0 +1,66 @@
+/* What an export names and does not hold (KT-1843). The overlay and the dialog
+ * shell are the dashboard's (`.dash-modal*`). Tokens only. */
+
+.export-not-carried {
+  width: 560px;
+}
+
+.export-not-carried-intro {
+  margin: 0 0 var(--kr-sp-6);
+  font-size: var(--kr-fs-base);
+  color: var(--kr-text-secondary);
+}
+
+.export-not-carried-list {
+  list-style: none;
+  margin: 0 0 var(--kr-sp-6);
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-md);
+}
+
+.export-not-carried-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  border-bottom: 1px solid var(--kr-border-soft);
+}
+
+.export-not-carried-row:last-child {
+  border-bottom: none;
+}
+
+.export-not-carried-kind {
+  flex: 0 0 96px;
+  font-size: var(--kr-fs-base);
+  font-weight: 600;
+  color: var(--kr-text-primary);
+}
+
+.export-not-carried-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.export-not-carried-id {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-base);
+  color: var(--kr-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.export-not-carried-where {
+  font-size: var(--kr-fs-base);
+  color: var(--kr-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.export-not-carried-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--kr-sp-4);
+}

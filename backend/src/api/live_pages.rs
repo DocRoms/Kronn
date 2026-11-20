@@ -24,12 +24,12 @@ const INVALID_SLUG_MESSAGE: &str = "Page slug must contain lowercase ASCII lette
 /// JSON-RPC request of at most 8 MiB (KT-1139), so an MCP agent writes a Page
 /// of up to about 8 MiB in one call; heavier Pages come through the UI, an
 /// import or the native tools.
-pub(crate) const PAGE_HTML_SAFETY_BYTES: usize = 24 * 1024 * 1024;
+pub const PAGE_HTML_SAFETY_BYTES: usize = 24 * 1024 * 1024;
 /// Weight grades shown in the UI and sent as a write notice (#252).
-pub(crate) const PAGE_HTML_HEAVY_BYTES: usize = 1024 * 1024;
-pub(crate) const PAGE_HTML_VERY_HEAVY_BYTES: usize = 4 * 1024 * 1024;
+pub const PAGE_HTML_HEAVY_BYTES: usize = 1024 * 1024;
+pub const PAGE_HTML_VERY_HEAVY_BYTES: usize = 4 * 1024 * 1024;
 
-pub(crate) fn validate_page_html(html: &str) -> Result<(), String> {
+pub fn validate_page_html(html: &str) -> Result<(), String> {
     if html.trim().is_empty() {
         return Err("Page HTML must be non-empty".into());
     }
@@ -45,7 +45,7 @@ pub(crate) fn validate_page_html(html: &str) -> Result<(), String> {
 
 /// The notice a successful write carries when the HTML is heavy, for the
 /// agent (`kronn_notice`); the Pages UI grades `html_size_bytes` itself.
-pub(crate) fn page_html_weight_notice(bytes: usize) -> Option<String> {
+pub fn page_html_weight_notice(bytes: usize) -> Option<String> {
     let advice = "consider optimizing it: WebP images, data moved to datasets, minification";
     if bytes > PAGE_HTML_VERY_HEAVY_BYTES {
         Some(format!(
@@ -128,6 +128,45 @@ pub async fn get(
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
             format!("Unable to load Page: {error}"),
+        )),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct LivePageDataQuery {
+    /// The data revision the reader holds. Kept as text: a value that does
+    /// not parse gets the full state rather than a refusal.
+    pub since: Option<String>,
+    /// The HTML revision id the reader shows.
+    pub revision: Option<String>,
+}
+
+/// What changed on a Page since the reader's revision: the changed datasets
+/// only, or the full state when the publication journal has a gap.
+pub async fn data(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<LivePageDataQuery>,
+) -> Json<ApiResponse<crate::models::LivePageDataDelta>> {
+    let since = query
+        .since
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let revision = query.revision.filter(|value| !value.is_empty());
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::live_pages::read_live_page_data(conn, &id, since, revision.as_deref())
+        })
+        .await
+    {
+        Ok(Some(delta)) => Json(ApiResponse::ok(delta)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to load Page data: {error}"),
         )),
     }
 }
@@ -414,32 +453,93 @@ pub async fn unlink_discussion(
 }
 
 pub async fn update_html(
+    state: State<AppState>,
+    id: Path<String>,
+    request: Json<UpdateLivePageHtmlRequest>,
+) -> Json<ApiResponse<LivePageRevision>> {
+    Json(save_html(state, id, request).await.0)
+}
+
+/// A save refused for a stale base: the revision the Page has now, if any.
+struct HtmlConflict(Option<String>);
+
+/// The answer of an HTML save and, when it was refused for a stale base,
+/// the conflict it names.
+async fn save_html(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<UpdateLivePageHtmlRequest>,
-) -> Json<ApiResponse<LivePageRevision>> {
+) -> (ApiResponse<LivePageRevision>, Option<HtmlConflict>) {
     if let Err(message) = validate_page_html(&request.html) {
-        return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
+        return (
+            ApiResponse::err_coded(ApiErrorCode::Validation, message),
+            None,
+        );
     }
     let notice = page_html_weight_notice(request.html.len());
     let html = request.html;
     let actor = request.created_by_agent;
+    let base = request.base_revision_id;
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::live_pages::update_live_page_html(conn, &id, &html, actor.as_deref())
+            crate::db::live_pages::update_live_page_html_from(
+                conn,
+                &id,
+                &html,
+                actor.as_deref(),
+                base.as_deref(),
+            )
         })
         .await
     {
-        Ok(revision) => Json(ApiResponse::ok(revision).with_notice(notice)),
-        Err(error) if error.to_string().contains("Page not found") => Json(ApiResponse::err_coded(
-            ApiErrorCode::NotFound,
-            "Page not found",
-        )),
-        Err(error) => Json(ApiResponse::err_coded(
-            ApiErrorCode::Internal,
-            format!("Unable to update Page HTML: {error}"),
-        )),
+        Ok(revision) => (ApiResponse::ok(revision).with_notice(notice), None),
+        Err(error) if error.to_string().contains("Page not found") => (
+            ApiResponse::err_coded(ApiErrorCode::NotFound, "Page not found"),
+            None,
+        ),
+        Err(error) => match error.downcast_ref::<crate::db::live_pages::HtmlRevisionConflict>() {
+            Some(conflict) => (
+                ApiResponse::err_coded(ApiErrorCode::Conflict, error.to_string()),
+                Some(HtmlConflict(conflict.0.clone())),
+            ),
+            None => (
+                ApiResponse::err_coded(
+                    ApiErrorCode::Internal,
+                    format!("Unable to update Page HTML: {error}"),
+                ),
+                None,
+            ),
+        },
+    }
+}
+
+/// The 409 of an HTML save: the usual envelope and the revision to save over.
+#[derive(serde::Serialize)]
+struct HtmlConflictAnswer {
+    #[serde(flatten)]
+    envelope: ApiResponse<LivePageRevision>,
+    current_revision_id: Option<String>,
+}
+
+/// `PUT /api/pages/{id}/html`: a save refused for a stale base answers 409
+/// and names the Page's current revision in `current_revision_id`.
+pub async fn update_html_route(
+    state: State<AppState>,
+    id: Path<String>,
+    request: Json<UpdateLivePageHtmlRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match save_html(state, id, request).await {
+        (envelope, Some(HtmlConflict(current_revision_id))) => (
+            axum::http::StatusCode::CONFLICT,
+            Json(HtmlConflictAnswer {
+                envelope,
+                current_revision_id,
+            }),
+        )
+            .into_response(),
+        (envelope, None) => Json(envelope).into_response(),
     }
 }
 
@@ -586,12 +686,32 @@ pub async fn add_dataset(
     Path(id): Path<String>,
     Json(dataset): Json<CreateLivePageDataset>,
 ) -> Json<ApiResponse<LivePageDataset>> {
+    let revision = |conn: &rusqlite::Connection, page_id: &str| {
+        crate::db::live_pages::get_live_page_summary(conn, page_id)
+            .map(|page| page.map(|page| page.data_revision))
+    };
     match state
         .db
-        .with_conn(move |conn| crate::db::live_pages::add_live_page_dataset(conn, &id, &dataset))
+        .with_conn(move |conn| {
+            let before = revision(conn, &id)?;
+            let dataset = crate::db::live_pages::add_live_page_dataset(conn, &id, &dataset)?;
+            // Declaring an existing dataset again moves nothing.
+            let added = revision(conn, &dataset.page_id)?.filter(|after| Some(*after) != before);
+            Ok((dataset, added))
+        })
         .await
     {
-        Ok(dataset) => Json(ApiResponse::ok(dataset)),
+        Ok((dataset, added)) => {
+            if let Some(data_revision) = added {
+                let _ = state
+                    .ws_broadcast
+                    .send(crate::models::WsMessage::LivePageDataChanged {
+                        page_id: dataset.page_id.clone(),
+                        data_revision,
+                    });
+            }
+            Json(ApiResponse::ok(dataset))
+        }
         Err(error) if error.to_string().contains("Page not found") => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Page not found",
@@ -808,7 +928,7 @@ fn normalize_page_title(title: &str) -> Result<String, &'static str> {
 
 /// A slug never looks like a page id: pages resolve by id or slug, and one
 /// page's slug equal to another's id would make the id ambiguous.
-pub(crate) fn valid_slug(slug: &str) -> bool {
+pub fn valid_slug(slug: &str) -> bool {
     Uuid::parse_str(slug).is_err()
         && !slug.is_empty()
         && slug.len() <= 100
@@ -991,11 +1111,11 @@ pub async fn change_embed_origins(
 }
 
 #[cfg(all(test, feature = "full-tests"))]
-#[path = "live_page_dataset_api_tests.rs"]
-mod dataset_api_tests;
+#[path = "live_page_data_api_tests.rs"]
+mod data_api_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
-mod tests {
+pub mod tests {
     use super::*;
 
     #[test]

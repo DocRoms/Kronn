@@ -212,7 +212,6 @@ fn workflow(
         variables,
         enabled: true,
         retention: None,
-        shadow: None,
         pinned: false,
         created_at: now,
         updated_at: now,
@@ -338,7 +337,10 @@ pub fn bundle(conn: &Connection, language: &str) -> Result<String> {
         referenced_quick_apis: vec![],
         referenced_quick_execs: vec![],
         referenced_skills: vec![],
+        referenced_directives: vec![],
+        referenced_profiles: vec![],
         redacted_fields: vec![],
+        not_carried: Vec::new(),
     };
     Ok(serde_json::to_string(&bundle)?)
 }

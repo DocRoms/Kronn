@@ -1,6 +1,6 @@
 //! Dataset lifecycle after creation (KT-1104): what uses a dataset, deleting
 //! it, and changing its retention limits.
-use super::*;
+pub use super::*;
 use crate::models::{
     DeleteLivePageDatasetResult, LivePageDatasetUsage, LivePageDatasetWriter,
     UpdateLivePageDatasetRequest, UpdateLivePageDatasetResult,
@@ -64,7 +64,7 @@ fn targets_page(target: &str, page: &LivePage, aliases: &HashSet<String>) -> boo
 
 /// `name` as a whole word of `html`: neither neighbour is a character a
 /// dataset name may contain.
-fn html_names(html: &str, name: &str) -> bool {
+pub fn html_names(html: &str, name: &str) -> bool {
     let is_name_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     html.match_indices(name).any(|(start, _)| {
         let before = html[..start].chars().next_back();
@@ -189,7 +189,7 @@ fn find_dataset(conn: &Connection, page_id: &str, name: &str) -> Result<LivePage
 }
 
 /// Moves the Page to a new data revision so open views reload it.
-fn bump_data_revision(conn: &Connection, page_id: &str) -> Result<u64> {
+pub(super) fn bump_data_revision(conn: &Connection, page_id: &str) -> Result<u64> {
     let revision: i64 = conn.query_row(
         "UPDATE live_pages SET data_revision = data_revision + 1, updated_at = ?2
           WHERE id = ?1 RETURNING data_revision",
@@ -197,6 +197,16 @@ fn bump_data_revision(conn: &Connection, page_id: &str) -> Result<u64> {
         |row| row.get(0),
     )?;
     u64::try_from(revision).context("Negative Page data revision")
+}
+
+/// Removes every dataset of a Page, for a caller that declares them again.
+/// The revision moves even when none comes back, so no reader keeps them.
+pub fn clear_live_page_datasets(conn: &Connection, page_id: &str) -> Result<u64> {
+    conn.execute(
+        "DELETE FROM live_page_datasets WHERE page_id = ?1",
+        [page_id],
+    )?;
+    bump_data_revision(conn, page_id)
 }
 
 /// Deletes a dataset and its points. Refused with [`DatasetReferenced`] while
@@ -283,7 +293,3 @@ pub fn update_live_page_dataset_limits(
         data_revision,
     })
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "live_page_datasets_tests.rs"]
-pub(crate) mod tests;

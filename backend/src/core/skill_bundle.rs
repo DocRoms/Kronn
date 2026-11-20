@@ -194,16 +194,34 @@ pub fn bundle_skill(id: &str) -> Option<BundledSkill> {
     })
 }
 
-/// The bundle entries of every custom skill among `ids`, once each.
+/// The bundle entries of every custom skill among `ids`, once each, then of
+/// the custom skills their text names (KT-1843): a skill that sends the agent
+/// to another one is of no use without it.
 pub fn bundle_skills<'a>(ids: impl IntoIterator<Item = &'a String>) -> Vec<BundledSkill> {
-    let wanted: BTreeSet<&String> = ids
+    let mut queue: Vec<String> = ids
         .into_iter()
         .filter(|id| id.starts_with("custom-"))
-        .collect();
-    wanted
+        .cloned()
+        .collect::<BTreeSet<String>>()
         .into_iter()
-        .filter_map(|id| bundle_skill(id))
-        .collect()
+        .collect();
+    let mut seen: BTreeSet<String> = queue.iter().cloned().collect();
+    let mut bundled = Vec::new();
+    while let Some(id) = queue.pop() {
+        let Some(skill) = bundle_skill(&id) else {
+            continue;
+        };
+        let mut cited = BTreeSet::new();
+        ids_in_text(&skill.content, &mut cited);
+        for id in cited {
+            if seen.insert(id.clone()) {
+                queue.push(id);
+            }
+        }
+        bundled.push(skill);
+    }
+    bundled.sort_by(|a, b| a.id.cmp(&b.id));
+    bundled
 }
 
 /// A bundled skill whose file is intact, with the name its file gives.
@@ -403,6 +421,77 @@ pub fn remap_ids(ids: &mut [String], remap: &HashMap<String, String>) {
     }
 }
 
+/// Every value of a JsonData `payload` spelled like a custom skill id
+/// (`custom-x`, `custom-x@N`): a script that loads skills by the ids its
+/// configuration lists needs them as much as a step's `skill_ids`. Export
+/// bundles those that exist; any other string is left out.
+pub fn ids_in_payload(payload: &serde_json::Value, out: &mut BTreeSet<String>) {
+    match payload {
+        serde_json::Value::String(text) => {
+            if text.starts_with("custom-")
+                && !text.contains(char::is_whitespace)
+                && super::skill_versions::split_pin(text).is_ok()
+            {
+                out.insert(text.clone());
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| ids_in_payload(item, out)),
+        serde_json::Value::Object(map) => map.values().for_each(|item| ids_in_payload(item, out)),
+        _ => {}
+    }
+}
+
+/// Every custom skill id (`custom-x`, `custom-x@N`) written inside `text`: in
+/// a script, a prompt, a key (KT-1843). A whole id only, as its characters
+/// bound it: the caller keeps those that name an existing skill, so a prefix
+/// a script tests (`startswith('custom-pr')`) carries nothing.
+pub fn ids_in_text(text: &str, out: &mut BTreeSet<String>) {
+    let part = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let mut from = 0;
+    while let Some(found) = text[from..].find("custom-") {
+        let start = from + found;
+        from = start + "custom-".len();
+        if text[..start].chars().next_back().is_some_and(part) {
+            continue;
+        }
+        let rest = &text[start..];
+        let end = rest.find(|c: char| !part(c)).unwrap_or(rest.len());
+        let id = rest[..end].trim_end_matches('-');
+        if id.len() == "custom".len() || id.contains('_') {
+            continue;
+        }
+        from = start + id.len();
+        let digits = rest[id.len()..]
+            .strip_prefix('@')
+            .map(|pin| pin.chars().take_while(char::is_ascii_digit).count())
+            .unwrap_or(0);
+        if digits > 0 {
+            out.insert(rest[..id.len() + 1 + digits].to_string());
+        } else {
+            out.insert(id.to_string());
+        }
+    }
+}
+
+/// [`remap_ids`] for the values of a JsonData `payload`: a value equal to a
+/// bundled skill id becomes the local id; keys and other values stay.
+pub fn remap_payload(payload: &mut serde_json::Value, remap: &HashMap<String, String>) {
+    match payload {
+        serde_json::Value::String(text) => {
+            if let Some(target) = remap.get(text.as_str()) {
+                *text = target.clone();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            items.iter_mut().for_each(|item| remap_payload(item, remap))
+        }
+        serde_json::Value::Object(map) => {
+            map.values_mut().for_each(|item| remap_payload(item, remap))
+        }
+        _ => {}
+    }
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
@@ -529,6 +618,48 @@ mod tests {
         let skill = crate::core::skills::parse_skill_markdown("custom-x", &scoped, false).unwrap();
         assert_eq!(skill.project_id.as_deref(), Some("q"));
         assert_eq!(skill.icon, "🦀");
+    }
+
+    #[test]
+    fn ids_in_text_finds_whole_ids_wherever_a_script_or_a_prompt_writes_them() {
+        let found = |text: &str| {
+            let mut out = BTreeSet::new();
+            ids_in_text(text, &mut out);
+            out.into_iter().collect::<Vec<_>>()
+        };
+        assert_eq!(
+            found("SKILLS = ['custom-front-conventions', \"custom-output-format@3\", 'php']"),
+            ["custom-front-conventions", "custom-output-format@3"]
+        );
+        assert_eq!(
+            found("Load custom-a, then custom-b."),
+            ["custom-a", "custom-b"]
+        );
+        assert_eq!(found("skills/custom-a.md custom-a@x"), ["custom-a"]);
+        // A prefix a script tests, a longer word, another identifier: no id.
+        assert_eq!(found("name.startswith('custom-pr-')"), ["custom-pr"]);
+        assert!(found("custom- my-custom-a custom_a xcustom-a custom-a_b").is_empty());
+        assert!(found("").is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn a_bundled_skill_brings_the_custom_skills_its_text_names() {
+        let _dir = DataDir::new("skill-bundle-cited");
+        let leaf = create("Output format", "Answer in a table.", None);
+        let middle = create("Conventions", &format!("Then follow {leaf}."), None);
+        let top = create(
+            "Review",
+            &format!("Load {middle} first, never custom-gone, and {middle} again."),
+            None,
+        );
+        let alone = create("Unrelated", "Nothing to cite.", None);
+
+        let ids: Vec<String> = bundle_skills([&top]).into_iter().map(|s| s.id).collect();
+        let mut expected = vec![leaf, middle, top];
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert!(!ids.contains(&alone));
     }
 
     #[test]

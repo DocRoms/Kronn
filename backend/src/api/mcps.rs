@@ -337,7 +337,7 @@ async fn probe_plugin(
     build_probe_response(&server.id, checks)
 }
 
-async fn probe_api(
+pub async fn probe_api(
     state: &AppState,
     server: &McpServer,
     config: &McpConfig,
@@ -355,7 +355,7 @@ async fn probe_api(
     .await
 }
 
-async fn probe_api_with_policy(
+pub async fn probe_api_with_policy(
     state: &AppState,
     server: &McpServer,
     config: &McpConfig,
@@ -644,7 +644,7 @@ fn mcp_probe_command(
     process
 }
 
-async fn probe_mcp_stdio_with_timeout(
+pub async fn probe_mcp_stdio_with_timeout(
     command: &str,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
@@ -979,7 +979,7 @@ pub async fn create_config(
 /// Slugify a user-typed label into an `UPPER_SNAKE_CASE` env key.
 /// Examples: "Bearer Token" → "BEARER_TOKEN", "Org ID" → "ORG_ID",
 /// "x-api-key (header)" → "X_API_KEY_HEADER".
-pub(crate) fn slug_env_key(label: &str) -> String {
+pub fn slug_env_key(label: &str) -> String {
     let mut out = String::with_capacity(label.len());
     let mut prev_underscore = true; // skip leading underscores
     for ch in label.chars() {
@@ -1004,7 +1004,7 @@ pub(crate) fn slug_env_key(label: &str) -> String {
 /// unique `custom-{slug}-{nano}` so two instances of the same vendor with
 /// different credentials don't collide. `source = Manual` to distinguish
 /// from registry-sourced entries in the UI and analytics.
-pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer {
+pub fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer {
     let slug = name_slug(&payload.name);
     let nano: String = Uuid::new_v4().simple().to_string()[..8].to_string();
     let id = format!("custom-{}-{}", slug, nano);
@@ -1095,7 +1095,7 @@ fn validate_custom_auth(auth: &ApiAuthKind) -> Result<(), String> {
 }
 
 /// Every check a user-authored or imported Custom API spec must pass.
-pub(crate) fn validate_custom_payload(payload: &CustomApiPayload) -> Result<(), String> {
+pub fn validate_custom_payload(payload: &CustomApiPayload) -> Result<(), String> {
     validate_custom_auth(&payload.auth)?;
     validate_default_headers(payload)?;
     validate_test_endpoint(payload)
@@ -1267,7 +1267,7 @@ fn validate_default_headers(payload: &CustomApiPayload) -> Result<(), String> {
 
 /// Lower-snake-case slug for server-id construction. Mirrors the env-key
 /// slugifier but keeps lowercase: "Salesforce Sales API" → "salesforce-sales-api".
-pub(crate) fn name_slug(name: &str) -> String {
+pub fn name_slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_dash = true;
     for ch in name.chars() {
@@ -1354,7 +1354,7 @@ pub struct UpdateCustomSpecResponse {
 ///
 /// Secret-safe by construction: only key NAMES are read; values stay
 /// encrypted at the DB layer. Pure fn = unit-testable without a DB.
-pub(crate) fn compute_orphan_env_keys(
+pub fn compute_orphan_env_keys(
     prev: &McpServer,
     payload: &CustomApiPayload,
     configs: &[McpConfigDisplay],
@@ -1951,7 +1951,7 @@ pub async fn refresh(
                     // Try to match against registry by command+args
                     let registry_match = match_registry_entry(entry, &reg);
 
-                    let (server_id, server_name, description, source, server_transport) =
+                    let (server_id, server_name, description, source, server_transport, api_spec) =
                         if let Some(def) = registry_match {
                             (
                                 def.id.clone(),
@@ -1959,6 +1959,7 @@ pub async fn refresh(
                                 def.description.clone(),
                                 McpSource::Registry,
                                 def.transport.clone(),
+                                def.api_spec.clone(),
                             )
                         } else {
                             let desc = if let Some(cmd) = &entry.command {
@@ -1980,19 +1981,20 @@ pub async fn refresh(
                                 desc,
                                 McpSource::Detected,
                                 transport.clone(),
+                                None,
                             )
                         };
 
-                    // `.mcp.json` detection never surfaces API-only plugins —
-                    // they live exclusively in the Kronn catalog, not on disk —
-                    // so api_spec is always None on this path.
+                    // A registry match keeps its spec: a hybrid plugin (GitHub,
+                    // Atlassian) is in `.mcp.json` AND has a REST API. Only a
+                    // `detected:*` server has none.
                     let server = McpServer {
                         id: server_id.clone(),
                         name: server_name,
                         description,
                         transport: server_transport,
                         source,
-                        api_spec: None,
+                        api_spec,
                     };
                     db::mcps::upsert_server(&tx, &server)?;
 
@@ -2122,6 +2124,29 @@ pub async fn refresh(
 /// timeout; this just caps how many run at once so testing a large plugin
 /// list doesn't fork dozens of CLIs simultaneously.
 const TEST_ALL_CONCURRENCY: usize = 4;
+
+/// POST /api/mcps/configs/{id}/check-token — probe one connection's token now
+/// (KT-1692), unless it was probed a moment ago (`rate_limited`).
+pub async fn check_token(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<McpTokenCheckResult>> {
+    match crate::core::token_checks::check_connection(&state, &id).await {
+        Ok(result) => Json(ApiResponse::ok(result)),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
+/// POST /api/mcps/check-tokens — "Check all" (KT-1692): probe every connection
+/// that has a test endpoint.
+pub async fn check_all_tokens(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<McpTokenCheckAllResponse>> {
+    match crate::core::token_checks::check_all(&state).await {
+        Ok(results) => Json(ApiResponse::ok(McpTokenCheckAllResponse { results })),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
 
 /// POST /api/mcps/test-all — probe every visible config, per access, with a
 /// bounded concurrency. Persists the same way a single `probe_config` call
@@ -2437,7 +2462,15 @@ fn read_host_entry_env(
         }
         HostScope::Codex => {
             // toml 1.x: parse Document into Table directly.
-            let v: toml::Table = raw.parse()?;
+            // Not `?`: a toml error's Display prints the offending source line
+            // (an env token), and this error reaches the API response.
+            let v: toml::Table = raw.parse().map_err(|e: toml::de::Error| {
+                anyhow::anyhow!(
+                    "Cannot parse {}: {}",
+                    source_file,
+                    crate::core::redact::toml_error_summary(&raw, &e)
+                )
+            })?;
             let entry = v
                 .get("mcp_servers")
                 .and_then(|o| o.get(name))
@@ -2869,6 +2902,30 @@ ATL_USER = "alice"
         assert_eq!(env.get("ATL_USER"), Some(&"alice".to_string()));
     }
 
+    /// KT-1528 — a half-written ~/.codex/config.toml: the adopt error reaches the
+    /// API response, so it must say where the file is broken, not print the
+    /// offending line (an env token).
+    #[test]
+    fn an_unreadable_codex_toml_error_never_echoes_its_env_tokens() {
+        let tmp = TempDir::new().unwrap();
+        let codex = tmp.path().join("config.toml");
+        for broken in [
+            "[mcp_servers.gh.env]\nGITHUB_TOKEN = \"ghp_secret\n",
+            "[mcp_servers.gh.env]\nGITHUB_TOKEN = \"ghp_secret\" x\n",
+        ] {
+            fs::write(&codex, broken).unwrap();
+            let error =
+                read_host_entry_env(codex.to_str().unwrap(), &HostScope::Codex, "gh").unwrap_err();
+            let shown = format!("Adopt failed: {error}");
+            let chain = format!("{error:?}");
+            for text in [&shown, &chain] {
+                assert!(text.contains("line 2"), "{text}");
+                assert!(!text.contains("ghp_secret"), "{text}");
+                assert!(!text.contains("GITHUB_TOKEN"), "{text}");
+            }
+        }
+    }
+
     #[test]
     fn read_env_missing_entry_returns_error() {
         let tmp = TempDir::new().unwrap();
@@ -3152,7 +3209,7 @@ pub fn build_custom_plugin_export(server: &McpServer) -> Option<CustomApiPayload
 
 /// A file from a configuration-only export may hold placeholders (KT-1040):
 /// the file route has no review to ask for them, so its answer names them.
-pub(crate) fn unfilled_placeholder_notice(server: &McpServer) -> Option<String> {
+pub fn unfilled_placeholder_notice(server: &McpServer) -> Option<String> {
     let unfilled = crate::api::plugin_portability::placeholders_in(server);
     (!unfilled.is_empty()).then(|| {
         format!(
@@ -3370,51 +3427,6 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("Security"), "{err}");
-    }
-
-    /// A probed MCP server, possibly chosen by a repository's `.mcp.json`,
-    /// sees its own configured values and no backend secret (B4-04).
-    #[cfg(unix)]
-    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
-    #[test]
-    fn a_probed_mcp_server_sees_no_backend_secret() {
-        use crate::core::child_env::probe;
-        probe::plant_real_sentinel();
-        let bin = tempfile::tempdir().unwrap();
-        let out = probe::env_dumping_program(bin.path(), "repo-mcp");
-        let path = format!("{}:/usr/bin:/bin", bin.path().display());
-        let mut parent = probe::parent_with_secrets(&path, "/home/u");
-        parent.push(("KRONN_KEK".into(), "sentinel-legacy-kek".into()));
-        let borrowed: Vec<(&str, &str)> = parent
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
-        let env = std::collections::HashMap::from([(
-            "SERVER_API_TOKEN".to_string(),
-            "its-own".to_string(),
-        )]);
-        let command = bin.path().join("repo-mcp");
-        let _ = crate::core::child_env::with_parent_env(&borrowed, || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(probe_mcp_stdio_with_timeout(
-                    command.to_str().unwrap(),
-                    &[],
-                    &env,
-                    // The fake exits once it has written its environment, so
-                    // the probe returns then; the deadline only bounds a hang.
-                    Duration::from_secs(60),
-                ))
-        });
-        let seen = probe::read_dump(&out);
-        probe::assert_dump_without_secrets(&seen, &[]);
-        assert!(!seen.contains_key("KRONN_KEK"));
-        assert_eq!(
-            seen.get("SERVER_API_TOKEN").map(String::as_str),
-            Some("its-own")
-        );
     }
     use crate::core::mcp_scanner::McpServerEntry;
 
@@ -4892,6 +4904,8 @@ mod tests {
             merged_into_existing: None,
             last_probes: vec![],
             auth_failure: None,
+            token_probe: false,
+            token_check: None,
         }
     }
 

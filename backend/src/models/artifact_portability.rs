@@ -1,5 +1,5 @@
-//! Versioned Artifact bundles. Runtime histories and credentials are not part
-//! of the portable definition; retained dataset observations are explicitly included.
+//! Versioned Artifact bundles, without credentials or runtime histories. An Artifact
+//! file carries dataset definitions only; project resources and pre-#273 files carry values.
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -72,9 +72,22 @@ pub struct ArtifactBundle {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<Vec<super::BundledSkill>>")]
     pub referenced_skills: Vec<super::BundledSkill>,
+    /// KT-1843 — custom directives and profiles the steps and the bundled
+    /// Quick objects bind; an import reuses the local one that says the same.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<super::Directive>>")]
+    pub referenced_directives: Vec<super::Directive>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<super::AgentProfile>>")]
+    pub referenced_profiles: Vec<super::AgentProfile>,
     /// Literal credentials replaced before export; locations only, never values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
+    /// KT-1843 — what the exported content names and the file does not hold;
+    /// shown before the file leaves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<NotCarried>>")]
+    pub not_carried: Vec<NotCarried>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
@@ -183,6 +196,8 @@ pub struct ArtifactImportPreview {
     pub embed_origins: Vec<ArtifactImportEmbedOrigin>,
     /// What the import does with each bundled custom skill (KT-1446).
     pub skills: Vec<super::SkillImportDecision>,
+    /// What the import does with each bundled directive and profile (KT-1843).
+    pub bindings: Vec<super::BindingImportDecision>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -199,6 +214,8 @@ pub struct ArtifactImportResult {
     pub artifact: super::LivePage,
     pub entries: Vec<ArtifactImportEntry>,
     pub skills: Vec<super::SkillImportDecision>,
+    /// What the import did with each bundled directive and profile (KT-1843).
+    pub bindings: Vec<super::BindingImportDecision>,
     /// Origins this import added to the allowed sites.
     pub allowed_embed_origins: Vec<String>,
     /// Origins the user chose to add that are NOT allowed although the
@@ -213,4 +230,16 @@ pub struct ArtifactImportResult {
 pub struct ArtifactImportWarning {
     pub kind: String,
     pub id: String,
+}
+
+/// An object the exported content names and the file does not hold.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NotCarried {
+    /// `skill`, `directive`, `profile`, `page`, `workflow`, `quick_prompt`,
+    /// `quick_api` or `quick_exec`.
+    pub kind: String,
+    pub id: String,
+    /// Where it is named, e.g. `Review › write_ctx` (workflow, then step).
+    pub named_in: String,
 }

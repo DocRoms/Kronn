@@ -10,6 +10,7 @@ import {
   runtimeData,
 } from '../lib/live-page-sandbox';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
+import { createRequestSequence, refreshLivePageDetail, replacesShown } from '../lib/live-page-refresh';
 import {
   useActionStatesInFrame,
   useLivePageActions,
@@ -56,46 +57,59 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
     reload: reloadPageActions,
   } = useLivePageActions(() => setActionUnavailable(true));
 
+  // The snapshot a refresh starts from: only what changed since is read.
+  // Written with the state, never a render later.
+  const detailRef = useRef<LivePageDetail | null>(null);
+
+  // Answers are applied in the order their reads started; one that arrives
+  // after a newer one was shown, or for a Page since left, is dropped.
+  const [reads] = useState(createRequestSequence);
+
   useEffect(() => {
-    let active = true;
+    const ticket = reads.next(pageId);
     Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
-      if (!active) return;
+      if (!reads.apply(ticket)) return;
+      detailRef.current = page;
       setDetail(page);
       setError(null);
     }).catch(cause => {
-      if (!active) return;
-      setError(userError(cause));
+      // Not when a read started later already brought the Page.
+      if (reads.wanted(ticket)) setError(userError(cause));
     });
-    return () => { active = false; };
-  }, [pageId, reloadPageActions]);
+  }, [pageId, reads, reloadPageActions]);
 
-  // Keep reading the Page while the tab is open. New data reaches the frame by
-  // postMessage; the document is only rebuilt when the Page's HTML changes, so
-  // scroll and open rows survive a refresh.
+  // Keep following the Page while the tab is open: the poll compares the
+  // revision and reads the datasets that changed. New data reaches the frame
+  // by postMessage; the document is only rebuilt when the Page's HTML
+  // changes, so scroll and open rows survive a refresh.
+  const followPage = useCallback(() => {
+    const ticket = reads.follow(pageId);
+    if (ticket === null) return;
+    Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([read]) => {
+      if (!replacesShown(detailRef.current, read) || !reads.apply(ticket)) return;
+      // At once: the next answer of this turn is compared with this one.
+      detailRef.current = read.detail;
+      setDetail(read.detail);
+      setError(null);
+    }).catch(() => { /* keep the last view; the next read retries */ });
+  }, [pageId, reads, reloadPageActions]);
+
   useEffect(() => {
-    let active = true;
     const refresh = () => {
       if (document.visibilityState === 'hidden') return;
-      Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
-        if (active) setDetail(page);
-      }).catch(() => { /* keep the last view; the next tick retries */ });
+      followPage();
     };
     const timer = window.setInterval(refresh, REFRESH_MS);
     const onVisibility = () => { if (document.visibilityState === 'visible') refresh(); };
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      active = false;
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [pageId, reloadPageActions]);
+  }, [followPage]);
 
   // A publish reaches the open tab at once, without waiting for the poll.
-  useLivePageDataPush(pageId, () => {
-    Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
-      setDetail(current => (current && current.id !== page.id ? current : page));
-    }).catch(() => { /* the poll retries */ });
-  });
+  useLivePageDataPush(pageId, followPage);
 
   useEffect(() => {
     if (!detail) return undefined;
