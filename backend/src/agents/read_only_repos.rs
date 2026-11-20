@@ -133,11 +133,115 @@ const SECRET_DIR_NAMES: &[&str] = &[".ssh", ".aws", ".kronn/backups"];
 const SCAN_MAX_DEPTH: usize = 8;
 const SCAN_MAX_ENTRIES: usize = 20_000;
 const SCAN_SKIPPED_DIRS: &[&str] = &[".git", "node_modules", "target"];
-/// Bound the whole inline settings document, including the vault rules, rather
-/// than a count per root. Linux limits one argument to 128 KiB; keeping the room
-/// policy below 96 KiB leaves headroom and makes additional code roots share the
-/// same finite budget.
-pub const ROOM_SETTINGS_MAX_BYTES: usize = 96 * 1024;
+/// What a settings document may weigh as a command-line argument. Linux limits
+/// one argument to 128 KiB; a larger document is handed over as a file
+/// (KT-1971). Optional scan literals a pattern already covers stay within it.
+pub const SETTINGS_INLINE_MAX_BYTES: usize = 96 * 1024;
+
+/// Bound of the whole settings document, the vault rules included. Every
+/// granted project adds a fixed block of rules (about 5 KB read-only, 30 KB for
+/// `code`). The CLI refuses a settings file above 2 MiB ("Settings file exceeds
+/// the 2MiB limit", Claude Code 2.1.329) and was measured with a 1.9 MB
+/// document of 27 000 rules; the bound keeps room for the rules a launch adds.
+pub const ROOM_SETTINGS_MAX_BYTES: usize = 1920 * 1024;
+
+/// What the CLI accepts as a settings file.
+const CLAUDE_SETTINGS_FILE_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Where the settings documents too large for an argument are written.
+const LAUNCH_SETTINGS_DIR: &str = "launch-settings";
+/// A document no launch wrote again for this long is removed.
+const LAUNCH_SETTINGS_KEPT: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+
+fn launch_settings_dir() -> Result<PathBuf, String> {
+    crate::core::config::config_dir()
+        .map(|dir| dir.join(LAUNCH_SETTINGS_DIR))
+        .map_err(|error| format!("no Kronn data directory for the launch settings: {error}"))
+}
+
+/// Hand a settings document over as a file when it is too large for an
+/// argument: the `--settings` value becomes the path of a private file named
+/// after its content, in a directory the document itself closes to the agent.
+/// On failure the document stays inline, where the system's argument limit
+/// refuses a launch it cannot carry: the rules are never dropped.
+fn spill_large_settings(args: &mut [String]) {
+    let Some(at) = args
+        .windows(2)
+        .position(|pair| pair[0] == "--settings" && pair[1].starts_with('{'))
+        .map(|at| at + 1)
+    else {
+        return;
+    };
+    if args[at].len() <= SETTINGS_INLINE_MAX_BYTES {
+        return;
+    }
+    match write_launch_settings(&args[at]) {
+        Ok(path) => args[at] = path.display().to_string(),
+        Err(error) => tracing::error!(%error, "launch settings kept inline"),
+    }
+}
+
+fn write_launch_settings(document: &str) -> Result<PathBuf, String> {
+    use sha2::Digest;
+    let dir = launch_settings_dir()?;
+    let mut settings: serde_json::Value = serde_json::from_str(document)
+        .map_err(|error| format!("settings are not JSON: {error}"))?;
+    // The agent never rewrites the rules it runs under.
+    let root = dir.display().to_string();
+    let deny = settings["permissions"]["deny"]
+        .as_array_mut()
+        .ok_or("settings carry no deny list")?;
+    for tool in ["Edit", "Write"] {
+        deny.push(rule(tool, &root, "**").into());
+    }
+    if settings["sandbox"]["enabled"] == true {
+        match settings["sandbox"]["filesystem"]["denyWrite"].as_array_mut() {
+            Some(paths) => paths.push(root.into()),
+            None => return Err("sandboxed settings carry no denyWrite list".into()),
+        }
+    }
+    let document = settings.to_string();
+    if document.len() > CLAUDE_SETTINGS_FILE_MAX_BYTES {
+        return Err(format!(
+            "the Claude settings need {} bytes, above the {CLAUDE_SETTINGS_FILE_MAX_BYTES}-byte limit of a settings file",
+            document.len()
+        ));
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("cannot close {}: {error}", dir.display()))?;
+    }
+    forget_old_launch_settings(&dir);
+    let name: String = sha2::Sha256::digest(document.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let path = dir.join(format!("{name}.json"));
+    // Always rewritten: a file of that name is never trusted for its content.
+    crate::core::atomic_file::atomic_write(&path, &document)?;
+    Ok(path)
+}
+
+fn forget_old_launch_settings(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age > LAUNCH_SETTINGS_KEPT);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct ScannedSecrets {
@@ -833,6 +937,16 @@ impl ReadOnlyRepos {
         work_dir: &Path,
         checkouts: &[VerifiedCheckout],
     ) -> Result<Option<Self>, String> {
+        Self::resolve_room_within(agent, work_dir, checkouts, ROOM_SETTINGS_MAX_BYTES)
+    }
+
+    /// [`Self::resolve_room`] under a given bound of the settings document.
+    pub fn resolve_room_within(
+        agent: &AgentType,
+        work_dir: &Path,
+        checkouts: &[VerifiedCheckout],
+        max_bytes: usize,
+    ) -> Result<Option<Self>, String> {
         if checkouts.is_empty() {
             return Ok(None);
         }
@@ -883,7 +997,7 @@ impl ReadOnlyRepos {
             compact_paths: false,
             granted_dirs: Vec::new(),
         };
-        policy.fit_scanned_to_room_budget(&work_dir, scans)?;
+        policy.fit_scanned_to_room_budget(&work_dir, scans, max_bytes)?;
         Ok(Some(policy))
     }
 
@@ -907,17 +1021,27 @@ impl ReadOnlyRepos {
         &mut self,
         work_dir: &Path,
         scans: Vec<(PathBuf, ScannedSecrets)>,
+        max_bytes: usize,
     ) -> Result<(), String> {
         let absolute = self.args(&AgentType::ClaudeCode, work_dir);
-        if self.settings_document(&absolute).len() > ROOM_SETTINGS_MAX_BYTES {
+        if self.settings_document(&absolute).len() > SETTINGS_INLINE_MAX_BYTES {
+            // Paths relative to the working directory only where they keep
+            // the document an argument: a file carries absolute paths.
             self.compact_paths = true;
+            let compact = self.args(&AgentType::ClaudeCode, work_dir);
+            self.compact_paths =
+                self.settings_document(&compact).len() <= SETTINGS_INLINE_MAX_BYTES;
         }
-        let compact = self.args(&AgentType::ClaudeCode, work_dir);
-        let mandatory_len = self.settings_document(&compact).len();
-        if mandatory_len > ROOM_SETTINGS_MAX_BYTES {
+        let required = self.args(&AgentType::ClaudeCode, work_dir);
+        let mandatory_len = self.settings_document(&required).len();
+        if mandatory_len > max_bytes {
             return Err(format!(
-                "the room's required checkout rules need {mandatory_len} bytes, above the {}-byte Claude settings limit",
-                ROOM_SETTINGS_MAX_BYTES
+                "this room is granted too many projects for Claude Code ({} opened, {} for editing): \
+                 their protection rules need {mandatory_len} bytes, above the {}-byte limit. \
+                 Grant fewer projects to the room, or grant them read-only",
+                self.roots.len() + self.code_roots.len(),
+                self.code_roots.len(),
+                max_bytes
             ));
         }
 
@@ -941,7 +1065,7 @@ impl ReadOnlyRepos {
                 })
                 .collect();
             let args = self.args(&AgentType::ClaudeCode, work_dir);
-            if self.settings_document(&args).len() <= ROOM_SETTINGS_MAX_BYTES {
+            if self.settings_document(&args).len() <= max_bytes {
                 break;
             }
             let mut changed = false;
@@ -955,7 +1079,7 @@ impl ReadOnlyRepos {
             if !changed {
                 return Err(format!(
                     "the room's secret paths cannot fit the {}-byte Claude settings limit",
-                    ROOM_SETTINGS_MAX_BYTES
+                    max_bytes
                 ));
             }
         }
@@ -989,7 +1113,8 @@ impl ReadOnlyRepos {
                 let read_bytes = usize::from(!deny_read.contains(&path)) * (encoded.len() + 1);
                 let write_bytes =
                     usize::from(code && !deny_write.contains(&path)) * (encoded.len() + 1);
-                if bytes + read_bytes + write_bytes > ROOM_SETTINGS_MAX_BYTES {
+                // Paths a pattern already closes: never what makes a file of it.
+                if bytes + read_bytes + write_bytes > SETTINGS_INLINE_MAX_BYTES {
                     continue;
                 }
                 bytes += read_bytes + write_bytes;
@@ -1007,10 +1132,10 @@ impl ReadOnlyRepos {
         }
         let final_args = self.args(&AgentType::ClaudeCode, work_dir);
         let final_len = self.settings_document(&final_args).len();
-        if final_len > ROOM_SETTINGS_MAX_BYTES {
+        if final_len > max_bytes {
             return Err(format!(
                 "the room's Claude settings grew to {final_len} bytes, above the {}-byte limit",
-                ROOM_SETTINGS_MAX_BYTES
+                max_bytes
             ));
         }
         Ok(())
@@ -1024,6 +1149,7 @@ impl ReadOnlyRepos {
         args.extend(self.args(agent, work_dir));
         // KT-1495 — one `--settings` document: the vault rules join the policy's.
         crate::core::vault_guard::fold_vault_into_claude_settings(args, &self.granted_dirs);
+        spill_large_settings(args);
         args.push(prompt);
     }
 

@@ -1688,6 +1688,185 @@ mod tests {
         assert!(ReadOnlyRepos::resolve_room(&agent, &work, &checkouts).is_err());
     }
 
+    /// A room granted `count` projects, launched: the `--settings` value the
+    /// CLI receives and the document behind it.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    fn launched_room(
+        count: usize,
+        access: ScopeAccess,
+    ) -> (
+        tempfile::TempDir,
+        Vec<String>,
+        Result<(String, serde_json::Value), String>,
+    ) {
+        launched_room_within(count, access, ROOM_SETTINGS_MAX_BYTES)
+    }
+
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    fn launched_room_within(
+        count: usize,
+        access: ScopeAccess,
+        max_bytes: usize,
+    ) -> (
+        tempfile::TempDir,
+        Vec<String>,
+        Result<(String, serde_json::Value), String>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let repos: Vec<String> = (0..count)
+            .map(|n| checkout(temp.path(), &format!("project-{n}")))
+            .collect();
+        let granted = repos
+            .iter()
+            .enumerate()
+            .map(|(n, repo)| reached(&format!("p{n}"), &format!("project-{n}"), repo, access))
+            .collect();
+        let plan = plan(
+            &AgentType::ClaudeCode,
+            Some(&work),
+            false,
+            RoomReach {
+                granted,
+                requestable: vec![],
+            },
+        );
+        assert_eq!(opened(&plan), repos);
+        let launched = ReadOnlyRepos::resolve_room_within(
+            &AgentType::ClaudeCode,
+            &work,
+            &plan.checkouts(),
+            max_bytes,
+        )
+        .map(|policy| {
+            let mut args = vec!["prompt".to_string()];
+            policy
+                .unwrap()
+                .apply(&AgentType::ClaudeCode, &work, &mut args);
+            assert_eq!(args.last().unwrap(), "prompt");
+            let at = args.iter().position(|arg| arg == "--settings").unwrap();
+            let value = args[at + 1].clone();
+            let document = if value.starts_with('{') {
+                value.clone()
+            } else {
+                std::fs::read_to_string(&value).unwrap()
+            };
+            (value, serde_json::from_str(&document).unwrap())
+        });
+        (temp, repos, launched)
+    }
+
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    fn listed(settings: &serde_json::Value, pointer: &str, value: &str) -> bool {
+        settings
+            .pointer(pointer)
+            .and_then(|list| list.as_array())
+            .is_some_and(|list| list.iter().any(|entry| entry == value))
+    }
+
+    // KT-1971 — every granted project adds a fixed block of rules: a room
+    // granted every project of an instance passed the argument limit and its
+    // agent never started.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_room_granted_sixty_projects_launches_with_every_rule_in_a_private_file() {
+        let (_temp, repos, launched) = launched_room(60, ScopeAccess::Read);
+        let (value, settings) = launched.expect("sixty read-only projects launch");
+        // One argument stays far below what the system carries.
+        assert!(value.len() < 1024, "{} bytes of argument", value.len());
+        let file = Path::new(&value);
+        let dir = file.parent().unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(file), 0o600);
+            assert_eq!(mode(dir), 0o700);
+        }
+        assert!(std::fs::metadata(file).unwrap().len() > 128 * 1024);
+        // Nothing was dropped to make room: each project keeps its rules.
+        for repo in &repos {
+            for rule in [
+                format!("Edit(/{repo}/**)"),
+                format!("Read(/{repo}/.env*)"),
+                format!("Read(/{repo}/**/*.pem)"),
+                format!("Read(/{repo}/**/.ssh/**)"),
+            ] {
+                assert!(listed(&settings, "/permissions/deny", &rule), "{rule}");
+            }
+            assert!(listed(&settings, "/sandbox/filesystem/denyWrite", repo));
+        }
+        assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
+        // The agent cannot rewrite the rules it runs under.
+        let dir = dir.display().to_string();
+        for tool in ["Edit", "Write"] {
+            let rule = format!("{tool}(/{dir}/**)");
+            assert!(listed(&settings, "/permissions/deny", &rule), "{rule}");
+        }
+        assert!(listed(&settings, "/sandbox/filesystem/denyWrite", &dir));
+    }
+
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_room_with_ten_projects_open_for_editing_launches_with_their_rules() {
+        let (_temp, repos, launched) = launched_room(10, ScopeAccess::Code);
+        let (value, settings) = launched.expect("ten code projects launch");
+        assert!(!value.starts_with('{'), "handed over as a file");
+        for repo in &repos {
+            for rule in [
+                format!("Read(/{repo}/.env*)"),
+                format!("Write(/{repo}/**/*.pem)"),
+                format!("Edit(/{repo}/.git/**)"),
+                format!("Write(/{repo}/**/.mcp.json)"),
+            ] {
+                assert!(listed(&settings, "/permissions/deny", &rule), "{rule}");
+            }
+            assert!(listed(&settings, "/sandbox/filesystem/allowWrite", repo));
+        }
+    }
+
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_small_room_keeps_its_settings_in_the_argument() {
+        let (_temp, _repos, launched) = launched_room(2, ScopeAccess::Read);
+        let (value, _) = launched.unwrap();
+        assert!(value.starts_with('{'));
+    }
+
+    // What a project costs is what decides how many a room can hold: a change
+    // that makes it grow shows here before it shows on someone's instance.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn the_rules_of_a_project_stay_within_what_an_instance_can_hold() {
+        let size = |count, access| {
+            let (_temp, _repos, launched) = launched_room(count, access);
+            launched.unwrap().1.to_string().len()
+        };
+        let read = (size(9, ScopeAccess::Read) - size(1, ScopeAccess::Read)) / 8;
+        let code = (size(9, ScopeAccess::Code) - size(1, ScopeAccess::Code)) / 8;
+        assert!(read < 16 * 1024, "a read-only project costs {read} bytes");
+        assert!(code < 72 * 1024, "a code project costs {code} bytes");
+        // A hundred read-only projects, or twenty-five open for editing.
+        assert!(
+            100 * read < ROOM_SETTINGS_MAX_BYTES && 25 * code < ROOM_SETTINGS_MAX_BYTES,
+            "read {read}, code {code}"
+        );
+    }
+
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_room_beyond_the_limit_is_refused_in_words_a_person_can_act_on() {
+        let (_temp, _repos, launched) = launched_room_within(5, ScopeAccess::Code, 64 * 1024);
+        let error = launched.unwrap_err();
+        assert!(
+            error.contains("too many projects")
+                && error.contains("5 opened, 5 for editing")
+                && error.contains("Grant fewer projects"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn nothing_granted_opens_nothing_and_says_what_can_be_asked_without_naming_it() {
         let temp = tempfile::tempdir().unwrap();
