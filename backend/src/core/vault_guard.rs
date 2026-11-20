@@ -86,6 +86,20 @@ pub enum Confined {
     Unchanged(&'static str),
 }
 
+/// KT-1977 — what a launch behind Kronn's Seatbelt profile tells the browser
+/// servers its agent starts. Chrome isolates its helper processes with a
+/// Seatbelt profile of its own, which macOS refuses from inside another one
+/// (`sandbox initialization failed: Operation not permitted`, then the page
+/// crashes): `@playwright/mcp` reads this variable as its `--no-sandbox`. Only
+/// such a launch gets it; a browser started anywhere else keeps its sandbox.
+pub fn browser_env_inside(
+    outcome: &Confined,
+    seatbelt: bool,
+) -> Option<(&'static str, &'static str)> {
+    let inside = matches!(outcome, Confined::Wrapped | Confined::Replaced);
+    (inside && seatbelt).then_some(("PLAYWRIGHT_MCP_SANDBOX", "false"))
+}
+
 /// The directories a replaced Codex sandbox lets the process write.
 #[derive(Debug, Clone, Default)]
 pub struct LaunchRoots {

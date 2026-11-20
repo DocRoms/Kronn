@@ -4,7 +4,7 @@
 //! block that names what it reaches and how to ask for more. The grants gate Kronn's own tools; this is the part
 //! that reaches the agent's filesystem.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::db::discussion_scope::{ReachedProject, RoomReach};
 use crate::models::discussion_scope::ScopeAccess;
@@ -34,6 +34,9 @@ pub enum Files {
     /// No directory can be opened for it (provider, platform, or a path that
     /// is not a Git checkout root or overlaps the working directory).
     Closed,
+    /// The room opens more projects than the agent's sandbox carries
+    /// (KT-1971): this one is left closed for the launch, which still starts.
+    BeyondTheSandbox,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +70,7 @@ pub fn plan(
     full_access: bool,
     reach: RoomReach,
 ) -> RoomReachPlan {
-    let granted = reach
+    let mut granted: Vec<PlannedProject> = reach
         .granted
         .into_iter()
         .map(|project| {
@@ -112,6 +115,126 @@ pub fn plan(
             }
         })
         .collect();
+    // The sandbox of the launch carries only so many projects: the launch
+    // still starts, with the ones that fit. A project granted for editing is
+    // opened before one granted for reading (the explicit, stronger grant
+    // wins over a blanket one), then in the order of the list.
+    // Only Claude Code takes the policy that opens and closes directories.
+    if let Some(work_dir) =
+        work_dir.filter(|_| !full_access && matches!(agent, AgentType::ClaudeCode))
+    {
+        // A granted path that is no openable checkout is closed where it
+        // leads, unless that is, or holds, a checkout this room opens by its
+        // own path: the alias must not take the grant away.
+        let verified: Vec<PathBuf> = granted
+            .iter()
+            .filter_map(|entry| entry.checkout.as_ref())
+            .map(|checkout| checkout.root().to_path_buf())
+            .collect();
+        // The main checkout of a granted linked worktree cannot be closed
+        // either: the launch opens it first, as it does what holds the home.
+        let needs = super::read_only_repos::LaunchNeeds::of(work_dir)
+            .with_worktrees(verified.iter().map(PathBuf::as_path));
+        // Only in a launch that has a policy anyway (it opens a checkout): a
+        // room of plain folders alone starts as it always did, with none.
+        for entry in granted
+            .iter_mut()
+            .filter(|entry| entry.files == Files::Closed && !verified.is_empty())
+        {
+            entry.checkout = VerifiedCheckout::closed_at(&entry.project.path)
+                .filter(|checkout| checkout.closable(&needs))
+                .filter(|checkout| {
+                    !verified
+                        .iter()
+                        .any(|root| root.starts_with(checkout.root()))
+                });
+        }
+        let already_closed: Vec<VerifiedCheckout> = granted
+            .iter()
+            .filter_map(|entry| entry.checkout.clone())
+            .filter(VerifiedCheckout::is_closed)
+            .collect();
+        let mut order: Vec<usize> = (0..granted.len())
+            .filter(|at| {
+                granted[*at]
+                    .checkout
+                    .as_ref()
+                    .is_some_and(|checkout| !checkout.is_closed())
+            })
+            .collect();
+        // One the launch could not close (it holds the home directory) is
+        // opened first, under its rules, rather than left with none.
+        order.sort_by_key(|at| {
+            let closable = granted[*at]
+                .checkout
+                .as_ref()
+                .is_some_and(|checkout| checkout.closable(&needs));
+            (closable, granted[*at].files != Files::WritableDir)
+        });
+        // A project comes before those it holds: left out, it would close
+        // them, and the count of what fits would no longer grow with the list.
+        let root_of = |at: usize| {
+            granted[at]
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.root())
+        };
+        let mut at = 0;
+        while at < order.len() {
+            let holder = (at + 1..order.len()).find(|later| {
+                match (root_of(order[at]), root_of(order[*later])) {
+                    (Some(inner), Some(outer)) => inner != outer && inner.starts_with(outer),
+                    _ => false,
+                }
+            });
+            match holder {
+                Some(later) => {
+                    let moved = order.remove(later);
+                    order.insert(at, moved);
+                }
+                None => at += 1,
+            }
+        }
+        let checkouts: Vec<VerifiedCheckout> = order
+            .iter()
+            .filter_map(|at| granted[*at].checkout.clone())
+            .collect();
+        let held = super::read_only_repos::ReadOnlyRepos::checkouts_that_fit(
+            agent,
+            work_dir,
+            &checkouts,
+            &already_closed,
+        );
+        let leave_out = |entry: &mut PlannedProject| {
+            // Kept, closed: the launch denies its whole directory.
+            entry.checkout = entry.checkout.take().map(VerifiedCheckout::closed);
+            entry.files = Files::BeyondTheSandbox;
+        };
+        for at in order.into_iter().skip(held) {
+            leave_out(&mut granted[at]);
+        }
+        // A project inside one that is closed is closed with it.
+        let closed_roots: Vec<PathBuf> = granted
+            .iter()
+            .filter_map(|entry| entry.checkout.as_ref())
+            .filter(|checkout| checkout.is_closed() && checkout.closable(&needs))
+            .map(|checkout| checkout.root().to_path_buf())
+            .collect();
+        for entry in granted.iter_mut() {
+            let inside = entry.checkout.as_ref().is_some_and(|checkout| {
+                !checkout.is_closed()
+                    && closed_roots
+                        .iter()
+                        // The same project granted twice stays opened.
+                        .any(|closed| {
+                            checkout.root() != closed && checkout.root().starts_with(closed)
+                        })
+            });
+            if inside {
+                leave_out(entry);
+            }
+        }
+    }
     RoomReachPlan {
         granted,
         requestable: reach.requestable,
@@ -129,6 +252,8 @@ fn one_line(text: &str) -> String {
 impl RoomReachPlan {
     /// The validated checkouts to hand to the launch: read-only roots, and the
     /// writable ones of a `code` grant (`VerifiedCheckout::is_writable`).
+    /// Those the launch leaves out come too, marked closed
+    /// (`VerifiedCheckout::is_closed`): it denies their directory.
     pub fn checkouts(&self) -> Vec<VerifiedCheckout> {
         self.granted
             .iter()
@@ -155,6 +280,7 @@ impl RoomReachPlan {
             for entry in &self.granted {
                 let access = match (entry.project.access, entry.files) {
                     (ScopeAccess::Read, _) => "read",
+                    (ScopeAccess::Plan, Files::BeyondTheSandbox) => "plan (planning in Kronn's tools)",
                     (ScopeAccess::Plan, _) => {
                         "plan (planning in Kronn's tools; its files are read-only)"
                     }
@@ -224,9 +350,17 @@ impl RoomReachPlan {
                         one_line(&entry.project.path)
                     ),
                     Files::Closed => format!(
-                        "files: {} (NOT readable by you in this run; use Kronn's tools)",
+                        "files: {} (not opened for you in this run; use Kronn's tools)",
                         one_line(&entry.project.path)
                     ),
+                    // No path: the launch holds no rule on a project it does not open.
+                    Files::BeyondTheSandbox => "files: NOT opened in this run: this room is \
+                         granted more projects than your sandbox can protect at once; those \
+                         granted for editing are opened first, then the others in this order. \
+                         If you need this one, tell the human to remove from the room the \
+                         projects it does not need, or to grant them read-only; use Kronn's \
+                         tools meanwhile"
+                        .to_string(),
                 };
                 out.push_str(&format!(
                     "- {} — access: {access} — {files}\n",
@@ -263,7 +397,9 @@ impl RoomReachPlan {
 mod tests {
     use super::*;
     #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
-    use crate::agents::read_only_repos::{ReadOnlyRepos, ROOM_SETTINGS_MAX_BYTES};
+    use crate::agents::read_only_repos::{
+        ReadOnlyRepos, ROOM_SETTINGS_MAX_BYTES, SETTINGS_INLINE_MAX_BYTES,
+    };
 
     fn checkout(parent: &Path, name: &str) -> String {
         let path = parent.join(name);
@@ -291,6 +427,7 @@ mod tests {
     fn opened(plan: &RoomReachPlan) -> Vec<String> {
         plan.checkouts()
             .iter()
+            .filter(|checkout| !checkout.is_closed())
             .map(|checkout| checkout.root().display().to_string())
             .collect()
     }
@@ -1041,7 +1178,7 @@ mod tests {
             .find(|arg| arg.starts_with('{'))
             .expect("the settings document");
         assert!(
-            settings_arg.len() <= ROOM_SETTINGS_MAX_BYTES,
+            settings_arg.len() <= SETTINGS_INLINE_MAX_BYTES,
             "{} bytes exceed the room-wide limit",
             settings_arg.len()
         );
@@ -1087,7 +1224,7 @@ mod tests {
             .find(|arg| arg.starts_with('{'))
             .expect("the settings document");
         assert!(
-            settings_arg.len() <= ROOM_SETTINGS_MAX_BYTES,
+            settings_arg.len() <= SETTINGS_INLINE_MAX_BYTES,
             "{} bytes exceed the shared room budget",
             settings_arg.len()
         );
@@ -1191,7 +1328,9 @@ mod tests {
                 "{tool} rule for app.env.production missing"
             );
         }
-        assert!(args.iter().find(|a| a.starts_with('{')).unwrap().len() <= ROOM_SETTINGS_MAX_BYTES);
+        assert!(
+            args.iter().find(|a| a.starts_with('{')).unwrap().len() <= SETTINGS_INLINE_MAX_BYTES
+        );
     }
 
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
@@ -1238,6 +1377,8 @@ mod tests {
                 );
             }
         }
+        // Kept as they are rather than collapsed to stay an argument: the
+        // document may be a file, within what a settings file holds.
         assert!(args.iter().find(|a| a.starts_with('{')).unwrap().len() <= ROOM_SETTINGS_MAX_BYTES);
     }
 
@@ -1646,6 +1787,7 @@ mod tests {
     }
 
     #[cfg(unix)] // creates symlinks through std::os::unix
+    #[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
     #[test]
     fn a_checkout_swapped_between_the_plan_and_the_launch_is_refused() {
         let temp = tempfile::tempdir().unwrap();
@@ -1688,30 +1830,23 @@ mod tests {
         assert!(ReadOnlyRepos::resolve_room(&agent, &work, &checkouts).is_err());
     }
 
-    /// A room granted `count` projects, launched: the `--settings` value the
-    /// CLI receives and the document behind it.
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
-    fn launched_room(
-        count: usize,
-        access: ScopeAccess,
-    ) -> (
-        tempfile::TempDir,
-        Vec<String>,
-        Result<(String, serde_json::Value), String>,
-    ) {
+    struct LaunchedRoom {
+        _temp: tempfile::TempDir,
+        repos: Vec<String>,
+        plan: RoomReachPlan,
+        /// The `--settings` value the process receives and the document behind it.
+        launched: Result<(String, serde_json::Value), String>,
+    }
+
+    /// A room granted `count` projects, planned then launched.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    fn launched_room(count: usize, access: ScopeAccess) -> LaunchedRoom {
         launched_room_within(count, access, ROOM_SETTINGS_MAX_BYTES)
     }
 
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
-    fn launched_room_within(
-        count: usize,
-        access: ScopeAccess,
-        max_bytes: usize,
-    ) -> (
-        tempfile::TempDir,
-        Vec<String>,
-        Result<(String, serde_json::Value), String>,
-    ) {
+    fn launched_room_within(count: usize, access: ScopeAccess, max_bytes: usize) -> LaunchedRoom {
         let temp = tempfile::tempdir().unwrap();
         let work = temp.path().join("work");
         std::fs::create_dir(&work).unwrap();
@@ -1733,7 +1868,6 @@ mod tests {
                 requestable: vec![],
             },
         );
-        assert_eq!(opened(&plan), repos);
         let launched = ReadOnlyRepos::resolve_room_within(
             &AgentType::ClaudeCode,
             &work,
@@ -1745,6 +1879,8 @@ mod tests {
             policy
                 .unwrap()
                 .apply(&AgentType::ClaudeCode, &work, &mut args);
+            // What the spawn does to the command line it hands over.
+            crate::agents::read_only_repos::spill_large_settings(&mut args);
             assert_eq!(args.last().unwrap(), "prompt");
             let at = args.iter().position(|arg| arg == "--settings").unwrap();
             let value = args[at + 1].clone();
@@ -1755,7 +1891,12 @@ mod tests {
             };
             (value, serde_json::from_str(&document).unwrap())
         });
-        (temp, repos, launched)
+        LaunchedRoom {
+            _temp: temp,
+            repos,
+            plan,
+            launched,
+        }
     }
 
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
@@ -1766,15 +1907,104 @@ mod tests {
             .is_some_and(|list| list.iter().any(|entry| entry == value))
     }
 
+    /// Paths and bytes of the sandbox a document asks for.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    fn sandbox_of(settings: &serde_json::Value) -> (usize, usize) {
+        ["denyRead", "denyWrite"]
+            .into_iter()
+            .filter_map(|list| settings["sandbox"]["filesystem"][list].as_array())
+            .flatten()
+            .filter_map(|path| path.as_str())
+            .fold((0, 0), |(paths, bytes), path| {
+                (paths + 1, bytes + path.len())
+            })
+    }
+
     // KT-1971 — every granted project adds a fixed block of rules: a room
     // granted every project of an instance passed the argument limit and its
     // agent never started.
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
     #[test]
-    fn a_room_granted_sixty_projects_launches_with_every_rule_in_a_private_file() {
-        let (_temp, repos, launched) = launched_room(60, ScopeAccess::Read);
-        let (value, settings) = launched.expect("sixty read-only projects launch");
-        // One argument stays far below what the system carries.
+    fn a_room_granted_sixty_projects_starts_and_opens_what_its_sandbox_carries() {
+        use crate::agents::read_only_repos::{SANDBOX_PATHS_MAX, SANDBOX_PATH_BYTES_MAX};
+        let room = launched_room(60, ScopeAccess::Read);
+        let (_, settings) = room.launched.expect("the agent starts");
+        let open = opened(&room.plan);
+        // More than the twenty the argument limit allowed, the first ones.
+        assert!(open.len() >= 25 && open.len() < 60, "{} opened", open.len());
+        assert_eq!(open, room.repos[..open.len()]);
+        // The sandbox stays within what was measured to start a shell.
+        let (paths, bytes) = sandbox_of(&settings);
+        assert!(paths <= SANDBOX_PATHS_MAX && bytes <= SANDBOX_PATH_BYTES_MAX);
+        // Nothing was dropped to make room: each opened project keeps its
+        // rules (paths relative to the working directory in an argument).
+        let has = |pointer: &str, start: &str, end: &str| {
+            settings
+                .pointer(pointer)
+                .and_then(|list| list.as_array())
+                .is_some_and(|list| {
+                    list.iter()
+                        .filter_map(|entry| entry.as_str())
+                        .any(|entry| entry.starts_with(start) && entry.ends_with(end))
+                })
+        };
+        for n in 0..open.len() {
+            for (tool, end) in [
+                ("Edit(", format!("/project-{n}/**)")),
+                ("Read(", format!("/project-{n}/.env*)")),
+                ("Read(", format!("/project-{n}/**/*.pem)")),
+                ("Read(", format!("/project-{n}/**/.ssh/**)")),
+            ] {
+                assert!(has("/permissions/deny", tool, &end), "{tool}…{end}");
+            }
+            assert!(has(
+                "/sandbox/filesystem/denyWrite",
+                "",
+                &format!("/project-{n}")
+            ));
+            assert!(has(
+                "/sandbox/filesystem/denyRead",
+                "",
+                &format!("/project-{n}/.env")
+            ));
+        }
+        assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
+        // A project left closed is not opened by any rule, and the agent is told.
+        let closed = &room.repos[open.len()];
+        let document = settings.to_string();
+        let name = format!("/project-{}", open.len());
+        assert!(!document.contains(&format!("{name}/")), "no rule inside it");
+        // Every project left out is closed whole to the agent's shell: with no
+        // rule of its own, its secrets would be readable there.
+        for n in open.len()..room.repos.len() {
+            for list in ["denyRead", "denyWrite"] {
+                assert!(
+                    has(
+                        &format!("/sandbox/filesystem/{list}"),
+                        "",
+                        &format!("/project-{n}")
+                    ),
+                    "project-{n} is not in {list}"
+                );
+            }
+        }
+        let entry = &room.plan.granted[open.len()];
+        assert_eq!(entry.files, Files::BeyondTheSandbox);
+        let prompt = room.plan.prompt();
+        assert!(prompt.contains("NOT opened in this run"));
+        // Its path is not handed to an agent that holds no rule on it.
+        assert!(!prompt.contains(closed.as_str()), "{closed} is named");
+    }
+
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
+    #[test]
+    fn a_room_with_six_projects_open_for_editing_launches_with_their_rules() {
+        let room = launched_room(6, ScopeAccess::Code);
+        let (value, settings) = room.launched.expect("six code projects launch");
+        assert_eq!(opened(&room.plan), room.repos, "all six are opened");
+        // Too large for an argument: a private file.
         assert!(value.len() < 1024, "{} bytes of argument", value.len());
         let file = Path::new(&value);
         let dir = file.parent().unwrap();
@@ -1785,19 +2015,6 @@ mod tests {
             assert_eq!(mode(dir), 0o700);
         }
         assert!(std::fs::metadata(file).unwrap().len() > 128 * 1024);
-        // Nothing was dropped to make room: each project keeps its rules.
-        for repo in &repos {
-            for rule in [
-                format!("Edit(/{repo}/**)"),
-                format!("Read(/{repo}/.env*)"),
-                format!("Read(/{repo}/**/*.pem)"),
-                format!("Read(/{repo}/**/.ssh/**)"),
-            ] {
-                assert!(listed(&settings, "/permissions/deny", &rule), "{rule}");
-            }
-            assert!(listed(&settings, "/sandbox/filesystem/denyWrite", repo));
-        }
-        assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
         // The agent cannot rewrite the rules it runs under.
         let dir = dir.display().to_string();
         for tool in ["Edit", "Write"] {
@@ -1805,15 +2022,7 @@ mod tests {
             assert!(listed(&settings, "/permissions/deny", &rule), "{rule}");
         }
         assert!(listed(&settings, "/sandbox/filesystem/denyWrite", &dir));
-    }
-
-    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
-    #[test]
-    fn a_room_with_ten_projects_open_for_editing_launches_with_their_rules() {
-        let (_temp, repos, launched) = launched_room(10, ScopeAccess::Code);
-        let (value, settings) = launched.expect("ten code projects launch");
-        assert!(!value.starts_with('{'), "handed over as a file");
-        for repo in &repos {
+        for repo in &room.repos {
             for rule in [
                 format!("Read(/{repo}/.env*)"),
                 format!("Write(/{repo}/**/*.pem)"),
@@ -1827,38 +2036,385 @@ mod tests {
     }
 
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
     #[test]
-    fn a_small_room_keeps_its_settings_in_the_argument() {
-        let (_temp, _repos, launched) = launched_room(2, ScopeAccess::Read);
-        let (value, _) = launched.unwrap();
-        assert!(value.starts_with('{'));
+    fn a_small_room_keeps_its_settings_in_the_argument_and_opens_everything() {
+        let room = launched_room(2, ScopeAccess::Read);
+        assert_eq!(opened(&room.plan), room.repos);
+        assert!(room.launched.unwrap().0.starts_with('{'));
     }
 
-    // What a project costs is what decides how many a room can hold: a change
+    // What a project costs is what decides how many a room can open: a change
     // that makes it grow shows here before it shows on someone's instance.
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
     #[test]
-    fn the_rules_of_a_project_stay_within_what_an_instance_can_hold() {
-        let size = |count, access| {
-            let (_temp, _repos, launched) = launched_room(count, access);
-            launched.unwrap().1.to_string().len()
-        };
-        let read = (size(9, ScopeAccess::Read) - size(1, ScopeAccess::Read)) / 8;
-        let code = (size(9, ScopeAccess::Code) - size(1, ScopeAccess::Code)) / 8;
-        assert!(read < 16 * 1024, "a read-only project costs {read} bytes");
-        assert!(code < 72 * 1024, "a code project costs {code} bytes");
-        // A hundred read-only projects, or twenty-five open for editing.
+    fn the_rules_of_a_project_stay_within_what_a_sandbox_carries() {
+        use crate::agents::read_only_repos::SANDBOX_PATHS_MAX;
+        let paths = |count, access| sandbox_of(&launched_room(count, access).launched.unwrap().1).0;
+        let read = (paths(5, ScopeAccess::Read) - paths(1, ScopeAccess::Read)) / 4;
+        let code = (paths(5, ScopeAccess::Code) - paths(1, ScopeAccess::Code)) / 4;
+        // Thirty read-only projects, or eight open for editing.
         assert!(
-            100 * read < ROOM_SETTINGS_MAX_BYTES && 25 * code < ROOM_SETTINGS_MAX_BYTES,
-            "read {read}, code {code}"
+            30 * read < SANDBOX_PATHS_MAX && 8 * code < SANDBOX_PATHS_MAX,
+            "a read-only project costs {read} sandbox paths, a code project {code}"
         );
     }
 
+    // Closing a directory closes all it holds: a project inside one that is
+    // left out is closed with it, rather than leave the outer one's secrets
+    // readable.
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
+    fn a_project_inside_one_that_is_left_out_is_closed_with_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let outer = checkout(temp.path(), "outer");
+        let inner = checkout(Path::new(&outer), "inner");
+        let apart = checkout(temp.path(), "apart");
+        let verify =
+            |path: &str| VerifiedCheckout::verify(&AgentType::ClaudeCode, &work, path).unwrap();
+        let checkouts = vec![verify(&inner), verify(&outer).closed(), verify(&apart)];
+        let args = ReadOnlyRepos::resolve_room(&AgentType::ClaudeCode, &work, &checkouts)
+            .unwrap()
+            .unwrap()
+            .args(&AgentType::ClaudeCode, &work);
+        let settings: serde_json::Value =
+            serde_json::from_str(args.iter().find(|arg| arg.starts_with('{')).unwrap()).unwrap();
+        let denied = |list: &str, end: &str| {
+            settings["sandbox"]["filesystem"][list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path.as_str().unwrap().ends_with(end))
+        };
+        assert!(denied("denyRead", "/outer") && denied("denyWrite", "/outer"));
+        // Only the project apart is an added directory.
+        let added: Vec<&String> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--add-dir")
+            .map(|pair| &pair[1])
+            .collect();
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert!(added[0].ends_with("/apart"));
+    }
+
+    // A directory that holds what the agent needs cannot be denied whole.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_left_out_project_that_holds_the_home_directory_is_not_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let repo = checkout(temp.path(), "apart");
+        let apart = VerifiedCheckout::verify(&AgentType::ClaudeCode, &work, &repo).unwrap();
+        let needs = crate::agents::read_only_repos::LaunchNeeds::of(&work);
+        assert!(apart.closable(&needs));
+        let home = crate::core::child_env::var_os("HOME").expect("a home directory");
+        let above_home =
+            VerifiedCheckout::closed_at(Path::new(&home).parent().unwrap().to_str().unwrap())
+                .expect("the directory above the home resolves");
+        assert!(!above_home.closable(&needs));
+        // Nor the one that holds the working directory, or lies in it.
+        let holder = VerifiedCheckout::closed_at(temp.path().to_str().unwrap()).unwrap();
+        assert!(!holder.closable(&needs));
+        // Nor a system folder registered as a project by mistake.
+        for system in ["/usr", "/etc", "/usr/bin"] {
+            if let Some(folder) = VerifiedCheckout::closed_at(system) {
+                assert!(!folder.closable(&needs), "{system}");
+            }
+        }
+    }
+
+    // A project left out inside an opened one is denied there, and one inside
+    // another left-out project adds no path: the outer one already denies it.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn nested_left_out_projects_are_closed_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let open = checkout(temp.path(), "open");
+        let inside_open = checkout(Path::new(&open), "inside");
+        let odd = checkout(Path::new(&open), "odd (old)");
+        let out = checkout(temp.path(), "out");
+        let inside_out = checkout(Path::new(&out), "deeper");
+        let verify =
+            |path: &str| VerifiedCheckout::verify(&AgentType::ClaudeCode, &work, path).unwrap();
+        let checkouts = vec![
+            verify(&open),
+            verify(&inside_open).closed(),
+            VerifiedCheckout::closed_at(&odd).unwrap(),
+            // The same project granted twice: the opened grant holds.
+            verify(&open).closed(),
+            verify(&out).closed(),
+            verify(&inside_out).closed(),
+        ];
+        let args = ReadOnlyRepos::resolve_room(&AgentType::ClaudeCode, &work, &checkouts)
+            .unwrap()
+            .unwrap()
+            .args(&AgentType::ClaudeCode, &work);
+        let settings: serde_json::Value =
+            serde_json::from_str(args.iter().find(|arg| arg.starts_with('{')).unwrap()).unwrap();
+        let denied: Vec<&str> = settings["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|path| path.as_str())
+            .collect();
+        assert!(denied.iter().any(|path| path.ends_with("/open/inside")));
+        // Inside an opened project the file tools would reach it as well.
+        let rules = settings["permissions"]["deny"].to_string();
+        for tool in ["Read", "Edit"] {
+            assert!(
+                rules.contains("/open/inside/**)") && rules.contains(&format!("{tool}(")),
+                "{tool}: {rules}"
+            );
+        }
+        assert!(
+            !rules.contains("/out/**)"),
+            "no tool rule outside an opened project"
+        );
+        // Parentheses cannot be written in a permission rule: sandbox only.
+        assert!(denied.iter().any(|path| path.ends_with("/open/odd (old)")));
+        assert!(!rules.contains("odd (old)"), "{rules}");
+        assert!(!denied.iter().any(|path| path.ends_with("/open")));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1].ends_with("/open")));
+        assert!(denied.iter().any(|path| path.ends_with("/out")));
+        assert!(!denied.iter().any(|path| path.ends_with("/out/deeper")));
+    }
+
+    // A linked worktree keeps its history in the main checkout: closing that
+    // checkout would break every Git command of the working directory.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn the_checkout_behind_a_worktree_working_directory_is_not_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = checkout(temp.path(), "main");
+        let work = temp.path().join("lane");
+        let git = |args: &[&str]| {
+            crate::core::cmd::git_cmd()
+                .arg("-C")
+                .arg(&main)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(git(&["commit", "--allow-empty", "-q", "-m", "first"]));
+        assert!(git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            work.to_str().unwrap()
+        ]));
+        let needs = crate::agents::read_only_repos::LaunchNeeds::of(&work);
+        let behind = VerifiedCheckout::closed_at(&main).unwrap();
+        assert!(!behind.closable(&needs));
+        // Nor the checkout behind a worktree the room opens.
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let apart = crate::agents::read_only_repos::LaunchNeeds::of(&elsewhere);
+        assert!(behind.closable(&apart));
+        assert!(!behind.closable(&apart.with_worktrees([work.as_path()])));
+    }
+
+    // A folder named with parentheses is no checkout Kronn opens (a permission
+    // rule could not name it), and a sandbox path names it as it is.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_granted_folder_with_parentheses_in_its_name_is_closed_too() {
+        let temp = tempfile::tempdir().unwrap();
+        let odd = checkout(temp.path(), "app (old)");
+        let closed = VerifiedCheckout::closed_at(&odd).expect("closed where it is");
+        assert!(closed.root().ends_with("app (old)") && closed.is_closed());
+        // What a sandbox would read as a pattern cannot be named.
+        let pattern = checkout(temp.path(), "app [v2]");
+        assert!(VerifiedCheckout::closed_at(&pattern).is_none());
+        assert!(VerifiedCheckout::closed_at("relative/path").is_none());
+    }
+
+    // Closing needs the sandboxed policy: a room that opens no checkout never
+    // had one, and must keep starting on a host without a sandbox.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_room_of_plain_folders_alone_gets_no_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let plain = temp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let plan = plan(
+            &AgentType::ClaudeCode,
+            Some(&work),
+            false,
+            RoomReach {
+                granted: vec![reached(
+                    "p1",
+                    "plain",
+                    plain.to_str().unwrap(),
+                    ScopeAccess::Read,
+                )],
+                requestable: vec![],
+            },
+        );
+        assert_eq!(plan.granted[0].files, Files::Closed);
+        assert!(plan.checkouts().is_empty());
+    }
+
+    // An alias of an opened project (a link to it, or the folder above it)
+    // must not close what the room opens by its own path.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn an_alias_of_an_opened_project_does_not_close_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let repos = temp.path().join("repos");
+        std::fs::create_dir(&repos).unwrap();
+        let target = checkout(&repos, "target");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let plan = plan(
+            &AgentType::ClaudeCode,
+            Some(&work),
+            false,
+            RoomReach {
+                granted: vec![
+                    reached("p1", "target", &target, ScopeAccess::Read),
+                    reached("p2", "linked", link.to_str().unwrap(), ScopeAccess::Read),
+                    reached("p3", "above", repos.to_str().unwrap(), ScopeAccess::Read),
+                ],
+                requestable: vec![],
+            },
+        );
+        assert_eq!(plan.granted[0].files, Files::ReadOnlyDir);
+        assert_eq!(opened(&plan).len(), 1);
+        assert_eq!(plan.checkouts().len(), 1, "neither alias is closed");
+    }
+
+    // A granted path that is no checkout (a plain directory reached through a
+    // link) was said « not readable » while the agent's shell could read it.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_granted_path_that_is_no_checkout_is_closed_where_it_leads() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let target = checkout(temp.path(), "target");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let beside = checkout(temp.path(), "beside");
+        let plan = plan(
+            &AgentType::ClaudeCode,
+            Some(&work),
+            false,
+            RoomReach {
+                granted: vec![
+                    reached("p1", "linked", link.to_str().unwrap(), ScopeAccess::Read),
+                    reached("p2", "beside", &beside, ScopeAccess::Read),
+                ],
+                requestable: vec![],
+            },
+        );
+        assert_eq!(plan.granted[0].files, Files::Closed);
+        let args = ReadOnlyRepos::resolve_room(&AgentType::ClaudeCode, &work, &plan.checkouts())
+            .unwrap()
+            .expect("a policy that closes it")
+            .args(&AgentType::ClaudeCode, &work);
+        let document = args.iter().find(|arg| arg.starts_with('{')).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(document).unwrap();
+        for list in ["denyRead", "denyWrite"] {
+            assert!(
+                settings["sandbox"]["filesystem"][list]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|path| path.as_str().unwrap().ends_with("/target")),
+                "{list}: {document}"
+            );
+        }
+        // Only the checkout beside it is an added directory.
+        assert_eq!(args.iter().filter(|arg| *arg == "--add-dir").count(), 1);
+    }
+
+    // A blanket read grant must not close the one project the human opened
+    // for editing because its name sorts last.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[test]
+    fn a_project_granted_for_editing_is_opened_before_the_read_only_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let mut granted: Vec<_> = (0..60)
+            .map(|n| {
+                let repo = checkout(temp.path(), &format!("project-{n}"));
+                reached(
+                    &format!("p{n}"),
+                    &format!("project-{n}"),
+                    &repo,
+                    ScopeAccess::Read,
+                )
+            })
+            .collect();
+        let edited = checkout(temp.path(), "zeta");
+        granted.push(reached("pz", "zeta", &edited, ScopeAccess::Code));
+        let plan = plan(
+            &AgentType::ClaudeCode,
+            Some(&work),
+            false,
+            RoomReach {
+                granted,
+                requestable: vec![],
+            },
+        );
+        assert_eq!(plan.granted.last().unwrap().files, Files::WritableDir);
+        let closed = plan
+            .granted
+            .iter()
+            .filter(|entry| entry.files == Files::BeyondTheSandbox)
+            .count();
+        assert!(closed > 0 && closed < 60, "{closed} closed");
+        // The read-only ones are closed from the end of the list.
+        assert_eq!(plan.granted[0].files, Files::ReadOnlyDir);
+        assert_eq!(plan.granted[59].files, Files::BeyondTheSandbox);
+    }
+
+    // A launch without a sandbox of its own may be wrapped in Kronn's, which
+    // hides the data directory: the process could not read a file there.
+    #[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
+    #[test]
+    fn a_large_document_without_a_sandbox_of_its_own_stays_an_argument() {
+        let rules: Vec<String> = (0..4000)
+            .map(|n| format!("Read(//a/granted/checkout/number-{n}/**)"))
+            .collect();
+        let document = serde_json::json!({ "permissions": { "deny": rules } }).to_string();
+        assert!(document.len() > 96 * 1024);
+        let mut args = vec!["--settings".to_string(), document.clone(), "prompt".into()];
+        crate::agents::read_only_repos::spill_large_settings(&mut args);
+        assert_eq!(args[1], document);
+    }
+
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
+    #[test]
     fn a_room_beyond_the_limit_is_refused_in_words_a_person_can_act_on() {
-        let (_temp, _repos, launched) = launched_room_within(5, ScopeAccess::Code, 64 * 1024);
-        let error = launched.unwrap_err();
+        let error = launched_room_within(5, ScopeAccess::Code, 64 * 1024)
+            .launched
+            .unwrap_err();
         assert!(
             error.contains("too many projects")
                 && error.contains("5 opened, 5 for editing")
@@ -1938,7 +2494,7 @@ mod tests {
                 .count(),
             4
         );
-        assert!(plan.prompt().contains("NOT readable by you in this run"));
+        assert!(plan.prompt().contains("not opened for you in this run"));
     }
 
     #[test]

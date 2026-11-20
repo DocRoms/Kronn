@@ -363,6 +363,28 @@ fn masks_secrets_no_shape_gives_away_and_the_sibling_fields_of_a_step() {
     assert_eq!(fallback["token"], REDACTED);
     assert_eq!(fallback["count"], 0);
 
+    // The fallback of an API extraction, on a step and on a Quick API.
+    let extract = || -> crate::models::ExtractSpec {
+        serde_json::from_value(serde_json::json!({
+            "path": "$.auth",
+            "fallback": { "api_key": "abc123", "region": "eu" },
+        }))
+        .unwrap()
+    };
+    let mut call = WorkflowStep {
+        name: "call".into(),
+        api_extract: Some(extract()),
+        ..WorkflowStep::default()
+    };
+    let mut found = vec![];
+    redact_steps("wf-1", "Nightly", std::iter::once(&mut call), &mut found);
+    let fallback = call.api_extract.unwrap().fallback.unwrap();
+    assert_eq!(fallback["api_key"], REDACTED);
+    assert_eq!(fallback["region"], "eu");
+    assert!(found
+        .iter()
+        .any(|field| field.field.starts_with("api_extract.fallback")));
+
     // The flag inside a shell line, and a key written twice.
     let mut shell = WorkflowStep {
         name: "shell".into(),

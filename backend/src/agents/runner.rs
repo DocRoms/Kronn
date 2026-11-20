@@ -14892,6 +14892,12 @@ pub fn try_spawn_granted(
     // below — sending a Linux path to a Windows-native spawn would just fail.
     let (cmd_name, mut cmd_args, resolved_via_wsl) =
         resolve_agent_invocation(binary, npx_package, args)?;
+    // KT-1971 — the process gets a settings document too large for an argument
+    // as a file; `args` keeps the document for what reads it below.
+    // Only a document that enables the CLI's own sandbox is handed over (the
+    // same reading as `vault_guard::launch_sandbox`): such a launch is never
+    // wrapped in Kronn's sandbox, which hides the directory the file is in.
+    super::read_only_repos::spill_large_settings(&mut cmd_args);
     let sandbox_required = task_worker_context.is_some()
         || args.windows(2).any(|pair| {
             pair[0] == "--settings"
@@ -14946,8 +14952,8 @@ pub fn try_spawn_granted(
     // only that) to an OS sandbox: its own shell and file tools could otherwise
     // read the keys and the database whatever Kronn's gates say. A host with no
     // sandbox, or the owner's setting off, leaves the launch exactly as it was.
-    let (final_cmd, final_args) = if runs_in_wsl || resolved_via_wsl {
-        (final_cmd, final_args)
+    let (final_cmd, final_args, browser_env) = if runs_in_wsl || resolved_via_wsl {
+        (final_cmd, final_args, None)
     } else {
         let roots = crate::core::vault_guard::LaunchRoots::discover(
             Path::new(&effective_work_dir),
@@ -14979,7 +14985,9 @@ pub fn try_spawn_granted(
             }
             crate::core::vault_guard::Confined::Wrapped => {}
         }
-        (program, wrapped_args)
+        let browser_env =
+            crate::core::vault_guard::browser_env_inside(&outcome, cfg!(target_os = "macos"));
+        (program, wrapped_args, browser_env)
     };
 
     let route = crate::core::child_env::ChildRoute::Agent(
@@ -15137,6 +15145,11 @@ pub fn try_spawn_granted(
     // and pretending an outer sandbox exists would undermine that guarantee.
     // Note: use CLAUDE_CODE_BUBBLEWRAP, not IS_SANDBOX — IS_SANDBOX also
     // suppresses 529 overloaded errors causing infinite silent retries.
+    // KT-1977 — a browser started by the agent's MCP servers cannot start its
+    // own sandbox inside Kronn's.
+    if let Some((name, value)) = browser_env {
+        cmd.env(name, value);
+    }
     if !sandbox_required {
         cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
     } else {

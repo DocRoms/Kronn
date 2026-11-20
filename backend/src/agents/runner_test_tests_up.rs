@@ -11984,6 +11984,77 @@ async fn auto_memory_switch_seen_by(
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+// KT-1971 — a settings document too large for an argument reaches the process
+// as a file, and the launch still reads its sandbox from the document.
+#[cfg(unix)] // the stand-in for the CLI is a shell script made executable with a Unix mode
+#[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
+#[tokio::test]
+async fn a_large_settings_document_reaches_the_process_as_a_file_and_keeps_its_sandbox() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings-probe");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nprintf '%s|%s|%s' \"$4\" \"${CLAUDE_CODE_BUBBLEWRAP-unset}\" \"$5\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let deny: Vec<String> = (0..4000)
+        .map(|n| format!("Read(//projects/project-{n}/**/*.pem)"))
+        .collect();
+    let settings = serde_json::json!({
+        "permissions": { "deny": deny },
+        "sandbox": {
+            "enabled": true,
+            "failIfUnavailable": true,
+            "filesystem": { "denyWrite": ["/projects"] }
+        }
+    })
+    .to_string();
+    assert!(settings.len() > 128 * 1024);
+    let args: Vec<String> = ["--setting-sources", "", "--settings", &settings, "prompt"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
+    let child = try_spawn(
+        path.to_str().unwrap(),
+        None,
+        &args,
+        dir.path(),
+        "ANTHROPIC_API_KEY",
+        None,
+        SpawnIo::Direct(None),
+        None,
+        None,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        crate::core::background_priority::Priority::Normal,
+        false,
+    )
+    .expect("the stand-in binary starts");
+    let output = child.wait_with_output().await.expect("the child exits");
+    let seen = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut seen = seen.split('|');
+    let (file, marker, prompt) = (
+        seen.next().unwrap(),
+        seen.next().unwrap(),
+        seen.next().unwrap(),
+    );
+    assert!(file.ends_with(".json") && file.len() < 1024, "{file}");
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    assert_eq!(written["permissions"]["deny"][3999], deny[3999]);
+    assert_eq!(written["sandbox"]["failIfUnavailable"], true);
+    // The sandbox was read from the document, not from the path.
+    assert_eq!(marker, "unset");
+    assert_eq!(prompt, "prompt");
+}
+
 /// What a spawned agent sees of the three GitHub variables (D2).
 #[cfg(unix)]
 async fn github_env_seen_by_child(

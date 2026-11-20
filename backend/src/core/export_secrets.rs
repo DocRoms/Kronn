@@ -284,6 +284,13 @@ pub fn redact_quick_api(api: &mut QuickApi, found: &mut Vec<RedactedField>) {
     if let Some(body) = api.api_body.as_mut() {
         scope.json("api_body".into(), None, body);
     }
+    if let Some(fallback) = api
+        .api_extract
+        .as_mut()
+        .and_then(|extract| extract.fallback.as_mut())
+    {
+        scope.json("api_extract.fallback".into(), None, fallback);
+    }
 }
 
 pub fn redact_quick_exec(exec: &mut QuickExec, found: &mut Vec<RedactedField>) {
@@ -381,6 +388,13 @@ fn redact_steps<'a>(
             let mut pairs = Some(std::mem::take(variables));
             scope.pairs(prefix, &mut pairs);
             *variables = pairs.unwrap_or_default();
+        }
+        if let Some(fallback) = step
+            .api_extract
+            .as_mut()
+            .and_then(|extract| extract.fallback.as_mut())
+        {
+            scope.json("api_extract.fallback".into(), None, fallback);
         }
         // A collect source is an inline Quick Exec line with its own variables,
         // and a transform fallback is a JSON literal.

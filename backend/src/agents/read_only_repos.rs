@@ -40,6 +40,9 @@ pub struct ReadOnlyRepos {
     /// `core.hooksPath` of each code root when it points inside the checkout:
     /// a hook the agent edits runs later, outside its sandbox.
     code_hooks: Vec<PathBuf>,
+    /// KT-1971 — granted projects this launch does not open: their directory
+    /// is closed whole to the agent's shell.
+    closed_roots: Vec<PathBuf>,
     /// A room's policy: the secrets of every opened checkout stay unreadable,
     /// whatever its level (`read`, `plan` or `code`).
     guard_secrets: bool,
@@ -145,6 +148,43 @@ pub const SETTINGS_INLINE_MAX_BYTES: usize = 96 * 1024;
 /// document of 27 000 rules; the bound keeps room for the rules a launch adds.
 pub const ROOM_SETTINGS_MAX_BYTES: usize = 1920 * 1024;
 
+/// What the CLI's own sandbox carries. Its `denyRead` and `denyWrite` paths
+/// become one sandbox profile handed to every command the agent runs: on macOS
+/// (Claude Code 2.1.329) a shell still starts with 1 397 paths of 124 KB in all,
+/// and no longer with 1 669 paths of 149 KB (`sandbox_apply: Invalid argument`,
+/// then `E2BIG`). A read-only project costs about 33 paths, one open for editing
+/// about 125.
+pub const SANDBOX_PATHS_MAX: usize = 1200;
+/// Paths the hand-over itself adds once the rules are fitted: the directory of
+/// the settings file, as named and as resolved.
+const SANDBOX_PATHS_OF_THE_FILE: usize = 2;
+pub const SANDBOX_PATH_BYTES_MAX: usize = 100 * 1024;
+/// The share of it the projects' fixed rules may take, the rest being left to
+/// the secrets a scan finds.
+const SANDBOX_SHARE_OF_ROOTS: usize = 85;
+
+/// Paths and bytes the document's sandbox would carry.
+fn sandbox_weight(document: &str) -> (usize, usize) {
+    // A document that does not parse holds nothing: it weighs beyond any bound.
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(document) else {
+        return (usize::MAX / 200, usize::MAX / 200);
+    };
+    ["denyRead", "denyWrite"]
+        .into_iter()
+        .filter_map(|list| settings["sandbox"]["filesystem"][list].as_array())
+        .flatten()
+        .filter_map(|path| path.as_str())
+        .fold((0, 0), |(paths, bytes), path| {
+            (paths + 1, bytes + path.len())
+        })
+}
+
+fn sandbox_holds(document: &str, percent: usize) -> bool {
+    let (paths, bytes) = sandbox_weight(document);
+    (paths + SANDBOX_PATHS_OF_THE_FILE) * 100 <= SANDBOX_PATHS_MAX * percent
+        && (bytes + SANDBOX_PATHS_OF_THE_FILE * 256) * 100 <= SANDBOX_PATH_BYTES_MAX * percent
+}
+
 /// What the CLI accepts as a settings file.
 const CLAUDE_SETTINGS_FILE_MAX_BYTES: usize = 2 * 1024 * 1024;
 
@@ -162,9 +202,16 @@ fn launch_settings_dir() -> Result<PathBuf, String> {
 /// Hand a settings document over as a file when it is too large for an
 /// argument: the `--settings` value becomes the path of a private file named
 /// after its content, in a directory the document itself closes to the agent.
-/// On failure the document stays inline, where the system's argument limit
-/// refuses a launch it cannot carry: the rules are never dropped.
-fn spill_large_settings(args: &mut [String]) {
+/// Only a document that enables the CLI's own sandbox, which only a Claude
+/// launch carries: any other launch may be wrapped in Kronn's sandbox, which
+/// hides the data directory from the process.
+/// On failure the document stays inline with every rule: the launch then runs
+/// as before, or is refused by the system's argument limit.
+///
+/// Called on the command line the process receives, at the spawn: everything
+/// that reads the launch's settings before (its sandbox, the vault rules)
+/// reads the document itself.
+pub fn spill_large_settings(args: &mut [String]) {
     let Some(at) = args
         .windows(2)
         .position(|pair| pair[0] == "--settings" && pair[1].starts_with('{'))
@@ -173,6 +220,13 @@ fn spill_large_settings(args: &mut [String]) {
         return;
     };
     if args[at].len() <= SETTINGS_INLINE_MAX_BYTES {
+        return;
+    }
+    // A launch without a sandbox of its own may be wrapped in Kronn's, which
+    // hides the data directory from the process: its document stays inline.
+    let own_sandbox = serde_json::from_str::<serde_json::Value>(&args[at])
+        .is_ok_and(|settings| settings["sandbox"]["enabled"] == true);
+    if !own_sandbox {
         return;
     }
     match write_launch_settings(&args[at]) {
@@ -184,21 +238,46 @@ fn spill_large_settings(args: &mut [String]) {
 fn write_launch_settings(document: &str) -> Result<PathBuf, String> {
     use sha2::Digest;
     let dir = launch_settings_dir()?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    // A link planted at that name would send the rules elsewhere.
+    let is_dir = std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_dir());
+    if !is_dir {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("cannot close {}: {error}", dir.display()))?;
+    }
     let mut settings: serde_json::Value = serde_json::from_str(document)
         .map_err(|error| format!("settings are not JSON: {error}"))?;
-    // The agent never rewrites the rules it runs under.
-    let root = dir.display().to_string();
+    // The agent never rewrites the rules it runs under: the directory as
+    // Kronn names it and as the system resolves it (a sandbox matches the
+    // resolved path).
+    let resolved = dir
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve {}: {error}", dir.display()))?;
+    let mut closed = vec![dir.display().to_string()];
+    push_unique_string(&mut closed, resolved.display().to_string());
     let deny = settings["permissions"]["deny"]
         .as_array_mut()
         .ok_or("settings carry no deny list")?;
-    for tool in ["Edit", "Write"] {
-        deny.push(rule(tool, &root, "**").into());
-    }
-    if settings["sandbox"]["enabled"] == true {
-        match settings["sandbox"]["filesystem"]["denyWrite"].as_array_mut() {
-            Some(paths) => paths.push(root.into()),
-            None => return Err("sandboxed settings carry no denyWrite list".into()),
+    for root in &closed {
+        for tool in ["Edit", "Write"] {
+            deny.push(rule(tool, root, "**").into());
         }
+    }
+    match settings["sandbox"]["filesystem"]["denyWrite"].as_array_mut() {
+        Some(paths) => {
+            for root in closed {
+                if !paths.iter().any(|path| path == root.as_str()) {
+                    paths.push(root.into());
+                }
+            }
+        }
+        None => return Err("sandboxed settings carry no denyWrite list".into()),
     }
     let document = settings.to_string();
     if document.len() > CLAUDE_SETTINGS_FILE_MAX_BYTES {
@@ -207,38 +286,34 @@ fn write_launch_settings(document: &str) -> Result<PathBuf, String> {
             document.len()
         ));
     }
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("cannot close {}: {error}", dir.display()))?;
-    }
-    forget_old_launch_settings(&dir);
     let name: String = sha2::Sha256::digest(document.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let path = dir.join(format!("{name}.json"));
+    let path = resolved.join(format!("{name}.json"));
     // Always rewritten: a file of that name is never trusted for its content.
     crate::core::atomic_file::atomic_write(&path, &document)?;
+    forget_old_launch_settings(&resolved, &path);
     Ok(path)
 }
 
-fn forget_old_launch_settings(dir: &Path) {
+fn forget_old_launch_settings(dir: &Path, written: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        let old = entry
-            .metadata()
+    let old = |path: &Path| {
+        std::fs::metadata(path)
             .and_then(|meta| meta.modified())
             .ok()
             .and_then(|at| at.elapsed().ok())
-            .is_some_and(|age| age > LAUNCH_SETTINGS_KEPT);
-        if old {
-            let _ = std::fs::remove_file(entry.path());
+            .is_some_and(|age| age > LAUNCH_SETTINGS_KEPT)
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Read again at the last moment: another launch may just have
+        // rewritten it.
+        if path != written && old(&path) && old(&path) {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -625,6 +700,9 @@ pub struct VerifiedCheckout {
     born: Option<std::time::SystemTime>,
     /// KT-1491 — opened for the agent to edit (a `code` grant), not read-only.
     writable: bool,
+    /// KT-1971 — granted, but beyond what the launch's sandbox carries: not
+    /// opened, and its whole directory closed to the agent's shell.
+    closed: bool,
 }
 
 impl VerifiedCheckout {
@@ -674,6 +752,7 @@ impl VerifiedCheckout {
             inode,
             born,
             writable: false,
+            closed: false,
         })
     }
 
@@ -688,6 +767,56 @@ impl VerifiedCheckout {
     /// The checkout sets `core.hooksPath` to its own root, so every file in it
     /// would be a hook: a `code` grant cannot open it for editing. The room gets
     /// it read-only and is told why.
+    /// A granted project whose path is no openable checkout (a link, a plain
+    /// directory, …), closed where it resolves: the launch denies the directory
+    /// the path leads to. `None` when it leads to none.
+    pub fn closed_at(location: &str) -> Option<Self> {
+        // The same hosts as an opened checkout (`check_platform`).
+        if cfg!(windows) {
+            return None;
+        }
+        let path = crate::core::scanner::resolve_host_path(location);
+        if !path.is_absolute() || location.trim().is_empty() {
+            return None;
+        }
+        // A sandbox path is no permission rule: parentheses are plain there.
+        // Only what a sandbox would read as a pattern cannot be named.
+        let root = path.canonicalize().ok()?;
+        if !root.is_dir()
+            || root
+                .to_str()?
+                .contains(['*', '?', '[', ']', '{', '}', '\\', '\n', '\r'])
+        {
+            return None;
+        }
+        let (device, inode, born) = identity(&root).ok()?;
+        Some(Self {
+            root,
+            device,
+            inode,
+            born,
+            writable: false,
+            closed: true,
+        })
+    }
+
+    /// Whether the launch can deny this directory whole: not when it holds
+    /// what the agent itself needs, nor when it lies in the working directory.
+    pub fn closable(&self, needs: &LaunchNeeds) -> bool {
+        needs.allow_closing(&self.root)
+    }
+
+    /// The same checkout left out of a launch: nothing in it is read or written.
+    pub fn closed(mut self) -> Self {
+        self.writable = false;
+        self.closed = true;
+        self
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
     pub fn hooks_at_root(&self) -> bool {
         matches!(hooks_path(&self.root), Ok(HooksPath::Root))
     }
@@ -723,6 +852,107 @@ fn check_platform(agent: &AgentType) -> Result<(), String> {
         return Err("read_only_repos requires a native macOS or Linux runner".into());
     }
     Ok(())
+}
+
+/// What a launch reads and writes whatever it is granted, as resolved paths:
+/// its working directory and the Git directory behind it (a linked worktree
+/// keeps its history in the main checkout), the home directory (the CLI's own
+/// state), the Kronn data directory (the settings handed over as a file) and
+/// the temporary directory. Denying a directory denies all it holds.
+/// System directories a launch cannot lose: a folder that is, or holds, one
+/// of them is never closed, were it registered as a project.
+const SYSTEM_DIRS: &[&str] = &[
+    "/etc",
+    "/var",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/usr/lib",
+    "/usr/share",
+    "/usr/libexec",
+    "/opt",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/run",
+    "/nix",
+    "/System",
+    "/Library",
+];
+
+/// The Git directory a linked worktree keeps outside its checkout.
+fn git_common_dir(checkout: &Path) -> Option<PathBuf> {
+    crate::core::cmd::project_git_cmd()
+        .arg("-C")
+        .arg(checkout)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|path| PathBuf::from(path.trim()))
+        .filter(|path| path.is_absolute())
+        .map(|path| path.canonicalize().unwrap_or(path))
+}
+
+#[derive(Debug, Clone)]
+pub struct LaunchNeeds {
+    work_dir: PathBuf,
+    held: Vec<PathBuf>,
+}
+
+impl LaunchNeeds {
+    pub fn of(work_dir: &Path) -> Self {
+        let resolved = |path: PathBuf| path.canonicalize().unwrap_or(path);
+        let work_dir = resolved(work_dir.to_path_buf());
+        let git_dir = git_common_dir(&work_dir);
+        let held = [
+            git_dir,
+            crate::core::child_env::var_os("HOME").map(PathBuf::from),
+            crate::core::config::config_dir().ok(),
+            Some(std::env::temp_dir()),
+            std::env::current_exe().ok(),
+        ]
+        .into_iter()
+        .flatten()
+        // Where the commands the agent runs live.
+        .chain(
+            crate::core::child_env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        )
+        // What every program reads, on macOS and on Linux.
+        .chain(SYSTEM_DIRS.iter().map(PathBuf::from))
+        .map(resolved)
+        .collect();
+        Self { work_dir, held }
+    }
+
+    /// An opened linked worktree reads its history in its main checkout,
+    /// which the launch therefore cannot close either.
+    pub fn with_worktrees<'a>(mut self, opened: impl IntoIterator<Item = &'a Path>) -> Self {
+        self.held.extend(
+            opened
+                .into_iter()
+                .filter(|root| root.join(".git").is_file())
+                .filter_map(git_common_dir),
+        );
+        self
+    }
+
+    /// Whether the directory can be denied whole.
+    pub fn allow_closing(&self, root: &Path) -> bool {
+        // `/usr`, `/opt`, a volume: never a project to close whole.
+        root.components().count() > 2
+            && !self.work_dir.starts_with(root)
+            && !root.starts_with(&self.work_dir)
+            && !self.held.iter().any(|needed| needed.starts_with(root))
+    }
 }
 
 fn refuse_overlap(root: &Path, work_dir: &Path) -> Result<(), String> {
@@ -921,6 +1151,7 @@ impl ReadOnlyRepos {
             code_hooks: Vec::new(),
             guard_secrets: false,
             compact_paths: false,
+            closed_roots: Vec::new(),
             granted_dirs,
         }))
     }
@@ -950,17 +1181,102 @@ impl ReadOnlyRepos {
         if checkouts.is_empty() {
             return Ok(None);
         }
+        let work_dir = canonical_directory(work_dir)?;
+        let mut policy = Self::room_rules(agent, &work_dir, checkouts)?;
+        // The walk happens here, once, at the launch. Selection happens only
+        // after every root has contributed to the same settings byte budget.
+        let scans = policy
+            .roots
+            .iter()
+            .chain(&policy.code_roots)
+            .map(|root| (root.clone(), scan_secrets(root)))
+            .collect::<Vec<_>>();
+        policy.fit_scanned_to_room_budget(&work_dir, &scans, max_bytes, true)?;
+        Ok(Some(policy))
+    }
+
+    /// How many of `checkouts`, in their order, a launch can open: the rules
+    /// of each are fixed, and the CLI's sandbox carries only so many
+    /// ([`SANDBOX_PATHS_MAX`]). The rest stay closed for that launch instead of
+    /// refusing it (KT-1971).
+    pub fn checkouts_that_fit(
+        agent: &AgentType,
+        work_dir: &Path,
+        checkouts: &[VerifiedCheckout],
+        closed: &[VerifiedCheckout],
+    ) -> usize {
+        // A small room fits whatever its paths: no Git read to learn it.
+        let writable = checkouts
+            .iter()
+            .filter(|checkout| checkout.writable)
+            .count();
+        if writable * 150 + (checkouts.len() - writable) * 40 + closed.len() * 2
+            <= SANDBOX_PATHS_MAX / 3
+        {
+            return checkouts.len();
+        }
+        let fits = |count: usize| {
+            count == 0
+                || canonical_directory(work_dir)
+                    .and_then(|work_dir| {
+                        // What is not opened is closed, at two paths a project.
+                        let launch: Vec<VerifiedCheckout> = checkouts[..count]
+                            .iter()
+                            .cloned()
+                            .chain(
+                                checkouts[count..]
+                                    .iter()
+                                    .cloned()
+                                    .map(VerifiedCheckout::closed),
+                            )
+                            .chain(closed.iter().cloned())
+                            .collect();
+                        let policy = Self::room_rules(agent, &work_dir, &launch)?;
+                        let args = policy.args(&AgentType::ClaudeCode, &work_dir);
+                        let document = policy.settings_document(&args);
+                        Ok(document.len() <= ROOM_SETTINGS_MAX_BYTES
+                            && sandbox_holds(document, SANDBOX_SHARE_OF_ROOTS))
+                    })
+                    // What cannot be opened at all is the launch's to refuse.
+                    .unwrap_or(true)
+        };
+        if fits(checkouts.len()) {
+            return checkouts.len();
+        }
+        // The largest prefix that fits: the weight only grows with a project.
+        let (mut held, mut over) = (0, checkouts.len());
+        while over - held > 1 {
+            let middle = held + (over - held) / 2;
+            if fits(middle) {
+                held = middle;
+            } else {
+                over = middle;
+            }
+        }
+        held
+    }
+
+    /// The roots of a room's checkouts and their fixed rules, no scan made.
+    fn room_rules(
+        agent: &AgentType,
+        work_dir: &Path,
+        checkouts: &[VerifiedCheckout],
+    ) -> Result<Self, String> {
         if !matches!(agent, AgentType::ClaudeCode) {
             return Err("room checkouts are only opened for Claude Code".into());
         }
         check_platform(agent)?;
-        let work_dir = canonical_directory(work_dir)?;
         let mut roots = Vec::new();
         let mut code_roots = Vec::new();
         let mut code_hooks = Vec::new();
+        let mut closed = Vec::new();
         for checkout in checkouts {
+            if checkout.closed {
+                push_unique(&mut closed, checkout.root.clone());
+                continue;
+            }
             checkout.still_holds()?;
-            refuse_overlap(&checkout.root, &work_dir)?;
+            refuse_overlap(&checkout.root, work_dir)?;
             if checkout.writable {
                 refuse_protected_overlap(&checkout.root)?;
                 // `core.hooksPath` may have changed since the plan: a checkout
@@ -981,24 +1297,46 @@ impl ReadOnlyRepos {
         }
         // A project granted both ways is read-only: the narrower wins.
         code_roots.retain(|root| !roots.contains(root));
-        // The walk happens here, once, at the launch. Selection happens only
-        // after every root has contributed to the same settings byte budget.
-        let scans = roots
-            .iter()
-            .chain(&code_roots)
-            .map(|root| (root.clone(), scan_secrets(root)))
-            .collect::<Vec<_>>();
-        let mut policy = Self {
+        // Closing a directory closes all it holds. One that holds what the
+        // agent needs cannot be closed: the plan opens those first, and one
+        // still here is left as a directory nobody granted.
+        let needs = LaunchNeeds::of(work_dir)
+            .with_worktrees(roots.iter().chain(&code_roots).map(PathBuf::as_path));
+        // The same project granted twice, one of the two opened: it is opened.
+        closed.retain(|root| !roots.contains(root) && !code_roots.contains(root));
+        closed.retain(|root| {
+            let closable = needs.allow_closing(root);
+            if !closable {
+                tracing::warn!(
+                    "a granted project left out of this launch holds a directory the agent \
+                     needs and stays unclosed: {}",
+                    root.display()
+                );
+            }
+            closable
+        });
+        // A project inside one that is left out is closed with it: the
+        // narrower wins, as for a project granted both ways.
+        roots.retain(|open| !closed.iter().any(|closed| open.starts_with(closed)));
+        code_roots.retain(|open| !closed.iter().any(|closed| open.starts_with(closed)));
+        // One inside an opened project stays closed: it was left out, and
+        // the launch says so. One inside another closed one is already denied.
+        let outer = closed.clone();
+        closed.retain(|root| {
+            !outer
+                .iter()
+                .any(|other| other != root && root.starts_with(other))
+        });
+        Ok(Self {
             roots,
             code_roots,
+            closed_roots: closed,
             scanned: Vec::new(),
             code_hooks,
             guard_secrets: true,
             compact_paths: false,
             granted_dirs: Vec::new(),
-        };
-        policy.fit_scanned_to_room_budget(&work_dir, scans, max_bytes)?;
-        Ok(Some(policy))
+        })
     }
 
     fn settings_root(&self, root: &Path, work_dir: &Path) -> String {
@@ -1020,11 +1358,14 @@ impl ReadOnlyRepos {
     fn fit_scanned_to_room_budget(
         &mut self,
         work_dir: &Path,
-        scans: Vec<(PathBuf, ScannedSecrets)>,
+        scans: &[(PathBuf, ScannedSecrets)],
         max_bytes: usize,
+        may_compact: bool,
     ) -> Result<(), String> {
+        self.compact_paths = false;
+        self.scanned.clear();
         let absolute = self.args(&AgentType::ClaudeCode, work_dir);
-        if self.settings_document(&absolute).len() > SETTINGS_INLINE_MAX_BYTES {
+        if may_compact && self.settings_document(&absolute).len() > SETTINGS_INLINE_MAX_BYTES {
             // Paths relative to the working directory only where they keep
             // the document an argument: a file carries absolute paths.
             self.compact_paths = true;
@@ -1034,14 +1375,15 @@ impl ReadOnlyRepos {
         }
         let required = self.args(&AgentType::ClaudeCode, work_dir);
         let mandatory_len = self.settings_document(&required).len();
-        if mandatory_len > max_bytes {
+        if mandatory_len > max_bytes || !sandbox_holds(self.settings_document(&required), 100) {
             return Err(format!(
                 "this room is granted too many projects for Claude Code ({} opened, {} for editing): \
-                 their protection rules need {mandatory_len} bytes, above the {}-byte limit. \
+                 their protection rules need {mandatory_len} bytes and {} sandbox paths, above \
+                 what the agent's sandbox carries ({max_bytes} bytes, {SANDBOX_PATHS_MAX} paths). \
                  Grant fewer projects to the room, or grant them read-only",
                 self.roots.len() + self.code_roots.len(),
                 self.code_roots.len(),
-                max_bytes
+                sandbox_weight(self.settings_document(&required)).0,
             ));
         }
 
@@ -1065,7 +1407,8 @@ impl ReadOnlyRepos {
                 })
                 .collect();
             let args = self.args(&AgentType::ClaudeCode, work_dir);
-            if self.settings_document(&args).len() <= max_bytes {
+            let document = self.settings_document(&args);
+            if document.len() <= max_bytes && sandbox_holds(document, 100) {
                 break;
             }
             let mut changed = false;
@@ -1105,7 +1448,18 @@ impl ReadOnlyRepos {
             .filter_map(|value| value.as_str().map(str::to_owned))
             .collect();
         let mut bytes = self.settings_document(&current).len();
-        for (root, scan) in &scans {
+        // Paths a pattern already closes: never what makes a file of an
+        // argument, nor what fills the sandbox.
+        let (mut sandbox_paths, mut sandbox_bytes) =
+            sandbox_weight(self.settings_document(&current));
+        // A document that is a file anyway keeps them up to the sandbox bound:
+        // they are what holds where a sandbox honours no pattern.
+        let named_bytes_max = if bytes > SETTINGS_INLINE_MAX_BYTES {
+            max_bytes
+        } else {
+            SETTINGS_INLINE_MAX_BYTES
+        };
+        for (root, scan) in scans {
             let code = self.code_roots.contains(root);
             for path in &scan.named {
                 let path = settings_path(path, work_dir, self.compact_paths);
@@ -1113,11 +1467,17 @@ impl ReadOnlyRepos {
                 let read_bytes = usize::from(!deny_read.contains(&path)) * (encoded.len() + 1);
                 let write_bytes =
                     usize::from(code && !deny_write.contains(&path)) * (encoded.len() + 1);
-                // Paths a pattern already closes: never what makes a file of it.
-                if bytes + read_bytes + write_bytes > SETTINGS_INLINE_MAX_BYTES {
+                let added = usize::from(read_bytes > 0) + usize::from(write_bytes > 0);
+                if bytes + read_bytes + write_bytes > named_bytes_max
+                    || sandbox_paths + added + SANDBOX_PATHS_OF_THE_FILE > SANDBOX_PATHS_MAX
+                    || sandbox_bytes + added * path.len() + SANDBOX_PATHS_OF_THE_FILE * 256
+                        > SANDBOX_PATH_BYTES_MAX
+                {
                     continue;
                 }
                 bytes += read_bytes + write_bytes;
+                sandbox_paths += added;
+                sandbox_bytes += added * path.len();
                 deny_read.insert(path.clone());
                 if code {
                     deny_write.insert(path.clone());
@@ -1132,11 +1492,17 @@ impl ReadOnlyRepos {
         }
         let final_args = self.args(&AgentType::ClaudeCode, work_dir);
         let final_len = self.settings_document(&final_args).len();
-        if final_len > max_bytes {
+        if final_len > max_bytes || !sandbox_holds(self.settings_document(&final_args), 100) {
             return Err(format!(
-                "the room's Claude settings grew to {final_len} bytes, above the {}-byte limit",
-                max_bytes
+                "the room's Claude settings grew to {final_len} bytes and {} sandbox paths, above \
+                 what the agent's sandbox carries ({max_bytes} bytes, {SANDBOX_PATHS_MAX} paths)",
+                sandbox_weight(self.settings_document(&final_args)).0
             ));
+        }
+        // The secrets no pattern names grew it past an argument: a file
+        // carries absolute paths, so the selection is made again with them.
+        if self.compact_paths && final_len > SETTINGS_INLINE_MAX_BYTES {
+            return self.fit_scanned_to_room_budget(work_dir, scans, max_bytes, false);
         }
         Ok(())
     }
@@ -1149,7 +1515,6 @@ impl ReadOnlyRepos {
         args.extend(self.args(agent, work_dir));
         // KT-1495 — one `--settings` document: the vault rules join the policy's.
         crate::core::vault_guard::fold_vault_into_claude_settings(args, &self.granted_dirs);
-        spill_large_settings(args);
         args.push(prompt);
     }
 
@@ -1186,6 +1551,26 @@ impl ReadOnlyRepos {
                     .map(|root| self.settings_root(root, work_dir))
                     .collect();
                 let mut deny_read: Vec<String> = Vec::new();
+                // A granted project the launch does not open has no rule of its
+                // own: its directory is closed whole, secrets included.
+                for closed in &self.closed_roots {
+                    let root = self.settings_root(closed, work_dir);
+                    // Inside an opened project the file tools reach it too. A
+                    // name with parentheses cannot be written in a rule: the
+                    // sandbox paths alone hold then, on the shell.
+                    if !root.contains(['(', ')'])
+                        && self
+                            .roots
+                            .iter()
+                            .chain(&self.code_roots)
+                            .any(|open| closed.starts_with(open))
+                    {
+                        deny.push(rule("Read", &root, "**"));
+                        deny.push(rule("Edit", &root, "**"));
+                    }
+                    push_unique_string(&mut deny_read, root.clone());
+                    push_unique_string(&mut deny_write, root);
+                }
                 // A room's read-only checkouts keep their secrets closed too: a
                 // lower level never reads what `code` cannot.
                 if self.guard_secrets {
@@ -1347,6 +1732,13 @@ mod tests {
             work.canonicalize().unwrap(),
             repo.canonicalize().unwrap(),
         )
+    }
+
+    // A document that cannot be weighed is never taken as light.
+    #[test]
+    fn a_settings_document_that_does_not_parse_fits_no_sandbox() {
+        assert!(!sandbox_holds("{ not json", 100));
+        assert!(sandbox_holds("{}", 100));
     }
 
     #[test]
