@@ -23,7 +23,7 @@ includes external Git metadata for linked worktrees. Missing/non-Git paths,
 permission-pattern characters, overlap with the working directory, unsupported
 agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
-[src: file: backend/src/agents/read_only_repos.rs:690-794#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:794-898#resolve_with_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:701-731#canonical_directory]
 [src: file: backend/src/api/workflow_step_schema.json:18#read_only_repos]
 
@@ -50,7 +50,7 @@ this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4676-4681#read_only_repos]
 [src: file: backend/src/agents/runner.rs:4724-4726#read_only_repos]
-[src: file: backend/src/agents/read_only_repos.rs:1019-1028#apply]
+[src: file: backend/src/agents/read_only_repos.rs:1144-1154#apply]
 [src: file: backend/src/agents/runner.rs:14890-14895#sandbox_required]
 [src: file: backend/src/agents/runner.rs:15127-15138#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
@@ -103,7 +103,7 @@ two launch routes (the direct CLI and the ACP adapter) build their arguments fro
 the same policy at every launch, so a revoke applies from the next turn; revoking
 a `code` grant (or lowering the trust level that gave it) also stops the room's
 running turn, which still holds the checkout open.
-[src: file: backend/src/agents/read_only_repos.rs:824-880#resolve_room]
+[src: file: backend/src/agents/read_only_repos.rs:928-994#resolve_room]
 [src: file: backend/src/api/discussions/messaging.rs:1556-1585#stop_running_turn]
 
 A writable root never opens what a later program runs or what is secret, whether
@@ -137,16 +137,26 @@ or not the path exists when the turn starts:
   `denyRead` and `denyWrite`: the fixed credential paths literally, whether or not
   they exist (Seatbelt takes a path that is not there yet), the names as patterns
   (honoured where the sandbox supports patterns), and what a bounded scan finds now
-  (depth 8, 20 000 entries, no link followed) as literal paths. The complete inline
-  `--settings` document has one 96 KiB budget shared by every root and already
-  includes the vault rules. Required tool rules and sandbox patterns come first.
+  (depth 8, 20 000 entries, no link followed) as literal paths. The complete
+  `--settings` document, vault rules included, is shared by every root. Each
+  granted project adds a fixed block of rules whatever the room's history (about
+  5 KB read-only, 30 to 70 KB for `code`, with the length of its path). Up to
+  96 KiB the document is a command-line argument (Linux refuses one argument
+  above 128 KiB). Beyond, it is written with absolute paths to a private file of
+  `<data dir>/launch-settings/`, named after its content, and `--settings` carries
+  that path (KT-1971): a room granted every project of an instance used to be
+  refused at 96 KiB. The document closes that directory to the agent's `Edit` and
+  `Write` tools and to its sandbox; a file no launch rewrote for 30 days is
+  removed. Claude Code refuses a settings file above 2 MiB, so the document is
+  bounded at 1 920 KiB (about a hundred read-only projects, or twenty-five open
+  for editing): beyond, the launch is refused with the number of projects opened
+  and what to reduce. Required tool rules and sandbox patterns come first.
   Existing secrets no pattern can name (`is_secret_file` ignores letter case:
   `PROD.PEM`, `Deploy.Key`) come next and are never dropped: their directories,
-  then parents, are denied until they fit. Pattern-covered literal paths use only
-  the remaining bytes. When absolute mandatory rules exceed the budget, Kronn uses
-  the shorter working-directory-relative form Claude documents for permission and
-  sandbox paths; if the mandatory compact form still cannot fit, the launch is
-  refused before the OS can fail it with `E2BIG`. A secret with an unpatterned name
+  then parents, are denied until they fit. Pattern-covered literal paths are added
+  only while the document stays an argument. The shorter
+  working-directory-relative form Claude documents for permission and sandbox
+  paths is used only where it keeps the document an argument. A secret with an unpatterned name
   created after the launch is not covered. The scan
   runs once at the launch, off the async executor (`spawn_blocking`). A versioned
   template such as `.env.example` is refused with them: a deny rule has no
@@ -173,7 +183,7 @@ requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
 [src: file: backend/src/workflows/run_artifacts.rs:202-211#ensure]
 [src: file: backend/src/workflows/steps.rs:126-147#artifacts_read_only_dirs]
-[src: file: backend/src/agents/read_only_repos.rs:690-720#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:794-824#resolve_with_dirs]
 
 ```json
 [
@@ -341,7 +351,7 @@ path, since the cwd is the copy. The copy goes with the artifacts directory.
 The automated policy and dispatch regressions use temporary repositories and
 fake CLI processes. They verify declarations and arguments; they do not prove
 vendor sandbox enforcement.
-[src: file: backend/src/agents/read_only_repos.rs:1200-1221#fixture]
+[src: file: backend/src/agents/read_only_repos.rs:1326-1347#fixture]
 [src: file: backend/tests/adapter_worker_policy.rs:41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 The dispatch regression checks initial and resumed Codex adapter arguments:
