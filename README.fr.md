@@ -111,15 +111,16 @@ Une image ou un clip peut partir de plusieurs images sources, ComfyUI compris (F
 ## L'approche Kronn : de l'ingénierie, pas de l'incantation
 
 Découper : le code fait ce que le code sait faire (récupérer, transformer, lancer une commande) sans dépenser de token, et un agent n'intervient que là où il faut du jugement, avec un prompt court et borné.
-Mesurer : les skills et les Quick Prompts sont versionnés, et un run shadow montre si une nouvelle version est vraiment meilleure avant sa mise en service. Voir [l'approche Kronn](docs/guides/the-kronn-way.md).
+Mesurer : les skills et les Quick Prompts sont versionnés, et un shadow d'étape montre si une nouvelle version est vraiment meilleure avant sa mise en service. Voir [l'approche Kronn](docs/guides/the-kronn-way.md).
 
-### Tester une nouvelle version sans risque (runs shadow)
+### Tester une nouvelle version sans risque (shadows d'étape)
 
-Chaque run normal d'un workflow peut lancer un run shadow sur les mêmes entrées réelles, qui charge la version du skill ou du Quick Prompt que tu testes.
-Chaque étape marquée comme agissant hors de Kronn (publier, envoyer, écrire ailleurs) est sautée dans le shadow, comme chaque Gate : il ne publie ni ne casse rien.
-La liste des runs compare les deux runs étape par étape, et un clic promeut la meilleure version. Voir [le guide des runs shadow](docs/guides/shadow-runs.md) (en anglais).
+Une étape peut porter des shadows : chacun rejoue cette étape à côté de son exécution principale, sur exactement la même entrée, avec un autre agent, modèle, prompt ou d'autres versions de skills (ou rien de tout cela, pour voir à quel point l'étape est déterministe).
+Seule la sortie principale continue le workflow. Un shadow ne lance jamais une étape marquée comme agissant hors de Kronn (publier, envoyer, écrire ailleurs), ni un Gate, et un shadow qui échoue ou dépasse son budget ne fait jamais échouer l'étape.
+La vue du run compare l'exécution principale et ses shadows étape par étape (ce qui diffère, tokens, coût, durée, diff des sorties, et combien de sorties distinctes donne un shadow identique), et un clic promeut la meilleure version.
+En option, une étape peut aussi fusionner son exécution principale avec un, plusieurs ou tous ses shadows (désactivé par défaut) : une passe de condensation dédoublonne leurs points, vérifie chaque point levé par un shadow et garde la provenance de chacun, et le résultat fusionné devient la sortie de l'étape. Un point qu'elle ne peut pas vérifier n'est jamais publié : la sortie principale reste alors la sortie de l'étape. Voir [le guide des shadows](docs/guides/shadow-runs.md) (en anglais).
 
-<p align="center"><img src="docs/screenshots/shadow-runs.fr.svg" alt="Les mêmes entrées réelles lancent un run normal, publié, avec Prompt v2 et Skill v1, et un run shadow sans effet de bord, avec Prompt v2 et Skill v2. Les deux alimentent une comparaison étape par étape, puis la meilleure version est promue en un clic" /></p>
+<p align="center"><img src="docs/screenshots/shadow-runs.fr.svg" alt="Une étape reçoit son entrée. L'exécution principale, publiée, est l'étape telle quelle. À côté, un shadow identique et un shadow variante (autre agent, modèle, prompt ou skills) rejouent uniquement cette étape sur la même entrée, sans effet de bord. Une comparaison par étape montre ce qui diffère, les tokens, le coût, la durée, un diff des sorties et une synthèse de déterminisme, et la version testée se promeut en un clic. Une fusion optionnelle condense l'exécution principale avec les shadows choisis, avec vérification et provenance, et le résultat fusionné devient la sortie de l'étape" /></p>
 
 ---
 
@@ -174,7 +175,7 @@ Docker sur macOS ne peut ni lancer tes agents hôtes ni lire le Trousseau : sur 
 | **Worker** | Un agent qui exécute une tâche dans son propre worktree et sa sous-discussion, relu par le principal de la room. |
 | **Quick Prompt / Quick API / Quick Exec** | Modèle de prompt réutilisable avec `{{variables}}` ; appel d'API enregistré ; collecteur CLI borné, sans shell. |
 | **Workflow** | Un pipeline multi-étapes (15 types de step) lancé à la main, par cron, par un tracker ou par un Watch. |
-| **Shadow run** | Un rejeu sans effet de bord d'un vrai run sur d'autres versions de skills ou de Quick Prompts. |
+| **Shadow d'étape** | Un rejeu sans effet de bord d'une étape à côté de son exécution principale, sur la même entrée, avec un autre agent, modèle, prompt ou d'autres versions de skills (ou rien, pour mesurer le déterminisme) ; fusionnable en option dans la sortie de l'étape. |
 | **Artifact (Page vivante)** | Un rapport HTML isolé et versionné, adossé à des jeux de données JSON. |
 | **Profil / Skill / Directive** | Qui est l'agent, ce qu'il sait, comment il parle : 18 profils et 30 skills intégrés, plus les tiens. |
 | **Plugin** | Intégration MCP, API, hybride ou Custom API avec secrets chiffrés : plus de 55 intégrés (GitHub, GitLab, Jira, Slack, Stripe…), n'importe quelle API REST via Custom API. |
@@ -218,6 +219,7 @@ Texte complet dans [LICENSE](LICENSE). Si ton équipe juridique veut plus de nua
 
 - [Site web](https://docroms.github.io/Kronn/) : le site de présentation de Kronn (FR / EN / ES)
 - [docs/install.md](docs/install.md) : installation par OS, Docker, WSL2, application desktop Tauri
+- [docs/install-by-agent.md](docs/install-by-agent.md) : l'installation qu'un agent IA peut mener de bout en bout, et comment vérifier que les agents ont les outils Kronn
 - [L'approche Kronn](docs/guides/the-kronn-way.md) : décomposition, batchs, compare-agents, modèles locaux
 - [docs/architecture/overview.md](docs/architecture/overview.md) : topologie backend/frontend, référence du moteur de workflow
 - [docs/architecture/trust-levels.md](docs/architecture/trust-levels.md) : niveaux de confiance, bac à sable, confirmation forte

@@ -45,7 +45,7 @@ bundle into two different projects still don't share or collide on *new*
 identities — each project's own import still records its own
 project-scoped row (`record_origin`, called only for a `Create`
 disposition). The root Artifact keeps its existing "always a fresh copy"
-behaviour (`artifact_roundtrip_preserves_null_points_and_reuses_previous_import_identities`);
+behaviour (`artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previous_import_identities`);
 only the anti-stale-preview observation changed, from a growing "generation"
 counter to observing whichever identity the slug currently maps to
 (`prepare_plan` in `backend/src/api/artifact_portability/import.rs`).

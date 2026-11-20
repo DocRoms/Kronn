@@ -15,7 +15,7 @@ Kronn-compatible documentation, with or without Kronn.
 
 One global mode, chosen in **Settings → Anti-hallucination** or with
 `anti_hallucination_mode` in `config.toml`. The default is `warn`.
-[src: file: backend/src/models/setup.rs:448#anti_hallucination_mode]
+[src: file: backend/src/models/setup.rs:1024#anti_hallucination_mode]
 
 - **`off`**: no directive, no checking.
 - **`warn`** (default): each agent receives a sourcing directive ("cite a
@@ -35,7 +35,7 @@ One global mode, chosen in **Settings → Anti-hallucination** or with
   citation stays visible but gets a refusal note telling you not to rely on it.
   On a project with a `docs/AGENTS.md`, the `kronn-doc-author` skill is attached
   to the agent.
-  [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
+  [src: file: backend/src/api/audit/anti_hallu_enforce.rs:28#MAX_ATTEMPTS]
   [src: file: backend/src/core/anti_halluc.rs:175-177#enforce_refusal_needed]
 
 ## Honest by design

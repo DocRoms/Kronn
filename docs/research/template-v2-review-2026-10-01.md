@@ -19,8 +19,8 @@ agent files. [src: commit: 1b67e8d3]
   The ten adapter templates now point to the canonical parameter instead.
   [src: file: backend/src/core/docs_migration.rs:660-662]
   [src: file: templates/AGENTS.md:3]
-  [src: file: backend/src/core/template_homogeneity_test.rs:17-29#INSTRUCTION_FILES]
-  [src: file: backend/src/core/template_homogeneity_test.rs:73-140#all_instruction_files_contain_required_sections]
+  [src: file: backend/src/core/template_homogeneity_test.rs:15-27#INSTRUCTION_FILES]
+  [src: file: backend/src/core/template_homogeneity_test.rs:71-138#all_instruction_files_contain_required_sections]
 - **A checklist overriding the configured test policy.** The test selection
   examples and completion checklist now apply only where required by the
   project policy and CI; they no longer introduce a universal full-suite gate.
