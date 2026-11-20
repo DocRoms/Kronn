@@ -1102,7 +1102,7 @@ fn source_language(path: &str) -> Option<&'static str> {
 /// Compute a bounded, GitHub-style language breakdown from the same source
 /// universe as the Code tab. Dependency/cache folders, docs, sensitive files,
 /// project exclusions and Git-ignored files do not influence the result.
-pub(crate) fn compute_source_language_stats(
+pub fn compute_source_language_stats(
     root: &std::path::Path,
     exclusions: &[String],
 ) -> Vec<ProjectLanguageStat> {

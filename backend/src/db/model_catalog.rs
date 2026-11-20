@@ -110,7 +110,7 @@ fn validate_manual_fields(req: &UpsertManualModelRequest) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn format_agent_type(agent_type: &AgentType) -> &'static str {
+pub fn format_agent_type(agent_type: &AgentType) -> &'static str {
     match agent_type {
         AgentType::ClaudeCode => "ClaudeCode",
         AgentType::Codex => "Codex",
@@ -126,7 +126,7 @@ pub(crate) fn format_agent_type(agent_type: &AgentType) -> &'static str {
     }
 }
 
-pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
+pub fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
     Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,

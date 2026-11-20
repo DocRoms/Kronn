@@ -22,7 +22,7 @@ use crate::models::{ApiResponse, AuditRun, AuditRunStep};
 use crate::AppState;
 
 /// What the writer knows once at the start of a run.
-pub(crate) struct RunStateMeta {
+pub struct RunStateMeta {
     pub started_by: String,
     pub resumed_from: Option<String>,
     pub template_version: Option<String>,
@@ -30,7 +30,7 @@ pub(crate) struct RunStateMeta {
 }
 
 impl RunStateMeta {
-    pub(crate) fn capture(
+    pub fn capture(
         project: &std::path::Path,
         started_by: String,
         resumed_from: Option<String>,
@@ -53,7 +53,7 @@ impl RunStateMeta {
 /// rows and the digests this writer holds are authoritative: nothing here
 /// ever reads the file back, so an agent editing it mid-run changes nothing
 /// and the next step rewrites it (KT-1199 §6).
-pub(crate) struct RunStateWriter {
+pub struct RunStateWriter {
     project: PathBuf,
     run_id: String,
     meta: RunStateMeta,
@@ -64,7 +64,7 @@ pub(crate) struct RunStateWriter {
 }
 
 impl RunStateWriter {
-    pub(crate) fn new(
+    pub fn new(
         project: PathBuf,
         run_id: String,
         meta: RunStateMeta,
@@ -82,7 +82,7 @@ impl RunStateWriter {
     /// Rewrite the file from the run's rows. `refresh` re-reads every
     /// finished step's file: the end of the run, when the documents are final.
     /// A failure to write never fails the run: it is logged.
-    pub(crate) fn sync(&self, conn: &rusqlite::Connection, refresh: bool) {
+    pub fn sync(&self, conn: &rusqlite::Connection, refresh: bool) {
         if let Err(e) = self.try_sync(conn, refresh) {
             tracing::warn!(
                 "Audit run state of {} not written to the repository: {e}",
@@ -209,7 +209,7 @@ fn step_status(row: &AuditRunStep) -> StepStatus {
 /// local database's: this instance has no run, or the file describes a
 /// different run that was updated after the local one ended. A run this
 /// instance is still running is never superseded.
-pub(crate) fn repo_is_newer(state: &RunState, local: Option<&AuditRun>) -> bool {
+pub fn repo_is_newer(state: &RunState, local: Option<&AuditRun>) -> bool {
     let Some(local) = local else {
         return true;
     };
@@ -255,7 +255,7 @@ pub struct RepoAuditRun {
 }
 
 /// The repository's run of `project`, against the local latest run.
-pub(crate) fn repo_view(
+pub fn repo_view(
     project: &std::path::Path,
     local_latest: Option<&AuditRun>,
 ) -> Option<RepoAuditRun> {
@@ -314,12 +314,12 @@ pub(crate) fn repo_view(
 
 /// The committed run a colleague finished, checked against the same gates as
 /// a local run (KT-1199 §4).
-pub(crate) struct RepoValidation {
+pub struct RepoValidation {
     pub state: RunState,
 }
 
 /// `Err` carries the reason the repository state cannot validate the project.
-pub(crate) fn repo_validation(project: &std::path::Path) -> Result<RepoValidation, RepoRefusal> {
+pub fn repo_validation(project: &std::path::Path) -> Result<RepoValidation, RepoRefusal> {
     let RepoProbe::Found { state, committed } = repo_state::probe(project) else {
         return Err(RepoRefusal::NoRun);
     };
@@ -345,7 +345,7 @@ pub(crate) fn repo_validation(project: &std::path::Path) -> Result<RepoValidatio
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RepoRefusal {
+pub enum RepoRefusal {
     NoRun,
     NotCommitted,
     NotCompleted(String),
@@ -354,7 +354,7 @@ pub(crate) enum RepoRefusal {
 }
 
 impl RepoRefusal {
-    pub(crate) fn message(&self) -> String {
+    pub fn message(&self) -> String {
         match self {
             Self::NoRun => "No audit run recorded for this project on this instance and no audit run state in the repository — run the audit first.".into(),
             Self::NotCommitted => format!(
@@ -375,7 +375,7 @@ impl RepoRefusal {
 
 /// What a validation rebuilds the run's digests from: never the working-tree
 /// file, which may be uncommitted and edited by an agent.
-pub(crate) struct LocalRunRows {
+pub struct LocalRunRows {
     pub run: AuditRun,
     pub steps: Vec<AuditRunStep>,
     pub baseline: Option<crate::core::adr::StartOfRun>,
@@ -388,7 +388,7 @@ pub(crate) struct LocalRunRows {
 /// audit, the committed (`HEAD`) copy of the file otherwise. The working-tree
 /// file only lends its descriptive header (who started it, the template
 /// version, the briefing digest).
-pub(crate) fn refresh_validated_digests(
+pub fn refresh_validated_digests(
     project: &std::path::Path,
     run_id: &str,
     local: Option<LocalRunRows>,
@@ -450,7 +450,7 @@ pub(crate) fn refresh_validated_digests(
 /// instance already has is left as is. The steps whose produced file still
 /// matches are inherited; the pending, failed and changed ones are replayed.
 /// Returns the number of steps inherited.
-pub(crate) fn adopt_repo_run(
+pub fn adopt_repo_run(
     conn: &rusqlite::Connection,
     project_id: &str,
     project: &std::path::Path,

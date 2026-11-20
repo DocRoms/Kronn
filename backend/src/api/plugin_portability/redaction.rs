@@ -45,7 +45,7 @@ pub struct ExportPlaceholder {
 
 /// How a leaf of the definition is treated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Rule {
+pub enum Rule {
     /// A server id: kept when it is a catalogue id or Kronn's own
     /// `custom-<slug>-<8 hex>`, else replaced by a fresh one (never a placeholder).
     Id,
@@ -80,7 +80,7 @@ pub(crate) enum Rule {
 const BODY: &str = "api_spec.auth.TokenExchange.body_template";
 
 /// Every decided leaf path, array indices written `[]`.
-pub(crate) const RULES: &[(&str, Rule)] = &[
+pub const RULES: &[(&str, Rule)] = &[
     ("id", Rule::Id),
     ("name", Rule::Name),
     ("label", Rule::Name),
@@ -160,7 +160,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
 ];
 
 /// The rule of a leaf, by its path with array indices written `[]`.
-pub(crate) fn rule(pattern: &str) -> Rule {
+pub fn rule(pattern: &str) -> Rule {
     if pattern.starts_with(BODY) {
         return Rule::EnvReference;
     }
@@ -197,7 +197,7 @@ fn shape_suspect(word: &str) -> bool {
     word.chars().count() > 20 || longest >= 6
 }
 
-pub(crate) fn name_allowed(name: &str) -> bool {
+pub fn name_allowed(name: &str) -> bool {
     name.chars().count() <= 80
         && name
             .split(|c: char| !c.is_alphanumeric())
@@ -232,7 +232,7 @@ fn is_key(key: &str) -> bool {
 
 /// An env-key name an export may carry: a key with no token-shaped word.
 /// A key derived from a withheld label would otherwise bring it back.
-pub(crate) fn env_key_allowed(key: &str) -> bool {
+pub fn env_key_allowed(key: &str) -> bool {
     is_key(key) && name_allowed(key)
 }
 
@@ -336,7 +336,7 @@ fn lone_reference(text: &str) -> bool {
 }
 
 /// `scheme://host[:port]` of an http(s) URL, user info dropped.
-pub(crate) fn url_origin(url: &str) -> Option<String> {
+pub fn url_origin(url: &str) -> Option<String> {
     let (scheme, host, port) = url_parts(url)?;
     Some(match port {
         Some(port) => format!("{scheme}://{host}:{port}"),
@@ -397,7 +397,7 @@ fn safe_origin(url: &str, catalogue: Option<&str>) -> Option<String> {
 
 /// A URL as a review may show it: whole when an export would keep it, else its
 /// origin when the host is kept.
-pub(crate) fn url_for_display(url: &str) -> String {
+pub fn url_for_display(url: &str) -> String {
     if url_allowed(url, None) || is_placeholder(url) {
         url.to_string()
     } else {
@@ -449,12 +449,12 @@ fn argument_allowed(arg: &str) -> bool {
 
 /// The one test of a placeholder key: the prefix and the name check, so the
 /// prefix can never carry a secret through.
-pub(crate) fn placeholder_key(key: &str) -> bool {
+pub fn placeholder_key(key: &str) -> bool {
     key.starts_with(PLACEHOLDER_PREFIX) && env_key_allowed(key)
 }
 
 /// Exactly one export placeholder, for the checks outside this module.
-pub(crate) fn is_export_placeholder(text: &str) -> bool {
+pub fn is_export_placeholder(text: &str) -> bool {
     is_placeholder(text)
 }
 
@@ -524,23 +524,23 @@ fn join(base: &str, key: &str) -> String {
     }
 }
 
-pub(crate) struct Walk<'a> {
-    pub(crate) catalogue: Option<&'a Value>,
+pub struct Walk<'a> {
+    pub catalogue: Option<&'a Value>,
     /// Env keys the catalogue entry declares, or the definition kept in clear.
-    pub(crate) declared: BTreeSet<String>,
+    pub declared: BTreeSet<String>,
     /// Makes a regenerated id stable within one export.
-    pub(crate) salt: String,
+    pub salt: String,
     /// `name_slug` of the definition's name when the export keeps that name.
-    pub(crate) kept_name_slug: Option<String>,
-    pub(crate) placeholders: Vec<ExportPlaceholder>,
+    pub kept_name_slug: Option<String>,
+    pub placeholders: Vec<ExportPlaceholder>,
     /// The same literal gets the same placeholder, so equal fields stay equal.
-    pub(crate) by_value: BTreeMap<String, usize>,
+    pub by_value: BTreeMap<String, usize>,
     /// Leaf paths no rule decides (withheld all the same).
-    pub(crate) unknown: Vec<String>,
+    pub unknown: Vec<String>,
 }
 
 impl Walk<'_> {
-    pub(crate) fn new(catalogue: Option<&Value>) -> Walk<'_> {
+    pub fn new(catalogue: Option<&Value>) -> Walk<'_> {
         Walk {
             catalogue,
             declared: BTreeSet::new(),
@@ -646,7 +646,7 @@ impl Walk<'_> {
         }
     }
 
-    pub(crate) fn value(
+    pub fn value(
         &mut self,
         value: &Value,
         pattern: &str,
@@ -730,7 +730,7 @@ impl Walk<'_> {
 }
 
 /// What a configuration-only export carries of one plugin.
-pub(crate) struct Redacted {
+pub struct Redacted {
     pub server: McpServer,
     pub label: String,
     pub env_keys: Vec<String>,
@@ -741,7 +741,7 @@ pub(crate) struct Redacted {
 
 /// What one export knows besides the definition: the catalogue entry and the
 /// env keys it declares, and the salt that keeps regenerated ids stable.
-pub(crate) struct ExportContext<'a> {
+pub struct ExportContext<'a> {
     pub catalogue: Option<&'a McpServer>,
     pub declared_env_keys: &'a [String],
     pub salt: &'a str,
@@ -749,7 +749,7 @@ pub(crate) struct ExportContext<'a> {
 
 /// One walk over the definition, the configuration label and the env-key
 /// names, so a literal shared between them gets one placeholder.
-pub(crate) fn redact_plugin(
+pub fn redact_plugin(
     server: &McpServer,
     context: &ExportContext<'_>,
     label: &str,
@@ -802,7 +802,7 @@ pub(crate) fn redact_plugin(
     }
 }
 
-pub(crate) fn redact_server(
+pub fn redact_server(
     server: &McpServer,
     catalogue: Option<&McpServer>,
 ) -> (McpServer, Vec<ExportPlaceholder>) {
@@ -865,7 +865,7 @@ fn restore_types(value: &mut Value, typed: &BTreeMap<String, Value>) {
 }
 
 /// Every placeholder key a definition holds.
-pub(crate) fn placeholders_in(server: &McpServer) -> BTreeSet<String> {
+pub fn placeholders_in(server: &McpServer) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     let mut value = serde_json::to_value(server).unwrap_or(Value::Null);
     each_string(&mut value, &mut |text| placeholder_keys(text, &mut keys));
@@ -873,14 +873,14 @@ pub(crate) fn placeholders_in(server: &McpServer) -> BTreeSet<String> {
 }
 
 /// Keys of `text` in placeholder form, for a label or an env key.
-pub(crate) fn placeholders_of(text: &str) -> BTreeSet<String> {
+pub fn placeholders_of(text: &str) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     placeholder_keys(text, &mut keys);
     keys
 }
 
 /// `text` with the owner's values in place of its placeholders.
-pub(crate) fn fill_text(text: &str, values: &BTreeMap<String, String>) -> String {
+pub fn fill_text(text: &str, values: &BTreeMap<String, String>) -> String {
     let mut out = text.to_string();
     for (key, filled) in values {
         if placeholder_key(key) && !filled.is_empty() {
@@ -893,7 +893,7 @@ pub(crate) fn fill_text(text: &str, values: &BTreeMap<String, String>) -> String
 /// The definition with the owner's values in place of the placeholders, and
 /// the keys left unfilled (they stay as references and fail a call naming
 /// them). A typed placeholder goes back as its type when the value parses.
-pub(crate) fn fill(
+pub fn fill(
     server: &McpServer,
     values: &BTreeMap<String, String>,
     types: &BTreeMap<String, ExportValueType>,
@@ -921,4 +921,4 @@ pub(crate) fn fill(
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "redaction_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

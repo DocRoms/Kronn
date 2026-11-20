@@ -40,7 +40,7 @@ const MODEL_DENIAL_MARKERS: [&str; 4] = [
 /// never answer for you", which is worth remembering. Deliberately NOT
 /// classified: 400/422 (could be the payload), 429, 5xx (transient) and a
 /// plain 401/403 (the key itself may be wrong).
-pub(crate) fn classify_model_failure(status: u16, body: &str) -> Option<ModelUnavailableReason> {
+pub fn classify_model_failure(status: u16, body: &str) -> Option<ModelUnavailableReason> {
     match status {
         404 | 410 => Some(ModelUnavailableReason::NotFound),
         401 | 403 => {
@@ -56,7 +56,7 @@ pub(crate) fn classify_model_failure(status: u16, body: &str) -> Option<ModelUna
 
 /// Human-readable catalogue detail for a flagged model. Carries the status and
 /// the way out, never the provider's body (which can echo account metadata).
-pub(crate) fn model_failure_detail(reason: ModelUnavailableReason, status: u16) -> String {
+pub fn model_failure_detail(reason: ModelUnavailableReason, status: u16) -> String {
     match reason {
         ModelUnavailableReason::AccessDenied => format!(
             "Access denied (HTTP {status}): the proxy lists this model but refuses it for this key or project. Choose another model, or test the connection again once access is fixed."
@@ -72,7 +72,7 @@ pub(crate) fn model_failure_detail(reason: ModelUnavailableReason, status: u16) 
 /// and an entry was flagged: selectors then show it as unavailable and the
 /// catalogue preflight refuses it instead of re-sending a call that cannot
 /// succeed, or quietly running another model.
-pub(crate) async fn flag_unreachable_model(
+pub async fn flag_unreachable_model(
     db: &crate::db::Database,
     runtime_target_id: &str,
     model: &str,
@@ -98,7 +98,7 @@ pub(crate) async fn flag_unreachable_model(
 }
 
 /// The counterpart of [`flag_unreachable_model`]: the model just answered.
-pub(crate) async fn clear_unreachable_model(
+pub async fn clear_unreachable_model(
     db: &crate::db::Database,
     runtime_target_id: &str,
     model: &str,

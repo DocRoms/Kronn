@@ -41,6 +41,17 @@
 #   overrides (`adm-zip`, `brace-expansion`, `global-agent`, `sharp`) are covered by the full
 #   frontend test/build gate because their parents have not released patched
 #   constraints yet.
+#
+# - `auditConfig.ignoreGhsas` — advisories `pnpm audit` skips, each with its
+#   reason and the date it was added. Remove an entry as soon as a patched
+#   release exists, and pin that release in `overrides` instead.
+#     • GHSA-fc5q-39xc-vjpf (2026-11-18, decided by the owner): picomatch
+#       <= 4.0.7, high, ReDoS. No patched release is published (4.0.7 is the
+#       latest). Development tooling only (vitest, fdir): `pnpm audit --prod`
+#       does not report it.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-fc5q-39xc-vjpf
 allowBuilds:
   onnxruntime-node: true
   protobufjs: true

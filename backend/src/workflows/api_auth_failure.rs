@@ -125,7 +125,7 @@ fn one_line(raw: &str) -> String {
 /// loses the connection's own secret values (`secrets`, every wire form), then
 /// goes through the same heuristic redaction as stored run output, and only
 /// then is bounded.
-pub(crate) fn sanitize(
+pub fn sanitize(
     mut refusal: AuthRefusal,
     secrets: &crate::core::secret_scrub::SecretSet,
 ) -> AuthRefusal {
@@ -159,13 +159,13 @@ pub fn plain_words(connection: &str, plugin: &str, refusal: &AuthRefusal) -> Str
 }
 
 /// `output` led by the plain sentence and closed by the signal line.
-pub(crate) fn annotate(output: &str, sentence: &str) -> String {
+pub fn annotate(output: &str, sentence: &str) -> String {
     format!("{sentence}\n{}\n{AUTH_REFUSED_SIGNAL}", output.trim_end())
 }
 
 /// The plain sentence a refused call's output leads with, when `output` is one
 /// (a step that aggregates several calls reuses it for its own output).
-pub(crate) fn sentence_of(output: &str) -> Option<&str> {
+pub fn sentence_of(output: &str) -> Option<&str> {
     if !output.contains(AUTH_REFUSED_SIGNAL) {
         return None;
     }
@@ -197,7 +197,19 @@ pub async fn track_outcome(
         let id = config_id.to_string();
         let cleared = state
             .db
-            .with_conn(move |conn| crate::db::mcps::clear_auth_failure(conn, &id))
+            .with_conn(move |conn| {
+                let cleared = crate::db::mcps::clear_auth_failure(conn, &id);
+                // KT-1692: the token worked now — the date a connection without
+                // a probe shows as "last good call". Written after the flag is
+                // cleared and never fatal: a failed date write must not keep a
+                // refusal (and its bell entry) up after a good call.
+                if let Err(error) =
+                    crate::db::mcps::mark_good_call(conn, &id, chrono::Utc::now())
+                {
+                    tracing::warn!(target: "kronn::api_auth", "recording the last good call failed: {error}");
+                }
+                cleared
+            })
             .await;
         if let Err(error) = cleared {
             tracing::warn!(target: "kronn::api_auth", "clearing the auth flag failed: {error}");
@@ -598,6 +610,15 @@ mod tests {
             failure(&state).await.is_none(),
             "a working token unflags it"
         );
+        // KT-1692: and dates the last good call.
+        let check = state
+            .db
+            .with_conn(|conn| crate::db::mcps::get_token_check(conn, "cfg-gh"))
+            .await
+            .unwrap()
+            .expect("the good call is recorded");
+        assert!(check.last_good_at.is_some());
+        assert_eq!(check.checked_at, None, "a call is not a probe");
     }
 
     #[tokio::test]

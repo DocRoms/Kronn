@@ -33,6 +33,10 @@ on:
 # ship Node 24-compatible entrypoints — this just flips the runtime selector.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Cargo 1.100 builds test binaries under build/<pkg>/<hash>/out/; the coverage
+  # report of the nextest archive then misses most objects (32 % instead of 83+).
+  # Keep the previous layout until KT-1788 handles both.
+  __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: "1"
   # 0.8.11 — onnxruntime-node's postinstall downloads CUDA GPU binaries from
   # api.nuget.org on linux-x64: never used in CI (browser app → onnxruntime-web,
   # CPU binaries bundled in the npm package) and api.nuget.org regularly times
@@ -52,7 +56,7 @@ jobs:
   # checks and reads as green. This required job always runs and fails unless
   # the trigger is a manual measurement or the PR retains the label.
   require-ci-label:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       pull-requests: read
@@ -86,7 +90,7 @@ jobs:
   test-backend-build:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A cache miss compiles the instrumented tree from scratch.
     timeout-minutes: 40
     outputs:
@@ -233,12 +237,23 @@ jobs:
       # cache main saves is exactly what a pull request compiles.
       # CARGO_TARGET_DIR keeps the instrumented tree where the hot cache
       # restores it. `eval`, not `source <(...)`: portable to any bash.
+      # Instrumented, the library and its test crate exceed the runner's
+      # memory side by side: this repository's crates compile one at a time.
       - name: Build the instrumented test archive
         run: |
           export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-target"
           eval "$(cargo llvm-cov show-env --sh)"
+          export RUSTC_WORKSPACE_WRAPPER="$GITHUB_WORKSPACE/scripts/ci/rustc_one_at_a_time.sh"
+          # The wrapper records each crate's peak memory with GNU time.
+          /usr/bin/time -f %M true >/dev/null
+          export KRONN_RUSTC_MEMORY_LOG="$RUNNER_TEMP/kronn-rustc-memory.log"
           cargo nextest archive --workspace --locked \
             --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst"
+
+      # A crate whose compilation nears the runner's memory is refused here,
+      # before it becomes a build that swaps until the job is cancelled.
+      - name: Crate memory gate — peak of each compilation
+        run: python3 scripts/ci/rustc_memory.py "$RUNNER_TEMP/kronn-rustc-memory.log"
 
       - name: Lint — no raw Command::new in prod code
         if: github.event_name != 'push'
@@ -298,7 +313,7 @@ jobs:
   test-backend-shard:
     needs: [require-ci-label, test-backend-build]
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -382,7 +397,7 @@ jobs:
   test-backend:
     needs: [require-ci-label, test-backend-build, test-backend-shard]
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
@@ -430,7 +445,8 @@ jobs:
         run: |
           export CARGO_TARGET_DIR="$KRONN_COV_TARGET"
           eval "$(cargo llvm-cov show-env --sh)"
-          cargo llvm-cov report --summary-only \
+          # `--workspace`: without it the report keeps the top crate only.
+          cargo llvm-cov report --workspace --summary-only \
             --fail-under-lines 83 \
             --fail-under-functions 83 \
             --fail-under-regions 83
@@ -453,16 +469,19 @@ jobs:
           NEXTEST_PROFILE: ci
           KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates
           LLVM_PROFILE_FILE: /dev/null
+          # One directory for the bindings of every backend crate.
+          TS_RS_EXPORT_DIR: ${{ github.workspace }}/backend/bindings
         run: |
           cargo nextest run --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst" \
             --workspace-remap "$PWD" -E 'test(export_bindings)'
-          node ../frontend/scripts/assemble-generated-types.mjs
-          git diff --exit-code ../frontend/src/types/generated.ts
+          # Compare in memory with the committed file: nothing is rewritten, so
+          # a stale bindings dir or a hand edit both fail here, never "fix" it.
+          node ../frontend/scripts/assemble-generated-types.mjs --check
 
   test-backend-quality:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -495,12 +514,12 @@ jobs:
       # The generated-type drift check and the raw-command lint run in
       # `test-backend`, on the build the suite already made.
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       # nextest does not run doctests; none exist today, and this keeps a
       # future one from being silently skipped.
       - name: cargo test --doc
         if: github.event_name != 'push'
-        run: cargo test --doc
+        run: cargo test --workspace --doc
       - name: Save cargo registry and clippy dependencies (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-clippy.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -537,6 +556,20 @@ jobs:
         if: github.event_name != 'push'
         run: |
           python3 scripts/ci/nginx_body_limits.py
+      - name: Crate size gate — lines per backend crate
+        if: github.event_name != 'push'
+        run: |
+          python3 scripts/ci/crate_size.py
+      # `test-support` and `full-tests` belong to test builds: the server links
+      # the layer crates without either.
+      - name: Server build — no test feature on the layer crates
+        if: github.event_name != 'push'
+        run: |
+          LEAKED=$(cargo tree -p kronn -e normal,build -f '{p} {f}' --locked | grep -E 'kronn-l[0-9]+ .*(test-support|full-tests)' || true)
+          test -z "$LEAKED" || { echo "$LEAKED"; exit 1; }
+          # A build that names no package takes every crate: still no test-support.
+          LEAKED=$(cargo tree -e normal,build -f '{p} {f}' --locked | grep -E 'kronn(-l[0-9]+)? .*test-support' || true)
+          test -z "$LEAKED" || { echo "$LEAKED"; exit 1; }
       - name: Tech-debt registry — index rows match open detail files
         if: github.event_name != 'push'
         run: |
@@ -566,7 +599,7 @@ jobs:
   duplication-check:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -590,7 +623,7 @@ jobs:
   diff-hygiene:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -616,7 +649,7 @@ jobs:
   test-python:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -651,7 +684,7 @@ jobs:
   test-frontend:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -722,7 +755,7 @@ jobs:
     # see).
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # ── Playwright official container ─────────────────────────────────
     # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
     # INTO this image. That eliminates the `pnpm exec playwright install`
@@ -799,7 +832,7 @@ jobs:
 
       - name: Build backend (dev profile)
         working-directory: backend
-        run: cargo build --locked --bin kronn
+        run: cargo build --locked -p kronn --bin kronn
 
       - name: Save cargo registry and the e2e backend dependencies (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-e2e-dev.outputs.cache-hit != 'true'
@@ -921,7 +954,7 @@ jobs:
   test-shell:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -951,7 +984,7 @@ jobs:
   security-scan:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -1024,7 +1057,7 @@ jobs:
       - test-e2e
       - test-shell
       - security-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       # Only a label check that ran and failed means "label missing". One that
@@ -1059,7 +1092,7 @@ jobs:
     # gate result: an SLO breach is a warning, while a real timeout still fails.
     if: always() && inputs.ref == '' && needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
     needs: [require-ci-label, test-backend-build, test-backend, ci-quality-gates]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       actions: read
@@ -1075,3 +1108,6 @@ jobs:
           CI_COMPILED_CACHE_HIT: ${{ needs.test-backend-build.outputs.compiled_cache_hit }}
           CI_COMPILED_CACHE_STATE: ${{ needs.test-backend-build.outputs.compiled_cache_state }}
         run: node scripts/ci/backend_ci_slo.mjs
+
+# Linux jobs name their image: four confinement tests fail on ubuntu-26.04, where
+# `ubuntu-latest` lands on some jobs and not on others (KT-1929).

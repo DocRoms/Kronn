@@ -286,7 +286,7 @@ fn a_symlinked_target_refuses_the_whole_reinstall_before_any_write() {
 #[test]
 fn the_real_template_reinstalls_cleanly_and_is_stable() {
     let tmp = TempDir::new().unwrap();
-    let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    let template = Path::new(crate::BACKEND_DIR).join("../templates/docs");
     write(tmp.path(), "docs/AGENTS.md", "# broken {{X}}");
     write(tmp.path(), "docs/coding-rules.md", "");
 
@@ -508,6 +508,9 @@ async fn a_bridge_caller_is_refused_and_the_routes_are_off_the_bridge_list() {
             own_discussions: Vec::new(),
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         }))
     };
 
@@ -542,7 +545,7 @@ async fn a_bridge_caller_is_refused_and_the_routes_are_off_the_bridge_list() {
 const VALIDATED_ENTRY: &str = "<!-- KRONN:VALIDATED -->\n# Entry\n\nAudited.\n";
 
 fn real_template() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs")
+    Path::new(crate::BACKEND_DIR).join("../templates/docs")
 }
 
 fn step_of<'a>(docs: &'a [PlaceholderDoc], path: &str) -> Option<&'a PlaceholderDoc> {

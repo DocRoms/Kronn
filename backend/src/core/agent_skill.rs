@@ -176,7 +176,7 @@ pub fn decode_scalar(raw: &str) -> String {
 
 /// Writes `value` as a YAML double-quoted scalar (also a valid TOML basic
 /// string): a newline or a quote in it can never start another key.
-pub(crate) fn quoted(value: &str) -> String {
+pub fn quoted(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
@@ -234,7 +234,7 @@ pub fn render(file: &AgentSkillFile) -> String {
 
 /// The `arguments` and `argument-hint` header lines, empty when there are none.
 /// The list is written as a JSON array, which YAML reads as a flow sequence.
-pub(crate) fn arguments_lines(arguments: &[String], hint: Option<&str>) -> String {
+pub fn arguments_lines(arguments: &[String], hint: Option<&str>) -> String {
     let mut lines = String::new();
     if !arguments.is_empty() {
         let list = serde_json::to_string(arguments).unwrap_or_else(|_| "[]".to_string());

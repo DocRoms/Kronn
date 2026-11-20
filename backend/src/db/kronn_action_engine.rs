@@ -22,7 +22,7 @@ use super::discussion_actions::{
 };
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ActionTable {
+pub enum ActionTable {
     Discussion,
     /// KT-678 — a Page's declaration row is an offer and never carries
     /// execution state; the state machine below only ever runs against one of
@@ -44,18 +44,18 @@ impl ActionTable {
 /// mutates, independent of whether the row is anchored to a discussion
 /// message or a Live Page action block.
 #[derive(Debug, Clone)]
-pub(crate) struct ActionCore {
-    pub(crate) id: String,
-    pub(crate) state: DiscussionActionState,
-    pub(crate) values: Vec<DiscussionActionValue>,
-    pub(crate) shared_run_id: Option<String>,
+pub struct ActionCore {
+    pub id: String,
+    pub state: DiscussionActionState,
+    pub values: Vec<DiscussionActionValue>,
+    pub shared_run_id: Option<String>,
     /// The discussion a Quick Prompt launch opened. It has no shared run: its
     /// execution is that discussion's first agent turn.
-    pub(crate) result_discussion_id: Option<String>,
-    pub(crate) diagnostic: Option<String>,
-    pub(crate) launched_at: Option<String>,
-    pub(crate) finished_at: Option<String>,
-    pub(crate) updated_at: String,
+    pub result_discussion_id: Option<String>,
+    pub diagnostic: Option<String>,
+    pub launched_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub updated_at: String,
 }
 
 pub struct ActionCompletion {
@@ -66,7 +66,7 @@ pub struct ActionCompletion {
     pub diagnostic: Option<String>,
 }
 
-pub(crate) fn state_db_str(state: DiscussionActionState) -> &'static str {
+pub fn state_db_str(state: DiscussionActionState) -> &'static str {
     match state {
         DiscussionActionState::Proposed => "proposed",
         DiscussionActionState::Launching => "launching",
@@ -109,7 +109,7 @@ pub enum Reconcile {
 /// API, Quick Exec or workflow, the first agent turn of the result discussion
 /// for a Quick Prompt. A launch with neither is either still being claimed or
 /// has lost what it produced.
-pub(crate) fn reconcile(
+pub fn reconcile(
     conn: &Connection,
     table: ActionTable,
     core: &mut ActionCore,
@@ -289,7 +289,7 @@ fn settle(
 }
 
 /// Idempotent no-op cancel of a still-`proposed` row.
-pub(crate) fn cancel(conn: &Connection, table: ActionTable, id: &str) -> Result<()> {
+pub fn cancel(conn: &Connection, table: ActionTable, id: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
         &format!(
@@ -303,7 +303,7 @@ pub(crate) fn cancel(conn: &Connection, table: ActionTable, id: &str) -> Result<
 }
 
 /// Drop the values a launch only hands over in memory, as a claimed row stores them.
-pub(crate) fn scrub_runtime_values(values: &mut [DiscussionActionValue]) {
+pub fn scrub_runtime_values(values: &mut [DiscussionActionValue]) {
     for value in values {
         if value.allow_manual_override
             || matches!(
@@ -331,7 +331,7 @@ pub(crate) fn scrub_runtime_values(values: &mut [DiscussionActionValue]) {
 /// current single-writer-mutex `Database`, this cannot actually happen since
 /// nothing else can interleave inside one transaction, but the check is kept
 /// to avoid silently trusting an UPDATE that matched zero rows).
-pub(crate) fn claim_launch(
+pub fn claim_launch(
     transaction: &rusqlite::Transaction<'_>,
     table: ActionTable,
     core: &mut ActionCore,
@@ -443,7 +443,7 @@ pub(crate) fn claim_launch(
     }
 }
 
-pub(crate) fn complete(
+pub fn complete(
     conn: &Connection,
     table: ActionTable,
     id: &str,

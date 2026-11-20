@@ -223,7 +223,7 @@ pub async fn install_template(
 }
 
 /// Resolve the templates directory (Docker mount or local)
-pub(crate) fn resolve_templates_dir() -> std::path::PathBuf {
+pub fn resolve_templates_dir() -> std::path::PathBuf {
     if let Ok(dir) = crate::core::child_env::var("KRONN_TEMPLATES_DIR") {
         return std::path::PathBuf::from(dir);
     }
@@ -263,7 +263,7 @@ fn templates_dir_near_executable(exe: &std::path::Path) -> Option<std::path::Pat
 /// architecture/operations/etc.). Agents write their RUNTIME-discovered
 /// facts to one of these targeted subfolders, keeping the curated areas
 /// pristine.
-pub(crate) fn ensure_agent_writable_subfolders(
+pub fn ensure_agent_writable_subfolders(
     project_root: &std::path::Path,
     docs_dir: &std::path::Path,
 ) {
@@ -305,7 +305,7 @@ pub(crate) fn ensure_agent_writable_subfolders(
 
 /// The README each agent-writable subfolder starts with. Shipped as
 /// `templates/docs/<folder>/README.md` too: a test keeps both copies equal.
-pub(crate) const SUBFOLDER_READMES: &[(&str, &str)] = &[
+pub const SUBFOLDER_READMES: &[(&str, &str)] = &[
     (
         "conventions",
         "# Conventions\n\n\
@@ -339,8 +339,8 @@ pub(crate) const SUBFOLDER_READMES: &[(&str, &str)] = &[
 /// allowed to touch. Existing files are never inspected or rewritten:
 /// a 0-byte or placeholder-bearing destination is user state until a
 /// manifest proves otherwise (Codex A2).
-#[cfg(test)]
-pub(crate) fn copy_dir_nondestructive(
+#[cfg(any(test, feature = "test-support"))]
+pub fn copy_dir_nondestructive(
     src: &std::path::Path,
     dst: &std::path::Path,
 ) -> Result<Vec<std::path::PathBuf>, String> {
@@ -359,7 +359,7 @@ pub(crate) fn copy_dir_nondestructive(
 /// folder is created, and every file published create-only, through the
 /// rooted primitives of `fs_guard` — a folder swapped for a link mid-install
 /// is refused, never followed, and a file that appeared is never overwritten.
-pub(crate) fn copy_dir_nondestructive_in(
+pub fn copy_dir_nondestructive_in(
     root: &std::path::Path,
     src: &std::path::Path,
     dst: &std::path::Path,
@@ -473,7 +473,7 @@ mod tests {
         let docs = tmp.path().join("docs");
         std::fs::create_dir(&docs).unwrap();
         ensure_agent_writable_subfolders(tmp.path(), &docs);
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+        let root = std::path::Path::new(crate::BACKEND_DIR).join("../templates/docs");
         for (sub, _) in SUBFOLDER_READMES {
             let body = std::fs::read_to_string(docs.join(sub).join("README.md")).unwrap();
             assert!(
@@ -688,7 +688,7 @@ mod tests {
         // This checkout's own templates, whatever another test left in the env.
         crate::core::child_env::set_var(
             "KRONN_TEMPLATES_DIR",
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates"),
+            std::path::Path::new(crate::BACKEND_DIR).join("../templates"),
         );
         let tmp = tempfile::TempDir::new().unwrap();
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());

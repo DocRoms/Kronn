@@ -31,6 +31,8 @@ accurate audit status when this repo is cloned to another Kronn instance.";
 
 /// File name (always under `docs/` — resolved via `detect_docs_dir`).
 pub const KRONN_STATE_FILENAME: &str = ".kronn.json";
+/// The human-validation record next to the state file (see `doc_provenance`).
+pub const PROVENANCE_FILENAME: &str = "provenance.json";
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export)]
@@ -66,6 +68,16 @@ pub struct ValidationEntry {
     pub validated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validated_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TemplateManifest {
+    pub version: Option<String>,
+    /// Paths relative to the docs root, hashes of upstream template bytes.
+    pub files: BTreeMap<String, String>,
+    /// The last spec bytes Kronn installed; never inferred from a filename.
+    #[serde(default)]
+    pub installed_spec_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -105,7 +117,7 @@ pub struct KronnState {
     pub template_installed_at: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template: Option<crate::core::template_manifest::TemplateManifest>,
+    pub template: Option<TemplateManifest>,
 
     /// Files Kronn itself wrote into the docs folder (path relative to the
     /// folder, hash of the bytes written). They are Kronn's whatever else the
@@ -157,7 +169,7 @@ fn read_for_mutation(project_path: &Path) -> Result<Option<KronnState>, String> 
 /// file, `Err` (with a warn) for an unreadable/corrupt one so the caller aborts
 /// instead of clobbering. Seeding from legacy evidence keeps a marker-only
 /// project's Validated/Bootstrapped state when its first state file is written.
-pub(crate) fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
+pub fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
     crate::core::docs_location::guard_write(project_path)?;
     read_for_mutation(project_path)
         .map(|state| {
@@ -197,15 +209,14 @@ fn kronn_version() -> String {
 /// sense that calling twice on the same day adds two entries — the audit
 /// engine itself decides whether to call this (e.g. once per successful
 /// full/partial run).
-pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String> {
+pub fn record_audit_with(
+    project_path: &Path,
+    audit_type: &str,
+    template: impl FnOnce(Option<&TemplateManifest>) -> Result<Option<TemplateManifest>, String>,
+) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;
-    let templates = crate::api::projects::template::resolve_templates_dir().join("docs");
-    if templates.is_dir() {
-        state.template = Some(crate::core::template_manifest::for_audit(
-            project_path,
-            &templates,
-            state.template.as_ref(),
-        )?);
+    if let Some(manifest) = template(state.template.as_ref())? {
+        state.template = Some(manifest);
     }
     state.audits.push(AuditEntry {
         date: today_iso(),
@@ -280,7 +291,7 @@ fn insert_written<'a>(
         let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         state
             .kronn_written
-            .insert(rel, crate::core::docs_merge::sha256_hex(&bytes));
+            .insert(rel, crate::core::audit_run_state::sha256_hex(&bytes));
     }
     Ok(())
 }
@@ -610,10 +621,6 @@ pub fn restore_from_git_history(project_path: &Path, commit: &str) -> Result<(),
         .map_err(|e| format!("{rel} in commit {commit} is not a valid state file: {e}"))?;
     crate::core::fs_guard::guarded_replace(project_path, &target, &content)
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "kronn_state_test.rs"]
-mod tests;
 
 #[cfg(all(test, unix, feature = "full-tests"))] // swaps a folder for a symlink (std::os::unix)
 mod swap_tests {

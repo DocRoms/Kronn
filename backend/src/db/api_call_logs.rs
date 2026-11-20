@@ -360,6 +360,17 @@ pub fn get(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiCallLog>> 
     .optional()
 }
 
+// A quarter of audit trail is kept; older rows are purged at boot.
+fn boot_purge(conn: &Connection, _: &mut super::BootReport) -> anyhow::Result<()> {
+    match purge_older_than(conn, 90) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Purged {} api_call_logs rows older than 90 days", n),
+        Err(e) => tracing::warn!("Failed to auto-purge api_call_logs: {}", e),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 100, run: boot_purge } }
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;

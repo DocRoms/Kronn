@@ -681,6 +681,9 @@ mod audit_status_tests {
                         own_discussions: Vec::new(),
                         own_run: None,
                         agent: None,
+                        room_agent_of: Vec::new(),
+                        own_execution: None,
+                        own_sessions: Vec::new(),
                     })
                 });
                 audit_status(State(state), Path("p1".into()), caller, None)
@@ -706,10 +709,6 @@ mod audit_status_tests {
 #[path = "audit_steps_root_tests.rs"]
 mod audit_steps_root_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "run_states_tests.rs"]
-mod run_states_tests;
-
-#[cfg(test)]
-#[path = "docs_writer_tests.rs"]
-mod docs_writer_tests;
+pub mod run_states_tests;

@@ -46,7 +46,7 @@ fn transform(step: &WorkflowStep, context: &TemplateContext) -> Result<Value> {
     transform_value(&config.fields, &input)
 }
 
-pub(crate) fn transform_value(fields: &[TransformDataField], input: &Value) -> Result<Value> {
+pub fn transform_value(fields: &[TransformDataField], input: &Value) -> Result<Value> {
     if fields.is_empty() {
         bail!("TransformData requires at least one output field");
     }

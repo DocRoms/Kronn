@@ -59,7 +59,7 @@ struct Shared {
     /// The number of the last frame published.
     seq: AtomicU32,
     /// Every significant state, in order, for tests that must see a short one.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     history: Mutex<Vec<HistoryEntry>>,
 }
 
@@ -79,7 +79,7 @@ impl Default for RunProgress {
     }
 }
 
-fn millis(duration: Duration) -> u32 {
+pub fn millis(duration: Duration) -> u32 {
     u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
 }
 
@@ -105,7 +105,7 @@ impl RunProgress {
             }),
             revision: watch::channel(Revision::default()).0,
             seq: AtomicU32::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             history: Mutex::default(),
         }))
     }
@@ -123,7 +123,7 @@ impl RunProgress {
             let now = Instant::now();
             match change(&mut state, now) {
                 Some(significant) => {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if significant {
                         if let Ok(mut history) = self.0.history.lock() {
                             history.push(HistoryEntry {
@@ -199,7 +199,7 @@ impl RunProgress {
     }
 
     /// The significant states so far, in order; for tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn history(&self) -> Vec<HistoryEntry> {
         self.0.history.lock().map(|h| h.clone()).unwrap_or_default()
     }
@@ -307,7 +307,7 @@ impl RunProgress {
 }
 
 /// One significant state as it was recorded; for tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryEntry {
     pub phase: AgentRunPhase,
@@ -458,7 +458,3 @@ pub async fn publish_registered(
     .await;
     live.remove(&identity.run_id);
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "run_progress_tests.rs"]
-mod tests;

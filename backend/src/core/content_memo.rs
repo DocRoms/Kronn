@@ -91,7 +91,7 @@ impl<T> ContentMemo<T> {
     }
 
     /// Whether `key` is held, without counting a hit or a miss.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn contains(&self, key: &str) -> bool {
         self.lock().entries.contains_key(key)
     }

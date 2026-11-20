@@ -5,7 +5,7 @@ use super::*;
 use crate::models::{BriefingEnvironment, BriefingPerson};
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(crate::BACKEND_DIR)
         .parent()
         .expect("workspace root")
         .to_path_buf()

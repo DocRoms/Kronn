@@ -2,7 +2,9 @@ use axum::extract::{Path, State};
 use axum::Json;
 
 use super::*;
-use crate::db::live_page_action_trusts::tests::{block, setup, workflow, ACTION, BOUND, PAGE};
+use crate::uptests::db__live_page_action_trusts__tests::tests::{
+    block, setup, workflow, ACTION, BOUND, PAGE,
+};
 
 fn state() -> AppState {
     let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
@@ -19,6 +21,9 @@ fn agent() -> Option<axum::Extension<crate::core::bridge_token::BridgeCaller>> {
         own_discussions: vec![],
         own_run: None,
         agent: None,
+        room_agent_of: Vec::new(),
+        own_execution: None,
+        own_sessions: Vec::new(),
     }))
 }
 

@@ -356,7 +356,7 @@ fn render_block(docs_root: &crate::core::docs_location::DocsRoot) -> String {
 
 /// True when `content` holds anything besides Kronn's managed block: the file
 /// carries human-written instructions Kronn must not rewrite.
-pub(crate) fn has_content_outside_managed_block(content: &str) -> bool {
+pub fn has_content_outside_managed_block(content: &str) -> bool {
     match find_marker_zone(content) {
         Some((start, end)) => {
             !content[..start].trim().is_empty() || !content[end..].trim().is_empty()
@@ -753,7 +753,7 @@ mod tests {
     }
 
     fn templates_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates")
+        PathBuf::from(crate::BACKEND_DIR).join("../templates")
     }
 
     #[test]

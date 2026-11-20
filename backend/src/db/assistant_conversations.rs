@@ -65,7 +65,7 @@ impl std::fmt::Debug for TransientSecrets {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl From<Vec<String>> for TransientSecrets {
     fn from(values: Vec<String>) -> Self {
         Self(values)
@@ -472,7 +472,7 @@ impl AssistantGuard {
     }
 
     /// Ages a turn, for the tests that cannot wait two hours.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn age_turn(&self, turn_id: &str, by: std::time::Duration) {
         if let Ok(mut turns) = self.turns.lock() {
             if let Some(turn) = turns.get_mut(turn_id) {
@@ -481,7 +481,7 @@ impl AssistantGuard {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn live_turns(&self) -> usize {
         self.turns.lock().map(|turns| turns.len()).unwrap_or(0)
     }
@@ -508,7 +508,7 @@ pub fn lend_guard(guard: std::sync::Arc<AssistantGuard>) -> LentGuard {
 }
 
 /// The values of every stored config of `server_id`, in their wire forms.
-pub(crate) fn stored_plugin_secrets(
+pub fn stored_plugin_secrets(
     conn: &Connection,
     server_id: &str,
     key: &str,
@@ -528,9 +528,11 @@ pub(crate) fn stored_plugin_secrets(
                     set.add(value);
                 }
                 if let Some(server) = &server {
-                    set.extend(&crate::workflows::api_call_executor::call_secrets(
-                        server, &env,
-                    ));
+                    set.extend(&(crate::core::uplink::linked::<
+                        crate::core::uplink::ApiCallSecrets,
+                    >()
+                    .expect("the API call secrets are linked into every binary that scrubs them")
+                    .0)(server, &env));
                 }
             }
             Err(_) => tracing::warn!(
@@ -544,7 +546,7 @@ pub(crate) fn stored_plugin_secrets(
 }
 
 /// The plugin whose stored credentials an assistant conversation may meet.
-pub(crate) fn plugin_of(
+pub fn plugin_of(
     kind: AssistantKind,
     target_id: Option<&str>,
     plugin_id: Option<&str>,

@@ -248,6 +248,9 @@ async fn acknowledge(
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         })
     });
     crate::api::audit::acknowledge_drift(

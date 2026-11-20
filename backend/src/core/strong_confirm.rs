@@ -24,7 +24,7 @@ pub const BODY_FIELD: &str = "kronn_confirm";
 /// Seconds a grant lives.
 pub const GRANT_TTL_SECS: u64 = 120;
 /// Grants kept at once: older ones are dropped first.
-const MAX_GRANTS: usize = 64;
+pub const MAX_GRANTS: usize = 64;
 /// Prefix of a grant, so a leaked one is recognisable.
 const GRANT_PREFIX: &str = "kgr_";
 
@@ -45,7 +45,7 @@ pub enum Protection {
 /// This list is the whole of what asks for the proof, besides the sensitive
 /// deletions and the conditional routes: `is_destructive` (the local-or-token
 /// gate) does not decide it. A non-secret maintenance route stays open here.
-const ALWAYS: &[(&str, &str)] = &[
+pub const ALWAYS: &[(&str, &str)] = &[
     // The passphrase that wraps the encryption key, and the code that unwraps it.
     ("POST", "/api/config/recovery/set"),
     // Every encrypted row plus the recovery blob.
@@ -102,7 +102,7 @@ pub fn is_lane_seeds_save(method: &str, pattern: &str) -> bool {
 /// everyday deletion (a message, a discussion, a task, a workflow, a page, a
 /// Quick Prompt, a Quick Exec, a skill, …) and goes through: it stays behind the
 /// destructive gate of `auth_allows` (local or token), which this does not touch.
-const SENSITIVE_DELETES: &[&str] = &[
+pub const SENSITIVE_DELETES: &[&str] = &[
     "/api/projects/{id}",
     "/api/mcps/configs/{id}",
     "/api/external-api/connections/{id}",
@@ -114,7 +114,7 @@ const SENSITIVE_DELETES: &[&str] = &[
 /// Routes where the handler decides, because only part of the calls matter:
 /// a bundle export with values, a base URL or endpoint that changes, a Quick
 /// Exec saved with the human approval.
-const CONDITIONAL: &[(&str, &str)] = &[
+pub const CONDITIONAL: &[(&str, &str)] = &[
     ("POST", "/api/mcps/bundles/export"),
     ("PUT", "/api/mcps/custom/{server_id}"),
     ("PUT", "/api/external-api/connections/{id}"),
@@ -131,7 +131,7 @@ const CONDITIONAL: &[(&str, &str)] = &[
 /// - a restore carries the recovery passphrase, its own proof;
 /// - starting a new key is for a key that is lost, so the seed that would be
 ///   checked is lost with it.
-const OWN_PROOF: &[(&str, &str)] = &[
+pub const OWN_PROOF: &[(&str, &str)] = &[
     ("POST", "/api/config/recovery/restore"),
     ("POST", "/api/config/recovery/start-new-key"),
 ];
@@ -298,7 +298,3 @@ pub fn overlaps_data_dir(path: &Path, data_dir: &Path) -> bool {
     let (path, data) = (resolved(path), resolved(data_dir));
     path.starts_with(&data) || data.starts_with(&path)
 }
-
-#[cfg(test)]
-#[path = "strong_confirm_tests.rs"]
-mod strong_confirm_tests;

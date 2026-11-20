@@ -295,7 +295,7 @@ fn match_by_slug(
                     let present = !slug.contains(['/', '\\'])
                         && slug != "."
                         && slug != ".."
-                        && crate::api::projects::resources::PROJECT_SKILL_ROOTS
+                        && crate::core::repository_skills::PROJECT_SKILL_ROOTS
                             .iter()
                             .filter(|skill_root| {
                                 !(**skill_root == ".agents/skills" && slug == "kronn")
@@ -322,8 +322,8 @@ fn match_by_slug(
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
-pub(crate) mod tests {
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+pub mod tests {
     use super::*;
 
     fn conn() -> Connection {
@@ -378,7 +378,7 @@ pub(crate) mod tests {
         "2026-01-01T00:00:00Z"
     }
 
-    pub(crate) fn seed_workflow(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
+    pub fn seed_workflow(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
         let workflow: crate::models::Workflow = serde_json::from_value(serde_json::json!({
             "id": id, "name": name, "project_id": project,
             "trigger": {"type": "Manual"},
@@ -390,7 +390,7 @@ pub(crate) mod tests {
         crate::db::workflows::insert_workflow(conn, &workflow).unwrap();
     }
 
-    pub(crate) fn seed_prompt(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
+    pub fn seed_prompt(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
         let prompt: crate::models::QuickPrompt = serde_json::from_value(serde_json::json!({
             "id": id, "name": name, "icon": "zap", "prompt_template": "x",
             "variables": [], "agent": "ClaudeCode", "project_id": project,
@@ -400,7 +400,7 @@ pub(crate) mod tests {
         crate::db::quick_prompts::insert_quick_prompt(conn, &prompt).unwrap();
     }
 
-    pub(crate) fn seed_api(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
+    pub fn seed_api(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
         let api: crate::models::QuickApi = serde_json::from_value(serde_json::json!({
             "id": id, "name": name, "icon": "globe", "project_id": project,
             "api_plugin_slug": "github", "api_config_id": "cfg", "api_endpoint_path": "/user",
@@ -410,7 +410,7 @@ pub(crate) mod tests {
         crate::db::quick_apis::insert_quick_api(conn, &api).unwrap();
     }
 
-    pub(crate) fn seed_exec(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
+    pub fn seed_exec(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
         let exec: crate::models::QuickExec = serde_json::from_value(serde_json::json!({
             "id": id, "name": name, "icon": "terminal", "project_id": project,
             "command": "cargo", "args": ["check"], "timeout_secs": 30,
@@ -420,13 +420,7 @@ pub(crate) mod tests {
         crate::db::quick_execs::insert_quick_exec(conn, &exec).unwrap();
     }
 
-    pub(crate) fn seed_page(
-        conn: &Connection,
-        id: &str,
-        title: &str,
-        slug: &str,
-        project: Option<&str>,
-    ) {
+    pub fn seed_page(conn: &Connection, id: &str, title: &str, slug: &str, project: Option<&str>) {
         let now = chrono::Utc::now();
         let page = crate::models::LivePage {
             id: id.into(),
@@ -453,7 +447,7 @@ pub(crate) mod tests {
         crate::db::live_pages::create_live_page(conn, &page, &revision, &[], None).unwrap();
     }
 
-    pub(crate) fn seed_plugin(conn: &Connection, config_id: &str, server_id: &str) {
+    pub fn seed_plugin(conn: &Connection, config_id: &str, server_id: &str) {
         crate::db::mcps::upsert_server(
             conn,
             &crate::models::McpServer {

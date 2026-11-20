@@ -49,7 +49,7 @@ enum ManagerKind {
 }
 
 impl ManagerKind {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     const ALL: [Self; 8] = [
         Self::JavaScript,
         Self::Composer,
@@ -76,8 +76,8 @@ impl ManagerKind {
 }
 
 /// Every manager label the watch can carry, for the tests that must cover them all.
-#[cfg(test)]
-pub(crate) fn manager_labels() -> Vec<&'static str> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn manager_labels() -> Vec<&'static str> {
     ManagerKind::ALL.iter().map(|kind| kind.label()).collect()
 }
 
@@ -1140,7 +1140,7 @@ fn update_package(name: &str, current: &str, latest: &str) -> Option<DependencyU
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn parse_npm_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, ()> {
     parse_npm_outdated_locked(output, None, &HashMap::new()).map(|(packages, _)| packages)
 }

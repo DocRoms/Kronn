@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 
 /// A column that can hold what an agent or a tool printed.
-pub(crate) struct Target {
+pub struct Target {
     pub table: &'static str,
     pub column: &'static str,
     /// Extra condition of [`scrub_known_shapes`]: an agent message only, since
@@ -60,7 +60,7 @@ const BY_EXECUTION: Option<&str> =
     Some("task_execution_id IN (SELECT id FROM task_executions WHERE sub_discussion_id = ?1)");
 
 /// Every column that can carry an agent transcript or tool output.
-pub(crate) const TARGETS: &[Target] = &[
+pub const TARGETS: &[Target] = &[
     // The transcript itself, and the copies a deletion or an edit keeps.
     Target {
         table: "messages",
@@ -219,7 +219,7 @@ fn rewrite(
 
 /// Migration 293: mask the vendor-shaped credentials every [`TARGETS`] column
 /// holds. Returns what it rewrote.
-pub(crate) fn scrub_known_shapes(conn: &Connection) -> Result<Rewritten> {
+pub fn scrub_known_shapes(conn: &Connection) -> Result<Rewritten> {
     let mut report = Rewritten::default();
     for target in TARGETS {
         let condition = target.generic_where.unwrap_or("1 = 1");
@@ -239,7 +239,7 @@ pub(crate) fn scrub_known_shapes(conn: &Connection) -> Result<Rewritten> {
 
 /// The id of the discussion `reference` names: the exact id, or a prefix of at
 /// least eight characters that only one discussion starts with.
-pub(crate) fn resolve_discussion(conn: &Connection, reference: &str) -> Result<String> {
+pub fn resolve_discussion(conn: &Connection, reference: &str) -> Result<String> {
     let reference = reference.trim();
     if reference.len() < 8 || !reference.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         bail!("give a discussion id: the full id, or at least its first 8 characters");
@@ -261,7 +261,7 @@ pub(crate) fn resolve_discussion(conn: &Connection, reference: &str) -> Result<S
 /// The owner-run audit of one discussion: the audit redaction over every column
 /// of every table that belongs to it, whatever the role of the message. Returns
 /// the id it resolved and what it rewrote.
-pub(crate) fn redact_discussion(conn: &Connection, reference: &str) -> Result<(String, Rewritten)> {
+pub fn redact_discussion(conn: &Connection, reference: &str) -> Result<(String, Rewritten)> {
     let discussion_id = resolve_discussion(conn, reference)?;
     let mut report = Rewritten::default();
     for target in TARGETS {

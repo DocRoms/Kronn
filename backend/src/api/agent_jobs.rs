@@ -26,7 +26,7 @@ const MAX_REASON_CHARS: usize = 1_000;
 const MAX_DEDUPE_CHARS: usize = 160;
 const DEFAULT_WAKE_BUDGET: u32 = 3;
 
-pub(crate) struct NativeAgentJobCaller<'a> {
+pub struct NativeAgentJobCaller<'a> {
     pub discussion_id: &'a str,
     pub agent_type: &'a AgentType,
     pub source_dispatch_job_id: Option<&'a str>,
@@ -139,7 +139,7 @@ fn scoped_dedupe(caller: &NativeAgentJobCaller<'_>, raw: &str) -> Result<String>
     ))
 }
 
-pub(crate) async fn start_background_job(
+pub async fn start_background_job(
     state: &AppState,
     caller: NativeAgentJobCaller<'_>,
     request: StartAgentBackgroundJobRequest,
@@ -257,7 +257,7 @@ pub(crate) async fn start_background_job(
     Ok(stored.view)
 }
 
-pub(crate) async fn schedule_wake(
+pub async fn schedule_wake(
     state: &AppState,
     caller: NativeAgentJobCaller<'_>,
     request: ScheduleAgentWakeRequest,

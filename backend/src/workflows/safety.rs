@@ -21,14 +21,14 @@ pub fn limits_set(safety: &WorkflowSafety) -> bool {
 }
 
 pub fn in_container() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = TEST_IN_CONTAINER.with(std::cell::Cell::get) {
         return forced;
     }
     crate::core::env::is_docker()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Lets a current-thread test pick the host the sandbox check sees.
     pub static TEST_IN_CONTAINER: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };

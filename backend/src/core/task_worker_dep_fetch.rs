@@ -1326,7 +1326,7 @@ pub fn fetch_missing_dependencies(
 }
 
 /// Whether `name` is one a fetch command inherits (see [`fetch_env`]).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn inherits_into_fetch(name: &str) -> bool {
     fetch_env(&[(OsString::from(name), OsString::from("x"))], &[])
         .iter()

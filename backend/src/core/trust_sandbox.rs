@@ -201,7 +201,7 @@ pub fn argv_reaches_protected(
 }
 
 /// [`argv_reaches_protected`] with the home directory given.
-pub(crate) fn argv_reaches_protected_from(
+pub fn argv_reaches_protected_from(
     argv: &[String],
     protected: &[PathBuf],
     cwd: &Path,
@@ -256,7 +256,7 @@ fn unglue_short_flag(part: &str) -> Vec<&str> {
         .collect()
 }
 
-pub(crate) fn host_home() -> Option<PathBuf> {
+pub fn host_home() -> Option<PathBuf> {
     directories::BaseDirs::new()
         .map(|dirs| dirs.home_dir().to_path_buf())
         .or_else(|| crate::core::child_env::var("HOME").ok().map(PathBuf::from))
@@ -444,15 +444,19 @@ pub fn host_sandbox() -> Result<(), String> {
 fn host_mechanism() -> Result<Mechanism, String> {
     // Unit tests do not depend on the sandbox of the machine they run on
     // (a Seatbelt cannot be applied from inside another one): they choose.
-    #[cfg(test)]
-    {
-        match test_unavailable() {
-            Some(reason) => Err(reason),
-            None => Ok(Mechanism::of_host().unwrap_or(Mechanism::Seatbelt)),
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            match test_unavailable() {
+                Some(reason) => Err(reason),
+                None => Ok(Mechanism::of_host().unwrap_or(Mechanism::Seatbelt)),
+            }
         }
-    }
-    #[cfg(not(test))]
-    {
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         Mechanism::usable_on_host()
     }
 }
@@ -521,16 +525,16 @@ impl CommandConfinement for LevelConfinement {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_UNAVAILABLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Tests pretend the host has no sandbox (`Some(reason)`), or restore it (`None`).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_test_unavailable(reason: Option<&str>) {
     *TEST_UNAVAILABLE.lock().unwrap_or_else(|p| p.into_inner()) = reason.map(str::to_owned);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_unavailable() -> Option<String> {
     TEST_UNAVAILABLE
         .lock()

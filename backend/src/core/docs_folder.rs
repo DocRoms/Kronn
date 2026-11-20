@@ -134,12 +134,12 @@ fn intact_written(
 
 /// The files Kronn recorded as its own in `dir` (paths relative to it) and that
 /// still hold the bytes it wrote.
-pub(crate) fn kronn_written(dir: &Path) -> BTreeSet<String> {
+pub fn kronn_written(dir: &Path) -> BTreeSet<String> {
     intact_written(dir, read_state(dir).as_ref())
 }
 
 /// `path` relative to `dir`, `/`-separated: the key of `kronn_written`.
-pub(crate) fn rel_key(dir: &Path, path: &Path) -> String {
+pub fn rel_key(dir: &Path, path: &Path) -> String {
     path.strip_prefix(dir)
         .unwrap_or(path)
         .components()
@@ -166,7 +166,7 @@ pub fn list_files(dir: &Path) -> BTreeSet<String> {
 
 /// The briefing Kronn writes from the human's answers and its state files: not
 /// the human's docs, counted by no gate and moved by no choice.
-pub(crate) fn is_kronn_state_file(name: &str) -> bool {
+pub fn is_kronn_state_file(name: &str) -> bool {
     name == "briefing.md"
         || name == crate::core::kronn_state::KRONN_STATE_FILENAME
         || name == crate::core::audit_run_state::RUN_STATE_FILENAME

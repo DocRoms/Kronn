@@ -4444,46 +4444,6 @@ mod tests {
         );
     }
 
-    // KT-1330 — the orchestrator's room posts carry a typed kind; ordinary
-    // messages do not; legacy rows (NULL column) fall back to the id prefix;
-    // and the agent-facing read keeps every message either way.
-    #[test]
-    fn orchestrator_posts_carry_the_orchestration_kind_through_the_db() {
-        use crate::models::MessageKind;
-        let conn = test_conn();
-        insert_discussion(&conn, &make_discussion("d-kind")).unwrap();
-        let orch = crate::api::orchestration::orchestrator_message(
-            "orch-review-request:exec-1:0".into(),
-            "review please".into(),
-        );
-        assert_eq!(orch.kind, MessageKind::Orchestration);
-        insert_message(&conn, "d-kind", &orch).unwrap();
-        insert_message(
-            &conn,
-            "d-kind",
-            &make_message("m-human", MessageRole::User, None),
-        )
-        .unwrap();
-
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT kind FROM messages WHERE id = 'orch-review-request:exec-1:0'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored.as_deref(), Some("orchestration"));
-
-        let messages = list_messages(&conn, "d-kind").unwrap();
-        assert_eq!(messages.len(), 2, "display-only: no message is dropped");
-        let kind_of = |id: &str| messages.iter().find(|m| m.id == id).unwrap().kind;
-        assert_eq!(
-            kind_of("orch-review-request:exec-1:0"),
-            MessageKind::Orchestration
-        );
-        assert_eq!(kind_of("m-human"), MessageKind::Standard);
-    }
-
     #[test]
     fn legacy_rows_without_a_stored_kind_fall_back_to_the_id_prefix() {
         use crate::models::MessageKind;

@@ -3,7 +3,7 @@ use crate::models::ActivityCategory::*;
 use serde_json::json;
 
 /// A string no output may ever contain.
-pub(crate) const SENTINEL: &str = "hunter2-SENTINEL-sk_live_abcdefghijklmnop";
+pub const SENTINEL: &str = "hunter2-SENTINEL-sk_live_abcdefghijklmnop";
 
 #[test]
 fn every_call_is_counted_by_category_even_when_nobody_reads_in_between() {

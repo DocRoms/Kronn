@@ -5,7 +5,7 @@ use crate::models::{
 };
 
 /// Every secret the fixtures hide, each in a different place.
-pub(crate) const SECRETS: &[&str] = &[
+pub const SECRETS: &[&str] = &[
     "sk-argsecret123",
     "tokeq456",
     "descsecret789",
@@ -37,7 +37,7 @@ pub(crate) const SECRETS: &[&str] = &[
     "sk1live9abc",
 ];
 
-pub(crate) fn no_catalogue() -> ExportContext<'static> {
+pub fn no_catalogue() -> ExportContext<'static> {
     ExportContext {
         catalogue: None,
         declared_env_keys: &[],
@@ -152,7 +152,7 @@ fn server(id: &str, transport: McpTransport, auth: Option<ApiAuthKind>) -> McpSe
 
 /// Kronn's own id format, `custom-<slug>-<8 hex>`: an id the export keeps.
 /// The fixtures are named "Leaky", so Kronn would have made `custom-leaky-…`.
-pub(crate) fn fixture_id(prefix: &str, index: usize) -> String {
+pub fn fixture_id(prefix: &str, index: usize) -> String {
     let group = match prefix {
         "t" => '1',
         "a" => 'a',
@@ -362,7 +362,7 @@ fn every_source() -> Vec<McpSource> {
 }
 
 /// Every definition the fixtures can build: each transport, each auth, each source.
-pub(crate) fn every_server() -> Vec<McpServer> {
+pub fn every_server() -> Vec<McpServer> {
     let mut all = Vec::new();
     for (index, transport) in every_transport().into_iter().enumerate() {
         all.push(server(&fixture_id("t", index), transport, None));
@@ -817,7 +817,7 @@ fn the_same_literal_gets_the_same_placeholder_and_a_reexport_lists_it_again() {
 }
 
 /// What the importer types back: the exporter's value of each placeholder.
-pub(crate) fn collect_fills(before: &Value, after: &Value, values: &mut BTreeMap<String, String>) {
+pub fn collect_fills(before: &Value, after: &Value, values: &mut BTreeMap<String, String>) {
     match (before, after) {
         (Value::Object(a), Value::Object(b)) => {
             for (key, value) in a {

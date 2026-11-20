@@ -33,8 +33,7 @@ use crate::AppState;
 
 type Reply<T> = (StatusCode, Json<ApiResponse<T>>);
 
-/// The header that carries the strong-confirmation code on any channel.
-pub const CONFIRM_HEADER: &str = "x-kronn-confirm";
+pub use crate::api::strong_confirm::CONFIRM_HEADER;
 
 /// How a request reached a trust route: the channel, and the code its
 /// `X-Kronn-Confirm` header carried. The bridge channel is decided by the
@@ -60,8 +59,8 @@ impl Confirm {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn channel_for_tests(&self) -> Channel {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn channel_for_tests(&self) -> Channel {
         self.channel
     }
 
@@ -906,7 +905,3 @@ pub async fn disable_proof(
         Err(error) => internal(error.into()),
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "trust_gate_tests.rs"]
-mod trust_gate_tests;

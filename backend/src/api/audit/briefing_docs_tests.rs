@@ -149,7 +149,7 @@ fn the_section_stays_out_of_the_prompt_copy() {
     assert!(!stripped.contains(DOCS_ANSWERS_PREFIX));
     assert!(stripped.contains("## Purpose\nP"));
     assert!(stripped.contains("## Kronn options\n- Turn audit"));
-    let prompt = super::super::briefing::briefing_prompt_section(
+    let prompt = crate::api::audit::briefing::briefing_prompt_section(
         &notes,
         &crate::core::docs_location::DocsRoot::default_root(),
     );
@@ -163,7 +163,7 @@ fn a_review_rewrite_gets_both_form_sections_back_before_the_kronn_options() {
         tracker: BriefingTracker::Linear,
         ..BriefingProjectAnswers::default()
     };
-    let facts = super::super::project_doc::render_facts_section(&project).unwrap();
+    let facts = crate::api::audit::project_doc::render_facts_section(&project).unwrap();
     let mut doc = loc("docs", BriefingDocState::Reference, true);
     doc.last_commit = Some("2024-03-02".into());
     let recorded = answers(vec![doc]);
@@ -175,12 +175,12 @@ fn a_review_rewrite_gets_both_form_sections_back_before_the_kronn_options() {
     let reviewed = format!(
         "# Project Briefing\n\n## Purpose\nRefined\n\n## Existing documentation\n- docs is obsolete\n\n{options}"
     );
-    let merged = super::super::project_doc::reattach_facts(Some(&previous), &reviewed);
+    let merged = crate::api::audit::project_doc::reattach_facts(Some(&previous), &reviewed);
     assert!(merged.contains("Refined"));
     assert!(!merged.contains("docs is obsolete"));
     assert_eq!(parse(&merged), Some(recorded.clone()));
     assert_eq!(
-        super::super::project_doc::parse_answers(&merged),
+        crate::api::audit::project_doc::parse_answers(&merged),
         Some(project)
     );
     assert_eq!(merged.matches(DOCS_HEADING).count(), 1);
@@ -194,14 +194,14 @@ fn a_review_rewrite_gets_both_form_sections_back_before_the_kronn_options() {
     // Documentation alone is restored too.
     let only_docs = format!("# Project Briefing\n\n{docs}");
     let merged =
-        super::super::project_doc::reattach_facts(Some(&only_docs), "# Project Briefing\n");
+        crate::api::audit::project_doc::reattach_facts(Some(&only_docs), "# Project Briefing\n");
     assert_eq!(parse(&merged), Some(recorded));
     assert!(!merged.contains("## Project facts"));
 }
 
 // ─── The audit prompt (KT-999) ──────────────────────────────────────────────
 
-use super::super::briefing::{
+use crate::api::audit::briefing::{
     briefing_prompt_section, briefing_prompt_section_for, BRIEFING_PROMPT_MAX_CHARS,
 };
 use crate::core::docs_location::DocsRoot;
@@ -242,7 +242,7 @@ fn the_documentation_reaches_only_the_steps_that_use_it_and_only_when_enabled() 
         let docs_root = DocsRoot::from_rel(rel).unwrap();
         let mut reached: Vec<String> = Vec::new();
         for kind in ALL_KINDS {
-            for step in super::super::steps_for(kind, &docs_root) {
+            for step in crate::api::audit::steps_for(kind, &docs_root) {
                 let on = briefing_prompt_section_for(&notes, &docs_root, step.target_file, true);
                 let off = briefing_prompt_section_for(&notes, &docs_root, step.target_file, false);
                 assert!(
@@ -517,18 +517,18 @@ fn a_hand_edited_briefing_cannot_smuggle_lines_or_directives_into_the_prompt() {
 fn the_step_prompt_still_ends_on_the_closing_directive_with_the_block_enabled() {
     for rel in ["docs", "knowledge/ai"] {
         let root = DocsRoot::from_rel(rel).unwrap();
-        let steps = super::super::steps_for(AuditKind::Full, &root);
+        let steps = crate::api::audit::steps_for(AuditKind::Full, &root);
         for (index, step) in steps.iter().enumerate() {
             let section =
                 briefing_prompt_section_for(&documented_briefing(), &root, step.target_file, true);
-            let prompt = super::super::finish_step_prompt(
+            let prompt = crate::api::audit::finish_step_prompt(
                 &format!("Instructions of the step.{section}"),
                 Some("Feedback of a retry."),
                 index + 1,
                 step,
                 &root,
             );
-            let directive = super::super::step_closing_directive(index + 1, step, &root);
+            let directive = crate::api::audit::step_closing_directive(index + 1, step, &root);
             assert!(prompt.ends_with(&directive), "{rel} {}", step.target_file);
             assert_eq!(prompt.matches("=== RUN THIS STEP NOW ===").count(), 1);
             if section.contains("## Existing documentation (from the briefing)") {

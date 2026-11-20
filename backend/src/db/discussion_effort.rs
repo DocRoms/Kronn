@@ -10,7 +10,7 @@ use crate::models::{AgentType, Discussion, ModelTier, ModelTiersConfig, QuickPro
 #[error(
     "Cannot apply Quick Prompt effort without a resolved model; choose a model or clear the effort"
 )]
-pub(crate) struct UnresolvedQuickPromptEffort;
+pub struct UnresolvedQuickPromptEffort;
 
 pub fn capture(
     conn: &Connection,

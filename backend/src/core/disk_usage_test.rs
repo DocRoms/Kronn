@@ -86,21 +86,9 @@ fn measure_sums_files_skips_named_top_level_entries_and_never_follows_links() {
 
     let budget = || MeasureBudget::within(1_000, Duration::from_secs(5));
     let all = measure_bounded(root, &[], budget());
-    assert_eq!(
-        all,
-        Measured {
-            bytes: 10_150,
-            partial: false
-        }
-    );
+    assert_eq!((all.bytes, all.partial), (10_150, false));
     let sources = measure_bounded(root, &["target"], budget());
-    assert_eq!(
-        sources,
-        Measured {
-            bytes: 150,
-            partial: false
-        }
-    );
+    assert_eq!((sources.bytes, sources.partial), (150, false));
 }
 
 #[test]
@@ -133,4 +121,93 @@ fn the_kinds_and_states_have_stable_wire_names() {
         "\"orphan\""
     );
     assert_eq!(DiskState::Foreign.as_str(), "foreign");
+}
+
+#[test]
+fn stalled_days_floor_at_one_and_the_state_has_a_wire_name() {
+    let _days = TestStalledDays::set(0);
+    assert_eq!(stalled_build_days(), MIN_STALLED_BUILD_DAYS);
+    drop(_days);
+    let _days = TestStalledDays::set(5);
+    assert_eq!(stalled_build_idle(), Duration::from_secs(5 * 24 * 3600));
+    assert_eq!(DiskState::Stalled.as_str(), "stalled");
+    assert_eq!(
+        serde_json::to_string(&DiskState::Stalled).unwrap(),
+        "\"stalled\""
+    );
+}
+
+#[test]
+fn real_or_apparent_prefers_the_unique_figure() {
+    let known = Measured {
+        bytes: 100,
+        partial: false,
+        unique_bytes: Some(10),
+    };
+    assert_eq!(known.real_or_apparent(), 10);
+    let unknown = Measured {
+        unique_bytes: None,
+        ..known
+    };
+    assert_eq!(unknown.real_or_apparent(), 100);
+}
+
+/// KT-1691 — the 2026-11-11 incident: 33 lanes cloned from one seed each read
+/// ~190 GB, 1.85 TB in all, and deleting five of them freed 39 GB. The apparent
+/// size counts shared blocks in full; the unique one must not.
+#[cfg(target_os = "macos")] // APFS clones (clonefile) exist only on macOS
+#[test]
+fn a_cloned_tree_reports_its_unique_bytes_not_the_blocks_it_shares() {
+    use crate::core::task_worker_lane_warm::clone_tree;
+
+    let dir = tempfile::tempdir().unwrap();
+    let seed = dir.path().join("seed");
+    fs::create_dir_all(&seed).unwrap();
+    // Not compressible, not sparse: a real 4 MiB of blocks.
+    let content: Vec<u8> = (0..4 * 1024 * 1024u32)
+        .map(|index| (index.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    fs::write(seed.join("big.rlib"), &content).unwrap();
+    let lane = dir.path().join("lane");
+    if clone_tree(&seed, &lane).is_err() {
+        // The temp dir's volume cannot clone: nothing shared to measure.
+        return;
+    }
+    let budget = || MeasureBudget::within(1_000, Duration::from_secs(5));
+    let cloned = measure_bounded(&lane, &[], budget());
+    assert_eq!(cloned.bytes, content.len() as u64, "apparent counts it all");
+    let unique = cloned.unique_bytes.expect("APFS answers");
+    assert!(
+        unique < cloned.bytes / 4,
+        "a fresh clone owns almost nothing: {unique} unique of {} apparent",
+        cloned.bytes
+    );
+
+    // The lane rewrites the file: now its blocks are its own.
+    let mut rewritten = content.clone();
+    rewritten
+        .iter_mut()
+        .for_each(|byte| *byte = byte.wrapping_add(1));
+    fs::write(lane.join("big.rlib"), &rewritten).unwrap();
+    let rewritten_unique = measure_bounded(&lane, &[], budget())
+        .unique_bytes
+        .expect("APFS answers");
+    assert!(
+        rewritten_unique >= (content.len() as u64) * 3 / 4,
+        "a rewritten file is the lane's own: {rewritten_unique}"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn without_a_way_to_tell_the_unique_size_is_unknown_not_guessed() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("f"), vec![1u8; 100]).unwrap();
+    let measured = measure_bounded(
+        dir.path(),
+        &[],
+        MeasureBudget::within(100, Duration::from_secs(5)),
+    );
+    assert_eq!(measured.unique_bytes, None);
+    assert_eq!(measured.real_or_apparent(), 100);
 }

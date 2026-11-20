@@ -677,7 +677,3 @@ pub async fn revoke_trust(
         )),
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "live_page_action_trust_api_tests.rs"]
-mod trust_api_tests;

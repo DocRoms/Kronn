@@ -158,7 +158,7 @@ fn enqueue_dispatches_for_trigger(
     Ok(jobs)
 }
 
-pub(crate) fn normalized_targets(
+pub fn normalized_targets(
     targets: Vec<MessageTarget>,
     target_agents: Vec<AgentType>,
     legacy_target: Option<AgentType>,
@@ -188,7 +188,7 @@ pub(crate) fn normalized_targets(
     deduped
 }
 
-pub(crate) async fn canonical_targets(
+pub async fn canonical_targets(
     state: &AppState,
     discussion_id: &str,
     requested: Vec<MessageTarget>,
@@ -3280,6 +3280,7 @@ mod tests {
                         trigger_context: None,
                         step_results: vec![],
                         tokens_used: 0,
+                        shadow_tokens_used: 0,
                         workspace_path: None,
                         started_at: Utc::now(),
                         finished_at: None,

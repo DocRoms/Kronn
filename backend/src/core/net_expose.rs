@@ -216,6 +216,10 @@ pub const LOCAL_PROOF_FILE: &str = "local-proof";
 /// It is what lets the recovery routes work while the token cannot be decrypted
 /// and no token can authenticate anyone. Minted on first use.
 pub fn local_proof(dir: &std::path::Path) -> std::io::Result<String> {
+    // One mint at a time: two first uses would each write their own proof, and
+    // the caller of the first would hold one the file no longer carries.
+    static MINT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _minting = MINT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = dir.join(LOCAL_PROOF_FILE);
     if let Some(existing) = read_trusted_proof(&path) {
         return Ok(existing);
@@ -811,6 +815,28 @@ mod tests {
         assert!(recovery_caller_is_local(true, true, true));
         // A proof from a non-loopback peer is still refused.
         assert!(!recovery_caller_is_local(true, false, true));
+    }
+
+    #[test]
+    fn first_uses_at_the_same_time_all_get_the_proof_the_file_keeps() {
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let start = std::sync::Barrier::new(8);
+            let proofs: Vec<String> = std::thread::scope(|scope| {
+                let callers: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            local_proof(dir.path()).expect("minted or read")
+                        })
+                    })
+                    .collect();
+                callers.into_iter().map(|c| c.join().unwrap()).collect()
+            });
+            for proof in &proofs {
+                assert!(local_proof_matches(dir.path(), Some(proof)), "{proofs:?}");
+            }
+        }
     }
 
     #[test]

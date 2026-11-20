@@ -23,7 +23,7 @@ use crate::models::{AgentType, CatalogModelEntry, ExternalApiConnection, ModelTi
 /// chat codec. Matches the free-form strings `external_api_connections::test`
 /// and the model-catalog reconciliation already write (`"chat"`, `"image"`,
 /// `"video"` — see `api/external_api_connections.rs` catalog tests).
-pub(crate) const CAPABILITY_CHAT: &str = "chat";
+pub const CAPABILITY_CHAT: &str = "chat";
 
 /// Explicit codec selection for the shared HTTP chat path — the "codec
 /// OpenAI Chat est explicite" half of KT-545's contract. `Ollama` speaks its
@@ -32,7 +32,7 @@ pub(crate) const CAPABILITY_CHAT: &str = "chat";
 /// regardless of which named connection backs it. One function, one
 /// decision — mirrors `acp::resolve_acp_route` being the sole ACP route
 /// decision point.
-pub(crate) fn resolve_chat_codec(agent_type: &AgentType) -> Box<dyn ChatCodec> {
+pub fn resolve_chat_codec(agent_type: &AgentType) -> Box<dyn ChatCodec> {
     if crate::agents::runner::is_openai_wire_agent(agent_type) {
         Box::new(OpenAiCodec)
     } else {
@@ -46,14 +46,14 @@ pub(crate) fn resolve_chat_codec(agent_type: &AgentType) -> Box<dyn ChatCodec> {
 /// with `model_catalog::preflight_check`'s "unknown is not blocked" policy,
 /// only a *positive* mismatch (the entry lists capabilities and this one is
 /// not among them) refuses.
-pub(crate) fn entry_supports_capability(entry: &CatalogModelEntry, capability: &str) -> bool {
+pub fn entry_supports_capability(entry: &CatalogModelEntry, capability: &str) -> bool {
     entry.capabilities.is_empty() || entry.capabilities.iter().any(|c| c.as_str() == capability)
 }
 
 /// Why the Kronn tool executor is, or is not, attached to an HTTP run
 /// (KT-1600).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HttpToolsVerdict {
+pub enum HttpToolsVerdict {
     Attach,
     /// The operator switched tools off for this agent or connection.
     OperatorOff,
@@ -73,7 +73,7 @@ pub(crate) enum HttpToolsVerdict {
 ///   counts (`Some(true)` cannot force tools onto a model listed without them);
 ///   LiteLLM, NVIDIA and a custom gateway report none and are left to the
 ///   operator. An unknown model keeps its tools.
-pub(crate) fn http_tools_verdict(
+pub fn http_tools_verdict(
     agent_type: &AgentType,
     setting: Option<bool>,
     catalogue: Option<bool>,
@@ -94,7 +94,7 @@ pub(crate) fn http_tools_verdict(
 /// Default-tier model when the requested tier has none configured, so
 /// leaving Economy/Reasoning empty at setup degrades to the connection's
 /// main model instead of an unconfigured-model refusal.
-pub(crate) fn connection_tier_model(
+pub fn connection_tier_model(
     connection: &ExternalApiConnection,
     tier: ModelTier,
 ) -> Option<String> {
@@ -113,7 +113,7 @@ pub(crate) fn connection_tier_model(
 /// dispatch already does, shared here so Compare and orchestration resolve a
 /// connection identically instead of reimplementing it (KT-545 DoD #4).
 /// `None` when the connection has no endpoint configured yet.
-pub(crate) fn external_http_runtime(
+pub fn external_http_runtime(
     connection: &ExternalApiConnection,
     tokens: &TokensConfig,
 ) -> Option<ExternalHttpRuntime> {
@@ -136,7 +136,7 @@ pub(crate) fn external_http_runtime(
 /// orchestration refuse a mismatched connection identically (KT-545 DoD #4).
 /// Returns the validated connection id (or `None` for a non-`Custom` agent
 /// with no connection requested).
-pub(crate) async fn validate_connection_target(
+pub async fn validate_connection_target(
     state: &crate::AppState,
     agent: &AgentType,
     connection_id: Option<&str>,
@@ -161,6 +161,72 @@ pub(crate) async fn validate_connection_target(
         ));
     }
     Ok(Some(connection_id.to_string()))
+}
+
+/// The credential of an `Authorization: Bearer …` header, the scheme matched
+/// case-insensitively (RFC 7235).
+pub fn bearer_credential(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let value = headers.get("authorization")?.to_str().ok()?.trim();
+    let (scheme, credential) = value.split_once(char::is_whitespace)?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| credential.trim())
+        .filter(|credential| !credential.is_empty())
+}
+
+/// Check if an IP address is local (localhost or Docker internal network).
+/// Docker bridge uses 172.16-31.x.x; the host accesses the gateway from
+/// an IP like 172.18.0.1. Peers connect from Tailscale (100.x), LAN (192.168.x),
+/// or public IPs — those are NOT local.
+///
+/// Strings only — HTTP source IPs always arrive as numeric strings
+/// (axum's `SocketAddr::ip()` already resolves hostnames upstream).
+/// We previously matched "localhost" defensively, but that opened a
+/// tiny attack surface where a misconfigured nginx could forge
+/// `X-Real-IP: localhost` to bypass auth. Numeric-only is safer.
+pub fn is_local_ip(ip: &str) -> bool {
+    if ip == "127.0.0.1" || ip == "::1" {
+        return true;
+    }
+    // Docker bridge: 172.16.0.0/12
+    if let Some(rest) = ip.strip_prefix("172.") {
+        if let Some(second) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
+            return (16..=31).contains(&second);
+        }
+    }
+    false
+}
+
+/// The part of a request URI that may be logged: the path, never the query.
+pub fn logged_uri(uri: &axum::http::Uri) -> &str {
+    uri.path()
+}
+
+/// Browser origins of the local frontend, for CORS and the WS Origin check.
+/// The nginx gateway ports exist only in the Docker deployment: a desktop or
+/// native backend on another port must not trust a page served there.
+pub fn frontend_origins(domain: &Option<String>, port: u16, in_docker: bool) -> Vec<String> {
+    match domain {
+        Some(d) => vec![
+            format!("https://{}", d),
+            format!("http://{}", d),
+            format!("https://{}:{}", d, port),
+            format!("http://{}:{}", d, port),
+        ],
+        None => {
+            let mut origins = vec![
+                format!("http://localhost:{}", port),
+                format!("http://127.0.0.1:{}", port),
+            ];
+            if in_docker {
+                for gateway in [3140, 3141] {
+                    origins.push(format!("http://localhost:{gateway}"));
+                    origins.push(format!("http://127.0.0.1:{gateway}"));
+                }
+            }
+            origins
+        }
+    }
 }
 
 #[cfg(all(test, feature = "full-tests"))]

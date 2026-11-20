@@ -151,7 +151,7 @@ pub struct LivePageActionTrustState {
 
 /// Step types known to run no agent and no other workflow. Any other type,
 /// today's or a future one, is refused by default.
-const AGENTLESS_STEP_TYPES: &[&str] = &[
+pub const AGENTLESS_STEP_TYPES: &[&str] = &[
     "ApiCall",
     "Notify",
     "Gate",
@@ -164,7 +164,7 @@ const AGENTLESS_STEP_TYPES: &[&str] = &[
     "TaskBoard",
 ];
 
-fn agentless_step_type(name: &str) -> bool {
+pub fn agentless_step_type(name: &str) -> bool {
     AGENTLESS_STEP_TYPES.contains(&name)
 }
 
@@ -175,7 +175,7 @@ fn step_type_name(step_type: &StepType) -> Option<String> {
 
 /// An agent, or another workflow whose steps this check would not see: the
 /// indirect paths are refused rather than followed.
-fn step_needs_agent(step: &WorkflowStep) -> bool {
+pub fn step_needs_agent(step: &WorkflowStep) -> bool {
     !step_type_name(&step.step_type).is_some_and(|name| agentless_step_type(&name))
         || step.quick_prompt_id.is_some()
         || step.batch_quick_prompt_id.is_some()
@@ -183,12 +183,12 @@ fn step_needs_agent(step: &WorkflowStep) -> bool {
         || !step.batch_chain_prompt_ids.is_empty()
 }
 
-pub(crate) const DEP_WORKFLOW: &str = "workflow";
-pub(crate) const DEP_QUICK_API: &str = "quick_api";
+pub const DEP_WORKFLOW: &str = "workflow";
+pub const DEP_QUICK_API: &str = "quick_api";
 
 /// The stored resources the workflow executes, as `(kind, id)` after the same
 /// reference resolution as a run, or why a trusted run could not freeze them.
-pub(crate) fn execution_dependencies(
+pub fn execution_dependencies(
     conn: &Connection,
     workflow: &Workflow,
     project_id: Option<&str>,
@@ -742,7 +742,3 @@ pub fn summary_for_page(conn: &Connection, live_page_id: &str) -> Result<serde_j
         })))
         .collect::<Vec<_>>()))
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "live_page_action_trusts_tests.rs"]
-pub(crate) mod tests;

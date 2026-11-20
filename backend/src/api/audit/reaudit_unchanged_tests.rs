@@ -266,7 +266,7 @@ async fn harness() -> Harness {
     let restore = TemplatesEnv(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
     crate::core::child_env::set_var(
         "KRONN_TEMPLATES_DIR",
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates"),
+        Path::new(crate::BACKEND_DIR).join("../templates"),
     );
     let tools = tempfile::tempdir().unwrap();
     let state = fresh_state();
@@ -746,6 +746,9 @@ impl Audited {
                 own_discussions: vec![],
                 own_run: None,
                 agent: None,
+                room_agent_of: Vec::new(),
+                own_execution: None,
+                own_sessions: Vec::new(),
             })
         });
         crate::api::audit::accept_audit_step(

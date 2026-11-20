@@ -19,7 +19,7 @@ use serde_json::Value;
 /// usage frame on OpenAI, so they are reported whenever seen and the caller
 /// accumulates them until the stream ends.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct ChatChunk {
+pub struct ChatChunk {
     pub delta: Option<String>,
     /// Provider-reported identity, independent of the requested model alias.
     pub model: Option<String>,
@@ -56,7 +56,7 @@ impl ChatChunk {
     }
 }
 
-pub(crate) trait ChatCodec: Send + Sync {
+pub trait ChatCodec: Send + Sync {
     fn endpoint(&self, base: &str) -> String;
     /// `None` when the line carries no event (blank, SSE comment, unparseable
     /// fragment) — the transport skips it without treating it as an error.
@@ -65,7 +65,7 @@ pub(crate) trait ChatCodec: Send + Sync {
 
 /// Ollama's native `/api/chat`: newline-delimited JSON, counts on the
 /// terminal `done` object.
-pub(crate) struct OllamaCodec;
+pub struct OllamaCodec;
 
 impl ChatCodec for OllamaCodec {
     fn endpoint(&self, base: &str) -> String {
@@ -106,7 +106,7 @@ impl ChatCodec for OllamaCodec {
 /// .include_usage` is set.
 ///
 /// Selected by `AgentType::LiteLlm` on the shared HTTP path.
-pub(crate) struct OpenAiCodec;
+pub struct OpenAiCodec;
 
 impl ChatCodec for OpenAiCodec {
     fn endpoint(&self, base: &str) -> String {
@@ -170,16 +170,12 @@ impl ChatCodec for OpenAiCodec {
     }
 }
 
-/// A provider-reported USD amount as integer micro-USD, so usage stays `Eq`.
-/// Negative or non-finite amounts are not a cost.
-pub(crate) fn usd_to_micros(usd: f64) -> Option<u64> {
-    (usd.is_finite() && usd >= 0.0).then(|| (usd * 1_000_000.0).round() as u64)
-}
+pub use crate::core::pricing::usd_to_micros;
 
 /// Request body for an OpenAI-compatible endpoint. Mirrors
 /// `build_ollama_chat_body`'s determinism (temperature 0, fixed seed) and
 /// asks for usage so token accounting survives streaming.
-pub(crate) fn build_openai_chat_body(
+pub fn build_openai_chat_body(
     model: &str,
     system_context: &str,
     user_prompt: &str,
@@ -216,7 +212,7 @@ pub(crate) fn build_openai_chat_body(
 /// Copy of an OpenAI-wire body asking LiteLLM to mark Anthropic cache
 /// breakpoints on the system prompt and the last message. Anthropic caches only
 /// marked prefixes; `None` for other models, which cache implicitly or not at all.
-pub(crate) fn with_prompt_cache_hints(body: &Value) -> Option<Value> {
+pub fn with_prompt_cache_hints(body: &Value) -> Option<Value> {
     let model = body.get("model")?.as_str()?;
     if !model.to_ascii_lowercase().contains("claude") {
         return None;

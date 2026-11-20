@@ -81,8 +81,8 @@ pub fn model_tool_support(agent_type: &AgentType, model_id: &str) -> Option<bool
 }
 
 /// Test seam: replace the projected tool support, `(agent, model, supported)`.
-#[cfg(all(test, feature = "full-tests"))]
-pub(crate) fn set_tool_support_for_test(models: &[(AgentType, &str, bool)]) {
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+pub fn set_tool_support_for_test(models: &[(AgentType, &str, bool)]) {
     let projected = models
         .iter()
         .map(|(agent, model, supported)| {
@@ -148,7 +148,7 @@ pub fn agent_default_for_tier(agent_type: &AgentType, tier: ModelTier) -> Option
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
     agent_default_for_tier(agent_type, tier)
 }
@@ -388,7 +388,7 @@ pub fn is_catalog_managed(agent_type: &AgentType) -> bool {
 }
 
 async fn discover(agent_type: &AgentType) -> DiscoveryOutcome {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Ok(outcome) = TEST_DISCOVERY.try_with(Clone::clone) {
         let _ = TEST_DISCOVERY_CALLS.try_with(|calls| calls.set(calls.get() + 1));
         return outcome;
@@ -399,7 +399,7 @@ async fn discover(agent_type: &AgentType) -> DiscoveryOutcome {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     static TEST_DISCOVERY: DiscoveryOutcome;
     static TEST_DISCOVERY_CALLS: std::cell::Cell<usize>;
@@ -407,11 +407,8 @@ tokio::task_local! {
 
 /// Test-only: a launch routed to a fixture transport has no CLI to discover, so
 /// it resolves as a runtime without live discovery; an outer test scope wins.
-#[cfg(test)]
-pub(crate) async fn test_routed_discovery<F: std::future::Future>(
-    routed: bool,
-    future: F,
-) -> F::Output {
+#[cfg(any(test, feature = "test-support"))]
+pub async fn test_routed_discovery<F: std::future::Future>(routed: bool, future: F) -> F::Output {
     if !routed || TEST_DISCOVERY.try_with(|_| ()).is_ok() {
         return future.await;
     }
@@ -1056,7 +1053,7 @@ pub async fn refresh_if_stale(
 ) -> anyhow::Result<ModelCatalogView> {
     let runtime_target_id = db::agent_runtime_target_id(&agent_type);
     if agent_type == AgentType::Ollama && force {
-        let base = crate::api::ollama::resolve_base_url_pub(None);
+        let base = crate::api::ollama_health::resolve_base_url_pub(None);
         return refresh_ollama_catalog_at(db, &base)
             .await
             .map(|(view, _)| view);

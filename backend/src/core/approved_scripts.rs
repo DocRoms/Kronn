@@ -240,7 +240,7 @@ fn write_copy(dest: &Path, verified: Vec<(String, Vec<u8>)>) -> std::io::Result<
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Runs between the removal of the previous copy and the new one: a test
     /// recreates the dir there, as a step could.
@@ -249,7 +249,7 @@ thread_local! {
 }
 
 fn after_previous_copy_removed() {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AFTER_REMOVE.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {
             hook();

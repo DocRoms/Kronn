@@ -184,7 +184,7 @@ fn is_credential_param(key: &str) -> bool {
 /// Whether a tool, by the name its runtime reports, opens a page by the `url`
 /// it is given: Claude's `WebFetch`, Kronn's `web_fetch`, an MCP fetch tool, a
 /// browser's `browser_navigate` / `navigate_page` / `new_page`.
-pub(crate) fn opens_url(name: &str) -> bool {
+pub fn opens_url(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     [
         "fetch", "navigate", "new_page", "browse", "goto", "scrape", "crawl",
@@ -195,7 +195,7 @@ pub(crate) fn opens_url(name: &str) -> bool {
 
 /// Whether a tool is a documentation lookup whose RESULT names the pages it
 /// read (Context7): the agent then cites a URL it was handed, not one it sent.
-pub(crate) fn returns_urls(name: &str) -> bool {
+pub fn returns_urls(name: &str) -> bool {
     name.to_ascii_lowercase().contains("context7")
 }
 
@@ -1039,7 +1039,7 @@ fn url_pattern() -> &'static regex_lite::Regex {
 }
 
 /// Every normalized `http(s)` URL written in `text`.
-pub(crate) fn urls_in(text: &str) -> Vec<String> {
+pub fn urls_in(text: &str) -> Vec<String> {
     url_pattern()
         .find_iter(text)
         .map(|m| normalize_url(m.as_str().trim_end_matches(['.', ',', ':'])))
@@ -1048,7 +1048,7 @@ pub(crate) fn urls_in(text: &str) -> Vec<String> {
 }
 
 /// The text of a tool result: a string, or the `text` blocks of an array.
-pub(crate) fn result_text(content: &serde_json::Value) -> String {
+pub fn result_text(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Array(blocks) => blocks
@@ -1064,7 +1064,7 @@ pub(crate) fn result_text(content: &serde_json::Value) -> String {
 /// The pages one tool call reads, from its structured input: the `url` of a
 /// page opener (`opens`: a fetch or a browser navigation), the URLs of a
 /// `curl` / `wget` command. Read from the whole input, before any excerpt.
-pub(crate) fn input_urls(opens: bool, input: &serde_json::Value) -> Vec<String> {
+pub fn input_urls(opens: bool, input: &serde_json::Value) -> Vec<String> {
     let mut urls = Vec::new();
     if opens {
         let single = input.get("url").and_then(|u| u.as_str());

@@ -310,7 +310,7 @@ pub fn summary_from_manifest(
 /// the execution lists its transcripts (KT-911). Polls the launch's provenance
 /// capture: the delivery can be accepted while the worker's turn is still
 /// running.
-pub(crate) struct ServedModelRecorder {
+pub struct ServedModelRecorder {
     capture: crate::agents::provenance::AgentProvenanceCapture,
     db: std::sync::Arc<crate::db::Database>,
     execution_id: String,
@@ -323,7 +323,7 @@ pub(crate) struct ServedModelRecorder {
 impl ServedModelRecorder {
     const POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
-    pub(crate) fn start(
+    pub fn start(
         db: std::sync::Arc<crate::db::Database>,
         execution_id: String,
         dispatch_job_id: String,
@@ -414,14 +414,14 @@ impl ServedModelRecorder {
     }
 
     /// The capture to hand to the launch as its `provenance`.
-    pub(crate) fn capture(&self) -> crate::agents::provenance::AgentProvenanceCapture {
+    pub fn capture(&self) -> crate::agents::provenance::AgentProvenanceCapture {
         self.capture.clone()
     }
 
     /// Stop polling after a last write. Dropping the recorder does the same
     /// without waiting for that write. The process has ended, so the session it
     /// named is final: the returned launch can still record what the turn cost.
-    pub(crate) async fn finish(self) -> FinishedWorkerLaunch {
+    pub async fn finish(self) -> FinishedWorkerLaunch {
         drop(self.stop);
         let _ = self.task.await;
         let session_id = self
@@ -440,7 +440,7 @@ impl ServedModelRecorder {
 }
 
 /// A worker launch whose process has ended.
-pub(crate) struct FinishedWorkerLaunch {
+pub struct FinishedWorkerLaunch {
     db: std::sync::Arc<crate::db::Database>,
     execution_id: String,
     dispatch_job_id: String,
@@ -452,7 +452,7 @@ impl FinishedWorkerLaunch {
     /// Record what the turn cost, on the session it ran in. A launch that never
     /// named its session (it died before its init line) has nothing to attach a
     /// cost to.
-    pub(crate) async fn record_cost(&self, cost: crate::db::orchestration::WorkerSessionCost) {
+    pub async fn record_cost(&self, cost: crate::db::orchestration::WorkerSessionCost) {
         let Some(session) = self.session_id.as_deref() else {
             return;
         };
@@ -577,9 +577,7 @@ pub async fn publish_accepted_delivery(
                 None => WorkerSpend::default(),
             };
             let refused_tool_calls = match sub_discussion_id.as_deref() {
-                Some(child) => {
-                    crate::api::discussions::runtime::refused_tool_calls_of_worker(conn, child)?
-                }
+                Some(child) => refused_tool_calls_of_worker(conn, child)?,
                 None => Vec::new(),
             };
             let provider_changes = crate::db::orchestration::provider_changes(conn, &execution_id)?;
@@ -673,6 +671,56 @@ fn render_stored(stored: &crate::db::delivery_summaries::StoredDeliverySummary) 
             stored.execution_id, stored.attempt_no, stored.correlation_id
         ),
     }
+}
+
+/// Most refusals the undelivered-worker notice and the delivery summary repeat.
+const REFUSED_TOOL_CALLS_MAX: usize = 3;
+
+/// KT-1541 — the tool calls the worker's CLI refused, read back from its
+/// transcript (the lines `parse_claude_worker_stream_line` writes), most recent
+/// first and without repeats. A worker that stops after a refused edit says
+/// nothing else, so the principal otherwise sees only "no delivery"; one that
+/// delivers anyway worked around a refusal its report should name. Empty when
+/// nothing was refused. The reasons come first-hand, not a count.
+///
+/// Only the current attempt counts: the worker's room outlives its review
+/// rounds, and each round opens with a User message (the brief, then the
+/// reviewer's findings), so a refusal from before the last one was met by an
+/// earlier attempt. And only a line that starts with the exact prefix the writer
+/// emits counts, so a worker that quotes the words in its prose creates none.
+pub fn refused_tool_calls_of_worker(
+    conn: &rusqlite::Connection,
+    discussion_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT content FROM messages
+         WHERE discussion_id = ?1 AND role = 'Agent' AND content LIKE ?2
+           AND sort_order > COALESCE(
+               (SELECT MAX(sort_order) FROM messages
+                 WHERE discussion_id = ?1 AND role = 'User'), -1)
+         ORDER BY sort_order DESC LIMIT 20",
+    )?;
+    let prefix = crate::agents::runner::REFUSED_TOOL_CALL_LINE_PREFIX;
+    let contents = statement
+        .query_map(
+            rusqlite::params![discussion_id, format!("%{prefix}%")],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut reasons: Vec<String> = Vec::new();
+    for content in contents {
+        for line in content.lines().rev() {
+            let Some(reason) = line.strip_prefix(prefix) else {
+                continue;
+            };
+            let reason = reason.trim().to_string();
+            if !reason.is_empty() && !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+    }
+    reasons.truncate(REFUSED_TOOL_CALLS_MAX);
+    Ok(reasons)
 }
 
 fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {

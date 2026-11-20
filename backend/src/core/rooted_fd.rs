@@ -166,10 +166,10 @@ mod unix {
         errno::set_errno(errno::Errno(0));
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     type RemoveHook = Option<Box<dyn FnMut(&OsStr)>>;
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     thread_local! {
         /// Runs after a directory's entries are listed and before they are
         /// removed: a test swaps an entry for a link there.
@@ -178,7 +178,7 @@ mod unix {
     }
 
     fn listed_hook(_name: &OsStr) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         BEFORE_REMOVE.with(|hook| {
             if let Some(hook) = hook.borrow_mut().as_mut() {
                 hook(_name);

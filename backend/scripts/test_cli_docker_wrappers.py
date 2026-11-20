@@ -185,7 +185,11 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates", report_job)
         self.assertIn("needs: [require-ci-label, test-backend-build, test-backend-shard]", report_job)
         self.assertIn("pattern: backend-profraw-*", report_job)
-        self.assertIn("cargo llvm-cov report --summary-only", report_job)
+        # Without `--workspace` the report keeps the top crate only, and both
+        # floors would be judged on a fraction of the backend.
+        self.assertIn("cargo llvm-cov report --workspace --summary-only", report_job)
+        keymgmt = (ROOT / "scripts" / "check-keymgmt-coverage.sh").read_text()
+        self.assertIn("cargo llvm-cov report --workspace --json", keymgmt)
         self.assertIn("-E 'test(export_bindings)'", report_job)
         self.assertIn("target/llvm-cov-target/debug/.fingerprint", backend)
         self.assertIn("target/llvm-cov-target/debug/build", backend)
@@ -251,9 +255,9 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             re.MULTILINE | re.DOTALL,
         ).group("section")
         self.assertIn("components: clippy", quality)
-        self.assertIn("cargo clippy --all-targets -- -D warnings", quality)
+        self.assertIn("cargo clippy --workspace --all-targets -- -D warnings", quality)
         # nextest skips doctests: they run here so a new one is never lost.
-        self.assertIn("run: cargo test --doc", quality)
+        self.assertIn("run: cargo test --workspace --doc", quality)
         desktop = re.search(
             r"^  test-desktop-compile:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             build,
@@ -405,6 +409,12 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         archive_build = step("test-backend-build", "Build the instrumented test archive")
         self.assertNotIn("if:", archive_build)
         self.assertIn("cargo nextest archive --workspace --locked", archive_build)
+        # The library and its test crate do not fit in a runner's memory side
+        # by side: the crates of this repository compile one at a time.
+        wrapper = 'export RUSTC_WORKSPACE_WRAPPER="$GITHUB_WORKSPACE/scripts/ci/rustc_one_at_a_time.sh"'
+        self.assertIn(wrapper, archive_build)
+        self.assertLess(archive_build.index(wrapper), archive_build.index("cargo nextest archive"))
+        self.assertTrue(os.access(ROOT / "scripts/ci/rustc_one_at_a_time.sh", os.X_OK))
         mac_suites = (
             "matrix.os != 'macos-latest' || github.event_name != 'pull_request' "
             "|| needs.portability-scope.outputs.mac == 'true'"
@@ -490,7 +500,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("Add the ci-build label before merging", build)
         # ci-test serves a cheaper e2e build: the real release profile is
         # built here, for every pull request.
-        self.assertIn("cargo build --release --locked --bin kronn", build)
+        self.assertIn("cargo build --release --locked -p kronn --bin kronn", build)
         self.assertIn("      - build-release", build)
         desktop = (WORKFLOWS / "desktop-build.yml").read_text()
         for name in ("ci-test.yml", "ci-build.yml"):
@@ -502,7 +512,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             CI_WORKFLOW.read_text(),
             re.MULTILINE | re.DOTALL,
         ).group("section")
-        self.assertIn("run: cargo build --locked --bin kronn", e2e)
+        self.assertIn("run: cargo build --locked -p kronn --bin kronn", e2e)
         self.assertIn("./target/debug/kronn", e2e)
         self.assertNotIn("--release", e2e)
         self.assertIn("target/debug/deps", e2e)
@@ -511,7 +521,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             BUILD_WORKFLOW.read_text(),
             re.MULTILINE | re.DOTALL,
         ).group("section")
-        self.assertIn("cargo build --release --locked --bin kronn", release)
+        self.assertIn("cargo build --release --locked -p kronn --bin kronn", release)
 
     def test_backend_readiness_wait_is_posix_and_latched(self):
         workflow = CI_WORKFLOW.read_text()
@@ -524,6 +534,43 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("backend_ready=1", workflow)
         self.assertIn('if [ "$backend_ready" -ne 1 ]', workflow)
         self.assertIn('kill -0 "$(cat /tmp/backend.pid)"', workflow)
+
+
+class RustcOneAtATimeTests(unittest.TestCase):
+    WRAPPER = ROOT / "scripts/ci/rustc_one_at_a_time.sh"
+
+    def run_wrapped(self, lock, *command):
+        return subprocess.run(
+            [str(self.WRAPPER), *command],
+            env={**os.environ, "KRONN_RUSTC_LOCK": str(lock)},
+            capture_output=True,
+            text=True,
+        )
+
+    def test_runs_the_command_with_its_arguments_and_its_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = pathlib.Path(tmp) / "lock"
+            result = self.run_wrapped(lock, "sh", "-c", 'printf "%s|" "$@"; exit 7', "rustc", "--crate-name", "a b")
+        self.assertEqual(result.stdout, "--crate-name|a b|")
+        self.assertEqual(result.returncode, 7)
+
+    @unittest.skipUnless(shutil.which("flock"), "flock(1) is what serialises: absent here, present on the runner")
+    def test_two_wrapped_commands_never_run_at_the_same_time(self):
+        script = 'echo "start $1" >> "$2"; sleep 0.4; echo "end $1" >> "$2"'
+        with tempfile.TemporaryDirectory() as tmp:
+            lock, log = pathlib.Path(tmp) / "lock", pathlib.Path(tmp) / "log"
+            running = [
+                subprocess.Popen(
+                    [str(self.WRAPPER), "sh", "-c", script, "sh", name, str(log)],
+                    env={**os.environ, "KRONN_RUSTC_LOCK": str(lock)},
+                )
+                for name in ("a", "b", "c")
+            ]
+            self.assertEqual([process.wait() for process in running], [0, 0, 0])
+            lines = log.read_text().split("\n")[:-1]
+        self.assertEqual(len(lines), 6)
+        for start, end in zip(lines[::2], lines[1::2]):
+            self.assertEqual(start.replace("start", "end"), end, lines)
 
 
 class DockerImagesWorkflowTests(unittest.TestCase):

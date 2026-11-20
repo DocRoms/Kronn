@@ -279,7 +279,7 @@ pub fn build_synthesis_prompt(
 /// Extracted so the prompt and the tests read the SAME predicate: telling a model it
 /// has these tools when it does not makes it hallucinate calls, and not telling it
 /// when it does makes it refuse to use them — both have shipped once.
-pub(crate) fn agent_has_native_planning(agent_type: &AgentType) -> bool {
+pub fn agent_has_native_planning(agent_type: &AgentType) -> bool {
     matches!(
         agent_type,
         AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia
