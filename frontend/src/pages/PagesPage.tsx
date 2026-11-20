@@ -28,6 +28,8 @@ import {
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
+import { ExportNotCarriedDialog } from '../components/ExportNotCarriedDialog';
+import type { NotCarried } from '../types/generated';
 import { triggerDownload } from '../lib/downloadBlob';
 import { exportRedactionNotice } from '../lib/redactedFields';
 import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
@@ -61,7 +63,9 @@ import {
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
 import { useLivePageDataPush } from '../hooks/useLivePageDataPush';
+import { createRequestSequence, refreshLivePageDetail, replacesShown } from '../lib/live-page-refresh';
 import { userError } from '../lib/userError';
+import { ApiRequestError } from '../lib/apiRequestError';
 import {
   livePageMosaicLayouts,
   standaloneLivePageMosaicUrl,
@@ -92,6 +96,17 @@ interface WorkflowRun {
 }
 
 const NO_EMBEDS: LivePageEmbedPlacement[] = [];
+
+interface HtmlConflict {
+  current: string | null;
+  read: 'reading' | 'ready' | 'failed';
+}
+
+/** The revision a refused HTML save says the Page has now, when the answer names one. */
+function conflictingRevision(refusal: ApiRequestError): string | null {
+  const named = (refusal.body as { current_revision_id?: unknown } | undefined)?.current_revision_id;
+  return typeof named === 'string' ? named : null;
+}
 
 function readPageNavigation(): PageNavigationPreference {
   try {
@@ -215,6 +230,11 @@ export function PagesPage({
   const [titleError, setTitleError] = useState<string | null>(null);
   const [savingTitle, setSavingTitle] = useState(false);
   const [htmlDraft, setHtmlDraft] = useState('');
+  // The HTML revision the draft started from, and whether the Page moved past it.
+  const draftBaseRef = useRef<string | null>(null);
+  // A save the server refused: `current` is the revision it named, `read`
+  // whether the HTML to compare with has reached the view.
+  const [htmlConflict, setHtmlConflict] = useState<HtmlConflict | null>(null);
   const [comparisonRevisionId, setComparisonRevisionId] = useState<string | null>(null);
   const [savingHtml, setSavingHtml] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<Record<string, WorkflowRun>>({});
@@ -245,16 +265,25 @@ export function PagesPage({
   const [exportNotice, setExportNotice] = useState<{ pageId: string; text: string } | null>(null);
   const closeImport = useCallback(() => setImportOpen(false), []);
   const artifactExportInFlight = useRef(false);
+  type ArtifactExportFile = { pageId: string; filename: string; blob: Blob };
+  const [pendingArtifactExport, setPendingArtifactExport] = useState<(ArtifactExportFile & { notCarried: NotCarried[] }) | null>(null);
+  const finishArtifactExport = async ({ pageId, filename, blob }: ArtifactExportFile) => {
+    triggerDownload(filename, blob);
+    const notice = await exportRedactionNotice(blob, t);
+    if (notice) setExportNotice({ pageId, text: notice });
+  };
   const exportArtifact = async () => {
     if (!detail || artifactExportInFlight.current) return;
     artifactExportInFlight.current = true; setExportBusy('json'); setExportNotice(null);
     try {
       const bundle = await pagesApi.exportArtifact(detail.id);
       const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
-      triggerDownload(`${detail.slug}.kronn-artifact.json`, blob);
+      const pending = { pageId: detail.id, filename: `${detail.slug}.kronn-artifact.json`, blob };
       setError(null);
-      const notice = await exportRedactionNotice(blob, t);
-      if (notice) setExportNotice({ pageId: detail.id, text: notice });
+      // What the file names and does not hold is shown before it leaves.
+      const notCarried = bundle.not_carried ?? [];
+      if (notCarried.length > 0) setPendingArtifactExport({ ...pending, notCarried });
+      else await finishArtifactExport(pending);
     } catch (cause) { setError(userError(cause)); }
     finally { artifactExportInFlight.current = false; setExportBusy(null); }
   };
@@ -280,7 +309,12 @@ export function PagesPage({
   } = useLivePageActions(() => setError(t('disc.action.unavailablePageAction')));
   const [bridgeChannel] = useState(channelId);
   const selectedIdRef = useRef(selectedId);
-  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  // The ref moves with the choice, not a render later: a reload that returns
+  // from the network checks it before it touches the view.
+  const choosePage = useCallback((pageId: string | null) => {
+    selectedIdRef.current = pageId;
+    setSelectedId(pageId);
+  }, []);
   const requestedPageIdRef = useRef(selectedPageId ?? initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
 
@@ -301,10 +335,45 @@ export function PagesPage({
     }
   }, [collapsedSections]);
 
-  const loadDetail = useCallback(async (pageId: string) => {
+  // The snapshot a background refresh starts from: only what changed is read.
+  // Written with the state, never a render later: an answer is compared
+  // with the Page shown even when two arrive in the same turn.
+  const detailRef = useRef<LivePageDetail | null>(null);
+  const putDetail = useCallback((next: LivePageDetail | null) => {
+    detailRef.current = next;
+    setDetail(next);
+  }, []);
+  const patchDetail = useCallback((updated: LivePageDetail) => {
+    if (detailRef.current?.id === updated.id) putDetail(updated);
+  }, [putDetail]);
+
+  // Answers are applied in the order their reads started, for the Page being
+  // read only: one that arrives after a newer one was shown, or for a Page
+  // since left, is dropped. The panels follow the same rule on their own.
+  const [detailReads] = useState(createRequestSequence);
+  const [pageLoads] = useState(createRequestSequence);
+
+  // Nothing typed for one Page stays open over another.
+  const closeEditors = useCallback(() => {
+    setEditingHtml(false);
+    setEditingTitle(false);
+    setTitleError(null);
+  }, []);
+  const showDetail = useCallback((next: LivePageDetail) => {
+    if (detailRef.current?.id !== next.id) closeEditors();
+    putDetail(next);
+  }, [closeEditors, putDetail]);
+
+  // `incremental` is for the timer: an action the user took reads the whole Page.
+  // A Page the user has left is not read: its answer would take the view back.
+  const loadDetail = useCallback(async (pageId: string, incremental = false) => {
+    if (selectedIdRef.current !== pageId) return;
+    const known = incremental && detailRef.current?.id === pageId ? detailRef.current : null;
+    const read = detailReads.next(pageId);
+    const load = pageLoads.next(pageId);
     const [[nextDetail, workflows, publications, discussions, pageRevisions, usage]] = await Promise.all([
       Promise.all([
-        pagesApi.get(pageId),
+        refreshLivePageDetail(pageId, known),
         pagesApi.workflows(pageId),
         pagesApi.publications(pageId),
         pagesApi.discussions(pageId),
@@ -314,17 +383,18 @@ export function PagesPage({
       ]),
       reloadPageActions(pageId),
     ]);
-    setDetail(nextDetail);
+    if (replacesShown(detailRef.current, nextDetail) && detailReads.apply(read)) showDetail(nextDetail.detail);
+    if (!pageLoads.apply(load)) return;
     setDatasetUsage(usage);
     setLinkedWorkflows(workflows);
     setRecentPublications(publications);
     setLinkedDiscussions(discussions);
     setRevisions(pageRevisions);
     setComparisonRevisionId(null);
-    setHtmlDraft(nextDetail.revision.html);
-  }, [reloadPageActions]);
+  }, [detailReads, pageLoads, reloadPageActions, showDetail]);
 
-  const refresh = useCallback(async (selectedOverride?: string | null) => {
+  const refresh = useCallback(async (selectedOverride?: string | null, incremental = false) => {
+    const selectedAtStart = selectedIdRef.current;
     try {
       const list = await pagesApi.list();
       setPages(list);
@@ -332,17 +402,22 @@ export function PagesPage({
       const requested = requestedId && list.some(page => page.id === requestedId)
         ? requestedId
         : null;
-      const candidate = selectedOverride === undefined ? selectedId : selectedOverride;
+      // The user may have opened another Page while the library was read.
+      const moved = selectedIdRef.current !== selectedAtStart;
+      const candidate = selectedOverride === undefined || moved ? selectedIdRef.current : selectedOverride;
       const target = requested
         ?? (candidate && list.some(page => page.id === candidate) ? candidate : null)
         ?? list.find(page => !page.archived)?.id
         ?? list[0]?.id
         ?? null;
-      setSelectedId(target);
+      choosePage(target);
       if (target) {
-        await loadDetail(target);
+        await loadDetail(target, incremental);
       } else {
-        setDetail(null);
+        detailReads.leave();
+        pageLoads.leave();
+        closeEditors();
+        putDetail(null);
         setDatasetUsage([]);
         setLinkedWorkflows([]);
         setRecentPublications([]);
@@ -360,12 +435,10 @@ export function PagesPage({
     } finally {
       setLoading(false);
     }
-  }, [loadDetail, reloadPageActions, selectedId]);
+  }, [choosePage, closeEditors, detailReads, loadDetail, pageLoads, putDetail, reloadPageActions]);
 
-  // `refresh` is rebuilt whenever `selectedId` changes, including from inside
-  // its own call and from `select`. Depending on it directly would re-run the
-  // mount effect on every such change and double the GET /pages/{id} that
-  // call already made — read the latest closure through a ref instead.
+  // The mount effect and the timer call `refresh` through a ref: depending
+  // on it directly would run them again each time it is rebuilt.
   const refreshRef = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
@@ -387,21 +460,25 @@ export function PagesPage({
   }, [selectedPageId, initialSelectedPageId, onInitialSelectionConsumed, selectedId]);
   useEffect(() => {
     if (editingHtml) return undefined;
-    const timer = window.setInterval(() => { void refreshRef.current(); }, REFRESH_MS);
+    const timer = window.setInterval(() => { void refreshRef.current(undefined, true); }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [editingHtml]);
 
   // A publish reaches the open Page at once; HTML edits in progress are kept.
   useLivePageDataPush(selectedId, () => {
     const pageId = selectedId;
-    if (!pageId) return;
-    void Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([next]) => {
-      setDetail(current => (current && current.id === next.id ? next : current));
+    // The first load of a Page brings it with its panels: nothing to follow before.
+    if (!pageId || detailRef.current?.id !== pageId) return;
+    const read = detailReads.follow(pageId);
+    if (read === null) return;
+    void Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([next]) => {
+      if (detailRef.current?.id !== next.detail.id || !replacesShown(detailRef.current, next)) return;
+      if (detailReads.apply(read)) showDetail(next.detail);
     }).catch(() => { /* the poll retries */ });
   });
 
   const select = useCallback(async (page: LivePage) => {
-    setSelectedId(page.id);
+    choosePage(page.id);
     // Only the finished display state goes; a run still in flight keeps being
     // tracked, or its lock and its updates would be lost.
     setWorkflowRuns(current => Object.fromEntries(
@@ -411,16 +488,16 @@ export function PagesPage({
     setLoading(true);
     try {
       await loadDetail(page.id);
-      setEditingHtml(false);
-      setEditingTitle(false);
-      setTitleError(null);
+      // The user went on to another Page: its own load speaks for the view.
+      if (selectedIdRef.current !== page.id) return;
+      closeEditors();
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (selectedIdRef.current === page.id) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
+      if (selectedIdRef.current === page.id) setLoading(false);
     }
-  }, [loadDetail]);
+  }, [choosePage, closeEditors, loadDetail]);
 
   const patchWorkflowRun = useCallback((workflowId: string, patch: (run: WorkflowRun) => WorkflowRun) => {
     setWorkflowRuns(current => current[workflowId]
@@ -533,11 +610,49 @@ export function PagesPage({
     };
   }, [sidePanel, closeSidePanel]);
 
-  const persistHtml = useAsyncGuard(async (pageId: string, html: string) => {
+  // The detail alone: a panel that fails to load must not keep the HTML the
+  // user is asked about out of the view.
+  const readConflictingHtml = useCallback(async (pageId: string) => {
+    const read = detailReads.follow(pageId);
+    if (read === null) {
+      // The view is not reading this Page right now: say so, the retry reads it.
+      setHtmlConflict(conflict => conflict && { ...conflict, read: 'failed' });
+      return;
+    }
+    setHtmlConflict(conflict => conflict && { ...conflict, read: 'reading' });
+    try {
+      const fresh = await pagesApi.get(pageId);
+      if (selectedIdRef.current !== pageId) return;
+      if (detailReads.apply(read)) putDetail(fresh);
+      setHtmlConflict(conflict => conflict && { ...conflict, read: 'ready' });
+    } catch {
+      if (selectedIdRef.current !== pageId) return;
+      setHtmlConflict(conflict => conflict && { ...conflict, read: 'failed' });
+    }
+  }, [detailReads, putDetail]);
+
+  // `base` is the HTML revision the draft started from: the server refuses
+  // the save when the Page has another one by then, whoever saved it.
+  const persistHtml = useAsyncGuard(async (pageId: string, html: string, base: string | null) => {
     setSavingHtml(true);
     try {
-      await pagesApi.updateHtml(pageId, { html, created_by_agent: null });
+      let saved: LivePageRevision;
+      try {
+        saved = await pagesApi.updateHtml(pageId, { html, created_by_agent: null, base_revision_id: base ?? undefined });
+      } catch (cause) {
+        if (!(cause instanceof ApiRequestError) || cause.code !== 'conflict') throw cause;
+        if (selectedIdRef.current !== pageId) return;
+        // The draft stays as typed; the HTML saved meanwhile is read next.
+        setHtmlConflict({ current: conflictingRevision(cause), read: 'reading' });
+        await readConflictingHtml(pageId);
+        return;
+      }
+      // Saved for a Page the user has left: the view stays where it is.
+      if (selectedIdRef.current !== pageId) return;
+      // The draft now starts from the revision it just created.
+      draftBaseRef.current = saved.id;
       await loadDetail(pageId);
+      if (selectedIdRef.current !== pageId) return;
       setEditingHtml(false);
       setError(null);
     } catch (cause) {
@@ -547,10 +662,45 @@ export function PagesPage({
     }
   });
 
+  // The draft starts from the HTML the Page has when the editor opens, and
+  // nothing but the user changes it while the editor is open.
+  const toggleHtmlEditor = useCallback(() => {
+    setComparisonRevisionId(null);
+    setHtmlConflict(null);
+    if (editingHtml || !detail) {
+      setEditingHtml(false);
+      return;
+    }
+    setHtmlDraft(detail.revision.html);
+    draftBaseRef.current = detail.revision.id;
+    setEditingHtml(true);
+  }, [detail, editingHtml]);
+
   const saveHtml = useCallback(() => {
     if (!detail || !htmlDraft.trim()) return;
-    void persistHtml(detail.id, htmlDraft);
+    // The server compares the base with the Page's HTML: it alone knows.
+    void persistHtml(detail.id, htmlDraft, draftBaseRef.current);
   }, [detail, htmlDraft, persistHtml]);
+
+  const overwriteHtml = useCallback(() => {
+    if (!detail || !htmlDraft.trim() || htmlConflict?.read !== 'ready') return;
+    // Over the revision the server named, and only that one: a later one is refused again.
+    const base = htmlConflict.current ?? detail.revision.id;
+    draftBaseRef.current = base;
+    setHtmlConflict(null);
+    void persistHtml(detail.id, htmlDraft, base);
+  }, [detail, htmlConflict, htmlDraft, persistHtml]);
+
+  const reloadHtmlDraft = useCallback(() => {
+    if (!detail || htmlConflict?.read !== 'ready') return;
+    setHtmlDraft(detail.revision.html);
+    draftBaseRef.current = detail.revision.id;
+    setHtmlConflict(null);
+  }, [detail, htmlConflict]);
+
+  const retryConflictingHtml = useCallback(() => {
+    if (detail) void readConflictingHtml(detail.id);
+  }, [detail, readConflictingHtml]);
 
   const exportPage = useCallback(async (format: 'pdf' | 'docx') => {
     if (!detail) return;
@@ -626,7 +776,7 @@ export function PagesPage({
     try {
       const updated = await pagesApi.update(page.id, patch);
       setPages(current => current.map(item => item.id === page.id ? updated : item));
-      setDetail(current => current?.id === page.id ? updated : current);
+      patchDetail(updated);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -639,11 +789,14 @@ export function PagesPage({
     try {
       const updated = await pagesApi.update(pageId, { title });
       setPages(current => current.map(page => page.id === pageId ? updated : page));
-      setDetail(current => current?.id === pageId ? updated : current);
+      patchDetail(updated);
+      // The title editor now belongs to another Page.
+      if (detailRef.current?.id !== pageId) return;
       setTitleDraft(updated.title);
       setEditingTitle(false);
       setError(null);
     } catch (cause) {
+      if (detailRef.current?.id !== pageId) return;
       // Keep the persisted title as the visible source of truth. The failed
       // draft must never leak into the sidebar or masquerade as a saved name.
       setTitleDraft(previousTitle);
@@ -719,6 +872,8 @@ export function PagesPage({
 
   const revisionHtml = detail?.revision.html ?? '';
   const latestPublication = recentPublications[0] ?? null;
+  // A refresh that changes nothing is not journaled: the Page's own date still moves.
+  const lastRefreshAt = detail?.last_published_at ?? latestPublication?.published_at ?? null;
   const totalDatasetSize = detail?.datasets.reduce(
     (total, dataset) => total + dataset.data_size_bytes,
     0,
@@ -1153,10 +1308,10 @@ export function PagesPage({
                 <span
                   className="live-pages-sync-fresh"
                   data-testid="live-page-sync-freshness"
-                  data-state={latestPublication ? 'synced' : 'waiting'}
+                  data-state={lastRefreshAt ? 'synced' : 'waiting'}
                 >
-                  {latestPublication
-                    ? `${t('pages.refreshSynced')} · ${formatRelativeTime(latestPublication.published_at, locale)}`
+                  {lastRefreshAt
+                    ? `${t('pages.refreshSynced')} · ${formatRelativeTime(lastRefreshAt, locale)}`
                     : t('pages.refreshWaiting')}
                 </span>
               )}
@@ -1165,9 +1320,9 @@ export function PagesPage({
                   type="button"
                   className="disc-chat-header-btn disc-chat-header-btn--primary"
                   data-testid="live-page-refresh-menu"
-                  data-state={latestPublication ? 'synced' : 'waiting'}
-                  title={latestPublication
-                    ? `${t('pages.autoRefresh')} · ${t('pages.refreshSynced')} ${formatRelativeTime(latestPublication.published_at, locale)}`
+                  data-state={lastRefreshAt ? 'synced' : 'waiting'}
+                  title={lastRefreshAt
+                    ? `${t('pages.autoRefresh')} · ${t('pages.refreshSynced')} ${formatRelativeTime(lastRefreshAt, locale)}`
                     : `${t('pages.autoRefresh')} · ${t('pages.refreshWaiting')}`}
                   aria-expanded={sidePanel === 'sync'}
                   aria-controls="live-page-side-panel"
@@ -1233,10 +1388,7 @@ export function PagesPage({
                       className="live-pages-editor-toggle"
                       data-active={editingHtml}
                       aria-label={editingHtml ? t('pages.closeEditor') : t('pages.editHtml')}
-                      onClick={() => {
-                        setEditingHtml(value => !value);
-                        setComparisonRevisionId(null);
-                      }}
+                      onClick={toggleHtmlEditor}
                     >
                       {editingHtml ? <X size={13} /> : <Pencil size={13} />}
                       <span className="live-pages-action-label">{editingHtml ? t('pages.closeEditor') : t('pages.editHtml')}</span>
@@ -1345,6 +1497,19 @@ export function PagesPage({
                     </button>
                   </div>
                 </div>
+                {htmlConflict && (
+                  <div className="live-pages-error live-pages-editor-conflict" role="alert">
+                    <span>{t('pages.htmlChangedElsewhere')}</span>
+                    {htmlConflict.read === 'failed' && (
+                      <>
+                        <span>{t('pages.htmlConflictUnread')}</span>
+                        <button type="button" className="live-pages-restore-revision" onClick={retryConflictingHtml}>{t('pages.htmlConflictRetry')}</button>
+                      </>
+                    )}
+                    <button type="button" className="live-pages-restore-revision" onClick={reloadHtmlDraft} disabled={savingHtml || htmlConflict.read !== 'ready'}>{t('pages.htmlReloadDraft')}</button>
+                    <button type="button" className="live-pages-restore-revision" onClick={overwriteHtml} disabled={savingHtml || htmlConflict.read !== 'ready'}>{t('pages.htmlOverwrite')}</button>
+                  </div>
+                )}
                 {comparisonRevision ? (
                   <div className="live-pages-editor-comparison">
                     <div><GitCompare size={14} />{t('pages.revisionComparison')}</div>
@@ -1435,7 +1600,7 @@ export function PagesPage({
                   page={detail}
                   onSaved={(updated) => {
                     setPages(current => current.map(item => item.id === updated.id ? updated : item));
-                    setDetail(current => current?.id === updated.id ? updated : current);
+                    patchDetail(updated);
                   }}
                 />
               </section>
@@ -1474,6 +1639,7 @@ export function PagesPage({
                 <ul className="live-pages-sync-workflows">
                   {linkedWorkflows.map(workflow => {
                     const run = workflowRuns[workflow.id];
+                    // The journal holds publications that changed data: a run that changed nothing is not there.
                     const lastPublication = recentPublications.find(publication => publication.workflow_id === workflow.id);
                     const runLabel = workflow.enabled ? t('pages.runLinkedWorkflow', workflow.name) : t('pages.runDisabledWorkflow');
                     return (
@@ -1522,12 +1688,12 @@ export function PagesPage({
                             <small data-kind="skipped">{t('pages.workflowSkipped')}</small>
                           ) : lastPublication ? (
                             <small>
-                              {t('pages.workflowLastPublished')}{' '}
+                              {t('pages.workflowLastChange')}{' '}
                               <time title={new Date(lastPublication.published_at).toLocaleString(locale)}>
                                 {formatRelativeTime(lastPublication.published_at, locale)}
                               </time>
                             </small>
-                          ) : <small>{t('pages.workflowNeverPublished')}</small>}
+                          ) : <small>{t('pages.workflowNoRecentChange')}</small>}
                         </div>
                         {run && <RunStatusCard runId={run.card.id === workflow.id ? undefined : run.card.id} model={run.card} />}
                       </li>
@@ -1559,7 +1725,7 @@ export function PagesPage({
             <section className="live-pages-sync-section" data-testid="live-page-sync-history" aria-label={t('pages.syncHistory')}>
               <header>
                 <h3><History size={12} />{t('pages.syncHistory')}</h3>
-                <span className="live-pages-sync-total">{t('pages.recentRefreshesHint')}</span>
+                <span className="live-pages-sync-total live-pages-sync-hint" title={t('pages.recentChangesHint')}>{t('pages.recentChangesHint')}</span>
               </header>
                     <div className="live-pages-refresh-timeline">
                       {recentPublications.length > 0 ? recentPublications.map(publication => {
@@ -1629,6 +1795,17 @@ export function PagesPage({
           </div>
           )}
         </SidePanelShell>
+      )}
+      {pendingArtifactExport && (
+        <ExportNotCarriedDialog
+          items={pendingArtifactExport.notCarried}
+          onCancel={() => setPendingArtifactExport(null)}
+          onDownload={() => {
+            const pending = pendingArtifactExport;
+            setPendingArtifactExport(null);
+            void finishArtifactExport(pending);
+          }}
+        />
       )}
       {importOpen && <ArtifactImportDialog onClose={closeImport} onImported={page => {
         setImportOpen(false);

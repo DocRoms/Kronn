@@ -155,6 +155,29 @@ pub struct SkillImportDecision {
     pub resolution: Option<SkillConflictResolution>,
 }
 
+/// What a bundled binding is (KT-1843).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum BindingKind {
+    Directive,
+    Profile,
+}
+
+/// One bundled directive or profile as an import preview shows it (KT-1843):
+/// reused when a local custom one says the same thing, created otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BindingImportDecision {
+    pub kind: BindingKind,
+    pub source_id: String,
+    pub name: String,
+    /// `reuse` or `create`.
+    pub action: SkillImportAction,
+    /// The local entry reused.
+    pub existing_id: Option<String>,
+}
+
 /// Kronn's description of one skill argument. Stored as JSON under the flat
 /// `kronn-variables` metadata key: the Agent Skills `metadata` is a string map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -58,9 +58,24 @@ pub async fn create(
     create_as(state, req, agent).await
 }
 
+/// KT-1843 — a directive id names a directive: any other id (a skill's, a
+/// typo) loads nothing at run time, without a word. Ids `kept` from the saved
+/// Quick Prompt pass, so an edit elsewhere is not held by an older entry.
+fn known_directives(ids: &[String], kept: &[String]) -> Result<(), String> {
+    match ids
+        .iter()
+        .find(|id| !kept.contains(id) && crate::core::directives::get_directive(id).is_none())
+    {
+        Some(id) => Err(format!(
+            "`{id}` is not a directive: `directive_ids` takes directive ids only"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// [`create`] naming the creating agent, if any: a resource an agent creates
 /// can shadow a shared `ref:` and so disable the workflows using it.
-pub(crate) async fn create_as(
+pub async fn create_as(
     state: AppState,
     req: CreateQuickPromptRequest,
     creator_agent: Option<String>,
@@ -75,6 +90,9 @@ pub(crate) async fn create_as(
         return Json(ApiResponse::err(error));
     }
     if let Err(error) = crate::core::skill_versions::validate_pins(&req.skill_ids) {
+        return Json(ApiResponse::err(error));
+    }
+    if let Err(error) = known_directives(&req.directive_ids, &[]) {
         return Json(ApiResponse::err(error));
     }
 
@@ -153,7 +171,7 @@ fn quick_prompt_execution(qp: &QuickPrompt) -> serde_json::Value {
     })
 }
 
-pub(crate) async fn update_as(
+pub async fn update_as(
     state: AppState,
     id: String,
     req: CreateQuickPromptRequest,
@@ -173,6 +191,9 @@ pub(crate) async fn update_as(
         return Json(ApiResponse::err(error));
     }
     if let Err(error) = crate::core::skill_versions::validate_pins(&req.skill_ids) {
+        return Json(ApiResponse::err(error));
+    }
+    if let Err(error) = known_directives(&req.directive_ids, &existing.directive_ids) {
         return Json(ApiResponse::err(error));
     }
     let before = quick_prompt_execution(&existing);

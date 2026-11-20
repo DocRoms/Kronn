@@ -59,6 +59,10 @@ struct ImportPlan {
     /// The bundle's custom skills and what the import does with each.
     bundled_skills: Vec<BundledSkill>,
     skills: Vec<SkillImportDecision>,
+    /// The bundle's custom directives and profiles (KT-1843).
+    bundled_directives: Vec<Directive>,
+    bundled_profiles: Vec<AgentProfile>,
+    bindings: Vec<BindingImportDecision>,
     preview: ArtifactImportPreview,
     /// Distinct origins the bundle's Pages embed from, sorted.
     embed_origins: Vec<String>,
@@ -110,6 +114,15 @@ type Remap = BTreeMap<ResourceKind, HashMap<String, String>>;
 struct SkillRemap<'a> {
     bundled: &'a BTreeSet<String>,
     ids: &'a HashMap<String, String>,
+    /// Bundled directives and profiles, by source id (KT-1843).
+    bindings: &'a crate::core::binding_bundle::BindingIds,
+}
+
+/// A bundle's files beside its resources: skills, directives, profiles.
+struct BundledFiles {
+    skills: Vec<BundledSkill>,
+    directives: Vec<Directive>,
+    profiles: Vec<AgentProfile>,
 }
 
 fn kind_key(kind: ResourceKind) -> String {
@@ -145,6 +158,20 @@ fn canonical(mut value: Value, kind: ResourceKind) -> Value {
                 }
             }
         }
+        // A file from before bare exports carries values; a stored page is
+        // compared without them, so neither side's values make them differ.
+        // A stored page lists its datasets by name, whatever the file's order.
+        if kind == ResourceKind::Artifact {
+            if let Some(datasets) = object.get_mut("datasets").and_then(Value::as_array_mut) {
+                datasets.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                for dataset in datasets.iter_mut().filter_map(Value::as_object_mut) {
+                    dataset.insert("has_current".into(), json!(false));
+                    dataset.insert("current".into(), Value::Null);
+                    dataset.insert("points".into(), json!([]));
+                    dataset.remove("updated_at");
+                }
+            }
+        }
     }
     value
 }
@@ -159,7 +186,8 @@ fn load_existing(conn: &Connection, kind: ResourceKind, id: &str) -> Result<Opti
                 |row| row.get(0),
             )?;
             if exists {
-                Some(serde_json::to_value(export_page(conn, id)?)?)
+                // Compared without data: `canonical` drops a bundle page's values.
+                Some(serde_json::to_value(export_bare_page(conn, id)?)?)
             } else {
                 None
             }
@@ -236,7 +264,7 @@ fn validate_page(page: &ArtifactBundlePage) -> Result<()> {
     Ok(())
 }
 
-fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Vec<BundledSkill>)> {
+fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, BundledFiles)> {
     if request.content.len() > MAX_BUNDLE_BYTES {
         bail!("Artifact bundle exceeds 64 MiB");
     }
@@ -248,6 +276,8 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
         bail!("Unsupported Artifact bundle kind or version");
     }
     let skills = bundle.referenced_skills;
+    let (directives, profiles) = (bundle.referenced_directives, bundle.referenced_profiles);
+    let bundled_skill_ids: BTreeSet<String> = skills.iter().map(|skill| skill.id.clone()).collect();
     let mut resources = Vec::new();
     for page in std::iter::once(bundle.artifact).chain(bundle.referenced_artifacts) {
         validate_page(&page)?;
@@ -257,8 +287,11 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
     for mut workflow in bundle.referenced_workflows {
         super::super::workflows::clear_human_approvals(&mut workflow.steps);
         super::super::workflows::clear_human_approvals(&mut workflow.on_failure);
-        super::super::workflows::validate_workflow_for_import(&workflow)
-            .map_err(anyhow::Error::msg)?;
+        super::super::workflows::validate_workflow_for_import_bundled(
+            &workflow,
+            &bundled_skill_ids,
+        )
+        .map_err(anyhow::Error::msg)?;
         resources.push(Resource::new(ResourceKind::Workflow, workflow)?);
     }
     for prompt in bundle.referenced_quick_prompts {
@@ -309,7 +342,14 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
             }
         }
     }
-    Ok((resources, skills))
+    Ok((
+        resources,
+        BundledFiles {
+            skills,
+            directives,
+            profiles,
+        },
+    ))
 }
 
 fn remap_for(resources: &[PlannedResource]) -> Remap {
@@ -418,6 +458,12 @@ fn remap_value(
                         .clone();
                 }
                 crate::core::skill_bundle::remap_ids(&mut step.skill_ids, skills.ids);
+                skills
+                    .bindings
+                    .remap(&mut step.profile_ids, &mut step.directive_ids);
+                if let Some(payload) = step.json_data_payload.as_mut() {
+                    crate::core::skill_bundle::remap_payload(payload, skills.ids);
+                }
             }
             let maps = crate::workflows::refs::RefRemaps {
                 pages: &map[&ResourceKind::Artifact],
@@ -440,7 +486,17 @@ fn remap_value(
         ResourceKind::QuickPrompt => {
             let mut prompt: QuickPrompt = serde_json::from_value(value)?;
             crate::core::skill_bundle::remap_ids(&mut prompt.skill_ids, skills.ids);
+            skills
+                .bindings
+                .remap(&mut prompt.profile_ids, &mut prompt.directive_ids);
             value = serde_json::to_value(prompt)?;
+        }
+        ResourceKind::QuickApi => {
+            let mut api: QuickApi = serde_json::from_value(value)?;
+            skills
+                .bindings
+                .remap(&mut api.profile_ids, &mut api.directive_ids);
+            value = serde_json::to_value(api)?;
         }
         _ => {}
     }
@@ -531,7 +587,16 @@ fn execution_requirements(
 }
 
 fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<ImportPlan> {
-    let (resources, bundled_skills) = parse_resources(request)?;
+    let (resources, files) = parse_resources(request)?;
+    let BundledFiles {
+        skills: bundled_skills,
+        directives: bundled_directives,
+        profiles: bundled_profiles,
+    } = files;
+    let bindings = crate::core::binding_bundle::plan(&bundled_directives, &bundled_profiles)
+        .map_err(anyhow::Error::msg)?;
+    // A preview knows only the ids of what it reuses.
+    let predicted_bindings = crate::core::binding_bundle::predicted_ids(&bindings);
     let skills = crate::core::skill_bundle::plan(
         &bundled_skills,
         &request.skill_choices,
@@ -546,6 +611,7 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
     let skill_remap = SkillRemap {
         bundled: &bundled_skill_ids,
         ids: &predicted_skill_ids,
+        bindings: &predicted_bindings,
     };
     let embed_origins = bundle_embed_origins(&resources);
     if let Some(project) = &request.project_id {
@@ -586,7 +652,7 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         let is_root = key == root_key;
         if is_root {
             // The root is always new (a fresh copy per import, never reused —
-            // see `artifact_roundtrip_preserves_null_points_and_reuses_previous_import_identities`).
+            // see `artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previous_import_identities`).
             // Observe the identity this slug currently maps to, so committing
             // a DIFFERENT mapping between preview and commit invalidates the
             // stale preview, without hydrating every previous copy.
@@ -794,11 +860,15 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         // Filled by the caller, which knows this Kronn's allowed sites.
         embed_origins: Vec::new(),
         skills: skills.clone(),
+        bindings: bindings.clone(),
     };
     Ok(ImportPlan {
         resources: planned,
         bundled_skills,
         skills,
+        bundled_directives,
+        bundled_profiles,
+        bindings,
         preview,
         embed_origins,
     })
@@ -921,9 +991,15 @@ fn create_imported_page(
         ],
     )?;
     for dataset in exported.datasets {
+        // A dataset that arrives without value or point was written here, now.
+        let updated_at = if dataset.has_current || !dataset.points.is_empty() {
+            dataset.updated_at
+        } else {
+            now
+        };
         tx.execute(
             "UPDATE live_page_datasets SET updated_at = ?1 WHERE page_id = ?2 AND name = ?3",
-            rusqlite::params![dataset.updated_at.to_rfc3339(), page.id, dataset.name],
+            rusqlite::params![updated_at.to_rfc3339(), page.id, dataset.name],
         )?;
         for point in dataset.points {
             tx.execute("INSERT INTO live_page_dataset_points
@@ -958,9 +1034,13 @@ fn commit_plan(
         .iter()
         .map(|skill| skill.id.clone())
         .collect();
+    let binding_ids =
+        crate::core::binding_bundle::apply(&plan.bundled_directives, &plan.bundled_profiles)
+            .map_err(anyhow::Error::msg)?;
     let skill_remap = SkillRemap {
         bundled: &bundled_skill_ids,
         ids: &skill_ids,
+        bindings: &binding_ids,
     };
     // Create action targets first, so Page action ingestion can resolve all of
     // them. Workflows contain JSON references and remain disabled throughout.
@@ -1066,6 +1146,7 @@ fn commit_plan(
         artifact: root.context("Imported root Artifact missing")?,
         entries: plan.preview.entries,
         skills: plan.skills,
+        bindings: plan.bindings,
         allowed_embed_origins: Vec::new(),
         not_allowed_embed_origins: Vec::new(),
         embed_origins_error: None,
@@ -1075,7 +1156,7 @@ fn commit_plan(
 /// Import a bundle Kronn ships itself, inside the caller's transaction: every
 /// dependency is a fresh copy, so nothing the user already has is reused or
 /// changed. Workflows land disabled, as for any import.
-pub(crate) fn import_shipped_in_transaction(
+pub fn import_shipped_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     content: String,
 ) -> Result<ArtifactImportResult> {

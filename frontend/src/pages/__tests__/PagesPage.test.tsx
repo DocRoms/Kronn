@@ -1,6 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { ApiRequestError } from '../../lib/apiRequestError';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { formatRelativeTime } from '../../lib/relativeTime';
+import en from '../../lib/i18n/locales/en';
+import es from '../../lib/i18n/locales/es';
+import fr from '../../lib/i18n/locales/fr';
+import zh from '../../lib/i18n/locales/zh';
 import { resolve } from 'node:path';
 import type { LivePage, LivePageAction, LivePageDetail, LivePagePublication, LivePageRevision, LivePageRevisionSummary } from '../../types/generated';
 
@@ -51,7 +57,7 @@ vi.mock('../../lib/api', () => ({
   discussionActions: { get: vi.fn(), cancel: vi.fn(), launch: vi.fn() },
   docs: { generatePdf: vi.fn(), generateDocx: vi.fn(), generateCsv: vi.fn() },
   pages: {
-    list: vi.fn(), get: vi.fn(), revisions: vi.fn(), revision: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
+    list: vi.fn(), get: vi.fn(), data: vi.fn(), revisions: vi.fn(), revision: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
     actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
     datasetUsage: vi.fn(() => Promise.resolve([])), resources: vi.fn(() => Promise.resolve([])), deleteDataset: vi.fn(), updateDataset: vi.fn(), publish: vi.fn(),
@@ -109,6 +115,7 @@ beforeEach(() => {
   actionRelay.onAction = null;
   vi.mocked(pagesApi.list).mockResolvedValue([page]);
   vi.mocked(pagesApi.get).mockResolvedValue(detail);
+  vi.mocked(pagesApi.data).mockResolvedValue({ page, full: null, datasets: [] });
   vi.mocked(pagesApi.revisions).mockResolvedValue([detail.revision, legacyRevision].map(summarize));
   vi.mocked(pagesApi.revision).mockImplementation(async (_id, revisionId) =>
     [detail.revision, legacyRevision, archivedRevision].find(revision => revision.id === revisionId)!);
@@ -257,6 +264,31 @@ describe('PagesPage', () => {
     fireEvent.click(screen.getByText('pages.export'));
     fireEvent.click(screen.getByRole('button', { name: 'pages.exportArtifact' }));
     expect(await screen.findByTestId('artifact-export-redacted')).toHaveTextContent('imp.exportRedacted');
+  });
+
+  it('lists what the bundle names and does not hold before it downloads (KT-1843)', async () => {
+    vi.mocked(triggerDownload).mockClear();
+    vi.mocked(pagesApi.exportArtifact).mockResolvedValue({ kind: 'kronn.artifact', version: 1, not_carried: [
+      { kind: 'workflow', id: '4339ea95-0000-4000-8000-000000000001', named_in: 'Refresh › call' },
+    ] } as never);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.exportArtifact' }));
+    const dialog = await screen.findByTestId('export-not-carried');
+    expect(dialog).toHaveTextContent('4339ea95-0000-4000-8000-000000000001');
+    expect(triggerDownload).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.cancel' }));
+    expect(screen.queryByTestId('export-not-carried')).toBeNull();
+    expect(triggerDownload).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText('pages.export'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.exportArtifact' }));
+    fireEvent.click(await screen.findByTestId('export-not-carried-download'));
+    await waitFor(() => expect(triggerDownload).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(triggerDownload).mock.calls[0][0]).toBe('adobe-signals.kronn-artifact.json');
+    expect(screen.queryByTestId('export-not-carried')).toBeNull();
   });
 
   it('offers an import even when no Artifact exists', async () => {
@@ -458,16 +490,749 @@ describe('PagesPage', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(pagesApi.get).toHaveBeenCalledTimes(1);
 
+      // KT-1819: the timer compares the revision; it never re-reads the Page.
       vi.mocked(pagesApi.get).mockClear();
       await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+      expect(pagesApi.data).toHaveBeenCalledTimes(1);
+      expect(pagesApi.data).toHaveBeenLastCalledWith('page-1', 3, 'rev-2');
 
-      vi.mocked(pagesApi.get).mockClear();
       await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+      expect(pagesApi.data).toHaveBeenCalledTimes(2);
+      expect(pagesApi.get).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('reads only the dataset a publication changed, and keeps the others', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    const kept = { ...detail.datasets[0], id: 'dataset-2', name: 'kept', current: { untouched: true } };
+    vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, datasets: [detail.datasets[0], kept] });
+    render(<PagesPage />);
+    const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    vi.mocked(pagesApi.get).mockClear();
+    vi.mocked(pagesApi.data).mockResolvedValue({
+      page: { ...page, data_revision: 4 },
+      full: null,
+      datasets: [{ ...detail.datasets[0], current: { total: 99 } }],
+    });
+
+    const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+    await act(async () => {
+      handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: 4 }));
+    });
+
+    // The frame gets the whole snapshot, as after a full read.
+    await waitFor(() => expect(post).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'kronn:page-data',
+      data: expect.objectContaining({
+        page: expect.objectContaining({ data_revision: 4 }),
+        datasets: {
+          summary: { kind: 'snapshot', current: { total: 99 }, points: [] },
+          kept: { kind: 'snapshot', current: { untouched: true }, points: [] },
+        },
+      }),
+    }), '*'));
+    expect(pagesApi.data).toHaveBeenCalledWith('page-1', 3, 'rev-2');
+    expect(pagesApi.get).not.toHaveBeenCalled();
+  });
+
+  it('words the sync panel for what the journal holds: publications that changed data', async () => {
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] },
+      // Publishes identical data: it runs, and leaves no journal entry.
+      { id: 'wf-quiet', name: 'Quiet cron', enabled: true, step_names: ['publish'] },
+    ]);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
+    const workflows = within(screen.getByTestId('live-page-sync-workflows'));
+    expect(workflows.getByText(/^pages\.workflowLastChange/)).toBeInTheDocument();
+    expect(workflows.getByText('pages.workflowNoRecentChange')).toBeInTheDocument();
+    expect(within(screen.getByTestId('live-page-sync-history')).getByText('pages.recentChangesHint')).toBeInTheDocument();
+    // The words themselves: a change, never "no publication" under a fresh "Synced".
+    for (const [locale, change] of [[en, /change/i], [fr, /change|modifi/i], [es, /cambi/i], [zh, /更改/]] as const) {
+      for (const key of ['pages.workflowLastChange', 'pages.workflowNoRecentChange', 'pages.recentChangesHint']) {
+        expect(locale[key]).toMatch(change);
+      }
+    }
+  });
+
+  describe('answers out of order (KT-1819)', () => {
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      let reject!: (cause: Error) => void;
+      const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+      return { promise, resolve, reject };
+    }
+    const other: LivePage = { ...page, id: 'page-2', title: 'Second', slug: 'second' };
+    const otherDetail: LivePageDetail = {
+      ...detail, ...other,
+      revision: { ...detail.revision, id: 'rev-b', page_id: other.id, html: '<h1>Second</h1>' },
+    };
+    const revisionsPosted = (post: { mock: { calls: unknown[][] } }) => post.mock.calls
+      .map(([message]) => message as { type?: string; data?: { page: { data_revision: number } } })
+      .filter(message => message.type === 'kronn:page-data')
+      .map(message => message.data!.page.data_revision);
+    // The frame's own load event may post the revision first shown after the
+    // spy is in place: what counts is everything from the first newer one on.
+    const postedSinceNewer = (post: { mock: { calls: unknown[][] } }) => {
+      const revisions = revisionsPosted(post);
+      const first = revisions.findIndex(revision => revision !== page.data_revision);
+      return first < 0 ? [] : revisions.slice(first);
+    };
+    const publish = async (revision: number, pageId = page.id) => {
+      const { useWebSocket } = await import('../../hooks/useWebSocket');
+      const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+      await act(async () => {
+        handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: pageId, data_revision: revision }));
+      });
+    };
+
+    it('keeps what a publish brought when a full read started before it answers late', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const full = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.get).mockClear();
+      vi.mocked(pagesApi.get).mockReturnValue(full.promise);
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      vi.mocked(pagesApi.data).mockResolvedValue({ page: { ...page, data_revision: 4 }, full: null, datasets: [] });
+      await publish(4);
+      await waitFor(() => expect(postedSinceNewer(post)).toEqual([4]));
+
+      // The full read was asked before the publication: it still holds revision 3.
+      await act(async () => { full.resolve(detail); });
+
+      expect(postedSinceNewer(post)).toEqual([4]);
+    });
+
+    it('shows a newly selected Page when a publish for it arrives during its first load', async () => {
+      const first = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      let reads = 0;
+      vi.mocked(pagesApi.get).mockImplementation(id => {
+        if (id !== other.id) return Promise.resolve(detail);
+        reads += 1;
+        return reads === 1 ? first.promise : Promise.resolve(otherDetail);
+      });
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(reads).toBe(1));
+      // The publish is read and answered while the first load is still out.
+      await publish(4, other.id);
+
+      await act(async () => { first.resolve(otherDetail); });
+
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+      // What the editor saves is the Page shown, with its own HTML.
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Second</h1>');
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1));
+      expect(pagesApi.updateHtml).toHaveBeenCalledWith(other.id, { html: '<h1>Second</h1>', created_by_agent: null, base_revision_id: 'rev-b' });
+    });
+
+    it('never saves the HTML of one Page into another', async () => {
+      const first = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      let reads = 0;
+      vi.mocked(pagesApi.get).mockImplementation(id => {
+        if (id !== other.id) return Promise.resolve(detail);
+        reads += 1;
+        return reads === 1 ? first.promise : Promise.resolve(otherDetail);
+      });
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(reads).toBe(1));
+      await publish(4, other.id);
+      await act(async () => { first.resolve(otherDetail); });
+
+      // Whatever Page the editor is on, the HTML saved is that Page's own.
+      fireEvent.click(await screen.findByText('pages.editHtml'));
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1));
+
+      const [savedInto, saved] = vi.mocked(pagesApi.updateHtml).mock.calls[0];
+      const own = savedInto === other.id ? otherDetail.revision.html : detail.revision.html;
+      expect(saved.html).toBe(own);
+    });
+
+    it('opens the Page when a publish for it arrives during the very first load', async () => {
+      const first = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.get).mockReturnValueOnce(first.promise);
+      render(<PagesPage />);
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      await publish(4);
+
+      await act(async () => { first.resolve(detail); });
+
+      expect(await screen.findByTestId('live-page-frame')).toBeInTheDocument();
+    });
+
+    it('shows what an older read brought when the read started after it fails', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const slow = deferred<{ page: LivePage; full: null; datasets: [] }>();
+      vi.mocked(pagesApi.data).mockReturnValue(slow.promise);
+      await publish(4);
+      // A full reload starts after it and fails on one of its panels.
+      vi.mocked(pagesApi.workflows).mockRejectedValueOnce(new Error('panel away'));
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(screen.getByText('panel away')).toBeInTheDocument());
+
+      await act(async () => { slow.resolve({ page: { ...page, data_revision: 4 }, full: null, datasets: [] }); });
+
+      expect(postedSinceNewer(post)).toEqual([4]);
+    });
+
+    it('keeps updating during a burst of publishes that each start before the last one answered', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const answers = [4, 5, 6].map(() => deferred<{ page: LivePage; full: null; datasets: [] }>());
+      let burst = 0;
+      vi.mocked(pagesApi.data).mockImplementation(() => answers[burst].promise);
+      await publish(4);
+      burst = 1;
+      await publish(5);
+      burst = 2;
+      await publish(6);
+
+      await act(async () => { answers[0].resolve({ page: { ...page, data_revision: 4 }, full: null, datasets: [] }); });
+      expect(revisionsPosted(post).at(-1)).toBe(4);
+      await act(async () => { answers[1].resolve({ page: { ...page, data_revision: 5 }, full: null, datasets: [] }); });
+      expect(revisionsPosted(post).at(-1)).toBe(5);
+    });
+
+    it('shows nothing new of the Page it left while the next one is still loading', async () => {
+      const late = deferred<LivePageDetail>();
+      const next = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      vi.mocked(pagesApi.get).mockClear();
+      vi.mocked(pagesApi.get).mockImplementation(id => (id === other.id ? next.promise : late.promise));
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(page.id));
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(other.id));
+
+      await act(async () => { late.resolve({ ...detail, title: 'Adobe late' }); });
+
+      expect(screen.queryByRole('heading', { name: 'Adobe late' })).toBeNull();
+      await act(async () => { next.resolve(otherDetail); });
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+    });
+
+    it('does not bring a Page back when its save ends after the user opened another', async () => {
+      const saved = deferred<LivePageRevision>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      vi.mocked(pagesApi.get).mockImplementation(async id => (id === other.id ? otherDetail : detail));
+      vi.mocked(pagesApi.updateHtml).mockReturnValue(saved.promise);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1));
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+      vi.mocked(pagesApi.get).mockClear();
+
+      await act(async () => { saved.resolve({ ...detail.revision, id: 'rev-3', revision: 3 }); });
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+      expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument();
+      expect(pagesApi.get).not.toHaveBeenCalledWith(page.id);
+    });
+
+    it('keeps the Page the user opened while the timer was reading the library', async () => {
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      vi.mocked(pagesApi.get).mockImplementation(async id => (id === other.id ? otherDetail : detail));
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        render(<PagesPage />);
+        await screen.findByTestId('live-page-frame');
+        const library = deferred<LivePage[]>();
+        vi.mocked(pagesApi.list).mockClear();
+        vi.mocked(pagesApi.list).mockReturnValue(library.promise);
+        await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+        expect(pagesApi.list).toHaveBeenCalledTimes(1);
+        fireEvent.click(getCanonicalPageRow('Second'));
+        await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+        vi.mocked(pagesApi.get).mockClear();
+
+        await act(async () => { library.resolve([page, other]); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+
+        expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument();
+        expect(pagesApi.get).not.toHaveBeenCalledWith(page.id);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    const agentHtml = '<h1>agent</h1>';
+    const agentDetail: LivePageDetail = {
+      ...detail, current_revision_id: 'rev-3', data_revision: 4,
+      revision: { ...detail.revision, id: 'rev-3', revision: 3, html: agentHtml },
+    };
+    const agentSavesHtml = async () => {
+      vi.mocked(pagesApi.data).mockResolvedValue({
+        page: { ...page, current_revision_id: 'rev-3', data_revision: 4 }, full: agentDetail, datasets: [],
+      });
+      vi.mocked(pagesApi.get).mockResolvedValue(agentDetail);
+      await publish(4);
+    };
+
+    it('opens the editor on the HTML the Page has now, not the one it was loaded with', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await agentSavesHtml();
+
+      fireEvent.click(screen.getByText('pages.editHtml'));
+
+      await waitFor(() => expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml));
+    });
+
+    it('keeps what the user typed when the Page is reloaded under the open editor', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      fireEvent.change(screen.getByLabelText('pages.htmlTitle'), { target: { value: '<h1>typed</h1>' } });
+      vi.mocked(pagesApi.get).mockClear();
+
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
+    });
+
+    // Another editor saved r3 while this one was open on r2: nothing told this view.
+    const anotherEditorSaved = (current: LivePageDetail = agentDetail) => {
+      refusedFor(current.revision.id);
+      vi.mocked(pagesApi.get).mockResolvedValue(current);
+    };
+    // The 409 of a save: the envelope plus the revision the Page has now.
+    const refusedFor = (revisionId: string) => {
+      vi.mocked(pagesApi.updateHtml).mockRejectedValueOnce(new ApiRequestError(
+        'The Page HTML changed', 'conflict', { success: false, error_code: 'conflict', current_revision_id: revisionId },
+      ));
+    };
+    // The HTML saved meanwhile has reached the view: the notice can be acted on.
+    const conflictShown = async () => {
+      await screen.findByText('pages.htmlChangedElsewhere');
+      await waitFor(() => expect(screen.getByText('pages.htmlOverwrite')).toBeEnabled());
+    };
+    const typeHtml = async (html = '<h1>typed</h1>') => {
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      fireEvent.change(screen.getByLabelText('pages.htmlTitle'), { target: { value: html } });
+    };
+    const savedWith = () => vi.mocked(pagesApi.updateHtml).mock.calls.map(([, request]) => request);
+
+    it('asks before saving over HTML the server says changed since the editor opened', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      anotherEditorSaved();
+
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+
+      expect(await screen.findByText('pages.htmlChangedElsewhere')).toBeInTheDocument();
+      expect(savedWith()).toEqual([{ html: '<h1>typed</h1>', created_by_agent: null, base_revision_id: 'rev-2' }]);
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
+
+      // Saving over it names the revision the user was just told about.
+      await conflictShown();
+      vi.mocked(pagesApi.updateHtml).mockResolvedValue({ ...agentDetail.revision, id: 'rev-4', revision: 4 });
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1]).toEqual({ html: '<h1>typed</h1>', created_by_agent: null, base_revision_id: 'rev-3' });
+    });
+
+    it('asks again when yet another revision lands before the user saves over the first', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      anotherEditorSaved();
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await conflictShown();
+      const fourth: LivePageDetail = {
+        ...agentDetail, current_revision_id: 'rev-4',
+        revision: { ...agentDetail.revision, id: 'rev-4', revision: 4, html: '<h1>fourth</h1>' },
+      };
+      anotherEditorSaved(fourth);
+
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1].base_revision_id).toBe('rev-3');
+      // Refused again: the notice is back, the fourth revision was not overwritten.
+      expect(await screen.findByText('pages.htmlChangedElsewhere')).toBeInTheDocument();
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
+    });
+
+    it('lets the user take the HTML that changed instead of saving over it', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      anotherEditorSaved();
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await conflictShown();
+
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
+
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml);
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+      // The draft now starts from that revision: saving it is no conflict.
+      vi.mocked(pagesApi.updateHtml).mockResolvedValue({ ...agentDetail.revision, id: 'rev-4', revision: 4 });
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1]).toEqual({ html: agentHtml, created_by_agent: null, base_revision_id: 'rev-3' });
+    });
+
+    it('does not conflict with its own save when the reload after it fails', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      vi.mocked(pagesApi.workflows).mockRejectedValueOnce(new Error('panel away'));
+
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('panel away');
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith().map(request => request.base_revision_id)).toEqual(['rev-2', 'rev-3']);
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+    });
+
+    it('saves again from the revision it just created', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      vi.mocked(pagesApi.get).mockResolvedValue({
+        ...agentDetail, revision: { ...agentDetail.revision, html: '<h1>typed</h1>' },
+      });
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await waitFor(() => expect(screen.queryByLabelText('pages.htmlTitle')).toBeNull());
+
+      vi.mocked(pagesApi.updateHtml).mockResolvedValue({ ...agentDetail.revision, id: 'rev-4', revision: 4 });
+      await typeHtml('<h1>again</h1>');
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1]).toEqual({ html: '<h1>again</h1>', created_by_agent: null, base_revision_id: 'rev-3' });
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+    });
+
+    it('forgets the conflict when the editor is closed', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      anotherEditorSaved();
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('pages.htmlChangedElsewhere');
+
+      fireEvent.click(screen.getByText('pages.closeEditor'));
+      fireEvent.click(screen.getByText('pages.editHtml'));
+
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+    });
+
+    it('offers to read the new HTML again, and nothing else, when reading it failed', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      refusedFor('rev-3');
+      vi.mocked(pagesApi.get).mockRejectedValueOnce(new Error('offline'));
+
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+
+      expect(await screen.findByText('pages.htmlConflictUnread')).toBeInTheDocument();
+      expect(screen.getByText('pages.htmlOverwrite')).toBeDisabled();
+      expect(screen.getByText('pages.htmlReloadDraft')).toBeDisabled();
+      // Neither a save from the stale base nor the old HTML in place of the draft.
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
+      expect(savedWith()).toHaveLength(1);
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
+      expect(screen.getByText('pages.htmlChangedElsewhere')).toBeInTheDocument();
+
+      vi.mocked(pagesApi.get).mockResolvedValue(agentDetail);
+      fireEvent.click(screen.getByText('pages.htmlConflictRetry'));
+
+      await conflictShown();
+      expect(screen.queryByText('pages.htmlConflictUnread')).toBeNull();
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml);
+    });
+
+    it('shows the new HTML after a refusal even when a panel of the Page fails to load', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      anotherEditorSaved();
+      vi.mocked(pagesApi.workflows).mockRejectedValue(new Error('panel away'));
+
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await conflictShown();
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
+
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml);
+    });
+
+    it('ignores both choices until the new HTML has arrived', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      refusedFor('rev-3');
+      let arrive: (detail: LivePageDetail) => void = () => {};
+      vi.mocked(pagesApi.get).mockReturnValueOnce(new Promise(resolve => { arrive = resolve; }));
+
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('pages.htmlChangedElsewhere');
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
+
+      expect(savedWith()).toHaveLength(1);
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
+      expect(screen.getByText('pages.htmlChangedElsewhere')).toBeInTheDocument();
+
+      await act(async () => { arrive(agentDetail); });
+      await conflictShown();
+    });
+
+    it('leaves nothing of a conflict on the Page the user opens while its HTML is still being read', async () => {
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      refusedFor('rev-3');
+      let arrive: (detail: LivePageDetail) => void = () => {};
+      vi.mocked(pagesApi.get).mockReturnValueOnce(new Promise(resolve => { arrive = resolve; }));
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('pages.htmlChangedElsewhere');
+      vi.mocked(pagesApi.get).mockImplementation(async id => (id === other.id ? otherDetail : agentDetail));
+
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+      // The read of the first Page lands late: the second one stays as it is.
+      await act(async () => { arrive(agentDetail); });
+      expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument();
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Second</h1>');
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+
+      // Back on the first Page, the editor opens on its HTML with no notice left.
+      fireEvent.click(getCanonicalPageRow(page.title));
+      await waitFor(() => expect(screen.getByRole('heading', { name: page.title })).toBeInTheDocument());
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml);
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+      expect(screen.getByText('pages.saveRevision')).toBeEnabled();
+    });
+
+    it('saves over the revision the server named, not a later one the view has read', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      refusedFor('rev-3');
+      vi.mocked(pagesApi.get).mockResolvedValue({
+        ...agentDetail, current_revision_id: 'rev-4',
+        revision: { ...agentDetail.revision, id: 'rev-4', revision: 4, html: '<h1>fourth</h1>' },
+      });
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await conflictShown();
+      refusedFor('rev-4');
+
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1].base_revision_id).toBe('rev-3');
+      await conflictShown();
+    });
+
+    it('leaves a whole-Page answer with older data to the next incremental read', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      vi.mocked(pagesApi.data).mockResolvedValue({ page: { ...page, data_revision: 4 }, full: null, datasets: [] });
+      await publish(4);
+      await waitFor(() => expect(revisionsPosted(post).at(-1)).toBe(4));
+      // A whole-Page read answers with revision 3: served early, or a restored database.
+      vi.mocked(pagesApi.get).mockClear();
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      expect(revisionsPosted(post).at(-1)).toBe(4);
+
+      // The incremental read says the server really is at 3: its full answer is shown.
+      vi.mocked(pagesApi.data).mockResolvedValue({ page, full: detail, datasets: [] });
+      await publish(3);
+
+      await waitFor(() => expect(revisionsPosted(post).at(-1)).toBe(3));
+      expect(vi.mocked(pagesApi.data).mock.calls.at(-1)?.[1]).toBe(4);
+    });
+
+    it('never saves a title typed on one Page into another', async () => {
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      vi.mocked(pagesApi.get).mockImplementation(async id => (id === other.id ? otherDetail : detail));
+      const view = render(<PagesPage selectedPageId={page.id} />);
+      await screen.findByTestId('live-page-frame');
+      fireEvent.click(screen.getByLabelText('pages.renameTitle:Adobe Signals'));
+      fireEvent.change(screen.getByLabelText('pages.titleInput'), { target: { value: 'Renamed' } });
+      fireEvent.click(screen.getByText('pages.editHtml'));
+
+      // The address moves to another Page (Back, a link).
+      view.rerender(<PagesPage selectedPageId={other.id} />);
+
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+      expect(screen.queryByLabelText('pages.titleInput')).toBeNull();
+      expect(screen.queryByLabelText('pages.htmlTitle')).toBeNull();
+      expect(pagesApi.update).not.toHaveBeenCalled();
+    });
+
+    it('leaves the title being typed on a Page alone when the rename of another one ends', async () => {
+      const renamed = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      vi.mocked(pagesApi.get).mockImplementation(async id => (id === other.id ? otherDetail : detail));
+      vi.mocked(pagesApi.update).mockReturnValue(renamed.promise);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      fireEvent.click(screen.getByLabelText('pages.renameTitle:Adobe Signals'));
+      fireEvent.change(screen.getByLabelText('pages.titleInput'), { target: { value: 'Adobe renamed' } });
+      fireEvent.click(screen.getByLabelText('pages.saveTitle'));
+      await waitFor(() => expect(pagesApi.update).toHaveBeenCalledTimes(1));
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+      fireEvent.click(screen.getByLabelText('pages.renameTitle:Second'));
+      fireEvent.change(screen.getByLabelText('pages.titleInput'), { target: { value: 'Second typed' } });
+
+      await act(async () => { renamed.resolve({ ...detail, title: 'Adobe renamed' }); });
+
+      expect(screen.getByLabelText('pages.titleInput')).toHaveValue('Second typed');
+    });
+
+    it('leaves the editor open when the load of a Page the user came back from answers late', async () => {
+      const slow = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      vi.mocked(pagesApi.get).mockImplementation(id => (id === other.id ? slow.promise : Promise.resolve(detail)));
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(other.id));
+      vi.mocked(pagesApi.get).mockClear();
+      fireEvent.click(getCanonicalPageRow('Adobe Signals'));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(page.id));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toBeInTheDocument();
+
+      await act(async () => { slow.resolve(otherDetail); });
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+      expect(screen.getByLabelText('pages.htmlTitle')).toBeInTheDocument();
+    });
+
+    it('does not go back to older data when two reads are answered out of order', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const first = deferred<{ page: LivePage; full: null; datasets: [] }>();
+      const second = deferred<{ page: LivePage; full: null; datasets: [] }>();
+      let asked = false;
+      vi.mocked(pagesApi.data).mockImplementation(() => (asked ? second.promise : first.promise));
+      await publish(4);
+      asked = true;
+      await publish(4);
+
+      // The read started first was served after the publication, the second before it.
+      await act(async () => { first.resolve({ page: { ...page, data_revision: 4 }, full: null, datasets: [] }); });
+      await act(async () => { second.resolve({ page, full: null, datasets: [] }); });
+
+      expect(revisionsPosted(post).at(-1)).toBe(4);
+    });
+
+    it('compares an answer with what is shown, even one shown in the same turn', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const first = deferred<{ page: LivePage; full: null; datasets: [] }>();
+      const second = deferred<{ page: LivePage; full: null; datasets: [] }>();
+      let asked = false;
+      vi.mocked(pagesApi.data).mockImplementation(() => (asked ? second.promise : first.promise));
+      await publish(4);
+      asked = true;
+      await publish(4);
+
+      // Both answers land before React renders the first.
+      await act(async () => {
+        first.resolve({ page: { ...page, data_revision: 4 }, full: null, datasets: [] });
+        second.resolve({ page, full: null, datasets: [] });
+      });
+
+      expect(revisionsPosted(post).at(-1)).toBe(4);
+    });
+
+    it('still takes the full state of a Page that went back to an older revision', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const restored: LivePageDetail = { ...detail, data_revision: 1 };
+      vi.mocked(pagesApi.data).mockResolvedValue({ page: { ...page, data_revision: 1 }, full: restored, datasets: [] });
+
+      await publish(1);
+
+      await waitFor(() => expect(revisionsPosted(post).at(-1)).toBe(1));
+    });
+
+    it('stays empty when the read of a Page answers after the library lost every Page', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const late = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.get).mockReturnValue(late.promise);
+      vi.mocked(pagesApi.get).mockClear();
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      vi.mocked(pagesApi.list).mockResolvedValue([]);
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(screen.queryByTestId('live-page-frame')).toBeNull());
+
+      await act(async () => { late.resolve(detail); });
+
+      expect(screen.queryByTestId('live-page-frame')).toBeNull();
+    });
+
+    it('ignores the late answer of the Page it left: neither its detail nor its panels come back', async () => {
+      const late = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      // A full read of the first Page is in flight when the second is opened.
+      vi.mocked(pagesApi.get).mockClear();
+      vi.mocked(pagesApi.get).mockImplementation(id => (id === other.id ? Promise.resolve(otherDetail) : late.promise));
+      vi.mocked(pagesApi.workflows).mockImplementation(async id => (
+        id === other.id ? [] : [{ id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] }]
+      ));
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(page.id));
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+
+      await act(async () => { late.resolve(detail); });
+
+      expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Adobe Signals' })).toBeNull();
+      fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
+      expect(within(screen.getByTestId('live-page-sync-workflows')).queryByText('Adobe cron')).toBeNull();
+    });
   });
 
   it('fetches a newly selected Page detail exactly once, not twice', async () => {
@@ -683,6 +1448,7 @@ describe('PagesPage', () => {
     await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledWith(page.id, {
       html: '<h1>Nouvelle révision</h1>',
       created_by_agent: null,
+      base_revision_id: 'rev-2',
     }));
     expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1);
   });
@@ -1558,8 +2324,19 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
       expect(group.lastElementChild).toBe(screen.getByTestId('live-page-header-details-toggle'));
     });
 
+    it('dates the sync from the last refresh, even one that changed nothing and left no journal entry', async () => {
+      const refreshedAt = new Date(Date.now() - 60_000).toISOString();
+      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, last_published_at: refreshedAt });
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const fresh = await screen.findByText(/^pages\.refreshSynced · /);
+      expect(fresh).toHaveTextContent(`pages.refreshSynced · ${formatRelativeTime(refreshedAt, 'fr')}`);
+      expect(screen.getByTestId('live-page-refresh-menu').title).toContain(formatRelativeTime(refreshedAt, 'fr'));
+    });
+
     it('says the page is waiting for its first run when nothing was published yet', async () => {
       vi.mocked(pagesApi.publications).mockResolvedValue([]);
+      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, last_published_at: null });
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');
       const fresh = await screen.findByTestId('live-page-sync-freshness');

@@ -349,7 +349,7 @@ export function useLivePageActionSlot(
 /**
  * Skip automatic publication when runtimeData is unchanged to preserve Page
  * state. publishPageData stays unconditional for onLoad to seed fresh frames.
- * The revision changes on every publication, including dataset replacements.
+ * The revision changes whenever a publication changes a dataset.
  * `extraKey` covers what the host adds to runtimeData besides the Page itself
  * (the standalone tab's view parameters).
  */

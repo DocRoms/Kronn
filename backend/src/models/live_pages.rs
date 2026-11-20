@@ -119,19 +119,43 @@ pub struct LivePageDetail {
     pub slug_aliases: Vec<String>,
 }
 
-/// One step that loads a Page resource, with the version each lane loads.
+/// `GET /api/pages/{id}/data`: what an open view needs to catch up with the
+/// Page. `full` carries the whole Page whenever the publication journal cannot
+/// account for every revision the reader missed; otherwise `datasets` holds
+/// only the datasets that changed since the reader's revision.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageDataDelta {
+    pub page: LivePage,
+    pub full: Option<LivePageDetail>,
+    pub datasets: Vec<LivePageDatasetView>,
+}
+
+/// One step that loads a Page resource, with the version each of its shadows loads.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct LivePageResourceUse {
     pub workflow_id: String,
     pub workflow_name: String,
     pub step_name: String,
-    /// What the normal run loads: a skill id (`custom-x@3` when pinned) or,
-    /// for a Quick Prompt, `None` (its current version).
+    /// What the normal execution loads: a skill id (`custom-x@3` when pinned)
+    /// or, for a Quick Prompt, `None` (its current version).
     pub normal: Option<String>,
-    /// What the workflow's shadow run loads instead, when its shadow is on
-    /// and names this resource.
-    pub shadow: Option<String>,
+    /// What each enabled shadow of the step loads instead, when it names this
+    /// resource (KT-1459).
+    #[serde(default)]
+    pub shadows: Vec<LivePageResourceShadow>,
+}
+
+/// The version one shadow of a step tests for a resource a Page's workflow uses.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageResourceShadow {
+    pub shadow_id: String,
+    pub label: String,
+    /// A skill id (`custom-x@3`), `v3` for a Quick Prompt version, or an empty
+    /// string when the shadow drops the skill.
+    pub version: String,
 }
 
 /// A Quick Prompt or a skill one of the Page's workflows uses (KT-1450).
@@ -157,7 +181,8 @@ pub struct LivePageWorkflowLink {
     pub step_names: Vec<String>,
 }
 
-/// One successful data refresh recorded in the Page publication ledger.
+/// One data refresh that changed a dataset, recorded in the Page publication
+/// ledger; a refresh that changed nothing is not recorded.
 /// Workflow fields remain optional because Pages may also be published
 /// directly and workflow deletion preserves the historical publication.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -262,6 +287,11 @@ pub struct LinkLivePageDiscussionRequest {
 pub struct UpdateLivePageHtmlRequest {
     pub html: String,
     pub created_by_agent: Option<String>,
+    /// The HTML revision this edit started from. When given and no longer
+    /// the Page's current one, the save is refused instead of overwriting.
+    #[serde(default)]
+    #[ts(optional)]
+    pub base_revision_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

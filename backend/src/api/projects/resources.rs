@@ -11,33 +11,22 @@ use uuid::Uuid;
 use super::resource_links::{
     definition_references, link_resources, ResourceKey, ResourceReferences,
 };
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+use crate::core::repository_skills::MAX_CONTENT_BYTES;
+pub(super) use crate::core::repository_skills::{read_repository_file, side_text};
 use crate::models::{
     ApiErrorCode, ApiResponse, ApproveProjectRepositoryResourceRequest, ArtifactBundlePage,
     CreateLivePageDataset, ImportProjectRepositoryResourceRequest, LivePage, LivePageRevision,
-    ProjectRepositoryResource, ProjectRepositoryResourceKind, ProjectRepositoryResourceLevel,
-    ProjectRepositoryResourceMutation, ProjectRepositoryResourceStatus, ProjectRepositoryResources,
-    ProjectRepositorySkill, ProjectRepositorySkillProvenance,
-    PublishProjectRepositoryResourceRequest, QuickApi, QuickExec, QuickPrompt,
-    RepositoryNativeSkillRequest, RepositoryResourceComparison, RepositoryResourceFileContent,
-    RepositoryResourceFileDiff, ResourceAdrLevel, Skill, UpdateLivePageRequest, Workflow,
+    ProjectRepositoryResource, ProjectRepositoryResourceKind, ProjectRepositoryResourceMutation,
+    ProjectRepositoryResourceStatus, ProjectRepositoryResources, ProjectRepositorySkill,
+    ProjectRepositorySkillProvenance, PublishProjectRepositoryResourceRequest, QuickApi, QuickExec,
+    QuickPrompt, RepositoryNativeSkillRequest, RepositoryResourceComparison,
+    RepositoryResourceFileContent, RepositoryResourceFileDiff, ResourceAdrLevel, Skill,
+    UpdateLivePageRequest, Workflow,
 };
 use crate::AppState;
 
-/// Where skills are looked for. `kronn/skills` is where Kronn used to write
-/// them: it is still read (and offered for migration), never written.
-pub(crate) const PROJECT_SKILL_ROOTS: &[&str] = &[
-    "kronn/skills",
-    ".claude/skills",
-    ".agents/skills",
-    ".codex/skills",
-    ".github/skills",
-    ".opencode/skills",
-    ".opencode/skill",
-    ".cursor/skills",
-    ".vibe/skills",
-    ".kiro/skills",
-    ".gemini/skills",
-];
+pub use crate::core::repository_skills::PROJECT_SKILL_ROOTS;
 
 /// Every directory whose files the listing dates: `kronn/` and the native
 /// skill folders.
@@ -295,44 +284,6 @@ fn lock_entry(
     )
 }
 
-impl ProjectRepositoryResourceKind {
-    pub(super) fn identity_kind(self) -> &'static str {
-        match self {
-            Self::Skill => "skill",
-            Self::Workflow => "workflow",
-            Self::QuickPrompt => "quick_prompt",
-            Self::QuickApi => "quick_api",
-            Self::QuickExec => "quick_exec",
-            Self::Artifact => "artifact",
-        }
-    }
-
-    fn level(self) -> ProjectRepositoryResourceLevel {
-        match self {
-            Self::Skill | Self::QuickPrompt | Self::QuickExec => {
-                ProjectRepositoryResourceLevel::UsableWithoutKronn
-            }
-            Self::Workflow | Self::QuickApi | Self::Artifact => {
-                ProjectRepositoryResourceLevel::KronnRequired
-            }
-        }
-    }
-
-    fn paths(self, slug: &str) -> Vec<String> {
-        match self {
-            Self::Skill => vec![crate::core::repository_resources::skill_path(slug)],
-            Self::Workflow => vec![format!("kronn/workflows/{slug}.yaml")],
-            Self::QuickPrompt => vec![format!("kronn/prompts/{slug}.md")],
-            Self::QuickApi => vec![format!("kronn/quick-apis/{slug}.yaml")],
-            Self::QuickExec => vec![format!("kronn/quick-execs/{slug}.yaml")],
-            Self::Artifact => vec![
-                format!("kronn/artifacts/{slug}/artifact.yaml"),
-                format!("kronn/artifacts/{slug}/index.html"),
-            ],
-        }
-    }
-}
-
 pub(super) fn parse_identity_time(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
@@ -403,32 +354,6 @@ fn kind_needs_approval(kind: ProjectRepositoryResourceKind) -> bool {
             | ProjectRepositoryResourceKind::QuickApi
             | ProjectRepositoryResourceKind::QuickExec
     )
-}
-
-pub(super) fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
-    let path = root.join(relative);
-    crate::core::fs_guard::assert_contained_no_symlink(root, &path).ok()?;
-    std::fs::read(path).ok()
-}
-
-/// What the sheet carries of one side of one file: a longer text is cut here
-/// and flagged, so a large artifact cannot turn the answer into megabytes. The
-/// diff is built from the whole file, whatever is cut.
-const MAX_CONTENT_BYTES: usize = 512 * 1024;
-
-/// The text of one side of one file as the answer carries it: masked first,
-/// whichever side it comes from, then cut — so a secret straddling the cut is
-/// never half shown.
-pub(super) fn side_text(bytes: &[u8]) -> (String, bool) {
-    let text = crate::core::repository_resources::masked_text(bytes);
-    if text.len() <= MAX_CONTENT_BYTES {
-        return (text.as_str().to_string(), false);
-    }
-    let mut end = MAX_CONTENT_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_string(), true)
 }
 
 /// Every file a resource has on either side, with its text on each, both masked
@@ -1859,10 +1784,7 @@ fn imported_artifact(
             &exported.html,
             exported.created_by_agent.as_deref(),
         )?;
-        conn.execute(
-            "DELETE FROM live_page_datasets WHERE page_id = ?1",
-            [&page_id],
-        )?;
+        crate::db::live_pages::clear_live_page_datasets(conn, &page_id)?;
         for dataset in &datasets {
             crate::db::live_pages::add_live_page_dataset(conn, &page_id, dataset)?;
         }
@@ -3548,6 +3470,90 @@ mod tests {
                 .is_err_and(|error| error.contains("safety bound")),
             "{refused:?}"
         );
+    }
+
+    /// KT-1819 — a re-import replaces every dataset of a Page: a reader that
+    /// only asks what changed since its revision gets the whole Page, with or
+    /// without the HTML revision it shows.
+    #[tokio::test]
+    async fn a_kronn_reimport_sends_open_readers_the_full_page() {
+        use axum::extract::{Path as UrlPath, Query, State};
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let page_doc =
+            |datasets: serde_json::Value| crate::core::repository_resources::RepositoryDocument {
+                schema_version: 1,
+                kind: ProjectRepositoryResourceKind::Artifact,
+                slug: "board".into(),
+                updated_at: Utc::now(),
+                requires: vec![],
+                resource: serde_json::json!({
+                    "id": "foreign-page", "title": "Board", "slug": "board",
+                    "html": "<p>board</p>", "created_by_agent": null,
+                    "datasets": datasets
+                }),
+                redacted_fields: vec![],
+            };
+        let summary = |count: u32| {
+            serde_json::json!([{
+                "name": "summary", "kind": "snapshot", "has_current": true,
+                "current": {"count": count}, "schema": null, "max_points": 100,
+                "max_age_days": null, "updated_at": Utc::now(), "points": []
+            }])
+        };
+        let import = |document: crate::core::repository_resources::RepositoryDocument| {
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .with_conn(move |conn| {
+                        let key =
+                            crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                        import_document(conn, "project-1", &key, &document)
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        let read = |page_id: String, since: u64| {
+            let state = state.clone();
+            async move {
+                let axum::Json(response) = crate::api::live_pages::data(
+                    State(state),
+                    UrlPath(page_id),
+                    Query(crate::api::live_pages::LivePageDataQuery {
+                        since: Some(since.to_string()),
+                        revision: None,
+                    }),
+                )
+                .await;
+                response.data.unwrap()
+            }
+        };
+        let page_id = import(page_doc(summary(1))).await;
+        let open = read(page_id.clone(), 0).await.page.data_revision;
+        assert!(
+            read(page_id.clone(), open).await.full.is_none(),
+            "nothing moved yet"
+        );
+
+        // Same dataset name, another value.
+        assert_eq!(import(page_doc(summary(2))).await, page_id);
+        let changed = read(page_id.clone(), open).await;
+        let full = changed.full.expect("the datasets were replaced");
+        assert_eq!(
+            full.datasets[0].dataset.current,
+            Some(serde_json::json!({"count": 2}))
+        );
+
+        // No dataset left: nothing is declared again, the Page moves anyway.
+        let open = changed.page.data_revision;
+        assert_eq!(import(page_doc(serde_json::json!([]))).await, page_id);
+        let emptied = read(page_id.clone(), open).await;
+        assert!(emptied.page.data_revision > open);
+        let full = emptied.full.expect("the datasets were removed");
+        assert!(full.datasets.is_empty());
     }
 
     /// KT-1017 — a `kronn/` import refuses an unsafe inline line in a
