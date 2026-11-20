@@ -93,7 +93,7 @@ async fn dialable_contact(state: &AppState, id: &str) -> Option<crate::models::C
 
 /// `ws(s)://host:port/api/ws` for a stored contact URL, or None when the URL
 /// is not a bare host and port.
-pub(crate) fn peer_ws_url(kronn_url: &str) -> Option<String> {
+pub fn peer_ws_url(kronn_url: &str) -> Option<String> {
     let base = crate::db::contacts::contact_base_url(kronn_url)?;
     Some(format!(
         "{}/api/ws",
@@ -172,6 +172,7 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
                 let _ = state.ws_broadcast.send(WsMessage::Presence {
                     from_pseudo: contact.pseudo.clone(),
                     from_invite_code: contact.invite_code.clone(),
+                    from_secret: String::new(),
                     online: true,
                 });
 
@@ -183,6 +184,7 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
                 let _ = state.ws_broadcast.send(WsMessage::Presence {
                     from_pseudo: contact.pseudo.clone(),
                     from_invite_code: contact.invite_code.clone(),
+                    from_secret: String::new(),
                     online: false,
                 });
 
@@ -221,7 +223,7 @@ const HEALTHY_SESSION: Duration = Duration::from_secs(20);
 /// the socket dies with no Close frame, neither side errors → zombie that
 /// never reconnects). Both directions ping independently, so each ~6-byte
 /// frame also refreshes the NAT entry for its direction. Cost is negligible.
-pub(crate) const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
+pub const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// If no frame (Text, Ping, or Pong) arrives from the peer within this window,
 /// the connection is treated as dead and torn down so the manager reconnects.
@@ -234,7 +236,7 @@ pub(crate) const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 /// would otherwise be dropped every cycle (reconnect loop → presence flicker
 /// and repeated notifications). 45 s tolerates a 20 s-era peer with margin
 /// while still surfacing a dead link reasonably fast.
-pub(crate) const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+pub const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Send our Presence and the F4 catch-up requests. False when the peer lost
 /// its authorization or the socket failed: the connection then ends.
@@ -263,9 +265,26 @@ where
             return false;
         }
     };
+    // The secret this contact was paired with proves who we are; the invite
+    // code only names us. A contact without one must re-pair (KT-1650).
+    let id = contact_id.to_owned();
+    let secret = state
+        .db
+        .with_conn(move |conn| crate::db::contacts::outbound_secret(conn, &id))
+        .await
+        .ok()
+        .flatten();
+    let Some(secret) = secret else {
+        tracing::warn!(
+            "WS client: contact {contact_id} has no pairing secret, not announcing. {}",
+            crate::db::contacts::REPAIR_HINT
+        );
+        return false;
+    };
     let presence_msg = WsMessage::Presence {
         from_pseudo: our_pseudo,
         from_invite_code: our_invite_code,
+        from_secret: secret,
         online: true,
     };
     if !send_if_authorized(ws_sender, state, peer, &presence_msg).await {
@@ -412,7 +431,18 @@ async fn handle_peer_connection(
             };
             let text = match msg {
                 tungstenite::Message::Text(text) => text,
-                tungstenite::Message::Close(_) => break,
+                tungstenite::Message::Close(frame) => {
+                    // A peer that refuses us says how to re-pair: show it to the
+                    // operator instead of retrying in silence.
+                    if let Some(frame) = frame.filter(|f| !f.reason.is_empty()) {
+                        tracing::warn!(
+                            "WS client: peer closed the connection: {} ({})",
+                            frame.reason,
+                            crate::db::contacts::REPAIR_HINT
+                        );
+                    }
+                    break;
+                }
                 _ => continue,
             };
             let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) else {
@@ -461,7 +491,7 @@ async fn handle_peer_connection(
 /// connection never echoes a peer's own chat/invite frame straight back to it.
 /// FIFO eviction keeps it O(1) and memory-bounded under sustained traffic.
 #[derive(Default)]
-pub(crate) struct PeerEchoGuard {
+pub struct PeerEchoGuard {
     set: HashSet<String>,
     order: VecDeque<String>,
 }
@@ -469,7 +499,7 @@ pub(crate) struct PeerEchoGuard {
 impl PeerEchoGuard {
     const CAP: usize = 4096;
 
-    pub(crate) fn record(&mut self, key: String) {
+    pub fn record(&mut self, key: String) {
         if self.set.insert(key.clone()) {
             self.order.push_back(key);
             if self.order.len() > Self::CAP {
@@ -480,7 +510,7 @@ impl PeerEchoGuard {
         }
     }
 
-    pub(crate) fn contains(&self, key: &str) -> bool {
+    pub fn contains(&self, key: &str) -> bool {
         self.set.contains(key)
     }
 }

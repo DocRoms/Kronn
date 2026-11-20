@@ -157,7 +157,7 @@ _BRIDGE_SCRIPT_SHA256_AT_LOAD = (
 STEP_TYPES = (
     "Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec", "Gate",
     "Notify", "JsonData", "CollectApiData", "TransformData", "PublishPageData",
-    "SubWorkflow", "TriggerWorkflow", "DelegateSubtasks", "TaskBoard",
+    "SubWorkflow", "TriggerWorkflow", "DelegateSubtasks", "TaskBoard", "Decide",
 )
 
 TOOLS = [
@@ -1723,7 +1723,7 @@ TOOLS = [
             "`qe_list`, `page_list`. `step_type` is a tagged object of the closed "
             "set **Agent, ApiCall, BatchApiCall, BatchQuickPrompt, Exec, Gate, Notify, "
             "JsonData, CollectApiData, TransformData, PublishPageData, SubWorkflow, "
-            "TriggerWorkflow, DelegateSubtasks, TaskBoard**. "
+            "TriggerWorkflow, DelegateSubtasks, TaskBoard, Decide**. "
             "Read `authoring_doctrine` in `workflow_step_schema` before composing: "
             "it says which type to prefer. Adapt a real workflow via "
             "`workflow_get`/`workflow_clone`. Contract: "
@@ -1751,8 +1751,9 @@ TOOLS = [
                 "artifacts": {"type": "object", "description": "Artifact declarations."},
                 "concurrency_limit": {"type": "integer", "description": "Max concurrent runs; scheduled default is 1."},
                 "safety": {"type": "object", "description": "Optional WorkflowSafety overrides."},
-                "actions": {"type": "array", "description": "Optional actions (legacy slot)."},
-                "workspace_config": {"type": "object", "description": "Direct or Isolated workspace."},
+                "actions": {"type": "array", "description": "Legacy slot."},
+                "workspace_config": {"type": "object", "description": "Direct or Isolated."},
+                "refs": {"type": "object", "description": "`{name:{kind,id}}`; steps read `{{refs.<name>}}`."},
             },
             "required": ["name", "trigger", "steps"],
         },
@@ -1786,7 +1787,7 @@ TOOLS = [
     {
         "name": "workflow_get",
         "description": (
-            "Fetch a workflow's full definition (with its human-set `shadow`), "
+            "Fetch a workflow's full definition (with step `shadows`), "
             "the shape `workflow_create_draft`/`workflow_update` accept. Read a "
             "real workflow here before cloning or patching it."
         ),
@@ -1847,7 +1848,8 @@ TOOLS = [
                 "name": {"type": "string"},
                 "trigger": {"type": "object", "description": "e.g. `{ \"type\": \"Manual\" }`."},
                 "steps": {"type": "array", "description": "Full replacement steps array (1-20). Fetch + edit via `workflow_get` first."},
-                "variables": {"type": "array", "description": "Launch-time PromptVariable declarations. Sources: user_input, project_env with `<env.NAME>`, or kronn_context with `<context.key>`; references resolve anew at run start. `label`/`placeholder` auto-default."},
+                "variables": {"type": "array", "description": "PromptVariable declarations, as in `workflow_create_draft`."},
+                "refs": {"type": "object", "description": "Replaces `{name:{kind,id}}`."},
                 "guards": {"type": "object"},
                 "on_failure": {"type": "array"},
                 "exec_allowlist": {"type": "array", "items": {"type": "string"}},
@@ -2187,13 +2189,15 @@ TOOLS = [
     {
         "name": "workflow_step_schema",
         "description": (
-            "The canonical WorkflowStep schema as an untruncated result: the "
-            "closed set of `step_type`s, fields per type, the runtime contracts "
-            "that break a run when missed, the `time.now` grammar and "
-            "`authoring_doctrine` (which type to prefer: read it first). Call it "
-            "before authoring or editing a workflow, not one `workflow_get` sample."
+            "Step contract: the closed set of `step_type`s, required fields per "
+            "type and `authoring_doctrine` (which type to prefer: read it first). "
+            "`step_type`: one type whole; `section`: template_vars (`time.now` "
+            "grammar) or data_pipeline_contract. Read before authoring."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {"step_type": {"type": "string"}, "section": {"type": "string"}},
+        },
     },
     {
         "name": "qa_create_draft",
@@ -5018,6 +5022,13 @@ def call_task_update_dod(args):
         raise RuntimeError("task_update_dod: completed must be a boolean")
     encoded_task = urllib.parse.quote(task_id, safe="")
     encoded_dod = urllib.parse.quote(dod_id, safe="")
+    # A post-integration check is the principal's: send the identity the
+    # execution tools send, derived here and never named by the model. A bridge
+    # with none still ticks an ordinary item.
+    try:
+        principal = _task_exec_principal("task_update_dod")
+    except RuntimeError:
+        principal = {}
     return _task_ack(
         _unwrap(_http(
             "PATCH",
@@ -5026,6 +5037,7 @@ def call_task_update_dod(args):
                 "completed": args["completed"],
                 "evidence": args.get("evidence"),
                 "actor": _planning_actor(args),
+                **principal,
             },
         )),
         dod_id=dod_id,
@@ -7851,6 +7863,11 @@ def call_disk_usage(args):
         "totals": report.get("totals"),
         "orphan_count": report.get("orphan_count"),
         "orphan_bytes": report.get("orphan_bytes"),
+        # KT-1691: `bytes` counts the blocks a cloned lane shares with the seed
+        # in full; `unique_bytes` is the real figure (null when unknown).
+        "apparent_bytes": report.get("apparent_bytes"),
+        "unique_bytes": report.get("unique_bytes"),
+        "orphan_unique_bytes": report.get("orphan_unique_bytes"),
         "entries_total": len(entries),
         "entries": entries[:limit],
     })
@@ -8653,6 +8670,7 @@ def call_workflow_update(args):
         "name", "project_id", "trigger", "steps", "actions", "safety",
         "workspace_config", "concurrency_limit", "concurrency_key", "guards",
         "artifacts", "on_failure", "exec_allowlist", "variables", "enabled",
+        "refs",
     )
     body = {k: args[k] for k in patchable if k in args}
     if not body:
@@ -9691,9 +9709,15 @@ def call_directive_delete(args):
     return _lib_delete("directive", args)
 
 
-def call_workflow_step_schema(_args):
-    """Read the same canonical schema used by native HTTP agents."""
-    return _unwrap(_http("GET", "/api/workflows/step-schema"))
+def call_workflow_step_schema(args):
+    """Read the same authoring contract native HTTP agents read: the lean
+    default, one type's whole contract (`step_type`) or a shared section."""
+    query = urllib.parse.urlencode(
+        {key: args[key] for key in ("step_type", "section") if args.get(key)}
+    )
+    return _unwrap(
+        _http("GET", "/api/workflows/step-schema" + (f"?{query}" if query else ""))
+    )
 
 
 # ─── Audit tools (0.8.12 PR A) ─────────────────────────────────────────────
@@ -10523,7 +10547,9 @@ TOOL_MANUALS = {
         "reviews and enables it. Use autonomous creation only after the conversation has "
         "converged. The payload mirrors CreateWorkflowRequest: required name, tagged trigger "
         "and 1-20 steps; optional project, variables, guards, failure chain, allowlist, "
-        "artifacts, concurrency, safety, actions and workspace config.\n\n"
+        "artifacts, concurrency, safety, actions, workspace config and `refs` "
+        "(`{name: {kind, id}}`, kind among page, workflow, quick_prompt, quick_api, "
+        "quick_exec, skill; also accepted by `workflow_update`).\n\n"
         "`concurrency_key` (e.g. `\"{{ticketKey}}\"`, also accepted by `workflow_update`, "
         "null clears it) makes `concurrency_limit` count runs per key rendered at launch: "
         "runs with different keys overlap, a launch whose key is already at the limit is "
@@ -10572,10 +10598,11 @@ TOOL_MANUALS = {
         "with `\"no_change\": true` in its envelope; an identical Page publish is inferred. "
         "On an existing workflow retention is human-only: `workflow_update` does not take it; "
         "ask the user to change it in the editor (\"Run retention\").\n\n"
-        "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a shadow run skips it, an unmarked one acts twice. "
-        "Use {{run.variant}} (normal or shadow) in every branch name or path both runs would share, and {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. "
+        "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a step shadow never runs it and the step cannot carry shadows. "
+        "Write {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. "
+        "An export carries a custom skill named by its whole id anywhere in a step; any other pasted id is not exported. "
         "`custom-x@N` in skill_ids pins a skill version. "
-        "The shadow config is human-only: workflow_get shows it, no agent tool sets it; point the user to the workflow editor's Shadow runs settings, and to the Resources panel of a Page the workflow feeds to promote a version. "
+        "Step shadows are human-only: workflow_get shows each step's shadows, no agent tool sets them and a save keeps the stored ones; a shadow re-runs only its step beside the main execution, on the same input, with another agent, model, prompt or skills (or none, to measure determinism), and never runs a Gate or a step marked external_effect, nor fails or delays the main step; a step's optional shadow_merge (human-only too) waits for the shadows it selects, condenses them with the main output and verifies every point, and its result becomes the step's output; point the user to the step editor's Shadows section, and to the Resources panel of a Page the workflow feeds to promote a version. "
         'Details: tool_manual({tool: "workflow-architect", section: "Versions and shadow runs"}).'
     ),
     "skill_get": (
@@ -10605,7 +10632,7 @@ TOOL_MANUALS = {
     "qp_get": (
         "qp_get({qp_id}) returns the Quick Prompt whole with its `versions`: version_index, created_at and current, newest first, without bodies; each save adds one, v1 is its creation. "
         "qp_get({qp_id, version: N}) returns version N whole: its template, variables and bindings as saved then. "
-        "A step cannot pin a Quick Prompt version; only a workflow's shadow loads another one (shadow.quick_prompt_versions, set by a human). "
+        "A step cannot pin a Quick Prompt version; only a shadow of a step loads another one (its quick_prompt_versions, set by a human). "
         "A project's Quick Prompt and its versions are read only where that project is in reach. "
         "Deleting a version is a human action. "
         'Shadow runs: tool_manual({tool: "workflow-architect", section: "Versions and shadow runs"}).'
@@ -10859,8 +10886,10 @@ TOOL_MANUALS["disk_usage"] = (
     "`lane_build_dir`, `cache`), `orphan_*` and `available_bytes` cover the whole instance. "
     "`entries` (largest first, 25 max; `entries_total` is the count) are your own project's "
     "only, with `task_ref`, `execution_id`, `status`, `idle_seconds` and a `state`: `orphan` "
-    "(finished, no live worktree, idle), `reclaimable`, `active`, `kept`, `foreign`; sizes are "
-    "floors when `bytes_are_partial`. `scoped: true` = this view.\n\n"
+    "(finished, no live worktree, idle), `reclaimable`, `active`, `kept`, `foreign`, `stalled` "
+    "(Blocked/Interrupted, build dir idle for days); `bytes` are apparent (a lane cloned from the "
+    "seed counts shared blocks in full), `unique_bytes` is what deleting really frees (null = "
+    "unknown); sizes are floors when `bytes_are_partial`. `scoped: true` = this view.\n\n"
     "Read-only: purging is a human action in Settings > Disk. Tell the user when "
     "`under_pressure` or `orphan_bytes` is large; do not try to purge. Another project's id is refused."
 )

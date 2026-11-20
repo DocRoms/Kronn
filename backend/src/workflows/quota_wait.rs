@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::models::{QuotaParkReason, QuotaWait, RunStatus, Workflow, WorkflowRun};
+use crate::models::{QuotaParkReason, QuotaWait, Workflow, WorkflowRun};
 use crate::AppState;
 
 /// Consecutive quota refusals of one step, persisted across wake-ups.
@@ -24,8 +24,6 @@ pub const QUOTA_ATTEMPTS_STATE_KEY: &str = "__kronn.quota_attempts";
 const RESET_MARGIN: Duration = Duration::minutes(2);
 /// Wake-ups the engine attempts on its own before handing the run to a human.
 pub const MAX_AUTOMATIC_WAKES: u32 = 4;
-/// Longest reset Kronn trusts; anything further is a misparse.
-const MAX_RESET_HORIZON: Duration = Duration::days(45);
 /// Set by a parent on a child it can resume after a quota wait.
 pub const PARENT_RESUMES_KEY: &str = "__subwf_quota_resumable__";
 
@@ -97,157 +95,7 @@ pub fn mirrored_child(
     Some((child, wait))
 }
 
-/// A quota or session-limit refusal, as opposed to an agent failure. Shared
-/// capacity saturation (529, NVIDIA worker limits) is transient, not quota.
-pub fn is_quota_refusal(error: &str) -> bool {
-    use crate::api::discussions::orchestration::{
-        is_hard_quota_exhausted, is_transient_provider_overload,
-    };
-    if is_hard_quota_exhausted(error) {
-        return true;
-    }
-    if is_transient_provider_overload(error) {
-        return false;
-    }
-    // Claude's short form names no plan: "5-hour limit · resets 5:30pm (…)".
-    // Only its dot separator and a reset time, maybe dated ("resets Nov 7 at 8pm"):
-    // "limit: reset the cache" is no quota.
-    static LIMIT_RESETS: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(
-            r"(?i)\blimit(?:\s+reached)?\s*[·∙•]\s*resets\s+(?:[a-z]{3,9}\s+)?\d",
-        )
-        .expect("static limit-resets regex")
-    });
-    if LIMIT_RESETS.is_match(error) {
-        return true;
-    }
-    let lower = error.to_lowercase();
-    [
-        "http 429",
-        "status 429",
-        "status: 429",
-        "error: 429",
-        "429 too many requests",
-        "too many requests",
-        "rate_limit_exceeded",
-        "rate limit exceeded",
-        "rate_limit_error",
-        "usage_limit_reached",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
-/// The step's quota classification, with the reset the refusal announced.
-pub fn classify(error: &str, now: DateTime<Utc>) -> Option<QuotaWait> {
-    is_quota_refusal(error).then(|| QuotaWait {
-        id: None,
-        reset_at: announced_reset(error, now),
-        wake_at: None,
-        attempt: 0,
-        parked: None,
-        detail: None,
-    })
-}
-
-/// The reset instant a refusal names: Claude's wall clock with its zone, a
-/// Retry-After (seconds or HTTP date), a relative "try again in", a Codex
-/// `resets_in_seconds`/`resets_at`, or an ISO timestamp next to "reset".
-pub fn announced_reset(error: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    // Every parser stays within the horizon with checked arithmetic: an
-    // absurd provider number yields no reset, never a panic.
-    crate::api::discussions::orchestration::announced_quota_reset(error, now)
-        .or_else(|| retry_after(error, now))
-        .or_else(|| relative_reset(error, now))
-        .or_else(|| codex_reset(error, now))
-        .or_else(|| iso_reset(error))
-        .filter(|at| *at > now && *at <= now + MAX_RESET_HORIZON)
-}
-
-/// `now + secs`, or `None` when the delay is not positive or beyond the horizon.
-fn after_seconds(now: DateTime<Utc>, secs: i64) -> Option<DateTime<Utc>> {
-    if secs <= 0 || secs > MAX_RESET_HORIZON.num_seconds() {
-        return None;
-    }
-    now.checked_add_signed(Duration::try_seconds(secs)?)
-}
-
-fn retry_after(error: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    static SECONDS: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r#"(?i)retry[-_ ]after(?:[-_]seconds)?["']?\s*[:=]?\s*"?(\d{1,7})(?:\.\d+)?\s*(?:s\b|sec|seconds?\b|"|,|;|\)|\s|$)"#)
-            .expect("static retry-after regex")
-    });
-    static HTTP_DATE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(
-            r"(?i)retry-after\s*:\s*([A-Za-z]{3},\s*\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+GMT)",
-        )
-        .expect("static retry-after date regex")
-    });
-    if let Some(caps) = SECONDS.captures(error) {
-        return after_seconds(now, caps[1].parse().ok()?);
-    }
-    let caps = HTTP_DATE.captures(error)?;
-    DateTime::parse_from_rfc2822(&caps[1])
-        .ok()
-        .map(|at| at.with_timezone(&Utc))
-}
-
-fn relative_reset(error: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    static RELATIVE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"(?i)(?:try again|resets?|retry)\s+in\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b[\s,]*(?:and\s+)?)+)")
-            .expect("static relative reset regex")
-    });
-    static PART: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(
-            r"(?i)(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
-        )
-        .expect("static duration part regex")
-    });
-    let span = RELATIVE.captures(error)?;
-    let cap = MAX_RESET_HORIZON.num_seconds();
-    let mut total: i64 = 0;
-    for part in PART.captures_iter(&span[1]) {
-        // Capped per component and per running sum, before any Duration exists.
-        let n: i64 = part[1].parse().ok().filter(|n| *n <= cap)?;
-        let unit: i64 = match part[2].to_lowercase().chars().next()? {
-            'd' => 86_400,
-            'h' => 3_600,
-            'm' => 60,
-            _ => 1,
-        };
-        total = total
-            .checked_add(n.checked_mul(unit)?)
-            .filter(|t| *t <= cap)?;
-    }
-    after_seconds(now, total)
-}
-
-fn codex_reset(error: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    static IN_SECONDS: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r#"(?i)"?resets_in_seconds"?\s*[:=]\s*(\d{1,8})"#)
-            .expect("static resets_in_seconds regex")
-    });
-    static AT_EPOCH: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r#"(?i)"?resets_at"?\s*[:=]\s*(\d{10})\b"#)
-            .expect("static resets_at regex")
-    });
-    if let Some(caps) = IN_SECONDS.captures(error) {
-        return after_seconds(now, caps[1].parse().ok()?);
-    }
-    let caps = AT_EPOCH.captures(error)?;
-    DateTime::from_timestamp(caps[1].parse().ok()?, 0)
-}
-
-fn iso_reset(error: &str) -> Option<DateTime<Utc>> {
-    static ISO: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r#"(?i)(?:reset|retry)[a-z_-]*["']?\s*(?:at)?\s*[:=]?\s*"?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))"#)
-            .expect("static iso reset regex")
-    });
-    let caps = ISO.captures(error)?;
-    DateTime::parse_from_rfc3339(&caps[1])
-        .ok()
-        .map(|at| at.with_timezone(&Utc))
-}
+pub use crate::core::quota_text::{announced_reset, classify, is_quota_refusal};
 
 /// Floor between two wake-ups of the same step: a provider that refuses again
 /// right after its announced reset must not drive an immediate retry loop.
@@ -297,19 +145,12 @@ fn previous_attempts(run_state: &std::collections::HashMap<String, String>, step
         .unwrap_or(0)
 }
 
-/// The quota wait a `WaitingQuota` run is parked on: its trailing step.
-pub fn pending_wait(run: &WorkflowRun) -> Option<&QuotaWait> {
-    (run.status == RunStatus::WaitingQuota)
-        .then(|| run.step_results.last())
-        .flatten()
-        .filter(|step| step.status == RunStatus::WaitingQuota)
-        .and_then(|step| step.quota_wait.as_ref())
-}
+pub use crate::db::workflows::pending_wait;
 
 /// Parks the wait `run` was read with, so it stops being polled and shows why.
 /// Compare-and-set on that same wait: a run resumed, cancelled or waiting
 /// again since the read is left untouched. Returns whether it parked.
-pub(crate) async fn park(
+pub async fn park(
     state: &AppState,
     run: &WorkflowRun,
     reason: QuotaParkReason,
@@ -519,7 +360,7 @@ async fn wake_one(state: &AppState, workflow: Workflow, mut run: WorkflowRun) ->
 /// The Agent step a `WaitingQuota` run is really parked on (KT-1657). A
 /// sub-workflow step mirrors its child's wait, so the step that holds the
 /// provider refusal sits in a run further down.
-pub(crate) struct WaitingLeaf {
+pub struct WaitingLeaf {
     /// The run owning the Agent step.
     pub run: WorkflowRun,
     /// Its workflow as saved, without the run's own agent choices.
@@ -531,7 +372,7 @@ pub(crate) struct WaitingLeaf {
 /// Deepest chain of mirrored waits followed; the engine nests no deeper.
 const MAX_LEAF_DEPTH: usize = 8;
 
-pub(crate) fn waiting_leaf(
+pub fn waiting_leaf(
     conn: &rusqlite::Connection,
     mut run: WorkflowRun,
 ) -> anyhow::Result<WaitingLeaf> {
@@ -679,6 +520,9 @@ pub struct QuotaRechecker {
     probe: std::sync::Arc<dyn QuotaProbe>,
     interval: Duration,
     book: std::sync::Mutex<RecheckBook>,
+    /// KT-1518 — the agents a fallback may be handed to. `None`: the ones the
+    /// host has installed and enabled; a test gives its own.
+    usable: Option<Vec<crate::models::AgentType>>,
 }
 
 impl QuotaRechecker {
@@ -691,7 +535,20 @@ impl QuotaRechecker {
                 seen_requests,
                 ..Default::default()
             }),
+            usable: None,
         }
+    }
+
+    /// The agents a fallback may be handed to, instead of the host's own.
+    pub fn with_usable_agents(mut self, usable: Vec<crate::models::AgentType>) -> Self {
+        self.usable = Some(usable);
+        self
+    }
+
+    /// The agents a fallback may be handed to: the test's own, or `None` to let
+    /// the chain lookup detect the host's (only once a chain exists).
+    fn usable_agents(&self) -> Option<Vec<crate::models::AgentType>> {
+        self.usable.clone()
     }
 
     pub fn production() -> Self {
@@ -778,11 +635,17 @@ impl QuotaRechecker {
             };
             let agent = leaf.step.agent.clone();
             let project_path = project_path_of(state, &run).await;
-            if self
+            let verdict = self
                 .verdict(state, &mut verdicts, &agent, &project_path)
-                .await
-                != Some(true)
-            {
+                .await;
+            if verdict != Some(true) {
+                // KT-1518 — the provider still refuses: the step's fallback chain
+                // is the alternative to waiting. The step moves to the next link
+                // like an owner's "switch agent" would, and the next pass asks
+                // that provider instead.
+                if verdict == Some(false) {
+                    offer_fallback(state, &run, &leaf.step, self.usable_agents()).await;
+                }
                 continue;
             }
             let workflow_id = run.workflow_id.clone();
@@ -840,7 +703,32 @@ impl QuotaRechecker {
                 .iter()
                 .find_map(|escalation| escalation.project_path.clone())
                 .unwrap_or_default();
-            if self.verdict(state, verdicts, &agent, &project_path).await != Some(true) {
+            let verdict = self.verdict(state, verdicts, &agent, &project_path).await;
+            if verdict != Some(true) {
+                // KT-1518 — still refused: the agent's chain is the alternative
+                // to waiting, through the same selection as a failing turn.
+                if verdict == Some(false) {
+                    let usable = self.usable_agents();
+                    for escalation in group {
+                        let Some(offer) = crate::core::uplink::linked::<
+                            crate::core::uplink_state::EscalatedFallback,
+                        >() else {
+                            continue;
+                        };
+                        match (offer.0)(state, &escalation.execution_id, usable.clone()).await {
+                            Ok(true) => tracing::info!(
+                                execution_id = %escalation.execution_id,
+                                provider,
+                                "provider still refuses: escalated execution continued on its fallback"
+                            ),
+                            Ok(false) => {}
+                            Err(error) => tracing::info!(
+                                execution_id = %escalation.execution_id,
+                                "agent fallback of an escalated execution skipped: {error}"
+                            ),
+                        }
+                    }
+                }
                 continue;
             }
             for escalation in group {
@@ -889,6 +777,18 @@ impl QuotaRechecker {
             .probe
             .quota_is_back(agent, project_path, &tokens, full_access)
             .await;
+        // KT-1518 — the provider answers again: its agent is back in play now,
+        // not when the cooldown would have run out.
+        if verdict == Some(true) {
+            let back = agent.clone();
+            if let Err(error) = state
+                .db
+                .with_conn(move |conn| crate::core::agent_fallback::clear_cooldown(conn, &back))
+                .await
+            {
+                tracing::warn!("agent cooldown could not be cleared: {error}");
+            }
+        }
         verdicts.insert(key, verdict);
         verdict
     }
@@ -907,6 +807,40 @@ impl QuotaRechecker {
                 book.last.insert(key.to_string(), now);
                 forced
             }
+        }
+    }
+}
+
+/// KT-1518 — switches the Agent step a quota-paused run waits on to the next
+/// usable link of its agent's fallback chain. Nothing happens without a chain,
+/// or when nothing in it can take the step.
+async fn offer_fallback(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &crate::models::WorkflowStep,
+    usable: Option<Vec<crate::models::AgentType>>,
+) {
+    let agents = state.config.read().await.agents.clone();
+    let Some(link) =
+        super::agent_fallback_step::link_for_waiting_step_among(state, &agents, step, usable).await
+    else {
+        return;
+    };
+    let choice = crate::models::StepAgentOverride {
+        agent: link.agent.clone(),
+        model: link.model.clone(),
+        reasoning_effort: None,
+    };
+    match crate::api::workflows::switch_quota_agent_inner(state, run.id.clone(), choice).await {
+        Ok(switched) => tracing::info!(
+            run_id = %run.id,
+            step = %switched.step_name,
+            from = %crate::core::agent_fallback::display_name(&step.agent),
+            to = %crate::core::agent_fallback::display_name(&link.agent),
+            "provider still refuses: the paused step continues on its fallback"
+        ),
+        Err(error) => {
+            tracing::info!(run_id = %run.id, "agent fallback of a paused run skipped: {error}")
         }
     }
 }

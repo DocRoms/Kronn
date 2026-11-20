@@ -12,12 +12,21 @@ journalled, confined by an OS sandbox, and taken back when the level is lowered.
   narrowest explicit setting wins: room, then workflow, then instance, then
   Standard. An explicit Standard on a room beats a Full instance. When one
   launch belongs to several rooms that disagree, the lowest level wins.
-  [src: file: backend/src/db/trust.rs:220-262#effective]
+  A task worker's room has no setting of its own: it is held to the level a
+  human gave the room that delegated to it (up the chain of delegations, the
+  lowest when several rooms delegated to it, Standard when the chain is too
+  long to follow), when that level is lower than the one it would get. It is never raised by it, and
+  a level set on the worker's own room is the one in force. Lowering a room
+  takes back what its workers were granted (KT-1964). A scope request is
+  decided at the level of the launch that files it (all its rooms, its run),
+  and of the room it names: both have to grant it, so neither a room the
+  agent just opened nor the workflow it runs in opens what the other would not.
+  [src: file: backend/src/db/trust.rs:260-302#effective]
 - **The workflow's level is for its own runs.** A workflow's level applies to the
   agents its steps launch (the run is on the bridge token). A room that merely
   edits a workflow never takes that workflow's level: an agent in a room with no
   level, editing a Full workflow, gets no approval from it.
-  [src: file: backend/src/api/workflows.rs:2391-2406#approve_exec_steps_by_trust]
+  [src: file: backend/src/api/workflows.rs:2542-2557#approve_exec_steps_by_trust]
 - **Storage**: `trust_settings` (one row per scope, no row = inherit), the journal
   `trust_audit_log` (migrations 278 to 282), and two marks on the objects a
   level approved: `quick_execs.approved_by_trust` and the step field
@@ -113,7 +122,7 @@ reaches the route and is refused for want of a code (see below).
   directory or a parent as a volume is refused, `argv_reaches_protected`; every
   source is compared as written **and** with its symlinks resolved, so a worktree
   link to the data directory is caught).
-  [src: file: backend/src/api/orchestration.rs:6544-6562#launch_for_reach]
+  [src: file: backend/src/api/orchestration.rs:7225-7243#launch_for_reach]
 - A human's approval is not marked and runs as before. A mark survives only on the
   very lines a level approved: an edit of the line, or a request that forges the
   mark, drops it (`mark_line_writers`, `update_as_in`).
@@ -311,7 +320,7 @@ the level now in force for the room or workflow it came from (`effective` on the
 origin the journal stores), and when that level no longer grants it the approval
 is removed from the object (a Quick Exec's, a step's, a scope grant is revoked) and
 a `withdrawn` line names it in the journal, shown in Settings › Trust levels.
-[src: file: backend/src/db/trust.rs:426-521#withdraw]
+[src: file: backend/src/db/trust.rs:494-589#withdraw]
 
 - A grant is judged by its **origin**, not by the scope that first gave it. The
   room badge writes an explicit Standard: a grant the room got from the instance

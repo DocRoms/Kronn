@@ -15,7 +15,10 @@ use std::time::Duration;
 use axum::response::sse::Event;
 use futures::stream::Stream;
 
-pub(crate) mod ceilings;
+pub mod agent_fallback;
+pub mod agent_fallback_override;
+pub mod agent_fallback_start;
+pub mod ceilings;
 #[cfg(all(test, unix, feature = "full-tests"))]
 // scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 mod companion_privacy_tests;
@@ -24,13 +27,13 @@ pub mod crud;
 pub mod messaging;
 pub mod monitor;
 pub mod orchestration;
-pub(crate) mod prompt_limit;
+pub use crate::core::prompt_limit;
 #[cfg(test)]
 mod review_workspace_tests;
-pub(crate) mod routing;
+pub mod routing;
 pub mod runtime;
 pub mod slash_markers;
-pub(crate) mod start_refusal;
+pub mod start_refusal;
 pub mod streaming;
 
 pub use context::*;
@@ -44,11 +47,7 @@ pub use runtime::*;
 
 /// Maximum title length for discussions (characters).
 pub(super) const MAX_TITLE_LEN: usize = 500;
-/// Resolve the configurable absolute timeout captured when each run starts.
-pub(super) fn configured_agent_global_timeout(minutes: u32) -> Duration {
-    let minutes = crate::models::clamp_agent_global_timeout_min(u64::from(minutes));
-    Duration::from_secs(u64::from(minutes) * 60)
-}
+pub(super) use crate::api::disc_introspection::configured_agent_global_timeout;
 /// Default stall timeout (5 minutes) — overridden by config.server.agent_stall_timeout_min
 pub(super) const DEFAULT_STALL_TIMEOUT_MIN: u32 = 5;
 /// Stall ceiling for NON-streaming agents (Codex `exec` etc.): they're silent
@@ -107,7 +106,7 @@ const TERMINAL_SIGNALS: &[&str] = &[
 ///
 /// Used by `streaming.rs` after persisting the agent's final reply
 /// to decide whether to flip `archived = true`.
-pub(crate) fn signal_should_auto_archive(signal: &str) -> bool {
+pub fn signal_should_auto_archive(signal: &str) -> bool {
     matches!(
         signal,
         "KRONN:VALIDATION_COMPLETE" | "KRONN:BRIEFING_COMPLETE" | "KRONN:BOOTSTRAP_COMPLETE"
@@ -127,7 +126,7 @@ pub(crate) fn signal_should_auto_archive(signal: &str) -> bool {
 /// `&text[tail_start..]` panics with "byte index N is not a char boundary".
 /// We back off the index until it lands on a valid char boundary — at most
 /// 3 bytes since UTF-8 codepoints are 1–4 bytes.
-pub(crate) fn detect_terminal_signal(text: &str) -> Option<&'static str> {
+pub fn detect_terminal_signal(text: &str) -> Option<&'static str> {
     let mut tail_start = text.len().saturating_sub(256);
     while tail_start > 0 && !text.is_char_boundary(tail_start) {
         tail_start -= 1;
@@ -140,25 +139,7 @@ pub(crate) fn detect_terminal_signal(text: &str) -> Option<&'static str> {
         .find(|sig| tail_upper.contains(sig))
 }
 
-/// STRICT terminal-position check (Codex A5 v3): does `text`, once
-/// right-trimmed, END on a line that is exactly `signal` (ASCII case
-/// tolerated)? Unlike [`detect_terminal_signal`] — a lenient tail-window
-/// `contains` meant for live stream truncation — this cannot be satisfied
-/// by a quotation or an instruction that merely mentions the marker
-/// mid-sentence. Gate-grade: used by validate-audit.
-/// Markdown emphasis around the line (`**…**`, backticks) is tolerated: the
-/// stream truncates right after the signal, which leaves `**KRONN:…` behind.
-pub(crate) fn ends_with_terminal_signal(text: &str, signal: &str) -> bool {
-    text.trim_end()
-        .lines()
-        .last()
-        .map(|line| {
-            line.trim()
-                .trim_matches(|c| matches!(c, '*' | '`' | '_'))
-                .eq_ignore_ascii_case(signal)
-        })
-        .unwrap_or(false)
-}
+pub use crate::db::discussions::ends_with_terminal_signal;
 
 /// Truncate `text` so it ends right after the first occurrence of `signal`.
 ///
@@ -174,7 +155,7 @@ pub(crate) fn ends_with_terminal_signal(text: &str, signal: &str) -> bool {
 /// chars and break our slice).
 ///
 /// Returns the original text untouched if the signal is not found.
-pub(crate) fn truncate_after_signal(text: &str, signal: &str) -> String {
+pub fn truncate_after_signal(text: &str, signal: &str) -> String {
     let needle = signal.as_bytes();
     let haystack = text.as_bytes();
     if needle.is_empty() || needle.len() > haystack.len() {
@@ -200,7 +181,7 @@ pub(crate) fn truncate_after_signal(text: &str, signal: &str) -> String {
 /// Pure, sync detector for the silent-crash footer pattern in a single
 /// agent message. Extracted for testability — the async DB-touching wrapper
 /// `last_message_is_silent_crash` calls this.
-pub(crate) fn message_matches_silent_crash(content: &str) -> bool {
+pub fn message_matches_silent_crash(content: &str) -> bool {
     content.contains("[Agent exited with error]") && content.contains("No output captured")
 }
 

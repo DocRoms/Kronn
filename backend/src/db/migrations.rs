@@ -1075,6 +1075,31 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "294_external_api_tools_enabled",
         include_str!("sql/294_external_api_tools_enabled.sql"),
     ),
+    (
+        "295_agent_fallback",
+        include_str!("sql/295_agent_fallback.sql"),
+    ),
+    ("296_step_shadows", include_str!("sql/296_step_shadows.sql")),
+    (
+        "297_contact_pairing_secrets",
+        include_str!("sql/297_contact_pairing_secrets.sql"),
+    ),
+    (
+        "298_contact_pairing_offer_contact",
+        include_str!("sql/298_contact_pairing_offer_contact.sql"),
+    ),
+    (
+        "299_step_shadow_merges",
+        include_str!("sql/299_step_shadow_merges.sql"),
+    ),
+    (
+        "300_mcp_token_checks",
+        include_str!("sql/300_mcp_token_checks.sql"),
+    ),
+    (
+        "301_workflow_runs_shadow_tokens",
+        include_str!("sql/301_workflow_runs_shadow_tokens.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
@@ -1083,7 +1108,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
 /// key to encrypt under, no copy is written. An older snapshot with other
 /// content is kept under a timestamped name; the clear copies 0.15.x left are
 /// converted first.
-pub(crate) fn backup_config_sealed(dir: &Path) -> std::io::Result<()> {
+pub fn backup_config_sealed(dir: &Path) -> std::io::Result<()> {
     use crate::core::config_copies as copies;
     let cfg = dir.join("config.toml");
     // The raw bytes: sealed as they are, not as a lossy string.
@@ -1125,7 +1150,7 @@ pub(crate) fn backup_config_sealed(dir: &Path) -> std::io::Result<()> {
 
 /// Keep the current snapshot under a timestamped name (a reset sets it aside,
 /// since it may hold another key): a clear one is encrypted first.
-pub(crate) fn rotate_config_backup(dir: &Path) -> std::io::Result<()> {
+pub fn rotate_config_backup(dir: &Path) -> std::io::Result<()> {
     use crate::core::config_copies as copies;
     let sealing = copies::sealing(dir, true);
     copies::protect_copies(dir, &sealing);
@@ -1157,7 +1182,20 @@ fn apply_migration(tx: &rusqlite::Transaction<'_>, name: &str, sql: &str) -> Res
         // Needs Kronn's redaction patterns, which SQL cannot call.
         crate::db::credential_scrub::scrub_known_shapes(tx)?;
     }
+    if name == "296_step_shadows" {
+        // Reads each workflow's steps to place its shadow, which SQL cannot do.
+        crate::db::legacy_shadow::migrate_workflow_shadows(tx)?;
+    }
     Ok(())
+}
+
+/// Free space a full copy of `live_bytes` needs: the copy itself, a tenth for
+/// what is written meanwhile, and a floor so the disk is not left full.
+pub fn required_free_bytes(live_bytes: u64) -> u64 {
+    const FLOOR: u64 = 512 * 1024 * 1024;
+    live_bytes
+        .saturating_add(live_bytes / 10)
+        .saturating_add(FLOOR)
 }
 
 fn ensure_openrouter_preset(tx: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -1306,7 +1344,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
 
 /// Every migration on a fresh database, with no backup and no schema check: the
 /// reference the boot check diffs a live database against.
-pub(crate) fn build_reference_schema(conn: &Connection) -> Result<()> {
+pub fn build_reference_schema(conn: &Connection) -> Result<()> {
     run_with_backup_checked(conn, None, |dir| fs2::available_space(dir))
 }
 
@@ -1320,7 +1358,7 @@ fn backup_disabled() -> bool {
 /// full disk never replaces the previous good backup. A failed copy stops the
 /// upgrade: migrating without a way back is the user's call, made with
 /// `KRONN_MIGRATION_BACKUP=0`, never a warning in a log.
-pub(crate) fn backup_before_migration(
+pub fn backup_before_migration(
     path: &Path,
     available_space: impl Fn(&Path) -> std::io::Result<u64>,
 ) -> Result<()> {
@@ -1338,7 +1376,7 @@ pub(crate) fn backup_before_migration(
     let mib = |bytes: u64| bytes / (1024 * 1024);
     let available = available_space(dir)
         .map_err(|e| anyhow::anyhow!("cannot read the free space in {}: {e}", dir.display()))?;
-    let required = crate::core::backup::required_free_bytes(size);
+    let required = required_free_bytes(size);
     if available < required {
         anyhow::bail!(
             "not enough free space to back up the database before upgrading it: \
@@ -1614,8 +1652,8 @@ fn drop_retired_workflow_observer_column(conn: &Connection) {
 /// Test-only: apply migrations up to AND INCLUDING `stop_after` (by name), so a
 /// test can build an older schema, seed pre-migration data, then run the
 /// remaining migrations through [`run`]. Panics on an unknown migration name.
-#[cfg(test)]
-pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _migrations (
             id INTEGER PRIMARY KEY,
@@ -3240,6 +3278,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reply_to.as_deref(), Some("u-1"));
+    }
+
+    /// KT-1650 (owner decision: existing contacts RE-PAIR) — a contact made before
+    /// pairing secrets keeps its row but is neither dialled nor admitted, and no
+    /// public value stands in for the secret it never got.
+    #[test]
+    fn contacts_without_pairing_secrets_must_pair_again_on_upgrade() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "294_external_api_tools_enabled").unwrap();
+        for (id, status) in [
+            ("c-acc", "accepted"),
+            ("c-pen", "pending"),
+            ("c-req", "requested"),
+            ("c-ref", "refused"),
+        ] {
+            conn.execute(
+                "INSERT INTO contacts (id, pseudo, kronn_url, invite_code, status, created_at, updated_at)
+                 VALUES (?1, ?1, 'http://10.0.0.1:3456', ?2, ?3, '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z')",
+                rusqlite::params![id, format!("kronn:{id}@10.0.0.1:3456"), status],
+            )
+            .unwrap();
+        }
+
+        run(&conn).unwrap();
+
+        let status = |id: &str| -> String {
+            conn.query_row("SELECT status FROM contacts WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(status("c-acc"), "needs_repair");
+        assert_eq!(status("c-pen"), "needs_repair");
+        assert_eq!(
+            status("c-req"),
+            "requested",
+            "a request never had a secret to lose"
+        );
+        assert_eq!(status("c-ref"), "refused");
+        for id in ["c-acc", "c-pen", "c-req", "c-ref"] {
+            assert!(!crate::db::contacts::is_paired(&conn, id).unwrap(), "{id}");
+            assert!(
+                crate::db::contacts::outbound_secret(&conn, id)
+                    .unwrap()
+                    .is_none(),
+                "{id}"
+            );
+        }
+        assert!(!crate::db::contacts::dials_outbound(&status("c-acc")));
+        for presented in ["", "kronn:c-acc@10.0.0.1:3456"] {
+            assert!(
+                !matches!(
+                    crate::db::contacts::authenticate_peer(
+                        &conn,
+                        "kronn:c-acc@10.0.0.1:3456",
+                        presented
+                    )
+                    .unwrap(),
+                    crate::db::contacts::InviteAuth::Accepted(_)
+                ),
+                "{presented:?}"
+            );
+        }
+    }
+
+    /// KT-1957 — runs recorded before the column get what their shadows spent,
+    /// the main row left out, and the others stay at zero.
+    #[test]
+    fn existing_runs_get_their_shadow_spend_on_upgrade() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "300_mcp_token_checks").unwrap();
+        conn.execute_batch(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('wf-1', 'Flux', '\"Manual\"', '[]', '2026-11-19T00:00:00Z', '2026-11-19T00:00:00Z');
+             INSERT INTO workflow_runs (id, workflow_id, status, tokens_used, started_at) VALUES
+                 ('run-shadowed', 'wf-1', 'Success', 100, '2026-11-19T00:00:00Z'),
+                 ('run-plain', 'wf-1', 'Success', 30, '2026-11-19T00:01:00Z');
+             INSERT INTO step_shadow_runs
+                 (id, run_id, result_index, step_name, shadow_id, status, identity_json, tokens_used, started_at) VALUES
+                 ('s-main', 'run-shadowed', 0, 'review', '', 'success', '{}', 100, '2026-11-19T00:00:00Z'),
+                 ('s-a', 'run-shadowed', 0, 'review', 'a', 'success', '{}', 40, '2026-11-19T00:00:00Z'),
+                 ('s-b', 'run-shadowed', 0, 'review', 'b', 'failed', '{}', NULL, '2026-11-19T00:00:00Z'),
+                 ('s-c', 'run-shadowed', 1, 'fix', 'a', 'success', '{}', 5, '2026-11-19T00:00:00Z');",
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        let spent = |id: &str| -> i64 {
+            conn.query_row(
+                "SELECT shadow_tokens_used FROM workflow_runs WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!((spent("run-shadowed"), spent("run-plain")), (45, 0));
     }
 
     /// KT-1656 — the upgrade masks the vendor-shaped credentials that agent output

@@ -166,6 +166,7 @@ pub async fn hydrate_step_from_quick_prompt(
         }
         None => {
             step.agent_settings = Some(crate::models::AgentSettings {
+                fallback: None,
                 tools: None,
                 model: qp_model,
                 tier: Some(qp.tier),
@@ -261,6 +262,8 @@ mod tests {
             delay_after_secs: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -304,6 +307,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -448,6 +452,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut qp = make_qp("qp-model", "Résume {{host}}");
         qp.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("qwen3:8b".to_string()),
             tier: None,
@@ -534,6 +539,7 @@ mod tests {
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
         step.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: None,
@@ -560,6 +566,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut qp = make_qp("qp-model2", "x");
         qp.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("qwen3:8b".to_string()),
             tier: None,
@@ -570,6 +577,7 @@ mod tests {
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
         step.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("llama3.3:70b".to_string()),
             tier: None,
@@ -594,6 +602,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut qp = make_qp("qp-effort", "Résume {{host}}");
         qp.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: None,
@@ -620,6 +629,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut qp = make_qp("qp-effort2", "x");
         qp.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: None,
@@ -630,6 +640,7 @@ mod tests {
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
         step.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: None,
@@ -721,7 +732,7 @@ mod tests {
 }
 
 /// The content a Quick Prompt version saved, over the current Quick Prompt.
-pub(crate) fn apply_version(
+pub fn apply_version(
     qp: &mut crate::models::QuickPrompt,
     version: crate::models::QuickPromptVersion,
 ) {

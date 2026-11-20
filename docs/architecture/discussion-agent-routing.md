@@ -43,7 +43,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5184-5195#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5200-5211#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -62,8 +62,8 @@ hiding joined peers. The mode switch retires pending native dispatches in the
 same transaction, and the dispatcher's final claim also checks that native
 mode is still enabled.
 [src: file: backend/src/db/discussions.rs:962-981#set_disc_no_agent_within_tx]
-[src: file: backend/src/db/agent_dispatch.rs:898-984#claim_with_limits]
-[src: file: backend/src/db/agent_dispatch.rs:1158-1176#mark_agent_started]
+[src: file: backend/src/db/agent_dispatch.rs:922-1008#claim_with_limits]
+[src: file: backend/src/db/agent_dispatch.rs:1263-1281#mark_agent_started]
 
 Current bridges send their durable session id on every wait (resolved by
 session id alone when the provider is unknown). Waking and seeing are separate
@@ -85,9 +85,9 @@ time, so any other Kronn call ends that wait; the call's result carries
 `wait_preempted` and the agent must re-arm. True zero-turn silence on such a
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
-[src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES]
-[src: file: backend/scripts/disc-introspection-mcp.py:7412-7443#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12372-12379#_with_wait_preempted]
+[src: file: backend/src/api/disc_invite.rs:1128-1132#AWARENESS_MAX_MESSAGES]
+[src: file: backend/scripts/disc-introspection-mcp.py:7420-7451#_WAIT_PREEMPTED_NOTICE]
+[src: file: backend/scripts/disc-introspection-mcp.py:12445-12452#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -100,10 +100,10 @@ replay, never a skipped turn. Message revision events ride the same backlog.
 New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/sql/105_user_turn_catchup.sql:12-23#user_catchup_cursor]
 [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
-[src: file: backend/src/api/disc_invite.rs:1362-1390#ack_awareness_upto]
+[src: file: backend/src/api/disc_invite.rs:1423-1451#ack_awareness_upto]
 [src: file: backend/scripts/disc-introspection-mcp.py:3528-3537#_PENDING_AWARENESS_ACK_BY_DISC]
 [src: file: backend/scripts/disc-introspection-mcp.py:4037-4054#_ack_pending_read_cursors]
-[src: file: backend/scripts/disc-introspection-mcp.py:4077-4089#_stage_awareness_ack]
+[src: file: backend/scripts/disc-introspection-mcp.py:4079-4091#_stage_awareness_ack]
 [src: file: backend/src/db/discussion_sessions.rs:450-484#create_session]
 
 ## Queue, restart, and edit/resend
@@ -122,14 +122,14 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:162-258#processingDiscsRef]
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1321-1341#insert_user_message_with_dispatches]
-[src: file: backend/src/db/agent_dispatch.rs:997-1146#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3589-3591#DispatchInProgress]
+[src: file: backend/src/db/agent_dispatch.rs:1106-1255#recover_after_restart]
+[src: file: backend/src/db/discussions.rs:3571-3573#DispatchInProgress]
 [src: file: backend/src/api/discussions/messaging.rs:1105-1113#DispatchInProgress]
-[src: file: backend/src/db/discussions.rs:3539-3801#revise_message_with_dispatch]
+[src: file: backend/src/db/discussions.rs:3521-3783#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
-[src: file: backend/src/api/federation.rs:130-175#federate_message_revision]
-[src: file: backend/src/api/ws.rs:1179-1187#resolved_targets]
-[src: file: backend/src/api/ws.rs:934#target_agent]
+[src: file: backend/src/api/federation.rs:126-171#federate_message_revision]
+[src: file: backend/src/api/ws.rs:1206-1214#resolved_targets]
+[src: file: backend/src/api/ws.rs:972#target_agent]
 
 New-discussion aliases follow the same independent fan-out contract. Creation
 persists the initial typed targets and keeps every native target visible as a
@@ -166,7 +166,7 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/db/discussions.rs:1778-1822#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:596-608#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:1135-1139#attach_discussion_participants]
+[src: file: backend/src/api/discussions/crud.rs:1032-1036#attach_discussion_participants]
 [src: file: backend/src/api/discussions/streaming.rs:2269-2381#independent_sibling_notice]
 [src: file: backend/src/api/discussions/streaming.rs:2162-2217#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]
@@ -180,7 +180,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5188-5274#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5200-5286#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one
@@ -189,7 +189,7 @@ receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
 [src: file: backend/src/db/discussions.rs:1559-1578#insert_message_with_targets_and_dispatches]
-[src: file: backend/src/api/disc_invite.rs:1698-1717#addressed_to_caller]
+[src: file: backend/src/api/disc_invite.rs:1694-1713#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
 `message_cli_authors`. This is local routing provenance, not portable transcript
@@ -209,9 +209,9 @@ the identity as `reply_target` so agents can inspect the decision without
 loading session tables.
 [src: file: backend/src/db/sql/100_message_cli_authors.sql:1-14#message_cli_authors]
 [src: file: backend/src/api/disc_source.rs:455-488#author_cli_session_id] [src: file: backend/src/api/disc_source.rs:542-577#message_cli_author_target]
-[src: file: backend/src/api/disc_invite.rs:1615-1673#reply_target]
-[src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
-[src: file: backend/src/api/disc_introspection.rs:83-86#reply_target] [src: file: backend/src/api/disc_introspection.rs:515-528#reply_target]
+[src: file: backend/src/api/disc_invite.rs:1680-1738#reply_target]
+[src: file: backend/src/api/disc_invite.rs:2036-2056#addressed_to_session]
+[src: file: backend/src/api/disc_introspection.rs:85-88#reply_target] [src: file: backend/src/api/disc_introspection.rs:515-528#reply_target]
 
 An untargeted live peer append in a native discussion deliberately addresses
 the native principal: this is how an invited CLI hands work back to the
@@ -243,7 +243,7 @@ exactly one follow-up, and the rest fold into that one. Jobs under any other
 dedupe key (execution workers, resume completions, human turns, question
 answers) are neither absorbed nor absorbing. Server-authored orchestration
 events post with zero dispatch; they do not queue a turn.
-[src: file: backend/src/db/agent_dispatch.rs:319-386#enqueue_coalescing_peer_wake]
+[src: file: backend/src/db/agent_dispatch.rs:343-410#enqueue_coalescing_peer_wake]
 [src: file: backend/src/db/discussions.rs:1601-1679#insert_message_with_targets_and_dispatches_within_tx]
 
 ## When a start is refused
@@ -278,7 +278,7 @@ Two distinctions the reason must not blur, and does not:
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
   [src: file: backend/src/api/discussions/crud.rs:673-716#replace_message_targets]
-  [src: file: backend/src/api/discussions/runtime.rs:711-730#dispatch_target_tier]
+  [src: file: backend/src/api/discussions/runtime.rs:790-809#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.
 - `messages.target_agent` remains the first-target compatibility projection.
@@ -289,7 +289,7 @@ Two distinctions the reason must not blur, and does not:
   names the elapsed deadline and offers an explicit retry.
 [src: file: backend/src/db/discussions.rs:1514-1557#insert_message_with_targeted_dispatch]
   [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/db/agent_dispatch.rs:997-1146#recover_after_restart]
+[src: file: backend/src/db/agent_dispatch.rs:1106-1255#recover_after_restart]
 [src: file: backend/src/api/discussions/streaming.rs:658-674#timeout_notice]
 
 The pure zero/single-target decision table remains in

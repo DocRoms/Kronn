@@ -163,7 +163,6 @@ fn workflow() -> Workflow {
     Workflow {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         pinned: false,
         id: "wf-793".into(),
@@ -201,6 +200,7 @@ fn pending_run() -> WorkflowRun {
         trigger_context: None,
         step_results: vec![],
         tokens_used: 0,
+        shadow_tokens_used: 0,
         workspace_path: None,
         started_at: chrono::Utc::now(),
         finished_at: None,

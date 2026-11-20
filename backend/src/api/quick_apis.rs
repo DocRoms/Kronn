@@ -47,7 +47,7 @@ pub async fn create(
 
 /// [`create`] naming the creating agent, if any: a resource an agent creates
 /// can shadow a shared `ref:` and so disable the workflows using it.
-pub(crate) async fn create_as(
+pub async fn create_as(
     state: AppState,
     req: CreateQuickApiRequest,
     creator_agent: Option<String>,
@@ -148,7 +148,7 @@ fn quick_api_execution(qa: &QuickApi) -> serde_json::Value {
     })
 }
 
-pub(crate) async fn update_as(
+pub async fn update_as(
     state: AppState,
     id: String,
     req: CreateQuickApiRequest,
@@ -426,7 +426,7 @@ pub async fn import_qa(
 /// bearer it holds — a host CLI joined through the bridge is not the person in
 /// the UI, so it never skips the agent access policy. Only a request that is
 /// neither is a human.
-pub(crate) fn broker_caller(
+pub fn broker_caller(
     bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     marker: &crate::core::bridge_token::AgentMark,
     native: Option<&crate::core::api_access::ApiCaller>,
@@ -691,6 +691,8 @@ pub async fn run_qa(
         mcp_config_ids: vec![],
         skill_ids: vec![],
         external_effect: false,
+        shadows: Vec::new(),
+        shadow_merge: None,
         profile_ids: vec![],
         directive_ids: vec![],
         batch_quick_prompt_id: None,
@@ -735,6 +737,7 @@ pub async fn run_qa(
         transform_data: None,
         page_publish: None,
         task_board: None,
+        decide: None,
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
@@ -1172,6 +1175,8 @@ pub async fn batch_run_qa(
         mcp_config_ids: vec![],
         skill_ids: vec![],
         external_effect: false,
+        shadows: Vec::new(),
+        shadow_merge: None,
         profile_ids: vec![],
         directive_ids: vec![],
         batch_quick_prompt_id: None,
@@ -1216,6 +1221,7 @@ pub async fn batch_run_qa(
         transform_data: None,
         page_publish: None,
         task_board: None,
+        decide: None,
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,

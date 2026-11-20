@@ -57,7 +57,14 @@ pub enum WsMessage {
     /// Presence announcement: a peer is online or offline.
     Presence {
         from_pseudo: String,
+        /// The sender's public address. It names the contact; it proves nothing.
         from_invite_code: String,
+        /// The per-contact secret this peer was paired with (KT-1650). Empty on
+        /// the local bus and for the frontend, never relayed, never shown to the
+        /// UI: the receiver strips it before the frame reaches the bus.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        #[ts(skip)]
+        from_secret: String,
         online: bool,
     },
     /// Heartbeat ping (sent by client).
@@ -363,6 +370,7 @@ mod tests {
         WsMessage::Presence {
             from_pseudo: "p".into(),
             from_invite_code: code.into(),
+            from_secret: String::new(),
             online: true,
         }
     }

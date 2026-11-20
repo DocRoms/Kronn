@@ -138,7 +138,7 @@ impl SecurityPolicy {
     /// The outbound transport policy: public addresses only, except the
     /// test-only loopback allowance.
     pub fn destinations(self) -> safe_http::SafeHttpPolicy {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if !self.enforce_public_ip {
             return safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;
         }
@@ -148,7 +148,7 @@ impl SecurityPolicy {
     /// For integration tests that MUST hit localhost (wiremock). Host-match
     /// guard stays on because the plugin base URL is the same localhost —
     /// so the actual allowlist path still runs.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn allow_loopback_for_tests() -> Self {
         Self {
             enforce_host_match: true,
@@ -192,12 +192,14 @@ async fn execute_core_gated(
     outcome
 }
 
+inventory::submit! { crate::core::uplink::ApiCallSecrets(call_secrets) }
+
 /// Every value this call takes from the env or the credential store is a
 /// secret wherever it lands, except the config values that are public (see
 /// [`is_public_config`]): masking a base URL would rewrite the links of the
 /// data handed to the next steps (`***/browse/EW-1`). The resolved auth adds
 /// its wire forms (Basic decoded to its password, bearer and header tokens).
-pub(crate) fn call_secrets(
+pub fn call_secrets(
     plugin: &McpServer,
     env: &HashMap<String, String>,
 ) -> crate::core::secret_scrub::SecretSet {
@@ -293,7 +295,7 @@ fn is_public_config(spec: &ApiSpec, trusted: bool, key: &str, value: &str) -> bo
 /// credential marker, ever, and anything that can parse as a URL (a `:` or `/`)
 /// goes through the full raw URL check. Only a plain token (host, workspace
 /// id) is taken as is.
-pub(crate) fn config_value_is_clean(value: &str) -> bool {
+pub fn config_value_is_clean(value: &str) -> bool {
     if has_credential_marker(value) {
         return false;
     }
@@ -741,7 +743,7 @@ fn render_endpoint(
 }
 
 /// The path of the plugin's base URL, without its trailing slash.
-pub(crate) fn base_path(spec: &ApiSpec, env: &HashMap<String, String>) -> Result<String, String> {
+pub fn base_path(spec: &ApiSpec, env: &HashMap<String, String>) -> Result<String, String> {
     let base = interpolate_env(&spec.base_url, env);
     Url::parse(base.trim_end_matches('/'))
         .map(|u| u.path().trim_end_matches('/').to_string())
@@ -750,7 +752,7 @@ pub(crate) fn base_path(spec: &ApiSpec, env: &HashMap<String, String>) -> Result
 
 /// The method and the path relative to the plugin's base URL that this step
 /// would send, computed without any network access (KT-1026 access gate).
-pub(crate) fn request_target(
+pub fn request_target(
     step: &WorkflowStep,
     spec: &ApiSpec,
     env: &HashMap<String, String>,
@@ -969,6 +971,120 @@ fn uses_cached_token(plugin: &McpServer) -> bool {
     })
 }
 
+/// Same rule as [`quick_prompt_for`] for a Quick API.
+pub fn quick_api_for(
+    conn: &rusqlite::Connection,
+    run_id: Option<&str>,
+    id: &str,
+) -> anyhow::Result<std::result::Result<Option<QuickApi>, String>> {
+    crate::db::workflow_run_pins::pinned_or_live(
+        conn,
+        run_id,
+        crate::db::workflow_run_pins::QUICK_API,
+        "Quick API",
+        id,
+        crate::db::quick_apis::get_quick_api,
+    )
+}
+
+/// Tag pour le diagnostic d'erreur — quel step type a déclenché l'hydratation.
+fn step_kind_label(step: &WorkflowStep) -> &'static str {
+    match step.step_type {
+        crate::models::StepType::BatchApiCall => "BatchApiCall",
+        crate::models::StepType::ApiCall => "ApiCall",
+        _ => "ApiCall-like",
+    }
+}
+
+/// Si `step.quick_api_id` est set, charge le QuickApi correspondant et applique
+/// l'override per-field (step wins). Mutate `step` in place.
+///
+/// Retourne `Err(message)` si :
+///   - Le QuickApi référencé est introuvable
+///   - L'accès DB échoue
+///
+/// No-op si `quick_api_id` est `None`.
+/// `run_id` is the workflow run executing the step: a pinned run gets its
+/// pinned revision (KT-1096).
+pub async fn hydrate_step_from_quick_api(
+    step: &mut WorkflowStep,
+    db: &crate::db::Database,
+    run_id: Option<&str>,
+) -> Result<(), String> {
+    let qa_id = match step.quick_api_id.clone() {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+    let kind = step_kind_label(step);
+
+    let qa_lookup = qa_id.clone();
+    let pinned_run = run_id.map(str::to_string);
+    let qa = match db
+        .with_read_conn(move |conn| {
+            let api = match quick_api_for(conn, pinned_run.as_deref(), &qa_lookup)? {
+                Ok(api) => api,
+                Err(reason) => return Ok(Err(reason)),
+            };
+            if let Some(api) = &api {
+                crate::core::repository_resources::ensure_quick_api_execution_approved(conn, api)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            Ok(Ok(api))
+        })
+        .await
+    {
+        Ok(Err(reason)) => return Err(reason),
+        Ok(Ok(Some(q))) => q,
+        Ok(Ok(None)) => {
+            return Err(format!(
+                "{} step references QuickApi `{}` which does not exist.",
+                kind, qa_id
+            ));
+        }
+        Err(e) => return Err(format!("QuickApi preflight failed: {}", e)),
+    };
+
+    // Per-field override : la valeur du step gagne si présente, sinon fallback
+    // sur la valeur du QuickApi. Aligne batch + single sur la même règle.
+    if step.api_plugin_slug.is_none() {
+        step.api_plugin_slug = Some(qa.api_plugin_slug);
+    }
+    if step.api_config_id.is_none() {
+        step.api_config_id = Some(qa.api_config_id);
+    }
+    if step.api_endpoint_path.is_none() {
+        step.api_endpoint_path = Some(qa.api_endpoint_path);
+    }
+    if step.api_method.is_none() {
+        step.api_method = qa.api_method;
+    }
+    if step.api_query.is_none() {
+        step.api_query = qa.api_query;
+    }
+    if step.api_path_params.is_none() {
+        step.api_path_params = qa.api_path_params;
+    }
+    if step.api_headers.is_none() {
+        step.api_headers = qa.api_headers;
+    }
+    if step.api_body.is_none() {
+        step.api_body = qa.api_body;
+    }
+    if step.api_extract.is_none() {
+        step.api_extract = qa.api_extract;
+    }
+    if step.api_pagination.is_none() {
+        step.api_pagination = qa.api_pagination;
+    }
+    if step.api_timeout_ms.is_none() {
+        step.api_timeout_ms = qa.api_timeout_ms;
+    }
+    if step.api_max_retries.is_none() {
+        step.api_max_retries = qa.api_max_retries;
+    }
+    Ok(())
+}
+
 /// The step hydrated from its Quick API, its plugin and its decrypted env:
 /// what every broker call sends from. Dynamic credentials are not minted yet,
 /// so an access decision can run before any token exists.
@@ -984,12 +1100,7 @@ async fn load_broker_target(
     // un appel canonique côté QuickApi et de le réutiliser dans un step
     // ApiCall single sans tout re-saisir.
     let mut step_owned = step.clone();
-    crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
-        &mut step_owned,
-        &state.db,
-        pinned_run_id,
-    )
-    .await?;
+    hydrate_step_from_quick_api(&mut step_owned, &state.db, pinned_run_id).await?;
     let step = &step_owned;
 
     let Some(slug) = step.api_plugin_slug.as_ref() else {
@@ -1568,7 +1679,7 @@ fn render_body(body: &Option<Value>, ctx: &TemplateContext) -> anyhow::Result<Op
 /// the regex would match `{x}` (the inner pair) — so we explicitly mask
 /// double-brace runs before substitution and restore them after. Cheap
 /// and bullet-proof, no `fancy-regex` dependency needed.
-pub(crate) fn resolve_path_params(
+pub fn resolve_path_params(
     endpoint_path: &str,
     path_params: &Option<HashMap<String, String>>,
     ctx: &TemplateContext,
@@ -1811,7 +1922,7 @@ fn resolve_method(
 // ─── Watch trigger poll ─────────────────────────────────────────────────
 
 /// One conditional GET a `Watch` trigger sends from the scheduler (KT-1099).
-pub(crate) struct WatchPollRequest<'a> {
+pub struct WatchPollRequest<'a> {
     /// A synthetic ApiCall step naming the source (API + endpoint, or a Quick API).
     pub source: &'a WorkflowStep,
     /// The workflow whose runs receive the response: the audience an API
@@ -1827,7 +1938,7 @@ pub(crate) struct WatchPollRequest<'a> {
 
 /// What a poll returned; every text field has had the call's credentials removed.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct WatchPollResponse {
+pub struct WatchPollResponse {
     pub status: u16,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
@@ -1839,7 +1950,7 @@ pub(crate) struct WatchPollResponse {
 /// the API's default headers and the guarded transport, a GET only, no
 /// retry (the next poll is the retry, bar the one re-mint after a 401 on a
 /// cached bearer) and no `api_call_logs` row.
-pub(crate) async fn execute_watch_poll(
+pub async fn execute_watch_poll(
     state: &crate::AppState,
     policy: SecurityPolicy,
     request: WatchPollRequest<'_>,
@@ -2609,18 +2720,18 @@ async fn send_with_retry(
 }
 
 /// A JSON response past this size fails the step before it is held whole.
-pub(crate) const MAX_JSON_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_JSON_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 /// An error body only feeds a 512-character excerpt.
 const ERROR_BODY_READ_BYTES: u64 = 64 * 1024;
 
-pub(crate) enum CappedBody {
+pub enum CappedBody {
     Whole(Vec<u8>),
     /// Bytes read when the cap was crossed (or the declared length).
     TooLarge(u64),
 }
 
 /// Reads a body chunk by chunk and stops as soon as it crosses `max`.
-pub(crate) async fn read_body_capped(
+pub async fn read_body_capped(
     mut response: reqwest::Response,
     max: u64,
 ) -> Result<CappedBody, reqwest::Error> {
@@ -2726,7 +2837,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 /// Parse the `[SIGNAL: http_NNN]` line emitted by both success and
 /// failure paths (see `execute_api_call_step_core` + `fail()`). Returns
 /// None when no HTTP code is encoded (transport error, config error).
-pub(crate) fn extract_http_status_from_output(output: &str) -> Option<u16> {
+pub fn extract_http_status_from_output(output: &str) -> Option<u16> {
     for line in output.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("[SIGNAL: http_") {
@@ -2959,6 +3070,8 @@ mod tests {
             delay_after_secs: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -3003,6 +3116,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

@@ -5,10 +5,10 @@ Status: **implemented for 0.9.1** (2026-07-25).
 The domain schema, compact HTTP/MCP contract, discussion panel, global backlog,
 human-gated proposal cards and delta-only prompt notifications are implemented.
 `[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99#planning_tasks]`
-`[src: file: backend/src/api/planning.rs:239-280#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:327-374#decide_proposal_item]`
+`[src: file: backend/src/api/planning.rs:311-352#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:399-446#decide_proposal_item]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
 `[src: file: frontend/src/pages/PlanningPage.tsx:191-216#withDiscussion]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3771-3802#planning_change_count]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3782-3813#planning_change_count]`
 
 This document is the implementation brief for a future Planning workspace and
 the smaller discussion-plan panel that exposes the same task data inside a
@@ -117,7 +117,7 @@ stops animating when reduced motion is requested. Background plan refreshes
 update membership and indicators without resetting the selected view.
 `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:842-872#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:240-249#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:407-440#filteredAllRelations]`
 `[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:133-138#writePlanOrchestrationState]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:550-554#renderProgress]` `[src: file: frontend/src/components/DiscussionPlanPanel.css:161-178#plan-task-progress]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:163-174#applyPlan]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:561-565#renderProgress]` `[src: file: frontend/src/components/DiscussionPlanPanel.css:161-178#plan-task-progress]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:163-174#applyPlan]`
 
 Agents may instead emit structured proposals that the UI renders as existing
 action-like cards. Initial actions are:
@@ -171,7 +171,7 @@ Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
 new room. `[src: file: backend/src/api/disc_prompts.rs:491-538#planning_notice]`
-`[src: file: backend/src/api/discussions/streaming.rs:3771-3802#planning_change_count]`
+`[src: file: backend/src/api/discussions/streaming.rs:3782-3813#planning_change_count]`
 
 The intended read surface is:
 
@@ -184,7 +184,7 @@ Writes are separate tools with narrow schemas. Lists are compact by default and
 full content is returned only for an explicitly requested task.
 `task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
 checkbox progress. Delta timestamps are compared numerically as RFC3339
-instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2895-2943#task_changes]` Agents are
+instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2933-2981#task_changes]` Agents are
 taught this contract in the same prompt/instruction layer that advertises the
 discussion-history tools `disc_meta`, `disc_get_message` and `disc_summarize`:
 the delayed history notice also lists the Planning reads and says how to write (a direct `task_create`, or a `kronn-plan-action` proposal). `[src: file: backend/src/api/disc_prompts.rs:569-599#introspection_notice]`
@@ -201,8 +201,8 @@ Runtime parity is capability-based:
 - Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
-  `[src: file: backend/src/api/agent_tools.rs:2227-2434#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2457-2488#task_create]` `[src: file: backend/src/api/agent_tools.rs:4037-4044#actor]`
-  `[src: file: backend/src/api/agent_tools.rs:5025-5052#unwrap_api_compact_task]`
+  `[src: file: backend/src/api/agent_tools.rs:2227-2434#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2457-2488#task_create]` `[src: file: backend/src/api/agent_tools.rs:4070-4077#actor]`
+  `[src: file: backend/src/api/agent_tools.rs:5067-5094#unwrap_api_compact_task]`
   `[src: file: backend/src/api/disc_prompts.rs:278-287#agent_has_native_planning]`
 
 The first release is local-only. Actor/audit metadata must still distinguish
@@ -247,7 +247,7 @@ assignees. The role is optional (`owner` | `reviewer`).
 6. **Project workspace — implemented** — project cards expose their linked
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
-   `[src: file: frontend/src/components/ProjectCard.tsx:2439-2450#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:88-121#createTask]`
+   `[src: file: frontend/src/components/ProjectCard.tsx:2443-2454#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:88-121#createTask]`
    `[src: file: frontend/src/components/ProjectTasksPanel.tsx:167-176#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.

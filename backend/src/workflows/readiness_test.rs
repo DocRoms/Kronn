@@ -28,7 +28,6 @@ fn workflow(id: &str, steps: Vec<WorkflowStep>, on_failure: Vec<WorkflowStep>) -
         variables: vec![],
         enabled: true,
         retention: None,
-        shadow: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
@@ -499,4 +498,145 @@ fn a_saved_quick_exec_source_awaiting_approval_is_a_named_blocker() {
     assert!(assess_with(&wf, &HashMap::new(), &approved).ready);
     // Without the Quick Exec map, the old check sees nothing to block.
     assert!(assess(&wf, &HashMap::new()).ready);
+}
+
+/// KT-1367 — a Decide step with no decision model saved is a blocker the
+/// human clears, and the launch refuses it with the same pointer.
+#[test]
+fn a_decide_step_without_a_decision_model_blocks_the_workflow() {
+    let decide = WorkflowStep {
+        name: "decide".into(),
+        step_type: StepType::Decide,
+        decide: Some(crate::models::DecideConfig {
+            state: "{{steps.tests.output}}".into(),
+            questions: vec![crate::models::DecideQuestion {
+                id: "ship".into(),
+                instructions: "Ready to merge?".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let wf = workflow("wf-decide", vec![decide], vec![]);
+
+    let _none = crate::core::config::test_saved_decision::set(false);
+    let readiness = assess(&wf, &HashMap::new());
+    let blocker = readiness
+        .blockers
+        .iter()
+        .find(|blocker| blocker.reason.as_deref() == Some("decision_model_missing"))
+        .expect("blocked");
+    assert!(blocker.human_only);
+    assert!(
+        blocker.action.contains("Config › Agents › Ollama"),
+        "{}",
+        blocker.action
+    );
+
+    let mut tiers = crate::models::ModelTiersConfig::default();
+    let refusal = crate::workflows::decide_step::launch_refusal(&wf, &tiers).expect("refused");
+    assert!(refusal.contains("Config › Agents › Ollama"), "{refusal}");
+
+    let _saved = crate::core::config::test_saved_decision::set(true);
+    let readiness = assess(&wf, &HashMap::new());
+    assert!(readiness
+        .blockers
+        .iter()
+        .all(|blocker| blocker.reason.as_deref() != Some("decision_model_missing")));
+    tiers.ollama.decision = Some("clef-flash:9b".into());
+    assert_eq!(
+        crate::workflows::decide_step::launch_refusal(&wf, &tiers),
+        None
+    );
+}
+
+fn decide_on(model: Option<&str>, connection: Option<&str>) -> WorkflowStep {
+    WorkflowStep {
+        name: "decide".into(),
+        step_type: StepType::Decide,
+        decide: Some(crate::models::DecideConfig {
+            state: "{{steps.tests.output}}".into(),
+            questions: vec![crate::models::DecideQuestion {
+                id: "ship".into(),
+                instructions: "Ready to merge?".into(),
+                ..Default::default()
+            }],
+            model: model.map(str::to_string),
+            connection_id: connection.map(str::to_string),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// KT-1697 — a step whose own decision model Ollama does not list, or whose
+/// connection cannot be called, is flagged; the configured model never stands
+/// in for it, and a step on an installed model does not need the default.
+#[test]
+fn a_decide_step_on_a_missing_model_or_a_connection_is_flagged_never_swapped() {
+    let reasons = |readiness: &WorkflowReadiness| -> Vec<String> {
+        readiness
+            .blockers
+            .iter()
+            .filter_map(|blocker| blocker.reason.clone())
+            .collect()
+    };
+    // A saved default exists: it must not rescue the step.
+    let _saved = crate::core::config::test_saved_decision::set(true);
+    let installed = DecisionModels {
+        installed: ["clef-flash:9b".to_string()].into(),
+        connections: [(
+            "or-1".to_string(),
+            "perplexity/pplx-decider-flash-v1.2".to_string(),
+        )]
+        .into(),
+    };
+
+    let missing = workflow("wf", vec![decide_on(Some("ghost:7b"), None)], vec![]);
+    let readiness = assess_with_decision_models(&missing, &HashMap::new(), &installed);
+    assert_eq!(reasons(&readiness), ["decision_model_not_installed"]);
+    assert!(!readiness.ready);
+    let blocker = &readiness.blockers[0];
+    assert_eq!(blocker.step.as_deref(), Some("decide"));
+    assert!(blocker.message.contains("ghost:7b"), "{}", blocker.message);
+    assert!(!blocker.human_only);
+
+    let present = workflow("wf", vec![decide_on(Some("clef-flash:9b"), None)], vec![]);
+    assert!(assess_with_decision_models(&present, &HashMap::new(), &installed).ready);
+
+    // A connection that serves the step's model is callable; one that is gone,
+    // or whose decision model changed, is flagged and never swapped.
+    let served = workflow(
+        "wf",
+        vec![decide_on(
+            Some("perplexity/pplx-decider-flash-v1.2"),
+            Some("or-1"),
+        )],
+        vec![],
+    );
+    assert!(assess_with_decision_models(&served, &HashMap::new(), &installed).ready);
+    for (model, connection) in [
+        ("perplexity/pplx-decider-flash-v1.2", "conn-gone"),
+        ("perplexity/another-decider", "or-1"),
+    ] {
+        let flagged = workflow("wf", vec![decide_on(Some(model), Some(connection))], vec![]);
+        let readiness = assess_with_decision_models(&flagged, &HashMap::new(), &installed);
+        assert_eq!(reasons(&readiness), ["decision_connection_unavailable"]);
+        assert!(!readiness.blockers[0].human_only);
+    }
+
+    // An unreadable catalogue skips the model check rather than guessing.
+    assert!(assess(&missing, &HashMap::new()).ready);
+
+    // A step with its own model does not need the configured one.
+    let _none = crate::core::config::test_saved_decision::set(false);
+    assert!(assess_with_decision_models(&present, &HashMap::new(), &installed).ready);
+    let tiers = crate::models::ModelTiersConfig::default();
+    assert_eq!(
+        crate::workflows::decide_step::launch_refusal(&present, &tiers),
+        None
+    );
+    let default_step = workflow("wf", vec![decide_on(None, None)], vec![]);
+    assert!(crate::workflows::decide_step::launch_refusal(&default_step, &tiers).is_some());
 }

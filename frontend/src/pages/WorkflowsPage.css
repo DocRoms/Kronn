@@ -2571,6 +2571,17 @@
   background: var(--kr-bg-hover);
 }
 
+/* KT-1367 — an option that needs a setting first (the Decide step). */
+.wf-step-type-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.wf-step-type-option:disabled:hover {
+  border-color: var(--kr-border-light);
+  background: var(--kr-bg-subtle);
+}
+
 .wf-step-type-option[data-selected='true'] {
   border-color: rgba(var(--kr-accent-rgb), 0.32);
   background: rgba(var(--kr-accent-rgb), 0.07);
@@ -3172,7 +3183,7 @@
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
-  z-index: 100;
+  z-index: var(--kr-z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3275,6 +3286,12 @@
   border-radius: var(--kr-r-sm);
   background: var(--kr-bg-elevated);
   border: 1px solid var(--kr-border-faint);
+}
+
+/* The lists of the import preview keep their bullets inside the panel. */
+.wf-import-skills ul {
+  margin: 4px 0 8px;
+  padding-left: 18px;
 }
 
 .wf-import-redacted {
@@ -3818,6 +3835,35 @@
   font-size: var(--kr-fs-sm);
   color: var(--kr-text-tertiary);
   cursor: pointer;
+}
+
+/* ── Project scope control (Infos step) ────────────────── */
+.wf-scope {
+  border: 0;
+  margin-inline: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.wf-scope > legend {
+  padding: 0;
+}
+
+.wf-scope-options,
+.wf-scope-projects {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.wf-scope-projects {
+  margin-top: var(--kr-sp-3);
+  padding-left: var(--kr-sp-8);
+}
+
+.wf-scope-hint {
+  margin-top: var(--kr-sp-3);
+  overflow-wrap: anywhere;
 }
 
 /* ── Cron preview box ──────────────────────────────────── */
@@ -7702,6 +7748,33 @@
   margin: 4px 0 0;
 }
 
+/* KT-1796 — possible secrets of a run: a warning, nothing was blocked. */
+.wf-possible-secrets {
+  margin: 10px 0 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  font-size: var(--kr-fs-sm);
+  border-radius: var(--kr-r-md);
+}
+
+.wf-possible-secrets strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--kr-warning);
+}
+
+.wf-possible-secrets p {
+  margin: 4px 0 0;
+}
+
+.wf-possible-secrets ul {
+  margin: 2px 0 4px;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+
 .wf-rollback-separator {
   margin: 10px 0 6px;
   padding: 6px 10px;
@@ -8357,48 +8430,85 @@
   .wf-shadow-select { min-width: 0; flex: 1; }
 }
 .wf-run-compact-shadow { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: var(--kr-r-sm); font-size: var(--kr-fs-xs); font-weight: 700; background: var(--kr-accent-bg); color: var(--kr-accent-ink); white-space: nowrap; }
+.wf-run-compact-secrets { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: var(--kr-r-sm); font-size: var(--kr-fs-xs); font-weight: 700; background: rgba(var(--kr-warning-rgb), 0.12); color: var(--kr-warning); white-space: nowrap; }
 .wf-run-compact-shadow[data-variant="paired"] { background: transparent; border: 1px dashed var(--kr-accent-border); font-weight: 600; }
-.wf-run-compact-pair { gap: 5px; }
-.wf-run-compact-pair-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--kr-text-faint); }
-.wf-run-compact-pair[data-status="Success"] .wf-run-compact-pair-dot { background: var(--kr-success); }
-.wf-run-compact-pair[data-status="Failed"] .wf-run-compact-pair-dot { background: var(--kr-error); }
-.wf-run-compact-pair[data-status="Running"] .wf-run-compact-pair-dot,
-.wf-run-compact-pair[data-status="Pending"] .wf-run-compact-pair-dot { background: var(--kr-accent); }
-.wf-run-compact-pair[data-status="WaitingApproval"] .wf-run-compact-pair-dot,
-.wf-run-compact-pair[data-status="Partial"] .wf-run-compact-pair-dot,
-.wf-run-compact-pair[data-status="StoppedByGuard"] .wf-run-compact-pair-dot { background: var(--kr-warning); }
-.wf-run-compact-pair-meta { color: var(--kr-text-faint); font-weight: 400; }
-.wf-run-pair { margin: 6px 0 4px; }
-.wf-run-pair-tabs { margin-bottom: 4px; }
 .wf-shadow-cmp { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-md); background: var(--kr-bg-raised); font-size: var(--kr-fs-sm); min-width: 0; }
 .wf-shadow-cmp-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; }
 .wf-shadow-cmp-title { display: inline-flex; align-items: center; gap: 6px; }
-.wf-shadow-cmp-links { display: inline-flex; gap: 10px; flex-wrap: wrap; font-size: var(--kr-fs-xs); }
-.wf-shadow-cmp-link { display: inline-flex; align-items: center; gap: 3px; color: var(--kr-accent-ink); text-decoration: none; }
-.wf-shadow-cmp-link:hover { text-decoration: underline; }
-.wf-shadow-cmp-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 8px 0; font-size: var(--kr-fs-xs); }
-.wf-shadow-cmp-filter { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; cursor: pointer; color: var(--kr-text-secondary); }
 .wf-shadow-cmp-verdict { padding: 1px 7px; border-radius: var(--kr-r-pill); font-size: var(--kr-fs-xs); font-weight: 600; white-space: nowrap; border: 1px solid var(--kr-border-subtle); color: var(--kr-text-secondary); }
 .wf-shadow-cmp-verdict[data-verdict="different"] { background: var(--kr-warning-bg); border-color: var(--kr-warning); color: var(--kr-text-primary); }
 .wf-shadow-cmp-verdict[data-verdict="same"] { background: var(--kr-success-bg); border-color: var(--kr-success); color: var(--kr-text-primary); }
 .wf-shadow-cmp-verdict[data-verdict="missing"] { border-style: dashed; }
-.wf-shadow-cmp-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-.wf-shadow-cmp-step { padding: 8px 10px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-sm); background: var(--kr-bg-surface); min-width: 0; }
-.wf-shadow-cmp-step[data-verdict="different"] { border-left: 3px solid var(--kr-warning); }
-.wf-shadow-cmp-step-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
-.wf-shadow-cmp-name { font-weight: 650; font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); }
-.wf-shadow-cmp-sides { display: inline-grid; grid-template-columns: auto auto; gap: 2px 8px; margin-left: auto; font-size: var(--kr-fs-xs); align-items: baseline; }
-.wf-shadow-cmp-lane { color: var(--kr-text-muted); }
-.wf-shadow-cmp-side { display: inline-flex; gap: 8px; flex-wrap: wrap; }
-.wf-shadow-cmp-side[data-status="Failed"] .wf-shadow-cmp-status { color: var(--kr-error); }
-.wf-shadow-cmp-status { font-weight: 600; }
 .wf-shadow-cmp-note { margin: 6px 0 0; font-size: var(--kr-fs-xs); color: var(--kr-text-secondary); }
 .wf-shadow-cmp-diff { margin-top: 8px; max-height: 320px; overflow: auto; }
 .wf-shadow-cmp-more { margin-top: 6px; font-size: var(--kr-fs-xs); }
 .wf-shadow-cmp-more > summary { cursor: pointer; color: var(--kr-text-secondary); }
 .wf-shadow-cmp-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; margin: 6px 0 0; padding: 6px 8px; border-radius: var(--kr-r-sm); background: var(--kr-bg-code); font-size: var(--kr-fs-xs); }
+/* KT-1459 — shadow lanes: editor, per-lane metrics, N-way comparison */
+.wf-shadow-item { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-md); background: var(--kr-bg-surface); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.wf-shadow-item-head { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 8px 12px; }
+.wf-shadow-item-field { display: flex; flex-direction: column; gap: 2px; font-size: var(--kr-fs-xs); min-width: 0; }
+.wf-shadow-item-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; padding: 3px 0; font-size: var(--kr-fs-sm); }
+.wf-shadow-item-limits { align-items: flex-end; }
+.wf-shadow-item-remove { margin-left: auto; }
+.wf-shadow-agent-fields { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.wf-shadow-step-name { min-width: 90px; font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); }
+.wf-shadow-input { padding: 4px 8px; border-radius: var(--kr-r-sm); border: 1px solid var(--kr-border); background: var(--kr-bg-input); color: var(--kr-text-primary); font: inherit; font-size: var(--kr-fs-sm); min-width: 0; }
+.wf-shadow-input[aria-invalid="true"] { border-color: var(--kr-error); }
+.wf-shadow-number { width: 96px; }
+.wf-shadow-textarea { width: 100%; resize: vertical; font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); }
+.wf-shadow-item-enabled { flex-direction: row; align-items: center; gap: 6px; }
+.wf-shadow-cmp-step-block { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--kr-border-subtle); min-width: 0; }
+.wf-shadow-cmp-step-block:first-of-type { margin-top: 8px; border-top: 0; padding-top: 0; }
+.wf-shadow-cmp-step-title { margin: 0 0 4px; font-family: var(--kr-font-mono); font-size: var(--kr-fs-sm); font-weight: 650; }
+.wf-shadow-identical { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 4px 0; font-size: var(--kr-fs-xs); }
+.wf-shadow-identical-field b { font-weight: 600; font-family: var(--kr-font-mono); }
+.wf-shadow-execs { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.wf-shadow-exec { padding: 8px 10px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-sm); background: var(--kr-bg-surface); min-width: 0; font-size: var(--kr-fs-xs); }
+.wf-shadow-exec[data-status="failed"], .wf-shadow-exec[data-status="timed_out"], .wf-shadow-exec[data-status="interrupted"] { border-left: 3px solid var(--kr-error); }
+.wf-shadow-exec[data-status="over_budget"], .wf-shadow-exec[data-status="skipped"] { border-left: 3px solid var(--kr-warning); }
+.wf-shadow-exec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wf-shadow-exec-name { font-size: var(--kr-fs-sm); overflow-wrap: anywhere; }
+.wf-shadow-exec-status { padding: 1px 7px; border-radius: var(--kr-r-pill); border: 1px solid var(--kr-border-subtle); color: var(--kr-text-secondary); white-space: nowrap; }
+.wf-shadow-exec-status[data-status="success"] { background: var(--kr-success-bg); border-color: var(--kr-success); color: var(--kr-text-primary); }
+.wf-shadow-exec-status[data-status="running"] { background: var(--kr-accent-bg); border-color: var(--kr-accent-border); color: var(--kr-accent-ink); }
+.wf-shadow-exec-status[data-status="failed"], .wf-shadow-exec-status[data-status="timed_out"], .wf-shadow-exec-status[data-status="interrupted"] { border-color: var(--kr-error); color: var(--kr-error); }
+.wf-shadow-exec-diff { margin: 6px 0 0; display: grid; gap: 2px; }
+.wf-shadow-exec-field { display: flex; gap: 6px; align-items: baseline; }
+.wf-shadow-exec-field dt { min-width: 64px; }
+.wf-shadow-exec-field dd { margin: 0; font-family: var(--kr-font-mono); overflow-wrap: anywhere; font-weight: 600; }
+.wf-shadow-exec-metrics { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 6px 0 0; color: var(--kr-text-secondary); }
+.wf-shadow-exec-metrics b { color: var(--kr-text-primary); font-weight: 650; }
+.wf-shadow-merge { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--kr-border-subtle); }
+.wf-shadow-merge-result { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--kr-accent-border); border-radius: var(--kr-r-sm); background: var(--kr-accent-bg); font-size: var(--kr-fs-xs); min-width: 0; }
+.wf-shadow-merge-result[data-status="rejected"], .wf-shadow-merge-result[data-status="failed"] { border-color: var(--kr-error); background: var(--kr-bg-surface); }
+.wf-shadow-merge-result[data-status="skipped"] { border-color: var(--kr-warning); background: var(--kr-bg-surface); }
+.wf-shadow-merge-status { margin: 4px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.wf-shadow-merge-list { list-style: none; margin: 4px 0; padding: 0; display: grid; gap: 4px; }
+.wf-shadow-merge-list li { overflow-wrap: anywhere; }
+.wf-shadow-merge-table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: var(--kr-fs-xs); }
+.wf-shadow-merge-table th, .wf-shadow-merge-table td { padding: 3px 8px; border-bottom: 1px solid var(--kr-border-subtle); text-align: right; }
+.wf-shadow-merge-table th:first-child, .wf-shadow-merge-table th[scope="row"] { text-align: left; font-weight: 600; }
+.wf-shadow-merge-table td[data-warn="true"] { color: var(--kr-error); font-weight: 650; }
+/* What a shadow found that no other execution did: the reason it ran. */
+.wf-shadow-merge-table td[data-brought="true"] { color: var(--kr-success); font-weight: 650; }
+.wf-shadow-merge-table td[data-col="unique"] { color: var(--kr-text-muted); }
+.wf-shadow-merge-table td[data-col="unique"][data-brought="true"] { color: var(--kr-success); }
+.wf-shadow-merge-verdict { padding: 0 6px; border-radius: var(--kr-r-pill); border: 1px solid var(--kr-border-subtle); color: var(--kr-text-secondary); white-space: nowrap; }
+.wf-shadow-merge-verdict[data-verdict="kept"] { border-color: var(--kr-success); color: var(--kr-text-primary); background: var(--kr-success-bg); }
+.wf-shadow-merge-verdict[data-verdict="dropped_unverified"] { border-color: var(--kr-error); color: var(--kr-error); }
+.wf-shadow-determinism { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; font-size: var(--kr-fs-sm); font-weight: 600; }
+.wf-shadow-vs-main { margin-top: 8px; }
+.wf-shadow-cmp-pick { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: 10px; font-size: var(--kr-fs-xs); }
+.wf-shadow-cmp-pick label { display: inline-flex; align-items: center; gap: 6px; }
 @media (max-width: 560px) {
-  .wf-shadow-cmp-sides { margin-left: 0; width: 100%; }
-  .wf-shadow-cmp-filter { margin-left: 0; }
   .wf-shadow-cmp-diff { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* KT-1693 — the step's fallback override sits under its agent/mode choice. */
+.wf-step-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-4);
 }

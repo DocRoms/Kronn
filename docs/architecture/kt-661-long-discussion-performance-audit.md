@@ -25,7 +25,7 @@ alone does not establish a user-visible duration.
    [src: file: backend/src/db/discussions.rs:799-809#list_messages]
 3. `list_messages` selects the message content and other message fields for one
    discussion, ordered by `sort_order, timestamp`; it has no `LIMIT` or
-   pagination clause. [src: file: backend/src/db/discussions.rs:2623-2690#list_messages]
+   pagination clause. [src: file: backend/src/db/discussions.rs:2621-2688#list_messages]
    The `(discussion_id, sort_order)` unique index supports the first ordering
    key. [src: file: backend/src/db/sql/082_message_sequence.sql:14-15#idx_messages_discussion_sort_order_unique]
 4. The frontend polls `GET /api/discussions/{id}/poll` on active-discussion
@@ -39,7 +39,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:997-998#reconcileLoadedDiscussion]
 5. The detail response also queries all message targets belonging to the
    discussion and groups them in a map.
-   [src: file: backend/src/db/discussions.rs:3105-3149#list_discussion_message_targets]
+   [src: file: backend/src/db/discussions.rs:3087-3131#list_discussion_message_targets]
    This means the refresh payload and
    server-side deserialization can grow with both messages and addressed
    targets, independently of visible transcript rows.
@@ -76,7 +76,7 @@ alone does not establish a user-visible duration.
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
-   [src: file: frontend/src/components/MessageBubble.tsx:2002-2009#MAX_MARKDOWN_CHARS]
+   [src: file: frontend/src/components/MessageBubble.tsx:2008-2015#MAX_MARKDOWN_CHARS]
 5. The active-detail change also triggers an effect that filters the complete
    array to mark the discussion seen.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:1959-1973#markDiscussionSeen]
@@ -90,7 +90,7 @@ alone does not establish a user-visible duration.
    `scrollTop = scrollHeight` on animation frames for up to 700 ms; the effect
    is reached after a non-empty message list loads.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:2028-2067#bottomSettleRafRef]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2093-2107#lastSettledDiscIdRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2099-2113#lastSettledDiscIdRef]
 2. For streaming content while stuck to the bottom, the page calls
    `scrollIntoView` no more often than once per 250 ms.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:2075-2085#lastScrollRef]
@@ -99,7 +99,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/hooks/useRafBatchedStream.ts:20-49#useRafBatchedStream]
    The active streaming text is
    deferred before being passed to the streaming reply renderer.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1558#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1559#deferredStreamingText]
    [src: file: frontend/src/pages/DiscussionsPage.tsx:3960-3968#deferredStreamingText]
 
 ## Findings and priorities

@@ -83,7 +83,7 @@ impl BatchTiming {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn zero() -> Self {
         Self {
             active_ms: 0,
@@ -1200,7 +1200,7 @@ fn render_qp_prompt(template: &str, first_var_name: Option<&str>, value: &str) -
 /// Fill EVERY `{{var}}` placeholder in `template` from the `vars` map. Mirrors
 /// the MCP `qp_batch_run` renderer (`render_qp_template`) so the workflow batch
 /// step and the MCP batch path produce identical prompts from the same vars.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn render_qp_template_vars(template: &str, vars: &HashMap<String, String>) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {
@@ -1936,7 +1936,6 @@ mod tests {
         let workflow = Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: wf_id.clone(),
@@ -1972,6 +1971,7 @@ mod tests {
             trigger_context: None,
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: None,
             started_at: Utc::now(),
             finished_at: None,
@@ -2067,6 +2067,8 @@ mod tests {
             delay_after_secs: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: Some(qp_id.into()),
@@ -2111,6 +2113,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

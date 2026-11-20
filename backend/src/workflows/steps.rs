@@ -23,18 +23,18 @@ pub struct StepOutcome {
 
 /// Output from a single agent run, including token usage.
 #[derive(Debug)]
-pub(crate) struct AgentOutput {
+pub struct AgentOutput {
     attempt_id: u32,
-    pub(crate) text: String,
+    pub text: String,
     /// `None`: the runtime reported no usage for this run.
-    pub(crate) tokens_used: Option<u64>,
+    pub tokens_used: Option<u64>,
     prompt_cache: runner::PromptCacheUsage,
     /// The usage `tokens_used` came from, parts kept apart: an attempt's cost is
     /// computed from these, never from the total (KT-894). `None` when the
     /// runtime reported only a total, or nothing.
-    pub(crate) reported_usage: Option<runner::ReportedUsage>,
+    pub reported_usage: Option<runner::ReportedUsage>,
     /// The cost the agent itself reported, when it gives one.
-    pub(crate) reported_cost_usd: Option<f64>,
+    pub reported_cost_usd: Option<f64>,
     native_tool_calls: Vec<NativeToolCallLog>,
     runtime_notices: Vec<String>,
 }
@@ -66,7 +66,7 @@ pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
 
 /// The refusal of a native ACP step agent whose full-access setting is off,
 /// read as the runner reads it; `None` when the agent may start.
-pub(crate) fn native_full_access_refusal_for(agent: &AgentType) -> Option<String> {
+pub fn native_full_access_refusal_for(agent: &AgentType) -> Option<String> {
     (runner::requires_explicit_full_access(agent) && !crate::core::config::saved_full_access(agent))
         .then(|| runner::native_full_access_refusal(agent))
 }
@@ -106,7 +106,7 @@ fn refusal_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
     }
 }
 
-pub(crate) fn step_model_override(
+pub fn step_model_override(
     step: &WorkflowStep,
     connection: Option<&ExternalApiConnection>,
 ) -> Option<String> {
@@ -128,7 +128,7 @@ pub(crate) fn step_model_override(
 /// KT-910 — the run's artifacts directory, granted read-only to a Claude Code
 /// or Codex step whose prompt names it. Other agents get no grant: their
 /// launch has no read-only policy to carry it.
-pub(crate) fn artifacts_read_only_dirs(
+pub fn artifacts_read_only_dirs(
     step: &WorkflowStep,
     ctx: &TemplateContext,
     prompt: &str,
@@ -159,10 +159,7 @@ pub(crate) fn artifacts_read_only_dirs(
 /// Returns `Err(String)` when strict rendering rejects an unknown variable,
 /// incomplete placeholder or unsupported filter —
 /// the caller maps that into a `Failed` StepOutcome.
-pub(crate) fn build_step_prompt(
-    step: &WorkflowStep,
-    ctx: &TemplateContext,
-) -> Result<String, String> {
+pub fn build_step_prompt(step: &WorkflowStep, ctx: &TemplateContext) -> Result<String, String> {
     let mut prompt = ctx
         .render_strict(&step.prompt_template)
         .map_err(|e| format!("Template render error: {}", e))?;
@@ -218,11 +215,14 @@ pub(crate) fn build_step_prompt(
 }
 
 /// One retry step of an agent step's backoff (15 s, 30 s, 45 s… capped at 90 s).
-#[cfg(not(test))]
-const RETRY_BACKOFF_UNIT: Duration = Duration::from_secs(15);
 /// Unit tests check the retry order, not the wait: same shape, in milliseconds.
-#[cfg(test)]
-const RETRY_BACKOFF_UNIT: Duration = Duration::from_millis(15);
+fn retry_backoff_unit() -> Duration {
+    if crate::core::test_mode::on() {
+        Duration::from_millis(15)
+    } else {
+        Duration::from_secs(15)
+    }
+}
 
 /// Execute a single workflow step.
 ///
@@ -471,15 +471,21 @@ pub async fn execute_step(
     // discussion message: the model's context window, under the configured
     // hard ceiling. Refused here, once, rather than sent to be truncated.
     let no_pinned_windows = std::collections::HashMap::new();
-    let prompt_limit = crate::api::discussions::prompt_limit::limit_for(
+    let pinned_windows = ollama_context_overrides.unwrap_or(&no_pinned_windows);
+    // A local model is held to the window its run gets, not to an assumed one.
+    let local_windows = crate::core::prompt_limit::local_windows(
+        [(step.agent.clone(), effective_model.clone())],
+        pinned_windows,
+    )
+    .await;
+    let prompt_limit = crate::core::prompt_limit::limit_with_local_windows(
         &step.agent,
         effective_model.as_deref(),
-        ollama_context_overrides.unwrap_or(&no_pinned_windows),
-        crate::api::discussions::prompt_limit::saved_hard_ceiling(),
+        pinned_windows,
+        &local_windows,
+        crate::core::prompt_limit::saved_hard_ceiling(),
     );
-    if let Err(refusal) =
-        crate::api::discussions::prompt_limit::check(prompt.len(), &prompt_limit, "Prompt")
-    {
+    if let Err(refusal) = crate::core::prompt_limit::check(prompt.len(), &prompt_limit, "Prompt") {
         return refusal_outcome(step, refusal);
     }
 
@@ -501,7 +507,7 @@ pub async fn execute_step(
             // rarely outlived a 429 window; 15s·attempt (15s/30s/45s, capped
             // 90s) gives a per-minute limit time to clear without stalling a
             // legitimate transient retry for minutes.
-            let delay = (RETRY_BACKOFF_UNIT * attempt).min(RETRY_BACKOFF_UNIT * 6);
+            let delay = (retry_backoff_unit() * attempt).min(retry_backoff_unit() * 6);
             tracing::info!(
                 "Step '{}' retry {}/{} after {:?}",
                 step.name,
@@ -996,7 +1002,9 @@ pub async fn execute_step(
                 );
                 // KT-811 — a quota refusal does not clear within the retry
                 // backoff; retrying only spends the run's attempts.
-                if let Some(quota) = super::quota_wait::classify(&last_error, chrono::Utc::now()) {
+                if let Some(quota) =
+                    crate::core::quota_text::classify(&last_error, chrono::Utc::now())
+                {
                     provenance.selected_attempt = None;
                     return StepOutcome {
                         result: StepResult {
@@ -1074,7 +1082,7 @@ pub async fn execute_step(
 /// True when a step's last error came from the stall watchdog (no agent output
 /// for `stall_timeout_secs`), as opposed to a crash/non-zero exit. Kept in sync
 /// with the `bail!` in `drive_agent_to_output`; pure + unit-tested.
-pub(crate) fn is_stall_error(err_msg: &str) -> bool {
+pub fn is_stall_error(err_msg: &str) -> bool {
     err_msg.contains("Agent stalled")
 }
 
@@ -1084,7 +1092,7 @@ pub(crate) fn is_stall_error(err_msg: &str) -> bool {
 /// anything else (crash, or a stall without `on_timeout`) fails normally and
 /// tips into the rollback chain. Returns `(output, condition_result,
 /// condition_action)`. Pure so the routing is unit-tested without an agent.
-pub(crate) fn timeout_routing(
+pub fn timeout_routing(
     stalled: bool,
     on_timeout: &Option<ConditionAction>,
     max_attempts: u32,
@@ -1141,6 +1149,7 @@ fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
     let mut escalated = step.clone();
     escalated.agent = crate::models::AgentType::ClaudeCode;
     escalated.agent_settings = Some(crate::models::AgentSettings {
+        fallback: None,
         tools: step.agent_settings.as_ref().and_then(|s| s.tools.clone()),
         model: None,
         tier: Some(crate::models::ModelTier::Reasoning),
@@ -1168,7 +1177,7 @@ fn reviewer_shares_step_connection(step: &WorkflowStep, reviewer_agent: &AgentTy
     *reviewer_agent == step.agent
 }
 
-pub(crate) async fn resolve_step_connection(
+pub async fn resolve_step_connection(
     step: &WorkflowStep,
     catalog_db: Option<&crate::db::Database>,
 ) -> Result<Option<ExternalApiConnection>> {
@@ -1212,7 +1221,7 @@ pub(crate) async fn resolve_step_connection(
 
 async fn preflight_workflow_launch(
     catalog_db: Option<&crate::db::Database>,
-    #[cfg_attr(not(test), allow(unused_variables))] work_dir: &str,
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))] work_dir: &str,
     step: &WorkflowStep,
     connection: Option<&ExternalApiConnection>,
     effective_model: Option<&str>,
@@ -1251,7 +1260,7 @@ async fn preflight_workflow_launch(
         model_tiers,
     );
     // A routed work dir stands in for the CLI, as in the runner's install check.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let resolution = crate::core::model_catalog::test_routed_discovery(
         runner::resolve_agent_work_dir(Some(work_dir), work_dir)
             .is_ok_and(|dir| runner::test_acp_routes::is_routed(&dir)),
@@ -1269,12 +1278,12 @@ async fn preflight_workflow_launch(
 /// its run's pin: read from the default branch when the run started, so the
 /// checkout's branch or the run's worktree never changes them. One the pin
 /// lacks stops the step by name instead of running without it.
-pub(super) fn step_skills(
+pub fn step_skills(
     skill_ids: &[String],
     project_id: Option<&str>,
     run_id: Option<&str>,
 ) -> Result<(Vec<String>, Vec<crate::models::Skill>)> {
-    use crate::api::projects::used_skills::parse_repository_skill_id;
+    use crate::core::repository_skills::parse_repository_skill_id;
     let mut catalog = Vec::new();
     let mut repository = Vec::new();
     for id in skill_ids {
@@ -1583,7 +1592,7 @@ fn format_silent_exit_error(exit_desc: &str, killed_by_signal: bool, stdout: &st
 /// timeout, then collect text + tokens. Generic over [`runner::AgentIo`]
 /// (0.8.8 test-seam) so the loop is exercised by a `ScriptedProcess` in
 /// tests without spawning a CLI.
-pub(crate) async fn drive_agent_to_output(
+pub async fn drive_agent_to_output(
     mut process: impl runner::AgentIo,
     progress_tx: Option<&ProgressSender>,
     activity: Option<&AgentActivitySink>,
@@ -1789,6 +1798,12 @@ pub(crate) async fn drive_agent_to_output(
     }
 
     let native_tool_calls = native_tool_calls_from_stderr(&stderr_lines);
+    // A structured transport (ACP, HTTP) reports its cost on the process.
+    let reported_cost_usd = stream_json_cost.or_else(|| {
+        process
+            .reported_cost_usd_micros()
+            .map(|micros| micros as f64 / 1_000_000.0)
+    });
 
     Ok(AgentOutput {
         attempt_id: 0, // Assigned by the launch recorder, outside the IO loop.
@@ -1796,7 +1811,7 @@ pub(crate) async fn drive_agent_to_output(
         tokens_used,
         prompt_cache,
         reported_usage,
-        reported_cost_usd: stream_json_cost,
+        reported_cost_usd,
         native_tool_calls,
         runtime_notices: stderr_lines
             .into_iter()
@@ -1904,6 +1919,7 @@ async fn run_multi_agent_debate(
         s.on_result = vec![];
         s.output_format = crate::models::StepOutputFormat::FreeText;
         s.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: cfg.reviewer_tier,
@@ -2096,10 +2112,7 @@ async fn run_multi_agent_debate(
 /// *quotes* `[SIGNAL: ERROR]` in the MIDDLE of a sentence in the last 5
 /// lines no longer triggers a false Stop/Goto. (`contains` did; strict
 /// equality would have regressed content-then-signal lines.)
-pub(crate) fn evaluate_conditions(
-    rules: &[StepConditionRule],
-    output: &str,
-) -> Option<ConditionAction> {
+pub fn evaluate_conditions(rules: &[StepConditionRule], output: &str) -> Option<ConditionAction> {
     // Look at the last 5 lines for a signal
     let tail: Vec<&str> = output.lines().rev().take(5).collect();
     for rule in rules {
@@ -2372,6 +2385,7 @@ mod tests {
         let mut local = make_step("summarize {{x}}");
         local.agent = crate::models::AgentType::Ollama;
         local.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("qwen3:8b".into()),
             tier: Some(crate::models::ModelTier::Default),
@@ -2431,6 +2445,7 @@ mod tests {
         let step = WorkflowStep {
             agent: AgentType::ClaudeCode,
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 model: Some("manual-model".into()),
                 tier: Some(ModelTier::Default),
                 reasoning_effort: Some("High".into()),
@@ -2512,6 +2527,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: Some(ModelTier::Default),
@@ -2575,6 +2591,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: Some(ModelTier::Default),
@@ -2600,6 +2617,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: Some(ModelTier::Default),
@@ -2616,6 +2634,7 @@ mod tests {
     fn explicit_workflow_model_remains_the_dispatch_and_preflight_model() {
         let mut step = make_step("anything");
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("expert-model".into()),
             tier: Some(ModelTier::Default),
@@ -2749,6 +2768,8 @@ mod tests {
             delay_after_secs: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -2793,6 +2814,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -3027,6 +3049,33 @@ mod drive_agent_to_output_tests {
     //! non-zero-exit error path — without spawning a CLI or burning tokens.
     use super::format_silent_exit_error;
     use super::{drive_agent_to_output, native_tool_calls_from_stderr};
+
+    /// The cost an ACP or HTTP run reports reaches the step, like its tokens.
+    #[tokio::test]
+    async fn a_step_keeps_the_cost_its_structured_transport_reported() {
+        use crate::agents::runner::ScriptedProcess;
+        let stall = std::time::Duration::from_secs(1);
+        let reported = ScriptedProcess::raw(["done"])
+            .with_reported_usage(9_993)
+            .with_reported_cost_usd_micros(412_500);
+        let output = drive_agent_to_output(
+            reported,
+            None,
+            None,
+            stall,
+            &AgentType::ClaudeCode,
+            "reason",
+        )
+        .await
+        .expect("the step ends");
+        assert_eq!(output.reported_cost_usd, Some(0.4125));
+        let silent = ScriptedProcess::raw(["done"]).with_reported_usage(9_993);
+        let output =
+            drive_agent_to_output(silent, None, None, stall, &AgentType::ClaudeCode, "reason")
+                .await
+                .expect("the step ends");
+        assert_eq!(output.reported_cost_usd, None);
+    }
 
     /// An ACP run's own watchdog owns inactivity: a step waits through a long
     /// text silence (tool work) instead of killing it, and a plain CLI is
@@ -3372,10 +3421,6 @@ mod drive_agent_to_output_tests {
 }
 
 #[cfg(all(test, feature = "full-tests"))]
-#[path = "steps_provenance_test.rs"]
-mod provenance_tests;
-
-#[cfg(all(test, feature = "full-tests"))]
 #[path = "steps_attempt_session_test.rs"]
 mod attempt_session_tests;
 
@@ -3453,6 +3498,7 @@ mod http_native_tool_step_tests {
             agent: AgentType::Custom,
             prompt_template: "Answer from the selected connection".into(),
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 tools: None,
                 model: model.map(str::to_string),
                 tier: Some(ModelTier::Default),
@@ -3762,6 +3808,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::ClaudeCode,
             prompt_template: "Use the selected model".into(),
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 tools: None,
                 model: Some("retired-alias".into()),
                 tier: Some(ModelTier::Reasoning),
@@ -3936,6 +3983,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::LiteLlm,
             prompt_template: "Which task is active?".into(),
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 tools: None,
                 model: Some("test-model".into()),
                 tier: None,
@@ -4032,6 +4080,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::Ollama,
             prompt_template: "Which task is active?".into(),
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 tools: None,
                 model: Some("test-model".into()),
                 tier: None,

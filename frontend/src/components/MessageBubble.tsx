@@ -31,6 +31,8 @@ import { hasSourceCitation, isCheckoutVerified, isLaneVerified, laneOf, splitSou
 import { DiscussionActionCard } from './DiscussionActionCard';
 import { QuickExecActivationCard } from './QuickExecActivation';
 import { parseActivationCard } from '../lib/activationCard';
+import { parseFallbackNotice } from '../lib/fallbackNotice';
+import { FallbackNoticeLine } from './FallbackNoticeLine';
 import { parsePlanningProposal } from '../lib/planningProposal';
 import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
@@ -619,6 +621,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const isKronnTool = msg.role === 'System' && msg.content.startsWith('[kronn-internal:');
   const isKronnPlanning = msg.role === 'System' && msg.content.startsWith('[kronn-planning:');
   const activationCard = msg.role === 'System' ? parseActivationCard(msg.content) : null;
+  // KT-1518 — the turn continued on the next agent of a fallback chain.
+  const fallbackNotice = msg.role === 'System' ? parseFallbackNotice(msg.content) : null;
   const executionContext = msg.role === 'System' ? parseExecutionContext(msg.content) : null;
   const [revealedExecutionVariables, setRevealedExecutionVariables] = useState<Record<string, string>>({});
   const [revealingExecutionVariable, setRevealingExecutionVariable] = useState<string | null>(null);
@@ -1066,6 +1070,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           // the markdown render — we don't want a second copy of
           // `[kronn-internal: ...]` rendered as raw text below.
           null
+        ) : fallbackNotice ? (
+          <FallbackNoticeLine notice={fallbackNotice} />
         ) : activationCard ? (
           // KT-1490 — the one-click activation of a Quick Exec an agent saved inactive.
           <QuickExecActivationCard card={activationCard} />

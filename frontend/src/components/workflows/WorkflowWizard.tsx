@@ -19,6 +19,8 @@ import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker'
 import { agentSettingsForSelection } from '../../lib/agentSelection';
 import { SearchableSelect } from '../SearchableSelect';
 import { ModelCatalogPicker } from '../ModelCatalogPicker';
+import { FallbackOverride } from '../settings/FallbackOverride';
+import { modeOfTier } from '../../lib/fallbackChain';
 import { MarkdownEditor } from '../MarkdownComposerTools';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
@@ -29,7 +31,7 @@ import type {
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, ProjectUsedSkill, AgentProfile, Directive,
-  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention, WorkflowShadow,
+  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
   TransformDataField, WorkflowProjectScope, ResourceRef,
 } from '../../types/generated';
@@ -37,7 +39,10 @@ import { SafetyWarnings } from './SafetyWarnings';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import { RunRetentionCard } from './RunRetentionCard';
 import QuickPromptVersionPin from '../QuickPromptVersionPin';
-import { ShadowRunsCard } from './ShadowRunsCard';
+import { StepShadowsEditor } from './StepShadowsEditor';
+import { StepShadowRows } from './StepShadowRows';
+import { hasShadowBlock } from './shadowRowModel';
+import type { ShadowEdit } from '../../lib/shadowMerge';
 import { WorkflowRefsCard } from './WorkflowRefsCard';
 import type { RefOptions } from '../../lib/workflowRefs';
 import type { AgentsConfig } from '../../types/generated';
@@ -46,8 +51,10 @@ import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
   AlertTriangle, UserCircle, FileText, Layers, Send,
-  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play, Network, Eye,
+  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play, Network, Eye, Compass,
 } from 'lucide-react';
+import { DecideStepForm } from './DecideStepForm';
+import { blankDecideConfig, decideConfigProblem } from '../../lib/decideStep';
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
@@ -138,6 +145,7 @@ const STEP_TYPE_GROUPS: ReadonlyArray<{
     hintKey: 'wiz.stepTypeGroupControlHint',
     options: [
       { type: 'Gate', dataType: 'gate', labelKey: 'wiz.stepTypeGate', hintKey: 'wiz.stepTypeGateHint' },
+      { type: 'Decide', dataType: 'decide', labelKey: 'wiz.stepTypeDecide', hintKey: 'wiz.stepTypeDecideHint' },
       { type: 'Notify', dataType: 'notify', labelKey: 'wiz.stepTypeNotify', hintKey: 'wiz.stepTypeNotifyHint' },
       { type: 'Exec', dataType: 'exec', labelKey: 'wiz.stepTypeExec', hintKey: 'wiz.stepTypeExecHint' },
     ],
@@ -174,6 +182,7 @@ function StepTypeGlyph({ type, size = 16 }: { type: string; size?: number }) {
   if (type === 'PublishPageData') return <FileText size={size} />;
   if (type === 'TriggerWorkflow') return <Play size={size} />;
   if (type === 'DelegateSubtasks') return <Network size={size} />;
+  if (type === 'Decide') return <Compass size={size} />;
   return <GitBranch size={size} />;
 }
 
@@ -190,6 +199,7 @@ function isWorkflowStepIncomplete(step: WorkflowStep): boolean {
   }
   if (step.step_type?.type === 'Notify') return !step.notify_config?.url;
   if (step.step_type?.type === 'Gate') return !step.gate_message?.trim();
+  if (step.step_type?.type === 'Decide') return decideConfigProblem(step.decide) !== null;
   if (step.step_type?.type === 'Exec') return !step.exec_command?.trim();
   if (step.step_type?.type === 'BatchApiCall') {
     const missingApi = !step.quick_api_id && (
@@ -304,6 +314,24 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     ? installedAgentTypes
     : ALL_AGENT_TYPES
   ).map(at => ({ type: at, label: AGENT_LABELS[at] ?? at }));
+  // KT-1693 — the step's own fallback for the mode it runs in, right under the
+  // agent/mode choice it depends on (not folded in the advanced settings): the
+  // agent's row applies unless the step overrides or cuts it.
+  const renderStepFallback = (step: WorkflowStep, index: number) => (
+    <div className="wf-step-fallback" data-testid={`wiz-step-${index}-fallback-block`}>
+      <label className="wf-label">{t('fallback.stepTitle')}</label>
+      <small className="text-2xs">{t('fallback.stepHint')}</small>
+      <FallbackOverride
+        testId={`wiz-step-${index}-fallback`}
+        origin={step.agent}
+        mode={modeOfTier(step.agent_settings?.tier)}
+        value={step.agent_settings?.fallback ?? null}
+        onChange={async next => updateStep(index, {
+          agent_settings: { ...step.agent_settings, fallback: next ?? undefined }
+        })}
+      />
+    </div>
+  );
   const renderAgentTierPicker = (step: WorkflowStep, onUpdate: (patch: Partial<WorkflowStep>) => void, compact = false) => (
     <AgentSwitchPicker
       currentAgent={step.agent}
@@ -365,12 +393,19 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     : 0;
   const [wizardStep, setWizardStep] = useState(() => {
     if ((initialStepId || focusedStepOnly) && needsAdvanced) return 2;
-    // The shadow card sits in Task (simple) or Config (advanced).
-    if (initialSection === 'shadow' && isEdit) return needsAdvanced ? 3 : 1;
+    // The shadows sit on the step: in Task (simple) or in the steps (advanced).
+    if (initialSection === 'shadow' && isEdit) return needsAdvanced ? 2 : 1;
     return 0;
   });
-  // Scroll to the shadow card once, on arrival; coming back to its step later does not.
+  // Scroll to the step shadows once, on arrival; coming back to its step later does not.
   const [shadowFocus, setShadowFocus] = useState(initialSection === 'shadow' && isEdit);
+  // The step the shadow settings open on: the first one that carries shadows, else the first Agent step.
+  const shadowTarget = (() => {
+    const steps = editWorkflow?.steps ?? [];
+    const carrying = steps.findIndex(step => (step.shadows ?? []).length > 0);
+    if (carrying >= 0) return carrying;
+    return Math.max(0, steps.findIndex(step => (!step.step_type || step.step_type.type === 'Agent') && !step.external_effect));
+  })();
   const [expandedStepTypePicker, setExpandedStepTypePicker] = useState<number | null>(null);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
@@ -395,7 +430,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [trackerLabels, setTrackerLabels] = useState(initTracker?.labels?.join(', ') ?? '');
   const [trackerInterval, setTrackerInterval] = useState(initTracker?.interval ?? '*/5 * * * *');
   const [showVarHelp, setShowVarHelp] = useState(false);
-  const [expandedStepAdvanced, setExpandedStepAdvanced] = useState<number | null>(null);
+  const [expandedStepAdvanced, setExpandedStepAdvanced] = useState<number | null>(initialSection === 'shadow' && isEdit ? shadowTarget : null);
 
   // Safety state
   const [safety, setSafety] = useState<WorkflowSafety>(editWorkflow?.safety ?? {
@@ -417,6 +452,17 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       .catch(() => { /* keep null — blankStep stays legacy-shaped */ });
   }, []);
 
+  // KT-1367 — the Decide step is offered only once a decision model is set.
+  // `undefined` while loading: greyed out too, never offered by mistake.
+  const [decisionModel, setDecisionModel] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    let active = true;
+    configApi.getModelTiers()
+      .then(tiers => { if (active) setDecisionModel(tiers?.ollama?.decision?.trim() || null); })
+      .catch(() => { if (active) setDecisionModel(null); });
+    return () => { active = false; };
+  }, []);
+
   // Workspace config state
   const initHooks = editWorkflow?.workspace_config?.hooks;
   const [wsHookAfterCreate, setWsHookAfterCreate] = useState(initHooks?.after_create ?? '');
@@ -431,7 +477,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // 0.7.0 — Execution limits (timeout / max LLM calls / loop detection)
   const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
   const [retention, setRetention] = useState<WorkflowRetention | null>(editWorkflow?.retention ?? null);
-  const [shadow, setShadow] = useState<WorkflowShadow | null>(editWorkflow?.shadow ?? null);
   // KT-1448 — named refs; the whole map is sent on every save.
   const [refs, setRefs] = useState<Record<string, ResourceRef>>(
     () => Object.fromEntries(Object.entries(editWorkflow?.refs ?? {})
@@ -677,6 +722,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
+  const shadowLoadNames = useMemo(() => ({ quickPrompts: availableQuickPrompts, skills: availableSkills }), [availableQuickPrompts, availableSkills]);
   const [availableQuickApis, setAvailableQuickApis] = useState<QuickApi[]>([]);
   const [quickApisLoaded, setQuickApisLoaded] = useState(false);
   const [availableQuickExecs, setAvailableQuickExecs] = useState<QuickExec[]>([]);
@@ -950,6 +996,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     setSteps(steps.map((s, i) => i === idx ? { ...s, ...patch } : s));
   };
 
+  /** KT-1696 — a change from the shadow sub-rows: the step's shadows, and its merge when the change moves it. */
+  const applyShadowEdit = (idx: number, edit: ShadowEdit) =>
+    updateStep(idx, edit.merge === undefined ? { shadows: edit.shadows } : { shadows: edit.shadows, shadow_merge: edit.merge ?? undefined });
+
   const createStarterPage = async (idx: number) => {
     const title = (pageDraftTitles[idx] ?? '').trim();
     if (!title || pageCreatingIndex !== null) return;
@@ -1138,6 +1188,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     // the variant has been customized — for now we conservatively prompt
     // whenever the user is leaving JsonData for a non-JsonData type.
     const hasJsonContent = currentType === 'JsonData'
+      || currentType === 'Decide'
       || currentType === 'PublishPageData'
       || currentType === 'CollectApiData'
       || currentType === 'TransformData';
@@ -1193,6 +1244,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             ? { collect_api_data: { sources: [], concurrent_limit: 5 } }
             : newType === 'TransformData'
               ? { transform_data: { input_from: idx > 0 ? `steps.${steps[idx - 1]?.name}.data` : '', fields: [] } }
+              : newType === 'Decide'
+                ? { decide: blankDecideConfig() }
           : {};
       return { ...universal, ...typeDefaults, agent: s.agent } as WorkflowStep;
     }));
@@ -1339,7 +1392,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           concurrency_key: trimmedConcurrencyKey || undefined,
           guards: guards ?? undefined,
           retention: retention ?? undefined,
-          shadow: shadow ?? undefined,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
@@ -1618,8 +1670,24 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             {t('wiz.agentAndTierLabel')} <HelpTip hint={t('wiz.helpAgent')} />
           </label>
           <div className="wf-wizard-agent-tier mb-6">
-            {steps[0] && renderAgentTierPicker(steps[0], patch => updateStep(0, patch))}
+            {steps[0] && !hasShadowBlock(steps[0]) && renderAgentTierPicker(steps[0], patch => updateStep(0, patch))}
+            {steps[0] && (
+              <StepShadowRows
+                step={steps[0]}
+                choices={agentChoices}
+                modelTiers={agentAccess?.model_tiers}
+                names={shadowLoadNames}
+                mainPicker={hasShadowBlock(steps[0]) ? renderAgentTierPicker(steps[0], patch => updateStep(0, patch)) : undefined}
+                onEdit={edit => applyShadowEdit(0, edit)}
+                addWhenEmpty
+                t={t}
+                testId="wf-wiz-shadow-rows-simple"
+              />
+            )}
           </div>
+          {steps[0] && (!steps[0].step_type || steps[0].step_type.type === 'Agent') && (
+            <div className="mb-6">{renderStepFallback(steps[0], 0)}</div>
+          )}
 
           <label className="wf-label">
             {t('wiz.promptLabel')} <HelpTip hint={t('wiz.helpPromptSimple')} />
@@ -1801,20 +1869,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             <TimezoneField id="wf-cron-timezone-simple" value={cronTimezone} onChange={setCronTimezone} schedule={buildCronExpr()} />
           )}
 
-          <ShadowRunsCard
-            value={shadow}
-            onChange={setShadow}
-            steps={steps}
-            projects={projects}
-            skills={availableSkills}
-            quickPrompts={availableQuickPrompts}
-            t={t}
-            focusOnOpen={shadowFocus}
-            onFocused={() => setShadowFocus(false)}
-            nothingSkippedHint={t('wf.shadow.nothingSkippedSimple')}
-          />
+          {/* KT-1459 — shadows live on the step; simple mode has one, so they sit here. */}
+          {steps[0] && (!steps[0].step_type || steps[0].step_type.type === 'Agent') && (
+            <StepShadowsEditor
+              testId="wf-step-shadows-simple"
+              step={steps[0]}
+              onChange={(shadows, merge) => updateStep(0, merge === undefined ? { shadows } : { shadows, shadow_merge: merge ?? undefined })}
+              projects={projects}
+              skills={availableSkills}
+              quickPrompts={availableQuickPrompts}
+              t={t}
+              focusOnOpen={shadowFocus}
+              onFocused={() => setShadowFocus(false)}
+            />
+          )}
           {/* Simple mode has no step « Advanced » section: the one step's flag lives here. */}
-          {shadow?.enabled && steps[0] && (
+          {steps[0] && ((steps[0].shadows ?? []).length > 0 || steps[0].external_effect) && (
             <div className="wf-simple-external-effect">
               <label className="wf-label">
                 <input
@@ -2167,7 +2237,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const isAdvOpen = expandedStepAdvanced === i;
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
               step.agent_settings ||
-              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.external_effect || step.room_id || step.read_only_repos?.length;
+              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.external_effect || step.room_id || step.read_only_repos?.length || step.shadows?.length;
             const multiAgentReview = step.multi_agent_review;
             const activeStepType = step.step_type?.type ?? 'Agent';
             const activeTypeOption = [...STEP_TYPE_GROUPS.flatMap(group => group.options), DELEGATE_SUBTASKS_OPTION]
@@ -2289,6 +2359,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           <div className="wf-step-type-grid">
                             {group.options.map(option => {
                               const selected = option.type === activeStepType;
+                              // KT-1367 — greyed out until a decision model is set.
+                              const unavailable = option.type === 'Decide' && !selected && !decisionModel;
                               return (
                                 <button
                                   key={option.type}
@@ -2297,6 +2369,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                   data-type={option.dataType}
                                   data-selected={selected}
                                   aria-pressed={selected}
+                                  disabled={unavailable}
+                                  title={unavailable ? t('wiz.stepTypeDecideUnavailable') : undefined}
                                   onClick={() => selectStepType(option)}
                                 >
                                   <span className="wf-step-type-option-icon" aria-hidden="true">
@@ -2304,7 +2378,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                   </span>
                                   <span>
                                     <strong>{t(option.labelKey)}</strong>
-                                    <small>{t(option.hintKey)}</small>
+                                    <small>{t(unavailable ? 'wiz.stepTypeDecideUnavailable' : option.hintKey)}</small>
                                   </span>
                                   {selected && <Check size={13} className="wf-step-type-option-check" />}
                                 </button>
@@ -2331,7 +2405,24 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 {activeStepType === 'Agent' && (
                   <div className="wf-step-agent-routing">
                     <label className="wf-label">{t('wiz.agentAndTierLabel')}</label>
-                    {renderAgentTierPicker(step, patch => updateStep(i, patch))}
+                    {!hasShadowBlock(step) && renderAgentTierPicker(step, patch => updateStep(i, patch))}
+                    {!hasShadowBlock(step) && renderStepFallback(step, i)}
+                    {/* KT-1696 — the shadows sit right under the agent, not in « Advanced ».
+                        KT-1707 — with shadows, the agent picker moves into the Principal row
+                        and the step fallback (KT-1693) follows the block. */}
+                    <StepShadowRows
+                      step={step}
+                      nextStepName={steps[i + 1]?.name}
+                      choices={agentChoices}
+                      modelTiers={agentAccess?.model_tiers}
+                      names={shadowLoadNames}
+                      mainPicker={hasShadowBlock(step) ? renderAgentTierPicker(step, patch => updateStep(i, patch)) : undefined}
+                      onEdit={edit => applyShadowEdit(i, edit)}
+                      addWhenEmpty
+                      t={t}
+                      testId={`wf-wiz-shadow-rows-${i}`}
+                    />
+                    {hasShadowBlock(step) && renderStepFallback(step, i)}
                   </div>
                 )}
                 {step.step_type?.type !== 'BatchQuickPrompt' && (checkAgentRestricted(agentAccess, step.agent) || requiresFullAccessToRun(agentAccess, step.agent)) && (
@@ -2713,6 +2804,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       </div>
                     )}
                   </div>
+                ) : step.step_type?.type === 'Decide' ? (
+                  <>
+                    {!decisionModel && decisionModel !== undefined && !step.decide?.model?.trim() && (
+                      <div className="wf-restricted-warning" role="alert">
+                        <AlertTriangle size={12} />
+                        <span>{t('wiz.decideNoModel')}</span>
+                      </div>
+                    )}
+                    <DecideStepForm
+                      config={step.decide ?? blankDecideConfig()}
+                      defaultModel={decisionModel}
+                      previousSteps={steps.slice(0, i).map(prev => prev.name)}
+                      onChange={decide => updateStep(i, { decide })}
+                      t={t}
+                    />
+                  </>
                 ) : step.step_type?.type === 'Gate' ? (
                   <div className="wf-gate-form">
                     <div className="wf-batch-intro">
@@ -4714,6 +4821,21 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         </p>
                       </div>
 
+                      {/* KT-1459 — what this step re-runs beside its main execution. */}
+                      {(!step.step_type || step.step_type.type === 'Agent') && (
+                        <StepShadowsEditor
+                          testId={`wf-step-shadows-${i}`}
+                          step={step}
+                          onChange={(shadows, merge) => updateStep(i, merge === undefined ? { shadows } : { shadows, shadow_merge: merge ?? undefined })}
+                          projects={projects}
+                          skills={availableSkills}
+                          quickPrompts={availableQuickPrompts}
+                          t={t}
+                          focusOnOpen={shadowFocus && i === shadowTarget}
+                          onFocused={() => setShadowFocus(false)}
+                        />
+                      )}
+
                       {/* Retry */}
                       <div className="flex-1">
                         <label className="wf-label">{t('wiz.retry')}</label>
@@ -5103,7 +5225,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               not hidden, not advanced — first-class safety control). */}
           <ExecutionLimitsCard value={guards} onChange={setGuards} t={t} />
           <RunRetentionCard value={retention} onChange={setRetention} t={t} />
-          <ShadowRunsCard value={shadow} onChange={setShadow} steps={steps} projects={projects} skills={availableSkills} quickPrompts={availableQuickPrompts} t={t} focusOnOpen={shadowFocus} onFocused={() => setShadowFocus(false)} />
           <WorkflowRefsCard value={refs} onChange={setRefs} options={refOptions} t={t} />
 
           {/* 0.7.0 Phase 5 — Exec allowlist. Visible by default; the

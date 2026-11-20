@@ -103,11 +103,7 @@ fn federated_content(msg: &DiscussionMessage, stored: Option<String>) -> String 
 /// Announce files that were pinned after their message had already federated.
 /// This is the attachment equivalent of `federate_message`, and is a no-op for
 /// local discussions.
-pub(crate) async fn federate_attachments_for_message(
-    state: &AppState,
-    disc_id: &str,
-    message_id: &str,
-) {
+pub async fn federate_attachments_for_message(state: &AppState, disc_id: &str, message_id: &str) {
     let did = disc_id.to_string();
     let shared_id = state
         .db
@@ -330,7 +326,7 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
 /// The shared cancellation of federation work: resolves once P2P is off
 /// (checked every 250 ms). Every peer socket, transfer and HTTP call to a
 /// contact races it.
-pub(crate) async fn until_p2p_off(state: &AppState) {
+pub async fn until_p2p_off(state: &AppState) {
     loop {
         if !state.p2p.enabled() {
             return;
@@ -340,7 +336,7 @@ pub(crate) async fn until_p2p_off(state: &AppState) {
 }
 
 /// Run `work` unless P2P goes off first.
-pub(crate) async fn unless_p2p_off<F: std::future::Future>(
+pub async fn unless_p2p_off<F: std::future::Future>(
     state: &AppState,
     work: F,
 ) -> Option<F::Output> {
@@ -351,7 +347,7 @@ pub(crate) async fn unless_p2p_off<F: std::future::Future>(
 }
 
 /// Where a downloaded attachment belongs, and who sent it.
-pub(crate) struct FederatedAttachment {
+pub struct FederatedAttachment {
     pub host: crate::api::ws::PeerAuth,
     pub shared_id: String,
     pub discussion_id: String,
@@ -365,7 +361,7 @@ pub(crate) struct FederatedAttachment {
 /// Publish a staged attachment and link it, in one DB call that first
 /// checks P2P, the sender's membership, the target message and the file id.
 /// A refusal drops the staged file.
-pub(crate) async fn commit_federated_attachment(
+pub async fn commit_federated_attachment(
     state: &AppState,
     staged: crate::core::context_files::StagedFile,
     attachment: FederatedAttachment,
@@ -431,7 +427,7 @@ pub async fn fetch_and_store_attachment(
     filename: &str,
     mime_type: &str,
     size: i64,
-    host_invite_code: &str,
+    host_peer: &crate::api::ws::PeerAuth,
 ) {
     // Idempotency — we already have this file.
     let fid = file_id.to_string();
@@ -446,21 +442,30 @@ pub async fn fetch_and_store_attachment(
         return;
     }
 
-    // Resolve the announcing host's URL from its invite code — accepted
-    // contacts only (passe D): a pending/refused peer must not be able to
-    // make us download bytes from it via a FileAttached announce.
-    let code = host_invite_code.to_string();
+    // The host is the peer the announcement arrived from, authenticated by its
+    // pairing secret when it connected (KT-1650). The invite code in the frame
+    // is a public string and never picks the contact: an accepted, paired
+    // contact only (passe D), so a pending/refused peer cannot make us download
+    // bytes from it via a FileAttached announce.
+    let crate::api::ws::PeerAuth::ContactId(host_id) = host_peer;
+    let id = host_id.clone();
     let host = state
         .db
-        .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &code))
+        .with_conn(move |conn| {
+            let Some(contact) = crate::db::contacts::get_contact(conn, &id)? else {
+                return Ok(None);
+            };
+            let secret = crate::db::contacts::outbound_secret(conn, &id)?;
+            Ok(Some((contact, secret)))
+        })
         .await;
-    let host = match host {
-        Ok(crate::db::contacts::InviteAuth::Accepted(c)) => c,
-        Ok(crate::db::contacts::InviteAuth::NotAccepted { pseudo, status }) => {
+    let (host, host_secret) = match host {
+        Ok(Some((c, Some(secret)))) if c.status == "accepted" => (c, secret),
+        Ok(Some((c, _))) => {
             tracing::warn!(
                 target: "kronn::invariant",
-                host = %pseudo, status = %status, file_id = %file_id,
-                "F8: FileAttached from a non-accepted contact — fetch refused"
+                host = %c.pseudo, status = %c.status, file_id = %file_id,
+                "F8: FileAttached from a non-accepted or unpaired contact — fetch refused"
             );
             return;
         }
@@ -470,7 +475,8 @@ pub async fn fetch_and_store_attachment(
         }
     };
 
-    // Our own code authenticates the fetch (same trust model as claim-by-token).
+    // Our own code names us and the host's secret authenticates the fetch
+    // (same trust model as claim-by-token).
     let our_code = {
         let cfg = state.config.read().await;
         crate::api::contacts::build_invite_code(&cfg.server).await
@@ -489,7 +495,11 @@ pub async fn fetch_and_store_attachment(
         return;
     };
     let url = format!("{base}/api/disc/fetch-file");
-    let body = serde_json::json!({ "file_id": file_id, "from_invite_code": our_code });
+    let body = serde_json::json!({
+        "file_id": file_id,
+        "from_invite_code": our_code,
+        "secret": host_secret,
+    });
     let Ok(url) = reqwest::Url::parse(&url) else {
         return;
     };
@@ -555,7 +565,7 @@ pub async fn fetch_and_store_attachment(
             }
         };
     let attachment = FederatedAttachment {
-        host: crate::api::ws::PeerAuth::InviteCode(host_invite_code.to_string()),
+        host: host_peer.clone(),
         shared_id: shared_id.to_string(),
         discussion_id: disc_id,
         file_id: file_id.to_string(),
@@ -584,7 +594,7 @@ pub async fn fetch_and_store_attachment(
         filename: filename.to_string(),
         mime_type: mime_type.to_string(),
         size,
-        from_invite_code: host_invite_code.to_string(),
+        from_invite_code: host.invite_code.clone(),
         pending: false, // F15+ ready: binary stored → front swaps placeholder for the file
     });
 }
@@ -818,7 +828,7 @@ mod tests {
 /// Transfer cap for a fetched F8 attachment: 2× the announced size, clamped
 /// to [1 MB, 64 MB]. Pure — the announced size comes from the peer's message
 /// and is not trusted beyond sizing the allowance.
-pub(crate) fn fetch_cap_bytes(announced: i64) -> usize {
+pub fn fetch_cap_bytes(announced: i64) -> usize {
     const MAX_FETCHED_FILE_BYTES: usize = 64 * 1024 * 1024;
     (announced.max(0) as usize)
         .saturating_mul(2)
@@ -827,7 +837,7 @@ pub(crate) fn fetch_cap_bytes(announced: i64) -> usize {
 
 /// Pre-decode check on the base64 payload length (4/3 expansion + head slack)
 /// so an oversized body is refused BEFORE allocating the decoded buffer.
-pub(crate) fn b64_len_within_cap(b64_len: usize, cap: usize) -> bool {
+pub fn b64_len_within_cap(b64_len: usize, cap: usize) -> bool {
     b64_len <= cap.saturating_mul(4) / 3 + 1024
 }
 
@@ -869,5 +879,106 @@ mod transfer_cap_tests {
         );
         // Boundary: exactly the b64 expansion of the cap passes.
         assert!(b64_len_within_cap(cap * 4 / 3, cap));
+    }
+
+    /// KT-1650 — a FileAttached announcement never picks the contact to download
+    /// from by a public invite code: the host is the authenticated peer the frame
+    /// came from, it is asked with the secret that peer was paired with, and a
+    /// contact without one (it must re-pair) is not asked at all.
+    #[tokio::test]
+    async fn an_attachment_is_fetched_from_the_authenticated_peer_with_its_secret() {
+        use crate::core::config::default_config;
+        use crate::db::Database;
+        use crate::DEFAULT_MAX_CONCURRENT_AGENTS;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let hits: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Arc::default();
+        let seen = hits.clone();
+        let app = axum::Router::new().route(
+            "/api/disc/fetch-file",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(body);
+                    axum::Json(serde_json::json!({ "success": true, "data": { "found": false } }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(default_config())),
+            db,
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        state.p2p.set(true);
+        let secret = "ab12".repeat(16);
+        let (host_secret, host_url) = (secret.clone(), url.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                for (id, paired) in [("c-paired", true), ("c-old", false)] {
+                    crate::db::contacts::insert_contact(
+                        conn,
+                        &crate::models::Contact {
+                            id: id.into(),
+                            pseudo: id.into(),
+                            avatar_email: None,
+                            kronn_url: host_url.clone(),
+                            invite_code: format!("kronn:{id}@127.0.0.1:1"),
+                            status: "accepted".into(),
+                            created_at: chrono::Utc::now(),
+                            updated_at: chrono::Utc::now(),
+                        },
+                    )?;
+                    if paired {
+                        crate::db::contacts::set_pairing_secrets(
+                            conn,
+                            id,
+                            &crate::db::contacts::hash_secret(&host_secret),
+                            &host_secret,
+                        )?;
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let fetch = |peer: &str| {
+            let (state, peer) = (
+                state.clone(),
+                crate::api::ws::PeerAuth::ContactId(peer.to_owned()),
+            );
+            async move {
+                fetch_and_store_attachment(
+                    &state,
+                    "shared",
+                    "m",
+                    "f-1",
+                    "a.pdf",
+                    "application/pdf",
+                    3,
+                    &peer,
+                )
+                .await
+            }
+        };
+
+        fetch("c-old").await;
+        fetch("c-ghost").await;
+        assert!(
+            hits.lock().unwrap().is_empty(),
+            "no request to an unpaired or unknown host"
+        );
+
+        fetch("c-paired").await;
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["secret"], secret.as_str());
+        assert_eq!(hits[0]["file_id"], "f-1");
+        assert_ne!(hits[0]["from_invite_code"], hits[0]["secret"]);
     }
 }

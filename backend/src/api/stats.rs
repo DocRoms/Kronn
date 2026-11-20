@@ -40,14 +40,15 @@ type AgentRow = (
 /// Workflow token total. Answered from `idx_workflow_runs_summary`:
 /// `tokens_used` is stored after the run's step results.
 pub(crate) const WORKFLOW_TOKENS_SQL: &str =
-    "SELECT COALESCE(SUM(tokens_used), 0) FROM workflow_runs WHERE tokens_used > 0";
+    "SELECT COALESCE(SUM(tokens_used + shadow_tokens_used), 0) FROM workflow_runs
+      WHERE tokens_used + shadow_tokens_used > 0";
 
 /// Top workflows by tokens. Aggregated over the runs first, from the same
 /// covering index, then joined to the few workflows that remain.
 pub(crate) const TOP_WORKFLOWS_SQL: &str = "SELECT w.id, w.name, totals.tokens
-     FROM (SELECT workflow_id, SUM(tokens_used) AS tokens
+     FROM (SELECT workflow_id, SUM(tokens_used + shadow_tokens_used) AS tokens
              FROM workflow_runs
-            WHERE tokens_used > 0
+            WHERE tokens_used + shadow_tokens_used > 0
             GROUP BY workflow_id) totals
      JOIN workflows w ON w.id = totals.workflow_id
      ORDER BY totals.tokens DESC
@@ -431,5 +432,36 @@ mod tests {
         assert_eq!(top.len(), 5);
         assert_eq!(top[0], ("wf-6".into(), "Flux é6".into(), 120));
         assert_eq!(top[4].0, "wf-2");
+    }
+
+    #[test]
+    fn workflow_totals_count_what_the_shadows_spent() {
+        // KT-1957 — a run whose steps spent nothing still counts its shadows.
+        let conn = migrated();
+        conn.execute_batch(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('wf-a', 'A', '\"Manual\"', '[]', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z'),
+                        ('wf-b', 'B', '\"Manual\"', '[]', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z');
+             INSERT INTO workflow_runs (id, workflow_id, status, tokens_used, shadow_tokens_used, started_at)
+                 VALUES ('r-a', 'wf-a', 'Success', 100, 0, '2026-10-01T00:00:00Z'),
+                        ('r-b1', 'wf-b', 'Success', 0, 70, '2026-10-01T00:00:00Z'),
+                        ('r-b2', 'wf-b', 'Success', 20, 30, '2026-10-01T00:01:00Z');",
+        )
+        .unwrap();
+        let total: i64 = conn
+            .query_row(WORKFLOW_TOKENS_SQL, [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 220);
+        let top: Vec<(String, i64)> = conn
+            .prepare(TOP_WORKFLOWS_SQL)
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            top,
+            vec![("wf-b".to_string(), 120), ("wf-a".to_string(), 100)]
+        );
     }
 }

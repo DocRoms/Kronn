@@ -76,6 +76,7 @@ const sampleConfig: McpConfigDisplay = {
   effective_preferred_interface: 'api',
   credential_source: 'stored',
   last_probes: [],
+  token_probe: false,
 } as McpConfigDisplay;
 
 const samplePlugins: ApiPluginOption[] = [

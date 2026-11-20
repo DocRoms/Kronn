@@ -100,7 +100,7 @@ is selected without moving the transcript. A page reload starts navigation
 fresh. Publication invalidations during a pending GET coalesce into a fresh
 follow-up read rather than accepting the old snapshot as the final state.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:194-264#goTo]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4624-4628#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4630-4634#ImportantMessagesBar]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:151-180#selections]
 [src: file: frontend/src/lib/importantMessages.ts:50-75#load]
 [src: file: frontend/src/lib/importantMessages.ts:84-90#refreshImportantMessages]
@@ -123,7 +123,7 @@ The bar re-fetches when the transcript's newest durable message id changes
 fetch per arrival, not one per render or per bubble, and never stuck on the
 first GET while a new card lands.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:182-192#messageRevision]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4624-4628#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4630-4634#ImportantMessagesBar]
 
 ## Human form (0.13.0, KT-643)
 
@@ -136,7 +136,7 @@ instead of selecting an unrelated task.
 [src: file: frontend/src/pages/DiscussionsPage.tsx:5541-5565#ImportantMessageForm]
 [src: file: frontend/src/components/ImportantMessageForm.tsx:90-104#taskRef]
 [src: file: frontend/src/pages/DiscussionsPage.tsx:1376-1406#openPlan]
-[src: file: frontend/src/components/DiscussionPlanPanel.tsx:88-91#initialTaskId]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:89-92#initialTaskId]
 
 The publication-key field appears only inside the open form. It uses the
 existing enrolled credential and single-use proof; Settings remains the place
@@ -166,7 +166,7 @@ identities, foreign keys, category checks and indexes.
 [src: file: frontend/src/lib/importantMessageDraft.ts:54-72#takeScalars]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:3-24#discussion_important_messages_next]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:25-33#idx_disc_important_message]
-[src: file: backend/src/db/migrations.rs:1879-2011#migration_175_preserves_populated_cards_and_closes_information_category]
+[src: file: backend/src/db/migrations.rs:1913-2045#migration_175_preserves_populated_cards_and_closes_information_category]
 
 ## Tests
 

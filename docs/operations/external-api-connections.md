@@ -4,7 +4,7 @@ Kronn's **Settings → Agents → External API mode** manages named connections 
 OpenAI-compatible chat services. LiteLLM, NVIDIA and OpenRouter provide endpoint
 presets; `Other` uses the same contract for an operator-supplied service. Every
 connection owns a display name, a unique discussion alias, an endpoint and
-optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1822-1837#ExternalApiSection]
+optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1949-1965#ExternalApiSection]
 [src: file: backend/src/models/external_api_connection.rs:11-20#ExternalApiConnection]
 
 The required HTTP surface is `GET /v1/models` plus
@@ -20,7 +20,7 @@ the same final route. Only a final `/v1` path segment is removed: `/v1beta`,
 2. Pick `LiteLLM`, `NVIDIA`, `OpenRouter` or `Other`. The first three presets
    seed their known endpoint; `Other` requires the complete base URL reachable
    from the Kronn backend.
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:54-61#PRESET_ENDPOINTS]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:61-68#PRESET_ENDPOINTS]
 3. Enter a display name and a unique mention alias. The stored alias is
    lower-cased without its leading `@`; `@name` is what a discussion uses.
    Whitespace and a second `@` are rejected. [src: file: backend/src/api/external_api_connections.rs:236-253#canonicalize_alias]
@@ -46,8 +46,8 @@ the same final route. Only a final `/v1` path segment is removed: `/v1beta`,
    endpoint and credential have passed that test. Changing the endpoint, key or
    preset invalidates the prior result; previous mappings stay visible but
    cannot be changed until the new connection state succeeds.
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:243#modelsUnlocked]
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:671-677#changeConnection]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:247#modelsUnlocked]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:678-684#changeConnection]
 
 The model tiers remain optional: leaving one blank stores no per-connection
 override for that tier. The connection card shows the saved endpoint,
@@ -57,7 +57,7 @@ an explicit click on the eye requests the stored value. **Replace** opens a
 blank editable field, while saving without replacement preserves the current
 credential. [src: file: backend/src/api/external_api_connections.rs:1820-1826#reveal_credential]
 [src: file: backend/src/api/external_api_connections.rs:2129-2130#set_credential]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:1024-1033#has_credential]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:1110-1119#has_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:328-342#SecretField]
 
 ## LiteLLM proxy
@@ -91,7 +91,7 @@ to the searchable tier selectors. Because the catalogue itself is public,
 Kronn validates the credential separately before treating the connection as
 ready. Testing selected tiers can make billed chat requests; the credential
 check and catalogue request do not select a paid model.
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:54-61#PRESET_ENDPOINTS]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:61-68#PRESET_ENDPOINTS]
 [src: file: backend/src/api/external_api_connections.rs:223-234#validate_credential_format]
 [src: file: backend/src/api/external_api_connections.rs:550-561#probe_openrouter_credential]
 
@@ -100,8 +100,8 @@ its display name and current tier model, and Quick Prompt comparisons persist
 the stable connection identifier. Re-running a comparison keeps the provider
 and reasoning tier while resolving the model currently mapped to that tier, so
 an unavailable or deliberately replaced model is not forced back into a retry.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:123-136#externalConnectionSwitchTarget]
-[src: file: backend/src/models/quick.rs:436-440#connection_id]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:125-138#externalConnectionSwitchTarget]
+[src: file: backend/src/models/quick.rs:502-506#connection_id]
 [src: file: frontend/src/lib/compareTargets.ts:5-9#CompareTarget]
 [src: file: backend/src/db/workflows.rs:955-1004#connection_tier_model]
 
@@ -125,7 +125,7 @@ encrypted with the instance key in the `stored_credentials` table since 0.14.3
 `config.toml` without them. `#[ts(skip)]` only keeps the value out of the
 generated TypeScript model. See [key-management.md](key-management.md).
 [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
-[src: file: backend/src/models/setup.rs:644-649#ApiKey]
+[src: file: backend/src/models/setup.rs:1251-1256#ApiKey]
 
 Deletion is not transactional across SQLite and the local configuration. Kronn
 deletes the connection row first, then removes the matching token entry from a
@@ -140,7 +140,7 @@ from the API keys.
 Mention the saved alias, such as `@nvidia` or `@company-proxy`, in the message.
 Kronn resolves named connection mentions before canonicalizing the requested
 agent targets, and carries the exact connection identifier in that target.
-[src: file: backend/src/db/external_api_connections.rs:201-235#target_for_connection]
+[src: file: backend/src/db/external_api_connections.rs:228-262#target_for_connection]
 [src: file: backend/src/api/discussions/messaging.rs:571-603#resolve_connection_mentions]
 
 The new-discussion form merges configured OpenRouter/Other aliases with native
@@ -157,11 +157,11 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:15576-15607#ollama_tokens]
+[src: file: backend/src/agents/runner.rs:15587-15618#ollama_tokens]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
-wrong endpoint. [src: file: backend/src/db/external_api_connections.rs:178-199#ensure_mention_alias_available]
+wrong endpoint. [src: file: backend/src/db/external_api_connections.rs:203-224#ensure_mention_alias_available]
 
 ### A connection is an agent everywhere, not only in the router (0.13.0)
 
@@ -196,8 +196,8 @@ At startup, Kronn backfills the former single LiteLLM and NVIDIA settings into
 stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
-configuration did not contain one. [src: file: backend/src/lib.rs:187-210#bootstrap_external_api_connections]
-[src: file: backend/src/db/external_api_connections.rs:334-365#backfill_legacy_config]
+configuration did not contain one. [src: file: backend/src/lib.rs:444-467#bootstrap_external_api_connections]
+[src: file: backend/src/db/external_api_connections.rs:403-434#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
 their endpoint and Economy, Default and Reasoning models. Saving either card
@@ -206,7 +206,7 @@ previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2125-2129#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1841-1846#onModelTiersChanged]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1962-1967#onModelTiersChanged]
 
 The former standalone LiteLLM settings card (`LiteLlmCard`) and its frontend
 client were removed (KT-668): nothing mounted them, and the named connection
@@ -228,6 +228,64 @@ connection across ordinary replies — is covered in
 [`docs/operations/http-transport.md`](http-transport.md). This page stays
 the configuration guide (creating/testing/tiering a connection); that one is
 the runtime-resolution guide.
+
+## Token checks of API plugin connections (KT-1692)
+
+This page is about the model-provider connections above. The **API plugin
+connections** of Settings → APIs (GitHub, Slides.com, Fastly, a custom API…)
+hold a token too, and a token that expired or was revoked while nobody called the
+connection used to stay unnoticed until a workflow or Quick API failed on it:
+KT-1524 flags a connection only after a real call was refused. Kronn now probes
+those tokens ahead of the call.
+
+- **Which connections have a probe.** Those with a declared readiness endpoint
+  (GitHub `/user`, Fastly `/current_user`…) or, for a custom API, a selected or
+  identity-named GET endpoint without path parameters — the endpoint the card's
+  "Test" already calls. A connection without one cannot be checked.
+  [src: file: backend/src/core/registry.rs:25-31#has_token_probe]
+- **When.** About 20 seconds after Kronn starts, then every 24 hours, for every
+  connection that has a probe; on demand with the **Check** button on the
+  connection card (`POST /api/mcps/configs/{id}/check-token`) and **Check all
+  tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
+  app starts the same scheduler.
+  [src: file: backend/src/core/token_checks.rs:316-334#spawn_scheduler]
+  [src: file: backend/src/lib.rs:2266-2268#check_token]
+- **What it sends.** One authenticated GET to the connection's own provider,
+  through the same ApiCall path as any call (SSRF policy, secret injection and
+  OAuth / token-exchange refresh included), with the 15 s timeout of the
+  readiness probe. The token goes nowhere else.
+- **What is stored.** One row per connection in `mcp_token_checks` (migration
+  `300_mcp_token_checks`): when it was probed, the outcome (`ok`, `refused` or
+  `inconclusive`), a redacted detail (the connection's own secret values masked,
+  the heuristic redaction of stored run output, 240 characters at most) and the
+  date of its last good probe or good call. The card shows them
+  (`McpConfigDisplay.token_check`).
+  [src: file: backend/src/db/mcps.rs:670-690#record_token_check]
+- **A refused probe is a refused call.** The probe runs `track_outcome`, so a 401,
+  a 403 that blames the credential or a refused OAuth refresh flags the
+  connection exactly as in KT-1524 (`mcp_auth_failures`, the "token refused"
+  notice, the `token_refused` health); a good probe clears the flag. Any other
+  failure (5xx, network, a missing scope) is `inconclusive`: the flag stays as it
+  was.
+- **The bell.** A flagged connection is listed in the bell's Notifications tab,
+  opening the connection, and nowhere else: it is not a row of the activity
+  overview and adds nothing to the "waiting on you" count. The notice is read
+  from the flag (`McpConfigDisplay.auth_failure`), so it disappears with it:
+  nothing is stored for the bell.
+  [src: file: frontend/src/hooks/useAuthFailureNotices.ts:13-36#useAuthFailureNotices]
+- **No probe.** A connection that cannot be probed shows "Not checked since
+  *date of its last good call*", or "Never checked" when no call has worked yet.
+  Every good call records that date, after the refusal flag is cleared: a
+  failed date write is logged and never keeps a refusal (or its notice) up.
+  [src: file: backend/src/workflows/api_auth_failure.rs:207-207#mark_good_call]
+- **Rate limits.** A connection is never probed twice within five minutes (a
+  click storm, a restart loop or a second request while one is running gets the
+  stored answer, marked `rate_limited`), and a batch runs two probes at a time.
+  The in-flight guard is taken before the stored row is read, so a check that
+  finishes in between cannot make a second request judge a stale row and probe
+  again.
+  [src: file: backend/src/core/token_checks.rs:33#MIN_RECHECK]
+  [src: file: backend/src/core/token_checks.rs:42#CHECK_CONCURRENCY]
 
 ## Troubleshooting
 
@@ -259,11 +317,11 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:16161-16167#task_worker_catalogue]
-  [src: file: backend/scripts/disc-introspection-mcp.py:6183-6198#call_agent_list]
-  [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
+  [src: file: backend/src/api/orchestration.rs:17594-17603#task_worker_catalogue]
+  [src: file: backend/scripts/disc-introspection-mcp.py:6195-6210#call_agent_list]
+  [src: file: backend/src/db/external_api_connections.rs:167-185#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]
   [src: file: backend/src/api/media.rs:449-478#usable_connections]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:671-677#changeConnection]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:678-684#changeConnection]

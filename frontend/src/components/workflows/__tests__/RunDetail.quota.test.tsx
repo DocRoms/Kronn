@@ -49,6 +49,7 @@ const waitingRun = (quota: StepResult['quota_wait']): WorkflowRun => ({
     }),
   ],
   tokens_used: 0,
+  shadow_tokens_used: 0,
   workspace_path: null,
   started_at: '2026-09-25T17:00:00Z',
   finished_at: null,

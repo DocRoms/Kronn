@@ -5,7 +5,7 @@ the audit, the briefing editor and the project card. An empty or unreadable
 file does not revive older DB notes. DB notes remain the fallback before the
 file exists, so answers saved before template installation are usable.
 [src: file: backend/src/api/projects/mod.rs:194-207#resolve_briefing_notes]
-[src: file: backend/src/api/projects/mod.rs:232#resolve_briefing_notes]
+[src: file: backend/src/api/projects/mod.rs:195-197#resolve_briefing_notes]
 [src: file: backend/src/api/audit/briefing.rs:21-39#get_briefing]
 
 Removing a TD-to-tasks or cross-agent option from the file disables it even
@@ -30,17 +30,17 @@ keeps an existing generated `project.md`; a newly installed template still
 gets its default fields filled. The report exposes `kept_without_answers`.
 [src: file: backend/src/api/audit/full.rs:939-944#sync_briefing_file]
 [src: file: backend/src/api/audit/full.rs:1056-1068#fill_project_doc_for_audit]
-[src: file: backend/src/api/audit/project_doc.rs:1202-1211#ProjectDocReport]
-[src: file: backend/src/api/audit/project_doc.rs:1266-1284#fill_project_doc_for_audit]
-[src: file: backend/src/api/audit/project_doc.rs:1286-1306#write_project_page]
+[src: file: backend/src/api/audit/project_doc.rs:1188-1197#ProjectDocReport]
+[src: file: backend/src/api/audit/project_doc.rs:1251-1269#fill_project_doc_for_audit]
+[src: file: backend/src/api/audit/project_doc.rs:1274-1294#write_project_page]
 
 The project facts include the external documentation (Confluence, Notion, a
 wiki, other): https addresses only, no credentials, at most six. A Confluence
 space is read back with one read-only GET through the project's Atlassian
 connection; a space the connection cannot see is "not verified", never a
 mismatch, because Confluence may live on another host than Jira.
-[src: file: backend/src/api/audit/project_doc.rs:928-941#confluence_space_key]
-[src: file: backend/src/api/audit/project_doc.rs:943-995#check_external_doc]
+[src: file: backend/src/api/audit/project_doc.rs:916-929#confluence_space_key]
+[src: file: backend/src/api/audit/project_doc.rs:931-983#check_external_doc]
 
 The same hook then seeds `gotchas/known-traps.md`, `people/team.md` and
 `conventions/git-workflow.md` from what the briefing states, and lists in each
@@ -51,13 +51,13 @@ the briefing no longer feeds is removed only while it still carries the marker.
 The report exposes `operating_docs`.
 [src: file: backend/src/api/audit/operating_seed.rs:305-390#seed]
 [src: file: backend/src/api/audit/operating_seed.rs:176-260#legacy_pointers]
-[src: file: backend/src/api/audit/project_doc.rs:1266-1284#fill_project_doc_for_audit]
+[src: file: backend/src/api/audit/project_doc.rs:1251-1269#fill_project_doc_for_audit]
 
 The regression suite covers HTTP reads and cards, stale database options,
 empty/unreadable files, explicit workflow defaults, clone preservation and a
 scripted Full audit that reads the briefing before its first step in both
 `docs/` and `.ai/`.
-[src: file: backend/tests/api_tests.rs:8357-8395#briefing_file_drives_http_reads_and_audited_project_cards]
+[src: file: backend/tests/api_tests.rs:8835-8873#briefing_file_drives_http_reads_and_audited_project_cards]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:67-97#briefing_residuals_empty_or_unreadable_file_never_resurrects_db_options]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:99-118#briefing_residuals_removing_an_option_in_the_file_overrides_stale_db_notes]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:120-169#briefing_residuals_fresh_clone_keeps_the_generated_project_doc_without_answers]

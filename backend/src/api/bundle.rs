@@ -274,7 +274,6 @@ async fn create_bundle_as(
     let wf_to_insert = Workflow {
         refs: req.workflow.refs.clone(),
         retention: req.workflow.retention,
-        shadow: None,
         project_scope: req.workflow.project_scope.clone(),
         pinned: false,
         id: wf_id.clone(),
@@ -337,7 +336,6 @@ async fn create_bundle_as(
         prepared_children.push(Workflow {
             refs: creq.refs.clone(),
             retention: creq.retention,
-            shadow: None,
             project_scope: creq.project_scope.clone(),
             pinned: false,
             id: real_id,

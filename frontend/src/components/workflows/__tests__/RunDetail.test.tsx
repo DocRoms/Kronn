@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act, fireEvent, within } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
-import type { WorkflowRun, WorkflowStep, StepResult, WorkflowAgentAttempt } from '../../../types/generated';
+import type { WorkflowRun, WorkflowStep, StepResult, StepShadowComparison, WorkflowAgentAttempt } from '../../../types/generated';
 
 vi.mock('../../../lib/api', () => buildApiMock());
 
@@ -43,6 +43,7 @@ const mkRun = (over: Partial<WorkflowRun>): WorkflowRun => ({
   trigger_context: null,
   step_results: [],
   tokens_used: 0,
+  shadow_tokens_used: 0,
   workspace_path: null,
   started_at: '2026-04-26T12:00:00Z',
   finished_at: '2026-04-26T12:00:01Z',
@@ -1322,5 +1323,41 @@ describe('RunDetail — sub-workflow provenance', () => {
     const pill = screen.getByText('Orphan Parent');
     fireEvent.click(pill);
     expect(onNav).not.toHaveBeenCalled();
+  });
+});
+
+describe('RunDetail — the run total counts every execution', () => {
+  const reason = mkResult({
+    step_name: 'reason', tokens_used: 17635,
+    agent_provenance: { attempts: [{ cost_usd: 1.4 }], selected_attempt: 1 } as unknown as StepResult['agent_provenance'],
+  });
+  const run = mkRun({ tokens_used: 17635, step_results: [reason] });
+
+  it('shows the steps alone when no step ran a shadow', () => {
+    render(<RunDetail run={run} onDelete={vi.fn()} />);
+    const total = screen.getByTestId('wf-run-total');
+    expect(total.textContent).toContain(`${(17635).toLocaleString()} wf.tokensTotal`);
+    expect(total.textContent).toContain('$1.40');
+    expect(total.getAttribute('title')).toBe('wf.tokensTotalHint');
+  });
+
+  it('adds the shadows and the merge, tokens and cost', () => {
+    const shadowSteps = [{
+      step_name: 'reason', result_index: 0,
+      shadows: [{ tokens_used: 39799, cost_usd: 0 }, { tokens_used: 58717, cost_usd: 0.15 }],
+      merge: { tokens_used: 7876, cost_usd: 1.42 },
+    }] as unknown as StepShadowComparison[];
+    render(<RunDetail run={run} shadowSteps={shadowSteps} onDelete={vi.fn()} />);
+    const total = screen.getByTestId('wf-run-total');
+    expect(total.textContent).toContain(`${(17635 + 39799 + 58717).toLocaleString()} wf.tokensTotal`);
+    expect(total.textContent).toContain('$2.97');
+    expect(total.textContent).not.toContain('\u2265');
+    expect(total.getAttribute('title')).toContain('wf.tokensTotalShadows:');
+  });
+
+  it('marks the cost as a floor when a shadow gave none', () => {
+    const shadowSteps = [{ step_name: 'reason', result_index: 0, shadows: [{ tokens_used: 900, cost_usd: null }] }] as unknown as StepShadowComparison[];
+    render(<RunDetail run={run} shadowSteps={shadowSteps} onDelete={vi.fn()} />);
+    expect(screen.getByTestId('wf-run-total').textContent).toContain('\u2265 $1.40');
   });
 });
