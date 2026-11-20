@@ -219,6 +219,7 @@ Full text in [LICENSE](LICENSE). If your legal team wants more nuance, dual-lice
 
 - [Website](https://docroms.github.io/Kronn/): the Kronn pitch site (FR / EN / ES)
 - [docs/install.md](docs/install.md): install per OS, Docker, WSL2, Tauri desktop
+- [docs/install-by-agent.md](docs/install-by-agent.md): the install an AI agent can run end to end, and how to check that agents have Kronn's tools
 - [The Kronn way](docs/guides/the-kronn-way.md): decomposition, batches, compare-agents, local models
 - [docs/architecture/overview.md](docs/architecture/overview.md): backend/frontend topology, workflow engine reference
 - [docs/architecture/trust-levels.md](docs/architecture/trust-levels.md): trust levels, sandbox, strong confirmation

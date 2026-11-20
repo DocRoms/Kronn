@@ -307,6 +307,8 @@ async fn bootstrap_in(
                 tracing::error!("Failed to sync MCP config for new project: {e}");
             }
         }
+    } else {
+        super::sync_new_project(&state, &project_id, &project.path).await;
     }
 
     // 4. Get language

@@ -219,6 +219,7 @@ Texte complet dans [LICENSE](LICENSE). Si ton équipe juridique veut plus de nua
 
 - [Site web](https://docroms.github.io/Kronn/) : le site de présentation de Kronn (FR / EN / ES)
 - [docs/install.md](docs/install.md) : installation par OS, Docker, WSL2, application desktop Tauri
+- [docs/install-by-agent.md](docs/install-by-agent.md) : l'installation qu'un agent IA peut mener de bout en bout, et comment vérifier que les agents ont les outils Kronn
 - [L'approche Kronn](docs/guides/the-kronn-way.md) : décomposition, batchs, compare-agents, modèles locaux
 - [docs/architecture/overview.md](docs/architecture/overview.md) : topologie backend/frontend, référence du moteur de workflow
 - [docs/architecture/trust-levels.md](docs/architecture/trust-levels.md) : niveaux de confiance, bac à sable, confirmation forte

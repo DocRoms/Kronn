@@ -147,3 +147,85 @@ async fn a_remap_moves_the_projects_list_and_registration_to_the_new_path() {
     assert_eq!(at_new, vec!["remap-tool".to_string()]);
     assert!(at_old.is_empty(), "the old path kept {at_old:?}");
 }
+
+/// KT-1981: a project added through the API has Kronn's tools in its agent
+/// configuration at once, not after a restart or a first discussion.
+#[tokio::test]
+#[serial_test::serial] // reads the bridge script path and the host-sync environment
+async fn a_project_added_through_the_api_gets_the_kronn_tools_at_once() {
+    let _owner = test_guard::exclusive_async().await;
+    if crate::agents::runner::disc_introspection_mcp_command_for_shared_config().is_none() {
+        return; // no bridge script on this host: nothing to write
+    }
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state();
+    for (name, with_git) in [("plain", false), ("repo", true)] {
+        let dir = root.path().canonicalize().unwrap().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let created = if with_git {
+            create(
+                State(state.clone()),
+                Json(DetectedRepo {
+                    path: dir.to_string_lossy().into_owned(),
+                    name: name.into(),
+                    remote_url: None,
+                    branch: "main".into(),
+                    ai_configs: vec![],
+                    has_project: false,
+                    hidden: false,
+                }),
+            )
+            .await
+        } else {
+            add_folder(
+                State(state.clone()),
+                Json(AddFolderRequest {
+                    path: dir.to_string_lossy().into_owned(),
+                    name: None,
+                }),
+            )
+            .await
+        };
+        assert!(created.0.success, "{:?}", created.0.error);
+        let written = std::fs::read_to_string(dir.join(".mcp.json"))
+            .unwrap_or_else(|e| panic!("{name}: no .mcp.json after creation: {e}"));
+        assert!(written.contains("kronn-internal"), "{name}: {written}");
+        forget_project(&dir);
+    }
+
+    // A repository sent back a second time is refused, not registered twice.
+    let repo = root.path().canonicalize().unwrap().join("repo");
+    let entry = || DetectedRepo {
+        path: repo.to_string_lossy().into_owned(),
+        name: "repo".into(),
+        remote_url: None,
+        branch: "main".into(),
+        ai_configs: vec![],
+        has_project: true,
+        hidden: false,
+    };
+    let again = create(State(state.clone()), Json(entry())).await;
+    assert!(
+        !again.0.success,
+        "a second registration of the same path passed"
+    );
+
+    // A path that is no directory is registered as before, and nothing is
+    // created on disk for it.
+    let absent = root.path().canonicalize().unwrap().join("absent");
+    let created = create(
+        State(state.clone()),
+        Json(DetectedRepo {
+            path: absent.to_string_lossy().into_owned(),
+            name: "absent".into(),
+            ..entry()
+        }),
+    )
+    .await;
+    assert!(created.0.success, "{:?}", created.0.error);
+    assert!(
+        !absent.exists(),
+        "the sync created the missing project folder"
+    );
+    forget_project(&absent);
+}

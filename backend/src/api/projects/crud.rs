@@ -318,6 +318,21 @@ pub async fn create(
         ));
     }
 
+    // A scan lists the repositories already registered too: sending one back
+    // must not register it twice.
+    let path_check = repo.path.clone();
+    let duplicate = state
+        .db
+        .with_conn(move |conn| {
+            let projects = crate::db::projects::list_projects(conn)?;
+            Ok(projects.iter().any(|p| p.path == path_check))
+        })
+        .await
+        .unwrap_or(false);
+    if duplicate {
+        return Json(ApiResponse::err("A project with this path already exists"));
+    }
+
     let now = Utc::now();
 
     let mut project = Project {
@@ -361,6 +376,7 @@ pub async fn create(
             crate::core::task_worker_lane_settings::register_project(std::path::Path::new(
                 &project.path,
             ));
+            super::sync_new_project(&state, &project.id, &project.path).await;
             Json(ApiResponse::ok(project))
         }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -543,6 +559,7 @@ pub async fn add_folder(
             crate::core::task_worker_lane_settings::register_project(std::path::Path::new(
                 &project.path,
             ));
+            super::sync_new_project(&state, &project.id, &project.path).await;
             Json(ApiResponse::ok(project))
         }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),

@@ -298,6 +298,7 @@ pub async fn clone_project(
     }
     // KT-1751: the project owns its tree from now on.
     crate::core::task_worker_lane_settings::register_project(std::path::Path::new(&project.path));
+    super::sync_new_project(&state, &project.id, &project.path).await;
 
     // Auto-detect skills
     let detected = crate::api::audit::detect_project_skills(&host_path);

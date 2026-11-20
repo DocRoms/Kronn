@@ -304,6 +304,33 @@ pub(super) async fn determine_parent_dir(state: &AppState) -> Result<String, Str
     }
 }
 
+/// Write a just-registered project's agent configuration files, so a CLI
+/// opened in it by hand finds Kronn's tools without waiting for a restart or
+/// a first discussion (KT-1981). Best-effort, like every other sync. A path
+/// that is no directory yet gets nothing: the sync would create it.
+pub async fn sync_new_project(state: &AppState, project_id: &str, project_path: &str) {
+    if !crate::core::scanner::resolve_host_path(project_path).is_dir() {
+        return;
+    }
+    let Some(secret) = state.config.read().await.encryption_secret.clone() else {
+        tracing::debug!(
+            "Skipping MCP sync for new project {project_id}: no encryption secret configured"
+        );
+        return;
+    };
+    let pid = project_id.to_string();
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::mcp_scanner::sync_project_with_report(conn, &pid, &secret);
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+    {
+        tracing::warn!("MCP sync failed for new project {project_id}: {e}");
+    }
+}
+
 /// Re-sync a project's on-disk agent assets to its CURRENT (DB) path.
 ///
 /// Writes the MCP plugins the project is configured for (`.mcp.json`,

@@ -96,7 +96,7 @@ cmd_start() {
     # Present the choice FIRST — agent detection is slow (~5-10s) and
     # completely unnecessary when the user just wants to launch the web UI.
     # The web interface has its own detection (instant, via the backend API).
-    menu_choice "How would you like to use Kronn?" \
+    KRONN_MENU_DEFAULT=1 menu_choice "How would you like to use Kronn?" \
         "Launch web interface (recommended)" \
         "Continue in CLI"
 
@@ -128,7 +128,7 @@ cmd_web() {
         # Enter-hammerers land on the FIRST option — make it the correct one on
         # macOS (native run), and DO it for them instead of printing a command
         # to retype. Docker stays available as the explicit second choice.
-        menu_choice "How do you want to run Kronn on this Mac?" \
+        KRONN_MENU_DEFAULT=1 menu_choice "How do you want to run Kronn on this Mac?" \
             "Native — backend + UI in one command (recommended: host agents work)" \
             "Docker anyway — web UI + API only (host agents won't run)"
         if [[ "$REPLY" == "1" ]]; then
