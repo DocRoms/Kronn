@@ -127,7 +127,7 @@ fn isolated_exec_child(
 /// the host has no sandbox, or the owner turned "Protect the Kronn vault from
 /// agents" off, it runs as it would for a human: a level refuses nothing for
 /// that. Any other step is unchanged.
-pub(crate) fn confined_for_level(
+pub fn confined_for_level(
     step: &WorkflowStep,
     program: &str,
     args: &[String],
@@ -433,7 +433,7 @@ pub fn static_refusals(step: &WorkflowStep, allowlist: &[String]) -> Vec<(String
 /// autoCode Issue steps are `python3` scripts, KT-1643) gets the prerequisite
 /// message that names what to install, not a raw OS error; any other failure
 /// keeps the raw spawn error.
-pub(crate) fn spawn_failure(step_name: &str, command: &str, error: &std::io::Error) -> String {
+pub fn spawn_failure(step_name: &str, command: &str, error: &std::io::Error) -> String {
     if command == crate::core::contribution::PYTHON_PROGRAM
         && error.kind() == std::io::ErrorKind::NotFound
     {
@@ -1466,6 +1466,8 @@ mod tests {
             mcp_config_ids: vec![],
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -1510,6 +1512,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

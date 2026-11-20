@@ -34,6 +34,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   previewImport: vi.fn(),
   autoDisabled: vi.fn(),
   reenable: vi.fn(),
+  stepShadows: vi.fn(),
 }));
 
 // The one place the default resolved values live: applied once when the mock is
@@ -48,6 +49,7 @@ const applyWorkflowsApiDefaults = vi.hoisted(() => () => {
   mockWorkflowsApi.previewImport.mockResolvedValue({ skills: [], missing_skills: [] });
   mockWorkflowsApi.autoDisabled.mockResolvedValue([]);
   mockWorkflowsApi.reenable.mockResolvedValue([]);
+  mockWorkflowsApi.stepShadows.mockResolvedValue([]);
 });
 applyWorkflowsApiDefaults();
 
@@ -62,6 +64,8 @@ vi.mock('../../hooks/useWebSocket', () => ({
 // Mock API — WorkflowsPage calls workflowsApi.list() and skillsApi.list() on mount
 vi.mock('../../lib/api', () => ({
   workflows: mockWorkflowsApi,
+  // KT-1518 — the fallback control of an expanded step lists the installed agents.
+  agents: { detect: vi.fn().mockResolvedValue([]) },
   skills: {
     list: vi.fn().mockResolvedValue([]),
     create: vi.fn(),
@@ -145,6 +149,10 @@ vi.mock('../../lib/api', () => ({
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
     // 0.8.6 phase 4 — WorkflowWizard reads default tier on mount.
     getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
+    // KT-1367 — the wizard reads the decision model to offer the Decide step.
+    getModelTiers: vi.fn().mockResolvedValue({}),
+    // KT-1518 — an expanded step editor reads the agent fallback chains.
+    getAgentFallback: vi.fn().mockResolvedValue({ chains: [], cooldowns: [] }),
   },
   // WorkflowWizard loads the MCP overview at mount (ApiCall plugin picker).
   mcps: {
@@ -2010,8 +2018,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
           selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null, editor: 'edit' }} />,
       );
-      // Expanded on arrival: its toggle is in view without a click.
-      expect(await screen.findByTestId('wf-shadow-enabled')).toBeInTheDocument();
+      // Expanded on arrival, on the first step that can carry shadows: no click needed.
+      expect(await screen.findByTestId('wf-step-shadows-0-add')).toBeInTheDocument();
     } finally {
       window.history.replaceState(null, '', window.location.pathname);
     }
@@ -2027,7 +2035,76 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null }} />,
     );
     fireEvent.click(await screen.findByTestId('wf-shadow-entry'));
-    expect(await screen.findByTestId('wf-shadow-enabled')).toBeInTheDocument();
+    expect(await screen.findByTestId('wf-step-shadows-0-add')).toBeInTheDocument();
+  });
+
+  describe('step shadows edited from the overview (KT-1696)', () => {
+    const doubled = () => labWorkflow({
+      steps: [
+        {
+          name: 'advise', agent: 'ClaudeCode', prompt_template: 'x', mode: { type: 'Normal' }, step_type: { type: 'Agent' },
+          shadows: [{ id: 'twin', label: 'Twin', enabled: true }, { id: 'other', label: 'Other', enabled: true }],
+          shadow_merge: { enabled: true, shadows: ['twin'], timeout_secs: 600 },
+        } as never,
+        { name: 'publish', agent: 'ClaudeCode', prompt_template: 'y', mode: { type: 'Normal' }, step_type: { type: 'Agent' } } as never,
+      ],
+    });
+
+    const openOverview = async (toast = vi.fn()) => {
+      mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+      mockWorkflowsApi.get.mockResolvedValue(doubled());
+      mockWorkflowsApi.listRuns.mockResolvedValue([]);
+      mockWorkflowsApi.countRuns.mockResolvedValue(0);
+      await wrap(
+        <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} toast={toast}
+          selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null }} />,
+      );
+      return toast;
+    };
+
+    it('shows the change first, then saves the whole step list with an explicit merge list', async () => {
+      let resolveSave: (workflow: Workflow) => void = () => {};
+      mockWorkflowsApi.update.mockImplementationOnce(() => new Promise<Workflow>(resolve => { resolveSave = resolve; }));
+      const toast = await openOverview();
+      const merge = await screen.findByTestId('wf-shadow-rows-0-other-merge');
+      expect(merge).toHaveAttribute('aria-checked', 'false');
+
+      fireEvent.click(merge);
+      // Optimistic: on screen before the server answered.
+      await waitFor(() => expect(screen.getByTestId('wf-shadow-rows-0-other-merge')).toHaveAttribute('aria-checked', 'true'));
+      expect(mockWorkflowsApi.update).toHaveBeenCalledTimes(1);
+      const [id, body] = mockWorkflowsApi.update.mock.calls[0];
+      expect(id).toBe('wf-lab');
+      expect(body.steps[0].shadow_merge).toEqual({ enabled: true, shadows: ['twin', 'other'], timeout_secs: 600 });
+      expect(body.steps[1]).toEqual(doubled().steps[1]);
+
+      const saved = doubled();
+      saved.steps[0].shadow_merge = body.steps[0].shadow_merge;
+      await act(async () => { resolveSave(saved); });
+      expect(screen.getByTestId('wf-shadow-rows-0-other-merge')).toHaveAttribute('aria-checked', 'true');
+      expect(toast).not.toHaveBeenCalled();
+    });
+
+    it('puts the change back and says why when the save fails', async () => {
+      mockWorkflowsApi.update.mockRejectedValueOnce(new Error('Workflow locked'));
+      const toast = await openOverview();
+      fireEvent.click(await screen.findByTestId('wf-shadow-rows-0-other-active'));
+      await waitFor(() => expect(toast).toHaveBeenCalled());
+      expect(toast).toHaveBeenCalledWith(expect.stringContaining('Workflow locked'), 'error');
+      await waitFor(() => expect(screen.getByTestId('wf-shadow-rows-0-other-active')).toHaveAttribute('aria-checked', 'true'));
+      expect(screen.getByTestId('wf-shadow-rows-0-other')).toHaveAttribute('data-paused', 'false');
+    });
+
+    it('removes a shadow and its merge entry in one save', async () => {
+      mockWorkflowsApi.update.mockResolvedValueOnce(doubled());
+      await openOverview();
+      fireEvent.click(await screen.findByTestId('wf-shadow-rows-0-twin-remove'));
+      await waitFor(() => expect(mockWorkflowsApi.update).toHaveBeenCalledTimes(1));
+      const body = mockWorkflowsApi.update.mock.calls[0][1];
+      expect(body.steps[0].shadows.map((shadow: { id: string }) => shadow.id)).toEqual(['other']);
+      // The last merged shadow went: the merge is off, its settings kept.
+      expect(body.steps[0].shadow_merge).toEqual({ enabled: false, shadows: [], timeout_secs: 600 });
+    });
   });
 
   it('applies the address again under a new token, even when its fields did not change', async () => {
@@ -2955,6 +3032,10 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         { source_id: 'custom-review', name: 'Review', action: 'conflict', existing_id: 'custom-review', resolution: 'create_copy' },
         { source_id: 'custom-style', name: 'Style', action: 'create', existing_id: null },
       ],
+      bindings: [
+        { kind: 'directive', source_id: 'custom-style', name: 'House style', action: 'reuse', existing_id: 'custom-our-style' },
+        { kind: 'profile', source_id: 'custom-cap', name: 'Release captain', action: 'create', existing_id: null },
+      ],
       missing_skills: ['custom-gone'],
     });
     mockWorkflowsApi.importWorkflow.mockResolvedValueOnce({ id: 'wf-skills' });
@@ -2979,6 +3060,11 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(mockWorkflowsApi.previewImport).toHaveBeenCalledWith({ content, project_id: null });
     expect(within(skills).getByText('Style')).toBeInTheDocument();
     expect(screen.getByTestId('import-missing-skills')).toHaveTextContent('custom-gone');
+    // KT-1843 — bundled directives and profiles: reused or created, never copied twice.
+    expect(within(screen.getByTestId('import-bindings')).getAllByRole('listitem').map(row => row.textContent)).toEqual([
+      'Directive House style identique à un élément présent : réutilisé, aucune copie',
+      'Profil Release captain absent ici : créé',
+    ]);
     const choice = within(skills).getByRole('combobox');
     expect(choice).toHaveValue('create_copy');
     fireEvent.change(choice, { target: { value: 'use_existing' } });

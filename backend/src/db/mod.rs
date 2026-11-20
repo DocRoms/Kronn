@@ -1,102 +1,45 @@
 pub mod acp_runtime_sessions;
-pub mod agent_decisions;
 pub mod agent_dispatch;
-pub mod agent_jobs;
 pub mod api_access_policies;
-pub mod api_call_logs;
 pub mod assistant_conversations;
-pub mod audit_cross;
 pub mod audit_documents;
-pub mod audit_run_cost;
 pub mod audit_runs;
-pub mod audit_validation;
 pub mod cli_telemetry;
-pub(crate) mod cli_worker_bindings;
-pub mod compare;
 pub mod contacts;
-pub mod context_audits;
 pub mod credential_scrub;
-pub mod default_contents;
 pub mod delivery_summaries;
 pub mod disc_source;
-pub mod discussion_actions;
-pub mod discussion_ceiling_requests;
-pub mod discussion_effort;
-pub mod discussion_important;
-pub(crate) mod discussion_launch_settings;
 pub mod discussion_monitor;
-pub mod discussion_questions;
-pub mod discussion_scope;
 pub mod discussion_sessions;
-pub mod discussion_video_sequences;
-pub mod discussion_weight;
 pub mod discussion_workspaces;
 pub mod discussions;
+pub mod execution_activity;
 pub mod execution_variable_snapshots;
 pub mod external_api_connections;
 pub mod github_connections;
-pub mod human_credentials;
-pub mod id_resolver;
-pub(crate) mod kronn_action_engine;
-pub mod learnings;
-pub mod lite_llm_model_failures;
-pub mod live_page_action_trusts;
-pub mod live_page_actions;
-pub mod live_pages;
+pub mod legacy_shadow;
 pub mod mcps;
 pub mod media_jobs;
 pub mod message_usage;
 pub mod migrations;
-pub mod model_catalog;
-pub mod orchestration;
 pub mod planning;
 pub mod planning_proposals;
-pub mod project_skill_references;
 pub mod projects;
-pub mod quick_apis;
-pub mod quick_exec_runs;
-pub mod quick_execs;
-pub mod quick_prompts;
 pub mod repository_resources;
 pub mod resource_changes;
-pub mod resource_identities;
 pub mod review_ledger;
 pub mod run_outcome;
-pub mod run_retention;
 pub mod run_state;
 pub mod schema_check;
-pub mod shared_runs;
 pub mod stored_credentials;
-pub mod task_boards;
-pub mod trust;
-pub mod ui_preferences;
 pub mod worker_deliveries;
-pub mod worker_offers;
 pub mod worker_reviews;
 pub mod workflow_run_pins;
-pub mod workflow_step_rooms;
 pub mod workflow_watch_state;
-pub mod workflows;
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "tests.rs"]
-mod tests;
-
-#[cfg(all(test, feature = "full-tests"))]
-mod release_gate_tests;
-
-#[cfg(all(test, feature = "full-tests"))]
-mod large_db_measure;
-
-#[cfg(test)]
-mod insert_redaction_measure;
-
-#[cfg(all(test, feature = "full-tests"))]
-mod upgrade_fixture_tests;
 
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
-#[cfg(test)]
-pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
     let mut statement = conn
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
         .expect("query plan");
@@ -112,8 +55,8 @@ pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
 /// Plan lines that read one of `aliases` from its table rather than from a
 /// covering index. On `workflow_runs` such a read walks the run's step results
 /// to reach any later column.
-#[cfg(test)]
-pub(crate) fn table_reads_outside_index(plan: &[String], aliases: &[&str]) -> Vec<String> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn table_reads_outside_index(plan: &[String], aliases: &[&str]) -> Vec<String> {
     plan.iter()
         .filter(|line| {
             let mut words = line.split_whitespace();
@@ -135,7 +78,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::config;
 
-fn parse_dt(s: String) -> DateTime<Utc> {
+pub fn parse_dt(s: String) -> DateTime<Utc> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
         return dt.with_timezone(&Utc);
     }
@@ -157,13 +100,13 @@ pub struct Database {
     /// holds its lock, so heavy reads stop freezing the whole API. `None`
     /// for in-memory databases (a second `:memory:` handle would be a
     /// DIFFERENT db) — `with_read_conn` falls back to the write connection.
-    read_conn: Option<Arc<Mutex<Connection>>>,
+    pub read_conn: Option<Arc<Mutex<Connection>>>,
     path: PathBuf,
     /// Runs flipped `Running`/`Pending` → `Interrupted` by THIS boot's
     /// reconcile. Drained exactly once by the boot notifier
     /// (`run_notify::notify_boot_interrupted`) — the process that would have
     /// webhooked these failures died with them.
-    boot_interrupted: Mutex<Vec<workflows::ReconciledRun>>,
+    boot_interrupted: Mutex<Vec<ReconciledRun>>,
     catalog_refresh_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Raised whenever the write connection changes a row a repository
     /// resource is rendered from — see [`resource_changes`].
@@ -172,6 +115,29 @@ pub struct Database {
     /// the closures run on this database's connections.
     assistant_guard: Arc<assistant_conversations::AssistantGuard>,
 }
+
+/// A workflow run the boot reconcile flipped to Interrupted.
+#[derive(Debug, Clone)]
+pub struct ReconciledRun {
+    pub run_id: String,
+    pub workflow_name: String,
+    /// RFC3339, as stored.
+    pub started_at: String,
+}
+
+/// What the boot steps are told and what they report.
+pub struct BootReport {
+    pub recover_commit_leases: bool,
+    pub interrupted: Vec<ReconciledRun>,
+}
+
+/// One step of the reconcile a database open runs after its migrations.
+/// `order` is the position in that sequence; an `Err` aborts the open.
+pub struct BootStep {
+    pub order: u16,
+    pub run: fn(&Connection, &mut BootReport) -> Result<()>,
+}
+inventory::collect!(BootStep);
 
 impl Database {
     pub fn assistant_guard(&self) -> &Arc<assistant_conversations::AssistantGuard> {
@@ -220,7 +186,7 @@ impl Database {
     /// Open the one production database after the caller has acquired the
     /// process-wide data-directory lock. Only this mode may discard commit
     /// leases: no Git worker from an earlier backend can still be live.
-    pub(crate) fn open_path_for_backend_boot(path: &PathBuf) -> Result<Self> {
+    pub fn open_path_for_backend_boot(path: &PathBuf) -> Result<Self> {
         Self::open_path_internal(path, true)
     }
 
@@ -272,98 +238,18 @@ impl Database {
         // Pass db path so a backup is created before pending migrations.
         migrations::run_with_backup(&conn, Some(path))?;
 
-        if recover_commit_leases {
-            let recovered_commit_leases =
-                orchestration::recover_spawned_commit_leases_after_restart(&conn)
-                    .context("Failed to reconcile spawned commit leases after restart")?;
-            if recovered_commit_leases > 0 {
-                tracing::info!(
-                    "Reconciled {recovered_commit_leases} spawned commit lease(s) left by the previous backend"
-                );
-            }
-        }
-
-        // 0.8.4 (#317 / B1) — reconcile stale `Running` audit_runs at
-        // boot. A backend crash, container restart, or kill -9 during
-        // an audit leaves the row stuck `Running` forever, polluting
-        // the recap chip strip + the "active audits" badge.
-        // Cutoff 0, same reasoning as the workflow_runs reconcile below:
-        // at boot no in-process audit runner exists, so every `Running`
-        // row is a zombie — and the flip is resume-safe because
-        // last_completed_step survives (see
-        // `reconcile_stale_runs_preserves_last_completed_step`).
-        // KT-1211 (M5), KT-1324 — an agent the previous backend left running
-        // would keep writing the docs the freed lease lets a resume rewrite:
-        // stop them all first (the recorded one, then whatever carries a run's
-        // tag). Then the step each was writing, which never ended, is put back
-        // from its pre-step snapshot (or marked partial) now — never before
-        // the agent is gone, and never left half-written and unmarked until
-        // the next launch.
-        match crate::api::audit::step_guard::stop_agents_and_settle_at_boot(&conn) {
-            Ok(0) => {}
-            Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
-            Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),
-        }
-        match audit_runs::reconcile_stale_runs(&conn, 0) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),
-            Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
-        }
-
-        // KT-1122 — recognise validations that already signalled completion
-        // and archive the stale ones an old audit left open. Idempotent.
-        match audit_validation::repair(&conn) {
-            Ok(audit_validation::RepairReport { completed: 0, archived: 0 }) => {}
-            Ok(report) => tracing::info!(
-                "Repaired audit validations: {} completion(s) recognised, {} stale discussion(s) archived",
-                report.completed,
-                report.archived
-            ),
-            Err(e) => tracing::warn!("Failed to repair audit validation state: {}", e),
-        }
-
-        // 0.8.11 (B5) — same reconcile for workflow_runs: a run that was in
-        // flight when the process died stays `Running`/`Pending` forever,
-        // poisoning the active-runs badge and cron "last run" checks.
-        // Cutoff 0 (not 30 min): at BOOT there is no in-process runner state,
-        // so every `Running`/`Pending` row is by definition a zombie — a grace
-        // window would just leave a freshly-interrupted run lying about its
-        // status for up to that long (Copilot review, PR #114).
-        let boot_interrupted = match workflows::reconcile_stale_runs(&conn, 0) {
-            Ok(v) => {
-                if !v.is_empty() {
-                    tracing::info!("Reconciled {} zombie workflow_runs left 'Running'/'Pending' by a previous process → Interrupted", v.len());
-                }
-                v
-            }
-            Err(e) => {
-                tracing::warn!("Failed to reconcile stale workflow_runs: {}", e);
-                Vec::new()
-            }
+        // What the previous backend left unfinished is settled now, each step
+        // by the crate that knows it, in the order the steps declare.
+        let mut boot = BootReport {
+            recover_commit_leases,
+            interrupted: Vec::new(),
         };
-        match workflow_step_rooms::revoke_all_after_restart(&conn) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Revoked {n} room membership(s) of workflow steps that died with the previous process"),
-            Err(e) => tracing::warn!("Failed to revoke stale workflow step room memberships: {e}"),
+        let mut steps: Vec<&BootStep> = inventory::iter::<BootStep>.into_iter().collect();
+        steps.sort_by_key(|step| step.order);
+        for step in steps {
+            (step.run)(&conn, &mut boot)?;
         }
-        match shared_runs::repair_stale_workflow_projections(&conn) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(
-                "Re-synced {} shared runs still marked live for finished workflow runs",
-                n
-            ),
-            Err(e) => tracing::warn!("Failed to repair stale shared-run projections: {}", e),
-        }
-
-        // 0.8.6 — auto-purge api_call_logs older than 90 days at boot.
-        // Generous default : keeps a quarter of audit trail for debug
-        // while preventing unbounded growth. User can manually trigger
-        // a tighter purge via the Settings → API audit "Purge" button.
-        match api_call_logs::purge_older_than(&conn, 90) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Purged {} api_call_logs rows older than 90 days", n),
-            Err(e) => tracing::warn!("Failed to auto-purge api_call_logs: {}", e),
-        }
+        let boot_interrupted = boot.interrupted;
 
         // ADR-001 O2 — open the read-only companion connection, ONLY when WAL
         // is actually effective: in DELETE/TRUNCATE journal modes a reader's
@@ -429,7 +315,7 @@ impl Database {
     /// `&Database`). Reads, writes, the change signal and the assistant guard
     /// are shared; the boot-interrupted list and the catalogue refresh locks
     /// are NOT — drain and lock them on the original only.
-    pub(crate) fn share_handle(&self) -> Database {
+    pub fn share_handle(&self) -> Database {
         Database {
             conn: Arc::clone(&self.conn),
             read_conn: self.read_conn.clone(),
@@ -441,7 +327,7 @@ impl Database {
         }
     }
 
-    pub(crate) async fn lock_catalog_refresh(
+    pub async fn lock_catalog_refresh(
         &self,
         target: &str,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
@@ -457,7 +343,7 @@ impl Database {
 
     /// Drain the boot-reconciled Interrupted runs (once). Returns empty on
     /// every subsequent call — the boot notifier is the single consumer.
-    pub fn take_boot_interrupted(&self) -> Vec<workflows::ReconciledRun> {
+    pub fn take_boot_interrupted(&self) -> Vec<ReconciledRun> {
         self.boot_interrupted
             .lock()
             .map(|mut v| std::mem::take(&mut *v))
@@ -515,8 +401,8 @@ impl Database {
 
     /// Whether no closure currently holds the write connection: lets a test
     /// assert that slow work runs outside `with_conn` (KT-1646).
-    #[cfg(test)]
-    pub(crate) fn write_connection_is_free(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn write_connection_is_free(&self) -> bool {
         !matches!(
             self.conn.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
@@ -575,7 +461,7 @@ impl Database {
 /// encryption key: no other account on the machine may read them (KT-990).
 /// Agents run as the same user, so this does not keep them out; that is the
 /// isolation work planned for 0.14.3.
-pub(crate) fn restrict_data_dir_to_owner(dir: &std::path::Path) {
+pub fn restrict_data_dir_to_owner(dir: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

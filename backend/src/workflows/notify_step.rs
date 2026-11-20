@@ -279,7 +279,7 @@ pub async fn execute_notify_step_with_policy(
 
 /// Public addresses only, except the test-only loopback allowance.
 fn notify_destinations(enforce_public_ip: bool) -> crate::core::safe_http::SafeHttpPolicy {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if !enforce_public_ip {
         return crate::core::safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;
     }
@@ -375,6 +375,8 @@ mod tests {
             delay_after_secs: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -419,6 +421,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

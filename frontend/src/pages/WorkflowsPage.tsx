@@ -19,7 +19,7 @@ import type {
   QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
   JsonValue, Skill, CreateSkillRequest, UnsafeExecStep, WorkflowStep,
 } from '../types/generated';
-import type { SkillImportChoice, WorkflowImportPreview } from '../types/generated';
+import type { NotCarried, SkillImportChoice, WorkflowImportPreview } from '../types/generated';
 import { SkillImportDecisions } from '../components/SkillImportDecisions';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
@@ -39,6 +39,7 @@ import { AutoDisabledReview } from '../components/workflows/AutoDisabledReview';
 import { AUTO_DISABLE_REASON_KEY } from '../lib/autoDisableReason';
 import { WorkflowWizard, type WorkflowWizardSection } from '../components/workflows/WorkflowWizard';
 import { agentSettingsForSelection } from '../lib/agentSelection';
+import { saveDecisionModel, type DecisionModelChoice } from '../lib/decisionModels';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
@@ -58,12 +59,15 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { mergeDeclaredAndDetected } from '../lib/workflowVariables';
 import { detectAutomationImport, type AutomationImportKind } from '../lib/automationImport';
 import { describeRedacted, exportRedactionNotice, redactedFieldsIn } from '../lib/redactedFields';
+import { notCarriedIn } from '../lib/exportReport';
+import { ExportNotCarriedDialog } from '../components/ExportNotCarriedDialog';
 import { AGENT_LABELS } from '../lib/constants';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import { isHeavyOutput } from '../lib/heavyOutput';
 import { formatBytes } from '../lib/live-page-weight';
 import { useHeavyOutputThreshold } from '../hooks/useHeavyOutputThreshold';
 import type { AgentSwitchTarget } from '../components/AgentSwitchPicker';
+import type { ShadowEdit } from '../lib/shadowMerge';
 import { AgentCompareSelector } from '../components/AgentCompareSelector';
 import { defaultCompareTargets, type CompareTarget } from '../lib/compareTargets';
 import { CollectionRowActions } from '../components/CollectionRowActions';
@@ -833,6 +837,16 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
   const triggeringRef = useRef(false);
   const [cancellingRunIds, setCancellingRunIds] = useState<Set<string>>(new Set());
 
+  // A workflow export waiting for the "named but not in the file" dialog (KT-1843).
+  type WorkflowExportFile = { filename: string; blob: Blob; name: string };
+  const [pendingExport, setPendingExport] = useState<(WorkflowExportFile & { notCarried: NotCarried[] }) | null>(null);
+  const finishExport = async ({ filename, blob, name }: WorkflowExportFile) => {
+    triggerDownload(filename, blob);
+    if (toastProp) toastProp(t('wf.exportDone').replace('{name}', name), 'success');
+    const notice = await exportRedactionNotice(blob, t);
+    if (notice && toastProp) toastProp(notice, 'info');
+  };
+
   // Live run state for SSE streaming
   const [liveRun, setLiveRun] = useState<{
     workflowId: string;
@@ -1230,6 +1244,52 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     } catch (error) {
       toastProp?.(userError(error), 'error');
       throw error;
+    }
+  };
+
+  // KT-1697 — a Decide step's model, saved the moment it is picked. The card
+  // shows the choice at once and goes back to the saved one if the save fails.
+  const changeStepDecisionModel = async (stepIndex: number, choice: DecisionModelChoice) => {
+    const workflow = detailWorkflow;
+    const step = workflow?.steps[stepIndex];
+    if (!workflow || !step) return;
+    try {
+      const saved = await saveDecisionModel(workflow, stepIndex, choice, {
+        show: shown => setDetailWorkflow(current => current?.id === workflow.id ? shown : current),
+        save: steps => workflowsApi.update(workflow.id, { steps }),
+      });
+      if (!saved) return;
+      void refetch();
+      toastProp?.(t('decisionPicker.changed', step.name, choice.model ?? t('decisionPicker.defaultShort')), 'success');
+    } catch (error) {
+      toastProp?.(userError(error), 'error');
+      throw error;
+    }
+  };
+
+  // KT-1696 — a change of a step's shadows or of its merge saves at once, like
+  // the main agent: shown first, put back with the reason if the save fails.
+  const changeStepShadows = async (stepIndex: number, edit: ShadowEdit) => {
+    const workflow = detailWorkflow;
+    const step = workflow?.steps[stepIndex];
+    if (!workflow || !step || (step.step_type && step.step_type.type !== 'Agent')) return;
+    const edited: WorkflowStep = {
+      ...step,
+      shadows: edit.shadows,
+      shadow_merge: edit.merge === undefined ? step.shadow_merge : edit.merge ?? undefined,
+    };
+    const withStep = (replacement: WorkflowStep) => (current: Workflow | null): Workflow | null =>
+      (current?.id === workflow.id
+        ? { ...current, steps: current.steps.map((existing, index) => (index === stepIndex ? replacement : existing)) }
+        : current);
+    setDetailWorkflow(withStep(edited));
+    try {
+      const updated = await workflowsApi.update(workflow.id, { steps: workflow.steps.map((existing, index) => (index === stepIndex ? edited : existing)) });
+      setDetailWorkflow(current => current?.id === workflow.id ? updated : current);
+      void refetch();
+    } catch (error) {
+      setDetailWorkflow(withStep(step));
+      toastProp?.(t('wf.shadow.rows.saveFailed', userError(error)), 'error');
     }
   };
 
@@ -3125,6 +3185,8 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                 runs={detailRuns}
                 availableAgentTypes={installedAgentTypes}
                 onChangeStepAgent={changeStepAgent}
+                onChangeStepDecisionModel={changeStepDecisionModel}
+                onChangeStepShadows={changeStepShadows}
                 onApplyUnsafeFix={applyUnsafeFix}
                 onApproveUnsafeStep={approveUnsafeStep}
                 agentChoices={compareAgentChoices}
@@ -3181,13 +3243,25 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                 onExport={async () => {
                   try {
                     const { filename, blob } = await workflowsApi.exportWorkflow(detailWorkflow.id);
-                    triggerDownload(filename, blob);
-                    if (toastProp) toastProp(t('wf.exportDone').replace('{name}', detailWorkflow.name), 'success');
-                    const notice = await exportRedactionNotice(blob, t);
-                    if (notice && toastProp) toastProp(notice, 'info');
+                    const pending = { filename, blob, name: detailWorkflow.name };
+                    // What the file names and does not hold is shown before it leaves.
+                    const notCarried = notCarriedIn(await blob.text());
+                    if (notCarried.length > 0) setPendingExport({ ...pending, notCarried });
+                    else await finishExport(pending);
                   } catch (e) {
                     if (toastProp) toastProp(userError(e), 'error');
                   }
+                }}
+              />
+            )}
+            {pendingExport && (
+              <ExportNotCarriedDialog
+                items={pendingExport.notCarried}
+                onCancel={() => setPendingExport(null)}
+                onDownload={() => {
+                  const pending = pendingExport;
+                  setPendingExport(null);
+                  void finishExport(pending);
                 }}
               />
             )}
@@ -4710,6 +4784,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                       {importSkills && (
                         <SkillImportDecisions
                           decisions={importSkills.skills}
+                          bindings={importSkills.bindings}
                           missing={importSkills.missing_skills}
                           choices={importSkillChoices}
                           onChoose={setImportSkillChoices}

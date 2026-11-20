@@ -1,95 +1,149 @@
-/** KT-1449 — a shadow run carries its variant and its normal run in its trigger context. */
-import type { RunStatus, StepResult, WorkflowRun, WorkflowShadow } from '../types/generated';
+/**
+ * KT-1449, KT-1459 — step shadows: a step re-runs beside its main execution on
+ * the same input. This reads what a run recorded about them: what differs
+ * between the executions of a step, what each spent, whether the outputs agree.
+ */
+import type {
+  ExecutionIdentity, MergeStatus, RunStatus, ShadowExecution, ShadowMerge, ShadowMergeReport, ShadowStatus, StepShadow, StepShadowComparison,
+  WorkflowRun, WorkflowStep,
+} from '../types/generated';
 
-const SKIPPED_SIGNAL = '[SIGNAL: SKIPPED_SHADOW]';
+/** The variant of a normal run; a run of the retired workflow-level shadow reads `shadow`. */
+export const NORMAL_VARIANT = 'normal';
 
-function context(run: WorkflowRun): Record<string, unknown> {
-  const value: unknown = run.trigger_context;
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-}
-
-/** How many skill and Quick Prompt versions a shadow configuration tests. */
-export function shadowTestedCount(shadow: WorkflowShadow | null | undefined): number {
-  return Object.keys(shadow?.skills ?? {}).length + Object.keys(shadow?.quick_prompt_versions ?? {}).length;
-}
-
+/** A run recorded by the retired workflow-level shadow (KT-1449): listed, never started again. */
 export function isShadowRun(run: WorkflowRun): boolean {
-  return context(run).__variant__ === 'shadow';
+  const value: unknown = run.trigger_context;
+  const variant = value && typeof value === 'object' ? (value as Record<string, unknown>).__variant__ : undefined;
+  return typeof variant === 'string' && variant !== NORMAL_VARIANT;
 }
 
-/** The normal run a shadow run was started alongside, if any. */
-export function shadowOf(run: WorkflowRun): string | null {
-  const id = context(run).__shadow_of__;
-  return typeof id === 'string' ? id : null;
+/** The steps that carry shadows, with how many each. */
+export function shadowedSteps(steps: readonly WorkflowStep[] | null | undefined): { step: WorkflowStep; shadows: readonly StepShadow[] }[] {
+  return (steps ?? []).filter(step => (step.shadows ?? []).length > 0).map(step => ({ step, shadows: step.shadows ?? [] }));
 }
 
-/** Each normal run id → its shadow run, among the runs loaded. */
-export function shadowsByNormalRun(runs: readonly WorkflowRun[]): Map<string, WorkflowRun> {
-  const map = new Map<string, WorkflowRun>();
-  for (const run of runs) {
-    const normal = shadowOf(run);
-    if (normal) map.set(normal, run);
+/** How many skill and Quick Prompt versions the shadows of the steps test. */
+export function shadowTestedCount(steps: readonly WorkflowStep[] | null | undefined): number {
+  return shadowedSteps(steps).reduce((total, { shadows }) => total + shadows.reduce((sum, shadow) => sum
+    + Object.keys(shadow.skills ?? {}).length + Object.keys(shadow.quick_prompt_versions ?? {}).length
+    + (shadow.prompt?.type === 'quick_prompt' ? 1 : 0), 0), 0);
+}
+
+/** Whether the shadow changes nothing of its step. */
+export function isIdenticalShadow(shadow: StepShadow): boolean {
+  return !shadow.agent && !shadow.prompt
+    && Object.keys(shadow.skills ?? {}).length === 0
+    && Object.keys(shadow.quick_prompt_versions ?? {}).length === 0;
+}
+
+/** The fields a header says may differ between the executions of a step. */
+export type IdentityField = 'agent' | 'model' | 'connection' | 'prompt' | 'skills';
+export const IDENTITY_FIELDS: readonly IdentityField[] = ['agent', 'model', 'connection', 'prompt', 'skills'];
+
+/** The model an execution ran on: the one it resolved, else the one it was configured with. */
+export function modelOf(execution: ShadowExecution): string {
+  return execution.model ?? execution.identity.model ?? '';
+}
+
+/** What an execution loaded for one field, as text (empty when it names none). */
+export function fieldValue(execution: ShadowExecution, field: IdentityField): string {
+  const identity: ExecutionIdentity = execution.identity;
+  switch (field) {
+    case 'agent': return identity.agent;
+    case 'model': return modelOf(execution);
+    case 'connection': return identity.connection_id ?? '';
+    case 'prompt': return identity.prompt;
+    case 'skills': return [...(identity.skills ?? [])].sort().join(', ');
   }
-  return map;
 }
 
-/** The shadow run recorded this step without running it (it acts outside Kronn). */
-export function isSkippedInShadow(step: StepResult): boolean {
-  return step.output.trimEnd().endsWith(SKIPPED_SIGNAL);
+/** Quick Prompt and skill names, to print an identity as a person reads it. */
+export interface IdentityNames {
+  quickPrompts?: readonly { id: string; name: string }[];
+  skills?: readonly { id: string; name: string }[];
 }
 
-/** Run list rows carry no step output: the comparison needs the full runs. */
-export function needsRunDetail(run: WorkflowRun): boolean {
-  return run.step_results.some(step => step.output === '');
+/** `custom-x@3` → « name v3 », `qp-id@8` → « name v8 »; an id nothing names stays as it is. */
+function namedVersion(ref: string, known: readonly { id: string; name: string }[] | undefined): string {
+  const at = ref.lastIndexOf('@');
+  const [id, version] = at > 0 && /^\d+$/.test(ref.slice(at + 1)) ? [ref.slice(0, at), ref.slice(at + 1)] : [ref, ''];
+  const name = known?.find(entry => entry.id === id)?.name ?? id.replace(/^custom-/, '');
+  return version ? `${name} v${version}` : name;
 }
 
-export type StepVerdict = 'same' | 'different' | 'skipped' | 'missing';
-
-export interface ComparedStep {
-  key: string;
-  name: string;
-  /** 1-based, shown only when a step ran more than once (Goto, retry loop). */
-  occurrence: number;
-  occurrences: number;
-  normal?: StepResult;
-  shadow?: StepResult;
-  verdict: StepVerdict;
-}
-
-export interface RunComparison {
-  steps: ComparedStep[];
-  counts: Record<StepVerdict, number>;
-  tokens: { normal: number; shadow: number };
-  durationMs: { normal: number; shadow: number };
-}
-
-function occurrences(run: WorkflowRun): Map<string, StepResult[]> {
-  const byName = new Map<string, StepResult[]>();
-  for (const step of run.step_results) {
-    if (step.is_rollback) continue;
-    byName.set(step.step_name, [...(byName.get(step.step_name) ?? []), step]);
+/**
+ * KT-1946 — what an execution loaded for one field, in names: the stored value keeps
+ * ids (`qp-id@8`, `custom-x@3`), which say nothing to the person comparing two runs.
+ */
+export function readableFieldValue(execution: ShadowExecution, field: IdentityField, names: IdentityNames, writtenPrompt: string): string {
+  const identity: ExecutionIdentity = execution.identity;
+  if (field === 'prompt') {
+    if (!identity.prompt) return '';
+    return identity.prompt.startsWith('inline:') ? writtenPrompt : namedVersion(identity.prompt, names.quickPrompts);
   }
-  return byName;
+  if (field === 'skills') return [...(identity.skills ?? [])].map(skill => namedVersion(skill, names.skills)).sort().join(', ');
+  return fieldValue(execution, field);
+}
+
+export interface IdentityDiff {
+  /** The fields every execution shares, with their common value (empty ones left out). */
+  identical: { field: IdentityField; value: string }[];
+  /** The fields on which the executions differ. */
+  differing: IdentityField[];
+}
+
+/** What differs between the executions of a step, and what they share. */
+export function compareIdentities(executions: readonly ShadowExecution[]): IdentityDiff {
+  const identical: IdentityDiff['identical'] = [];
+  const differing: IdentityField[] = [];
+  for (const field of IDENTITY_FIELDS) {
+    const values = executions.map(execution => fieldValue(execution, field));
+    if (values.every(value => value === values[0])) {
+      if (values[0] !== '') identical.push({ field, value: values[0] });
+    } else {
+      differing.push(field);
+    }
+  }
+  return { identical, differing };
+}
+
+/** Whether `execution` loaded exactly what `main` did. */
+export function sameIdentity(main: ShadowExecution, execution: ShadowExecution): boolean {
+  return IDENTITY_FIELDS.every(field => (field === 'model'
+    ? (main.identity.model ?? '') === (execution.identity.model ?? '')
+    : fieldValue(main, field) === fieldValue(execution, field)));
 }
 
 const ENVELOPE = /---STEP_OUTPUT---\s*([\s\S]*?)\s*---END_STEP_OUTPUT---/;
 
 /** A step output as a person compares it: a JSON envelope pretty-printed one
  *  field per line (so a line diff points at the field), the signal dropped. */
+/** Keys in alphabetical order at every depth: two models write the same fields in different orders. */
+function withSortedKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withSortedKeys);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, v]) => [key, withSortedKeys(v)]));
+  }
+  return value;
+}
+
 export function readableOutput(output: string): string {
-  const body = output.replace(/\n?\[SIGNAL: [A-Z_]+\]\s*$/, '').trim();
+  const body = output.replace(/\n?\[SIGNAL: [A-Za-z0-9_]+\]\s*$/, '').trim();
   const envelope = ENVELOPE.exec(body);
   const candidate = envelope ? envelope[1] : body;
   try {
     const parsed: unknown = JSON.parse(candidate);
-    if (parsed && typeof parsed === 'object') return JSON.stringify(parsed, null, 2);
+    if (parsed && typeof parsed === 'object') return JSON.stringify(withSortedKeys(parsed), null, 2);
   } catch {
     // Not JSON: compared as text.
   }
   return body;
 }
 
-/** Measurements that differ on every run: a step is not « different » for them. */
+/** Measurements that differ on every run: an output is not « different » for them. */
 const VOLATILE_KEYS = new Set(['duration_ms', 'elapsed_ms', 'started_at', 'finished_at', 'published_at', 'observed_at', 'data_revision']);
 const TIMINGS = /\b\d+(?:\.\d+)?\s?(?:ms|s)\b/g;
 
@@ -103,7 +157,7 @@ function withoutMeasurements(value: unknown): unknown {
   return typeof value === 'string' ? value.replace(TIMINGS, '…') : value;
 }
 
-/** The output as compared for the verdict: timings and timestamps left out. */
+/** The output as compared: timings and timestamps left out. */
 export function comparableOutput(output: string): string {
   const text = readableOutput(output);
   try {
@@ -113,38 +167,53 @@ export function comparableOutput(output: string): string {
   }
 }
 
-function sameOutput(a: StepResult, b: StepResult): boolean {
-  return a.status === b.status && comparableOutput(a.output) === comparableOutput(b.output);
+/** Whether an execution produced an output worth comparing. */
+export function hasOutput(execution: ShadowExecution): boolean {
+  return (execution.status === 'success' || execution.status === 'over_budget') && execution.output.trim() !== '';
 }
 
-/** Step by step, occurrence by occurrence: what each run produced and whether it differs. */
-export function compareRuns(normal: WorkflowRun, shadow: WorkflowRun): RunComparison {
-  const left = occurrences(normal);
-  const right = occurrences(shadow);
-  const order = [...new Set([...normal.step_results, ...shadow.step_results].filter(s => !s.is_rollback).map(s => s.step_name))];
-  const steps: ComparedStep[] = [];
-  for (const name of order) {
-    const a = left.get(name) ?? [];
-    const b = right.get(name) ?? [];
-    const total = Math.max(a.length, b.length);
-    for (let i = 0; i < total; i += 1) {
-      const n = a[i];
-      const s = b[i];
-      const verdict: StepVerdict = s && isSkippedInShadow(s) ? 'skipped'
-        : !n || !s ? 'missing'
-          : sameOutput(n, s) ? 'same' : 'different';
-      steps.push({ key: `${name}#${i}`, name, occurrence: i + 1, occurrences: total, normal: n, shadow: s, verdict });
-    }
-  }
-  const counts: Record<StepVerdict, number> = { same: 0, different: 0, skipped: 0, missing: 0 };
-  for (const step of steps) counts[step.verdict] += 1;
-  const sum = (run: WorkflowRun, pick: (s: StepResult) => number) => run.step_results.reduce((acc, s) => acc + pick(s), 0);
+export interface Determinism {
+  /** Executions compared: the main one and the identical shadows that produced an output. */
+  total: number;
+  /** How many different outputs they gave. */
+  distinct: number;
+  /** Identical shadows that produced none (failed, still running, skipped). */
+  missing: number;
+}
+
+/** For the shadows identical to the main execution: how many distinct outputs
+ *  out of N+1. `null` when the step has no identical shadow. */
+export function determinism(step: StepShadowComparison): Determinism | null {
+  const twins = step.shadows.filter(shadow => sameIdentity(step.main, shadow));
+  if (twins.length === 0) return null;
+  const compared = [step.main, ...twins].filter(hasOutput);
   return {
-    steps,
-    counts,
-    tokens: { normal: normal.tokens_used || sum(normal, s => s.tokens_used ?? 0), shadow: shadow.tokens_used || sum(shadow, s => s.tokens_used ?? 0) },
-    durationMs: { normal: sum(normal, s => s.duration_ms), shadow: sum(shadow, s => s.duration_ms) },
+    total: compared.length,
+    distinct: new Set(compared.map(execution => comparableOutput(execution.output))).size,
+    missing: twins.length + 1 - compared.length,
   };
+}
+
+/** The label of an execution: `main`'s is the caller's, a shadow's its label, else its id. */
+export function shadowName(execution: ShadowExecution, mainLabel: string): string {
+  return execution.shadow_id == null ? mainLabel : execution.label || execution.shadow_id;
+}
+
+/** `shadowName` followed by the agent and the model that answered. */
+export function shadowLabel(execution: ShadowExecution, mainLabel: string): string {
+  const name = shadowName(execution, mainLabel);
+  // Which agent and model answered: « shadow-2 » alone says nothing in a pick list.
+  // The model that answered when the run resolved one; else the one asked for (a tier).
+  const who = [execution.identity.agent, execution.model || execution.identity.model].filter(Boolean).join(' · ');
+  return who ? `${name} (${who})` : name;
+}
+
+/** A stable key for an execution inside its step. */
+export const executionKey = (execution: ShadowExecution): string => execution.shadow_id ?? '';
+
+/** `shadow.status.*` key of a stored execution. */
+export function shadowStatusKey(status: ShadowStatus): string {
+  return `wf.shadow.status.${status}`;
 }
 
 /** `run.status.*` key of a run or step status. */
@@ -164,26 +233,170 @@ export function clip(text: string, max: number): { text: string; clipped: boolea
   return chars.length > max ? { text: chars.slice(0, max).join(''), clipped: true } : { text, clipped: false };
 }
 
-/** Shadows whose normal run is loaded: they share its row in the run list. */
-export function pairedShadows(runs: readonly WorkflowRun[]): Map<string, WorkflowRun> {
-  const ids = new Set(runs.map(run => run.id));
-  return new Map([...shadowsByNormalRun(runs)].filter(([normalId]) => ids.has(normalId)));
+/** Cost as shown: `null` is unknown, never free. */
+export function formatCost(cost: number | null | undefined): string {
+  if (cost == null) return '—';
+  return `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
 }
 
-/** The runs listed as rows: a paired shadow folds into its normal run, which is
- *  listed when either side matches the filter. An orphan shadow keeps its row. */
-export function runListRows(
-  runs: readonly WorkflowRun[],
-  matching: readonly WorkflowRun[],
-  pairs: ReadonlyMap<string, WorkflowRun>,
-): WorkflowRun[] {
-  const matched = new Set(matching.map(run => run.id));
-  const folded = new Set([...pairs.values()].map(run => run.id));
-  return runs.filter(run => !folded.has(run.id)
-    && (matched.has(run.id) || matched.has(pairs.get(run.id)?.id ?? '')));
+/** What a run spent, every execution counted: its steps, their shadows, their merges. */
+export interface RunSpend {
+  /** Steps (a merge pass is counted in its step) plus shadows. */
+  tokens: number;
+  shadowTokens: number;
+  /** Null when no execution reported a cost. */
+  cost: number | null;
+  /** An execution spent tokens and gave no cost: `cost` is then a floor. */
+  partial: boolean;
 }
 
-/** The views of a run row pairing a normal run with its shadow. */
-export type PairView = 'compare' | 'normal' | 'shadow';
-export const pairTabId = (runId: string, view: PairView) => `wf-run-pair-${runId}-${view}-tab`;
-export const pairPanelId = (runId: string) => `wf-run-pair-${runId}-panel`;
+/** Steps plus shadows, as the run row and the lists show it (KT-1957). */
+export function runTokens(run: Pick<WorkflowRun, 'tokens_used' | 'shadow_tokens_used'>): number {
+  return run.tokens_used + (run.shadow_tokens_used ?? 0);
+}
+
+export function runSpend(
+  run: Pick<WorkflowRun, 'tokens_used' | 'step_results'>,
+  comparisons: readonly StepShadowComparison[],
+): RunSpend {
+  let cost: number | null = null;
+  let partial = false;
+  const add = (tokens: number | null | undefined, costs: readonly (number | null | undefined)[]) => {
+    const known = costs.filter((value): value is number => typeof value === 'number');
+    if (known.length > 0) cost = known.reduce((sum, value) => sum + value, cost ?? 0);
+    else if ((tokens ?? 0) > 0) partial = true;
+  };
+  for (const result of run.step_results ?? []) {
+    add(result.tokens_used, (result.agent_provenance?.attempts ?? []).map(attempt => attempt.cost_usd));
+  }
+  let shadowTokens = 0;
+  for (const step of comparisons) {
+    for (const shadow of step.shadows) {
+      shadowTokens += shadow.tokens_used ?? 0;
+      add(shadow.tokens_used, [shadow.cost_usd]);
+    }
+    if (step.merge) add(step.merge.tokens_used, [step.merge.cost_usd]);
+  }
+  return { tokens: run.tokens_used + shadowTokens, shadowTokens, cost, partial };
+}
+
+/** The change of `to` against `from`, as « (+12 %) », « (=) » or nothing when `from` is empty. */
+export function percent(from: number | null | undefined, to: number | null | undefined): string {
+  if (!from || from <= 0 || to == null) return '';
+  const delta = Math.round(((to - from) / from) * 100);
+  return delta === 0 ? ' (=)' : ` (${delta > 0 ? '+' : '−'}${Math.abs(delta)} %)`;
+}
+
+// ─── KT-1544 — the merge of a step's executions ────────────────────────────
+
+/** The execution name the condense pass uses for the main execution. */
+export const MERGE_MAIN = 'main';
+
+/** Whether a merge is still going: the comparison keeps refreshing. */
+export function mergeInProgress(merge: ShadowMergeReport | undefined | null): boolean {
+  return merge?.status === 'waiting' || merge?.status === 'condensing';
+}
+
+/** The i18n key naming how a merge stands. */
+export function mergeStatusKey(status: MergeStatus): string {
+  return `wf.shadow.merge.status.${status}`;
+}
+
+/** The label of an execution named in a merge (`main`, `shadow:<id>`). */
+export function mergeExecutionLabel(token: string, comparison: StepShadowComparison, mainLabel: string): string {
+  if (token === MERGE_MAIN) return shadowLabel(comparison.main, mainLabel);
+  const id = token.startsWith('shadow:') ? token.slice('shadow:'.length) : token;
+  const shadow = comparison.shadows.find(candidate => candidate.shadow_id === id);
+  return shadow ? shadowLabel(shadow, mainLabel) : id;
+}
+
+/** What one execution brought to a merge. `raised` is always `inResult + dropped`. */
+export interface MergeRow {
+  execution: string;
+  /** Distinct points it raised, kept or not. */
+  raised: number;
+  /** Of those, the points that stand in the result: found alone, with others, or reworded. */
+  inResult: number;
+  /** Of those, the points no other execution found. */
+  alone: number;
+  /** Raised but left out: no evidence held. */
+  dropped: number;
+}
+
+export interface MergeTally {
+  rows: MergeRow[];
+  /** Points of the result. */
+  result: number;
+  /** Of those, found by a single execution. */
+  alone: number;
+  /** Distinct points left out. */
+  dropped: number;
+}
+
+/**
+ * The merge read point by point. A point of the result belongs to every
+ * execution that found it, not to the first one named: a shadow that confirms
+ * three points of the main execution found three points, not zero.
+ */
+export function mergeTally(report: ShadowMergeReport): MergeTally {
+  const byId = new Map(report.points.map(point => [point.id, point]));
+  // The kept point a point stands for: itself, or the one it rewords.
+  const rootOf = (point: ShadowMergeReport['points'][number]) => {
+    let current = point;
+    for (let hop = 0; hop < report.points.length && current.verdict === 'duplicate'; hop += 1) {
+      const next = current.duplicate_of ? byId.get(current.duplicate_of) : undefined;
+      if (!next) return undefined;
+      current = next;
+    }
+    return current.verdict === 'kept' ? current : undefined;
+  };
+  const finders = new Map<string, Set<string>>();
+  const droppedBy = new Map<string, number>();
+  let dropped = 0;
+  for (const point of report.points) {
+    const root = rootOf(point);
+    if (!root) {
+      dropped += 1;
+      for (const execution of point.found_by) droppedBy.set(execution, (droppedBy.get(execution) ?? 0) + 1);
+      continue;
+    }
+    const found = finders.get(root.id) ?? new Set<string>();
+    point.found_by.forEach(execution => found.add(execution));
+    finders.set(root.id, found);
+  }
+  const rows = report.contributions.map(({ execution }) => {
+    // A point reworded twice by one execution is one point of the result.
+    const mine = [...finders.values()].filter(found => found.has(execution));
+    const left = droppedBy.get(execution) ?? 0;
+    return { execution, raised: mine.length + left, inResult: mine.length, alone: mine.filter(found => found.size === 1).length, dropped: left };
+  });
+  return { rows, result: finders.size, alone: [...finders.values()].filter(found => found.size === 1).length, dropped };
+}
+
+/** The longest wait the backend accepts, in minutes. */
+export const MAX_MERGE_MINUTES = 60;
+/** The wait when the step sets none, in minutes. */
+export const DEFAULT_MERGE_MINUTES = 10;
+
+/** The shadows a merge selects: none named means every shadow of the step. */
+export function mergedShadowIds(merge: ShadowMerge | undefined, shadows: readonly StepShadow[]): string[] {
+  const named = merge?.shadows ?? [];
+  return named.length > 0 ? named : shadows.map(shadow => shadow.id);
+}
+
+/** The merge once a shadow was renamed or removed: it names only shadows the step still carries. */
+export function pruneMerge(
+  merge: ShadowMerge | undefined, before: readonly StepShadow[], after: readonly StepShadow[],
+): ShadowMerge | null | undefined {
+  if (!merge) return undefined;
+  if (after.length === 0) return null;
+  const named = merge.shadows ?? [];
+  if (named.length === 0) return undefined;
+  const renamed = named.map(id => {
+    const index = before.findIndex(shadow => shadow.id === id);
+    return index >= 0 && after.length === before.length && after[index] ? after[index].id : id;
+  });
+  const kept = renamed.filter(id => after.some(shadow => shadow.id === id));
+  if (kept.length === named.length && kept.every((id, i) => id === named[i])) return undefined;
+  return { ...merge, shadows: kept.length === after.length ? [] : kept };
+}

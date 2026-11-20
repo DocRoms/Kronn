@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
-    AgentType, CatalogPreflightWarning, LivePageDatasetKind, LivePageWriteOperation, ModelTier,
-    PromptVariable,
+    AgentFallback, AgentType, CatalogPreflightWarning, LivePageDatasetKind, LivePageWriteOperation,
+    ModelTier, PromptVariable,
 };
 
 /// Why Kronn disabled a workflow on its own (KT-1037).
@@ -154,11 +154,6 @@ pub struct Workflow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retention: Option<WorkflowRetention>,
-    /// KT-1449 — a shadow run started alongside each normal one, with other
-    /// skill/QP versions and its external effects skipped. Human-only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub shadow: Option<WorkflowShadow>,
     /// KT-1448 — named references to Kronn objects, rendered by steps as
     /// `{{refs.<name>}}` and remapped by export/import like other dependencies.
     #[serde(default, skip_serializing_if = "WorkflowRefs::is_empty")]
@@ -168,25 +163,207 @@ pub struct Workflow {
     pub updated_at: DateTime<Utc>,
 }
 
-/// The shadow variant of a workflow (KT-1449). Each normal run of a matching
-/// project also starts a shadow run on the same inputs; steps flagged
-/// `external_effect` are skipped there, so it can be compared without acting.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// The agent a shadow runs its step on instead of the step's own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 #[ts(export)]
-pub struct WorkflowShadow {
+pub struct ShadowAgent {
+    pub agent: AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    /// The named HTTP connection (local Ollama, LiteLLM, OpenRouter…) the
+    /// agent talks to, when the agent type alone does not say which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_effort: Option<String>,
+}
+
+/// The prompt a shadow loads instead of its step's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export)]
+pub enum ShadowPrompt {
+    /// Another Quick Prompt, or one of its versions.
+    QuickPrompt {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        version: Option<u32>,
+    },
+    /// A prompt written in the shadow.
+    Inline { template: String },
+}
+
+/// What a shadow may spend before it is stopped. A stopped shadow never fails
+/// or delays its step.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ShadowBudget {
+    /// Also the generation cap handed to an agent that takes one; checked on
+    /// the tokens the shadow spent when it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_tokens: Option<u64>,
+    /// Wall-clock limit of the shadow, enforced: it replaces the workflow's
+    /// timeout for the shadow, so a slow local model may run longer than the
+    /// main step, which never waits for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_duration_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_cost_usd: Option<f64>,
+}
+
+impl ShadowBudget {
+    pub fn is_empty(&self) -> bool {
+        self.max_tokens.is_none() && self.max_duration_secs.is_none() && self.max_cost_usd.is_none()
+    }
+}
+
+/// A shadow of a step (KT-1449, KT-1459): the step runs once more beside the
+/// main execution, on exactly the same input, with what the shadow changes. A
+/// shadow that changes nothing measures the determinism of the step's agent.
+/// Only the main output continues the workflow; a shadow never runs a step that
+/// acts outside Kronn and never fails or delays the main step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StepShadow {
+    /// Short slug, unique in the step: the key of the shadow's column in the
+    /// comparison.
+    pub id: String,
+    /// Shown in the comparison; the id when empty.
+    #[serde(default)]
+    pub label: String,
+    /// Off keeps the shadow saved without running it.
+    #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Only runs of these projects get a shadow; empty means every run.
+    /// Only runs of these projects get this shadow; empty means every run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub project_ids: Vec<String>,
-    /// Skill replaced in the shadow run: `custom-x` → `custom-x@3`, or any
-    /// other skill id. Matched on the base id of what the step loads.
+    /// One run in N gets this shadow. Unset or 1 is every run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sample_every: Option<u32>,
+    /// The agent, model and connection the shadow runs on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent: Option<ShadowAgent>,
+    /// The prompt the shadow loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub prompt: Option<ShadowPrompt>,
+    /// Skill replaced in the shadow: `custom-x` → `custom-x@3`, or any other
+    /// skill id; an empty replacement drops the skill. Matched on the base id
+    /// of what the step loads.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     #[ts(type = "Record<string, string>")]
     pub skills: std::collections::BTreeMap<String, String>,
-    /// Quick Prompt version the shadow run loads instead of the current one.
+    /// Quick Prompt version the shadow loads instead of the current one.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     #[ts(type = "Record<string, number>")]
     pub quick_prompt_versions: std::collections::BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub budget: Option<ShadowBudget>,
+}
+
+impl Default for StepShadow {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            enabled: true,
+            project_ids: Vec::new(),
+            sample_every: None,
+            agent: None,
+            prompt: None,
+            skills: Default::default(),
+            quick_prompt_versions: Default::default(),
+            budget: None,
+        }
+    }
+}
+
+impl StepShadow {
+    /// The name shown for the shadow.
+    pub fn display_label(&self) -> &str {
+        if self.label.trim().is_empty() {
+            &self.id
+        } else {
+            &self.label
+        }
+    }
+
+    /// Whether the shadow changes nothing of its step.
+    pub fn is_identical(&self) -> bool {
+        self.agent.is_none()
+            && self.prompt.is_none()
+            && self.skills.is_empty()
+            && self.quick_prompt_versions.is_empty()
+    }
+}
+
+/// How long a merge waits for its shadows when the step sets no limit.
+pub const DEFAULT_SHADOW_MERGE_TIMEOUT_SECS: u64 = 600;
+/// The longest wait a step may ask for.
+pub const MAX_SHADOW_MERGE_TIMEOUT_SECS: u64 = 3600;
+
+/// The optional merge of a step (KT-1544): the main execution and the shadows
+/// it selects are condensed into one result, which becomes the step's output.
+/// Without it a step with shadows only compares them (KT-1459).
+///
+/// The merge waits for the selected shadows up to `timeout_secs`, goes on with
+/// those that finished and says which are missing. A condense pass (an Agent)
+/// then dedups the points, verifies each against the code and records which
+/// executions found it: a point it cannot verify is never published.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ShadowMerge {
+    /// Off keeps the setting saved without merging.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The shadows that merge with the main execution, by id; empty means every
+    /// shadow of the step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<String>,
+    /// How long to wait for the selected shadows; unset is
+    /// `DEFAULT_SHADOW_MERGE_TIMEOUT_SECS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timeout_secs: Option<u64>,
+    /// The agent of the condense pass, usually the strongest model; unset runs
+    /// it on the step's own agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent: Option<ShadowAgent>,
+}
+
+impl Default for ShadowMerge {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shadows: Vec::new(),
+            timeout_secs: None,
+            agent: None,
+        }
+    }
+}
+
+impl ShadowMerge {
+    /// Whether the shadow `id` is one the merge selects.
+    pub fn selects(&self, id: &str) -> bool {
+        self.shadows.is_empty() || self.shadows.iter().any(|selected| selected == id)
+    }
+
+    pub fn timeout(&self) -> u64 {
+        self.timeout_secs
+            .unwrap_or(DEFAULT_SHADOW_MERGE_TIMEOUT_SECS)
+    }
 }
 
 /// The kind of object a workflow ref names (KT-1448).
@@ -626,9 +803,18 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_ids: Vec<String>,
     /// KT-1449 — the step acts outside Kronn (posts, writes, sends): a shadow
-    /// run skips it.
+    /// never runs it, and it cannot carry shadows.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub external_effect: bool,
+    /// KT-1459 — the shadows of this step: each re-runs only this step beside
+    /// the main execution, on the same input. Human-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<StepShadow>,
+    /// KT-1544 — optional: condense the main execution with the selected
+    /// shadows into the step's output. Off by default; human-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub shadow_merge: Option<ShadowMerge>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profile_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -710,7 +896,7 @@ pub struct WorkflowStep {
     pub quick_prompt_id: Option<String>,
 
     /// Version of `quick_prompt_id` the step loads; unset follows its latest
-    /// version. A shadow run may still test another one.
+    /// version. A shadow of the step may still test another one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick_prompt_version: Option<u32>,
 
@@ -1004,6 +1190,11 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub task_board: Option<TaskBoardConfig>,
+
+    /// KT-1367 — for `StepType::Decide`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub decide: Option<DecideConfig>,
 
     /// 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
     /// workflow to run as a nested child. Required for that step type
@@ -1380,6 +1571,11 @@ pub enum StepType {
     /// board (to do / in progress / done) with an order Kronn stores. Zero
     /// tokens, no network: config in `WorkflowStep.task_board`.
     TaskBoard,
+    /// KT-1367 — asks the configured decision model typed questions about a
+    /// templated state and branches on the answers through `on_result`. Zero
+    /// agent tokens; local (Ollama) only for now. Config in
+    /// `WorkflowStep.decide`.
+    Decide,
 }
 
 impl StepType {
@@ -1387,7 +1583,7 @@ impl StepType {
     /// authoring surfaces render (`workflow_step_schema`, the workflow guide,
     /// the MCP greeting): a variant added to the enum fails `name` to compile
     /// until it is named, and a test fails until it is listed here.
-    pub const ALL: [StepType; 15] = [
+    pub const ALL: [StepType; 16] = [
         StepType::Agent,
         StepType::ApiCall,
         StepType::BatchApiCall,
@@ -1403,6 +1599,7 @@ impl StepType {
         StepType::TriggerWorkflow,
         StepType::DelegateSubtasks,
         StepType::TaskBoard,
+        StepType::Decide,
     ];
 
     /// The tag a step's `step_type` carries (`{"type": "<name>"}`).
@@ -1423,6 +1620,7 @@ impl StepType {
             StepType::TriggerWorkflow => "TriggerWorkflow",
             StepType::DelegateSubtasks => "DelegateSubtasks",
             StepType::TaskBoard => "TaskBoard",
+            StepType::Decide => "Decide",
         }
     }
 
@@ -1452,6 +1650,69 @@ pub enum TaskBoardOperation {
     /// Create a discussion about `task` and link it, once per task. The
     /// discussion uses the step's `agent`.
     Discuss,
+}
+
+/// KT-1367 — what a `Decide` step asks its decision model.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DecideConfig {
+    /// What the model reads, templated like a prompt (`{{steps.x.output}}`).
+    pub state: String,
+    /// Asked in one call, 1 to 64.
+    pub questions: Vec<DecideQuestion>,
+    /// Below this confidence an answer is not trusted: the step emits
+    /// `<id>_unsure` and `low_confidence` instead. `None` = the default of
+    /// each question kind, measured in docs/research.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub min_confidence: Option<f32>,
+    /// KT-1697 — this step's own decision model. `None` = the configured
+    /// Decision model (`model_tiers.ollama.decision`). Without `connection_id`
+    /// it is a local Ollama model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    /// KT-1697 — the external API connection `model` comes from. Only an
+    /// OpenRouter connection has a documented decision contract
+    /// (`POST /api/v1/systemone`); a step on a connection that is gone or can no
+    /// longer serve `model` is flagged by readiness and refused at run time,
+    /// never swapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
+}
+
+/// One typed question. Its answer becomes the signal `<id>_<answer>`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DecideQuestion {
+    /// Lowercase letters, digits and `_`; unique in the step.
+    pub id: String,
+    #[serde(default)]
+    pub kind: DecideKind,
+    pub instructions: String,
+    /// `choice`: 2 to 26 options, id → what it means. `noul`: optional
+    /// meanings of `true` and `false`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(optional, as = "Option<std::collections::BTreeMap<String, String>>")]
+    pub options: std::collections::BTreeMap<String, String>,
+    /// `score`: 2 to 10 levels, lowest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<String>>")]
+    pub levels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "lowercase")]
+pub enum DecideKind {
+    /// Yes or no: signal `<id>_yes` or `<id>_no`.
+    #[default]
+    Noul,
+    /// One of the options: signal `<id>_<option>`.
+    Choice,
+    /// A level, numbered from 1: signal `<id>_<level>`.
+    Score,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -1658,6 +1919,13 @@ pub struct AgentSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tools: Option<StepTools>,
+    /// KT-1693 — this step's own fallback, for the mode the step runs in (its
+    /// tier: eco, standard or advanced). `None`: the row of the agent applies;
+    /// `Some(empty)`: no fallback for this step; links: they replace the row,
+    /// then the rows of the fallbacks go on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fallback: Option<Vec<AgentFallback>>,
 }
 
 /// What a workflow Agent step may call (KT-908). Both lists empty = no tool.
@@ -1874,6 +2142,9 @@ pub struct WorkflowRun {
     pub trigger_context: Option<serde_json::Value>,
     pub step_results: Vec<StepResult>,
     pub tokens_used: u64,
+    /// What the run's shadows spent, on top of `tokens_used` (KT-1957).
+    #[serde(default)]
+    pub shadow_tokens_used: u64,
     pub workspace_path: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -2400,9 +2671,6 @@ pub struct CreateWorkflowRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retention: Option<WorkflowRetention>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub shadow: Option<WorkflowShadow>,
     #[serde(default, skip_serializing_if = "WorkflowRefs::is_empty")]
     #[ts(optional, as = "Option<WorkflowRefs>")]
     pub refs: WorkflowRefs,
@@ -2454,10 +2722,6 @@ pub struct UpdateWorkflowRequest {
     #[serde(default, deserialize_with = "super::deserialize_optional_field")]
     #[ts(optional)]
     pub retention: Option<Option<WorkflowRetention>>,
-    /// `null` removes the shadow variant; omitted keeps it.
-    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
-    #[ts(optional)]
-    pub shadow: Option<Option<WorkflowShadow>>,
     /// Replaces every named ref when present; omitted keeps them.
     #[serde(default)]
     #[ts(optional)]
@@ -2836,6 +3100,9 @@ pub struct ImportWorkflowRequest {
 #[ts(export)]
 pub struct WorkflowImportPreview {
     pub skills: Vec<super::SkillImportDecision>,
+    /// What the import does with each bundled directive and profile (KT-1843).
+    #[serde(default)]
+    pub bindings: Vec<super::BindingImportDecision>,
     /// Skills the steps name that neither this Kronn nor the file has.
     pub missing_skills: Vec<String>,
 }
@@ -2930,10 +3197,23 @@ pub struct WorkflowExportEnvelope {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<Vec<super::BundledSkill>>")]
     pub referenced_skills: Vec<super::BundledSkill>,
+    /// KT-1843 — custom directives and profiles the steps and the bundled
+    /// Quick objects bind; an import reuses the local one that says the same.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<super::Directive>>")]
+    pub referenced_directives: Vec<super::Directive>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<super::AgentProfile>>")]
+    pub referenced_profiles: Vec<super::AgentProfile>,
     /// Fields whose literal secret was replaced before export (never the
     /// value). An importer shows them so nothing silently runs without them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
+    /// KT-1843 — what the exported content names and the file does not hold;
+    /// shown before the file leaves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<crate::models::NotCarried>>")]
+    pub not_carried: Vec<crate::models::NotCarried>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -3062,33 +3342,6 @@ mod step_deserialization_tests {
         let step: WorkflowStep = serde_json::from_str(json).expect("Agent step must deserialise");
         assert_eq!(step.prompt_template, "Résume {{steps.fetch.data}}");
         assert!(matches!(step.agent, crate::models::AgentType::Codex));
-    }
-
-    /// 422 friendliness — the test API call endpoint payload that
-    /// frontend `workflowsApi.testApiCall()` sends. Without
-    /// `prompt_template` / `agent` / `mode` defaults this test would
-    /// blow up with the exact error the JIRA helper agent surfaced
-    /// during dogfooding ("missing field `prompt_template`").
-    #[test]
-    fn test_api_call_request_accepts_minimal_step() {
-        use crate::api::workflows::TestApiCallRequest;
-        let json = r#"{
-            "step": {
-                "name": "fetch_issue",
-                "step_type": { "type": "ApiCall" },
-                "api_plugin_slug": "mcp-atlassian",
-                "api_config_id": "cfg-1",
-                "api_endpoint_path": "/rest/api/3/issue/EW-{{ticket_number}}",
-                "api_method": "GET",
-                "api_query": { "fields": "summary,description" },
-                "api_extract": { "path": "$.fields", "fail_on_empty": false }
-            },
-            "project_id": "proj-1"
-        }"#;
-        let req: TestApiCallRequest = serde_json::from_str(json)
-            .expect("TestApiCallRequest with minimal ApiCall step must deserialise");
-        assert_eq!(req.project_id, "proj-1");
-        assert_eq!(req.step.name, "fetch_issue");
     }
 }
 

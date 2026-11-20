@@ -58,7 +58,7 @@ pub struct ChildLaunch<'a> {
 /// A mapping may not read a parent variable resolved from the project
 /// environment or the Kronn context: secrets are never forwarded, the child
 /// declares its own. Pure, shared by save-time validation and the executors.
-pub(crate) fn secret_mapping_error(
+pub fn secret_mapping_error(
     step: &WorkflowStep,
     parent_variables: &[PromptVariable],
 ) -> Option<String> {
@@ -100,10 +100,7 @@ pub(crate) fn secret_mapping_error(
 /// The project a child runs in: the parent run's when the child serves it
 /// (a multi-project child, KT-851), else its own when pinned, else the
 /// parent run's.
-pub(crate) fn child_project_id(
-    child: &Workflow,
-    parent_project_id: Option<&str>,
-) -> Option<String> {
+pub fn child_project_id(child: &Workflow, parent_project_id: Option<&str>) -> Option<String> {
     if let (Some(scope), Some(parent)) = (child.project_scope.as_ref(), parent_project_id) {
         if scope.allows(child.project_id.as_deref(), parent) {
             return Some(parent.to_string());
@@ -117,12 +114,12 @@ pub(crate) fn child_project_id(
 
 /// A child running for another project must not attach to the parent's
 /// worktree: that checkout belongs to another repository.
-pub(crate) fn pinned_to_another_project(child: &Workflow, parent_project_id: Option<&str>) -> bool {
+pub fn pinned_to_another_project(child: &Workflow, parent_project_id: Option<&str>) -> bool {
     child_project_id(child, parent_project_id).as_deref() != parent_project_id
 }
 
 /// Every mapped name must be a launch variable of the child.
-pub(crate) fn undeclared_mapping_error(step: &WorkflowStep, child: &Workflow) -> Option<String> {
+pub fn undeclared_mapping_error(step: &WorkflowStep, child: &Workflow) -> Option<String> {
     let mut names: Vec<_> = step.sub_workflow_variables.keys().collect();
     names.sort();
     names
@@ -142,7 +139,7 @@ pub(crate) fn undeclared_mapping_error(step: &WorkflowStep, child: &Workflow) ->
 }
 
 /// Renders a step's `sub_workflow_variables` strictly in the parent run.
-pub(crate) fn render_child_variables(
+pub fn render_child_variables(
     step: &WorkflowStep,
     ctx: &TemplateContext,
 ) -> Result<std::collections::HashMap<String, String>, String> {
@@ -250,6 +247,13 @@ fn insert_snapshot_marker(
 /// Run a sub-workflow as a child run. `current_depth` is the depth of the
 /// PARENT run (0 for a top-level run); the child is created at
 /// `current_depth + 1`. `parent_run_id` links the child for drill-down.
+///
+/// KT-1755 — this function is on the recursion path (the child's own
+/// SubWorkflow step comes back here), so it stays small: everything that runs
+/// before and after the child lives in `prepare_child` and `finish_child`,
+/// whose frames are gone by the time the child runs. In a debug build every
+/// local of a big body keeps its own stack slot, so inlining them here would
+/// charge each nesting level for the whole function.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_sub_workflow_step(
     state: &crate::AppState,
@@ -270,8 +274,78 @@ pub async fn execute_sub_workflow_step(
     launch: ChildLaunch<'_>,
 ) -> StepOutcome {
     let start = Instant::now();
+    let ChildToRun {
+        child_wf,
+        mut child_run,
+        child_workspace,
+    } = match Box::pin(prepare_child(
+        state,
+        parent_run_id,
+        current_depth,
+        step,
+        tokens_config,
+        agents_config,
+        budget.clone(),
+        parent_workspace,
+        launch,
+        start,
+    ))
+    .await
+    {
+        Ok(ready) => *ready,
+        Err(outcome) => return outcome,
+    };
+
+    // Re-enter the runner on the child. `Box::pin` breaks the otherwise-
+    // infinite async recursion type (execute_run → dispatch → here → execute_run).
+    let exec_res = Box::pin(crate::workflows::runner::execute_run(
+        state.clone(),
+        &child_wf,
+        &mut child_run,
+        tokens_config,
+        agents_config,
+        None,            // no live SSE for the child in Phase 1; the tree endpoint reads DB
+        Some(budget),    // SHARED budget — child counts against the tree-wide quota
+        child_workspace, // Phase 2 — share the parent's worktree when present
+    ))
+    .await;
+    if let Err(e) = exec_res {
+        // execute_run returns Err only on infra failure; the child status may
+        // still be set. Log and fall through to the status mapping.
+        tracing::warn!(
+            target: "kronn::sub_workflow",
+            child_run = %child_run.id, "sub-workflow run errored: {}", e
+        );
+    }
+    finish_child(step, start, &child_wf, &child_run)
+}
+
+/// What `prepare_child` hands the runner: the child workflow, its run row
+/// (already inserted or claimed) and the worktree it shares, if any.
+struct ChildToRun {
+    child_wf: Workflow,
+    child_run: WorkflowRun,
+    child_workspace: Option<String>,
+}
+
+/// Everything a sub-workflow step does before its child runs. `Err` is the
+/// step's final outcome: a refusal, or the whole foreach fan-out. It is
+/// returned once per step, not built in a loop: boxing it would only add noise.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+async fn prepare_child(
+    state: &crate::AppState,
+    parent_run_id: &str,
+    current_depth: usize,
+    step: &WorkflowStep,
+    tokens_config: &TokensConfig,
+    agents_config: &AgentsConfig,
+    budget: super::runner::SharedBudget,
+    parent_workspace: Option<String>,
+    launch: ChildLaunch<'_>,
+    start: Instant,
+) -> Result<Box<ChildToRun>, StepOutcome> {
     if let Some(error) = secret_mapping_error(step, launch.parent_variables) {
-        return fail(step, start, error);
+        return Err(fail(step, start, error));
     }
 
     let target = match step
@@ -282,11 +356,11 @@ pub async fn execute_sub_workflow_step(
     {
         Some(t) => t.to_string(),
         None => {
-            return fail(
+            return Err(fail(
                 step,
                 start,
                 "SubWorkflow step missing `sub_workflow_id`.".into(),
-            )
+            ))
         }
     };
 
@@ -294,9 +368,9 @@ pub async fn execute_sub_workflow_step(
     // hand-edited JSON or a workflow edited after a reference was created).
     let child_depth = current_depth + 1;
     if child_depth_exceeds(current_depth) {
-        return fail(step, start, format!(
+        return Err(fail(step, start, format!(
             "Sub-workflow depth limit ({MAX_SUBWORKFLOW_DEPTH}) exceeded at `{target}` — refusing to recurse further."
-        ));
+        )));
     }
 
     // 2026-06-12 Phase 3b (MVP) — per-item fan-out. When the step declares
@@ -311,7 +385,7 @@ pub async fn execute_sub_workflow_step(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        return execute_foreach(
+        return Err(execute_foreach(
             state,
             parent_run_id,
             child_depth,
@@ -325,7 +399,7 @@ pub async fn execute_sub_workflow_step(
             start,
             launch,
         )
-        .await;
+        .await);
     }
 
     // Load the child workflow definition.
@@ -342,7 +416,7 @@ pub async fn execute_sub_workflow_step(
         // A child disabled when its parent pinned it, or switched off by a
         // human since, is not run under the parent's activation (KT-1037).
         Ok(Ok(Some(w))) if !w.enabled => {
-            return fail(
+            return Err(fail(
                 step,
                 start,
                 format!(
@@ -350,32 +424,32 @@ pub async fn execute_sub_workflow_step(
                      before its parent can run it.",
                     w.name
                 ),
-            )
+            ))
         }
-        Ok(Err(reason)) => return fail(step, start, reason),
+        Ok(Err(reason)) => return Err(fail(step, start, reason)),
         Ok(Ok(Some(w))) => w,
         Ok(Ok(None)) => {
-            return fail(
+            return Err(fail(
                 step,
                 start,
                 format!("Sub-workflow `{target}` not found (deleted? wrong id?)."),
-            )
+            ))
         }
         Err(e) => {
-            return fail(
+            return Err(fail(
                 step,
                 start,
                 format!("DB error loading sub-workflow `{target}`: {e}"),
-            )
+            ))
         }
     };
 
     if let Some(error) = undeclared_mapping_error(step, &child_wf) {
-        return fail(step, start, error);
+        return Err(fail(step, start, error));
     }
     let supplied = match render_child_variables(step, launch.ctx) {
         Ok(values) => values,
-        Err(error) => return fail(step, start, error),
+        Err(error) => return Err(fail(step, start, error)),
     };
 
     // The child this step left waiting for its provider quota, if the parent
@@ -430,11 +504,11 @@ pub async fn execute_sub_workflow_step(
             RunStatus::WaitingQuota | RunStatus::Interrupted
         )
     }) {
-        return fail(
+        return Err(fail(
             step,
             start,
             ended_while_waiting(&child_wf.name, &child.status),
-        );
+        ));
     }
     let waiting_child = recorded_child;
 
@@ -458,11 +532,8 @@ pub async fn execute_sub_workflow_step(
     if parent_resumes_quota {
         trigger.insert(super::quota_wait::PARENT_RESUMES_KEY.into(), json!(true));
     }
-    if super::shadow::parent_is_shadow(state, parent_run_id).await {
-        trigger.insert(
-            super::shadow::VARIANT_KEY.into(),
-            json!(super::shadow::SHADOW),
-        );
+    if let Some(variant) = super::shadow::parent_variant(state, parent_run_id).await {
+        trigger.insert(super::shadow::VARIANT_KEY.into(), json!(variant));
     }
     // Its variables were resolved when it started: a resume neither resolves
     // them again nor moves the child to another concurrency bucket.
@@ -484,7 +555,7 @@ pub async fn execute_sub_workflow_step(
             .await
             {
                 Ok(prepared) => prepared,
-                Err(error) => return fail(step, start, error),
+                Err(error) => return Err(fail(step, start, error)),
             };
             insert_snapshot_marker(&mut trigger, prepared.snapshot);
             prepared.concurrency_key
@@ -498,6 +569,7 @@ pub async fn execute_sub_workflow_step(
         trigger_context: Some(serde_json::Value::Object(trigger)),
         step_results: vec![],
         tokens_used: 0,
+        shadow_tokens_used: 0,
         // Phase 1b-i: child gets its OWN workspace (execute_run handles it,
         // named by run_id → no collision). Sharing/merge is Phase 2.
         workspace_path: None,
@@ -525,7 +597,7 @@ pub async fn execute_sub_workflow_step(
         parent_workspace
     };
     let enforced_deadline = budget.deadline().map(|(deadline, _)| deadline);
-    let mut child_run = if let Some(mut child) = waiting_child {
+    let child_run = if let Some(mut child) = waiting_child {
         // The child keeps its steps and its active-time clock; only its
         // trigger context and concurrency key are rendered again, like a
         // foreach item's resume.
@@ -545,14 +617,14 @@ pub async fn execute_sub_workflow_step(
         match claimed {
             Ok(Ok(())) => child,
             Ok(Err(reason)) => {
-                return fail(
+                return Err(fail(
                     step,
                     start,
                     format!(
                         "Sub-workflow « {} » could not resume after its quota wait: {reason}",
                         child_wf.name
                     ),
-                )
+                ))
             }
             Err(e) => {
                 // Cancelled between the read and the claim: say so, rather
@@ -571,7 +643,7 @@ pub async fn execute_sub_workflow_step(
                         child_wf.name
                     ),
                 };
-                return fail(step, start, message);
+                return Err(fail(step, start, message));
             }
         }
     } else {
@@ -593,18 +665,18 @@ pub async fn execute_sub_workflow_step(
         {
             Ok(Ok(())) => fresh,
             Ok(Err(reason)) => {
-                return fail(
+                return Err(fail(
                     step,
                     start,
                     format!("Sub-workflow « {} » not started: {reason}", child_wf.name),
-                )
+                ))
             }
             Err(e) => {
-                return fail(
+                return Err(fail(
                     step,
                     start,
                     format!("Failed to create sub-workflow run row: {e}"),
-                )
+                ))
             }
         }
     };
@@ -616,33 +688,24 @@ pub async fn execute_sub_workflow_step(
         "entering sub-workflow"
     );
 
-    // Re-enter the runner on the child. `Box::pin` breaks the otherwise-
-    // infinite async recursion type (execute_run → dispatch → here → execute_run).
-    let exec_res = Box::pin(crate::workflows::runner::execute_run(
-        state.clone(),
-        &child_wf,
-        &mut child_run,
-        tokens_config,
-        agents_config,
-        None,            // no live SSE for the child in Phase 1; the tree endpoint reads DB
-        Some(budget),    // SHARED budget — child counts against the tree-wide quota
-        child_workspace, // Phase 2 — share the parent's worktree when present
-    ))
-    .await;
-    if let Err(e) = exec_res {
-        // execute_run returns Err only on infra failure; the child status may
-        // still be set. Log and fall through to the status mapping.
-        tracing::warn!(
-            target: "kronn::sub_workflow",
-            child_run = %child_run.id, "sub-workflow run errored: {}", e
-        );
-    }
+    Ok(Box::new(ChildToRun {
+        child_wf,
+        child_run,
+        child_workspace,
+    }))
+}
 
-    // Map the child's terminal status onto this step.
+/// Map the child's terminal status onto its parent step.
+fn finish_child(
+    step: &WorkflowStep,
+    start: Instant,
+    child_wf: &Workflow,
+    child_run: &WorkflowRun,
+) -> StepOutcome {
     let child_status = child_run.status.clone();
     let success = matches!(child_status, RunStatus::Success);
     // Neither a success nor a failure yet: the parent waits with it (KT-1119).
-    let quota_wait = super::quota_wait::pending_wait(&child_run).cloned();
+    let quota_wait = super::quota_wait::pending_wait(child_run).cloned();
     let status_str = if success {
         "OK"
     } else if quota_wait.is_some() {
@@ -651,7 +714,7 @@ pub async fn execute_sub_workflow_step(
         "SUBWF_FAILED"
     };
     let signal = status_str;
-    let child_tokens = measured_run_tokens(&child_run);
+    let child_tokens = measured_run_tokens(child_run);
     let summary = format!(
         "Sous-workflow « {} » → {:?} ({} étapes, {}){}",
         child_wf.name,
@@ -725,7 +788,7 @@ pub async fn execute_sub_workflow_step(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait,
-            terminal_stop: crate::workflows::safety::run_terminal_stop(&child_run),
+            terminal_stop: crate::workflows::safety::run_terminal_stop(child_run),
             output_bytes: None,
         },
         condition_action,
@@ -749,7 +812,7 @@ const MAX_FOREACH_ITEMS: usize = 30;
 
 /// Save-time shape of `sub_workflow_foreach_file`: a plain path relative to
 /// the worktree. Blank means no fan-out.
-pub(crate) fn validate_foreach_file(path: &str) -> Result<(), String> {
+pub fn validate_foreach_file(path: &str) -> Result<(), String> {
     let path = path.trim();
     if path.is_empty() {
         return Ok(());
@@ -767,16 +830,19 @@ pub(crate) fn validate_foreach_file(path: &str) -> Result<(), String> {
 }
 
 /// How often a foreach item re-checks its child workflow's capacity.
-#[cfg(not(test))]
-const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-#[cfg(test)]
-const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+fn capacity_poll() -> std::time::Duration {
+    if crate::core::test_mode::on() {
+        std::time::Duration::from_millis(50)
+    } else {
+        std::time::Duration::from_secs(2)
+    }
+}
 
 /// Time kept between the end of a capacity wait and the runner's timeout, so
 /// the foreach can still record its skipped items before the runner drops it.
 fn capacity_margin(timeout_seconds: u64) -> chrono::Duration {
     let tenth = std::time::Duration::from_secs(timeout_seconds) / 10;
-    let margin = tenth.clamp(CAPACITY_POLL * 2, std::time::Duration::from_secs(60));
+    let margin = tenth.clamp(capacity_poll() * 2, std::time::Duration::from_secs(60));
     chrono::Duration::from_std(margin).unwrap_or_else(|_| chrono::Duration::seconds(60))
 }
 
@@ -818,7 +884,7 @@ where
                     )));
                 }
                 let left = (deadline - Utc::now()).to_std().unwrap_or_default();
-                tokio::time::sleep(CAPACITY_POLL.min(left)).await;
+                tokio::time::sleep(capacity_poll().min(left)).await;
             }
         }
     }
@@ -839,7 +905,7 @@ fn read_foreach_file(worktree: &str, path: &str) -> Result<String, String> {
 /// Phase 3b — parse the foreach file content into items. Pure for tests.
 /// Must be a JSON array; empty or oversized arrays are explicit errors (an
 /// empty work-list almost always means the upstream step misfired).
-pub(crate) fn parse_foreach_items(content: &str) -> Result<Vec<serde_json::Value>, String> {
+pub fn parse_foreach_items(content: &str) -> Result<Vec<serde_json::Value>, String> {
     let v: serde_json::Value = serde_json::from_str(content)
         .map_err(|e| format!("foreach file is not valid JSON: {e}"))?;
     let arr = v
@@ -863,7 +929,7 @@ pub(crate) fn parse_foreach_items(content: &str) -> Result<Vec<serde_json::Value
 /// Flip économique (2026-06-12) — map an item's `complexity` onto a model
 /// tier for the child's Agent steps: low → Economy (cheap model on boilerplate),
 /// high → Reasoning, med/absent → None (agent default). Pure for tests.
-pub(crate) fn tier_for_complexity(complexity: Option<&str>) -> Option<crate::models::ModelTier> {
+pub fn tier_for_complexity(complexity: Option<&str>) -> Option<crate::models::ModelTier> {
     match complexity {
         Some("low") => Some(crate::models::ModelTier::Economy),
         Some("high") => Some(crate::models::ModelTier::Reasoning),
@@ -880,7 +946,7 @@ pub(crate) fn tier_for_complexity(complexity: Option<&str>) -> Option<crate::mod
 ///   completeness contract still holds without an agent).
 ///
 /// Pure for tests.
-pub(crate) fn validate_mechanical_files(
+pub fn validate_mechanical_files(
     item: &serde_json::Value,
 ) -> Result<Vec<(String, String)>, String> {
     let files = item
@@ -930,7 +996,7 @@ pub(crate) fn validate_mechanical_files(
 }
 
 /// Phase 3b — aggregate per-item outcomes into (status, signal). Pure for tests.
-pub(crate) fn aggregate_foreach(succeeded: usize, failed: usize) -> (&'static str, &'static str) {
+pub fn aggregate_foreach(succeeded: usize, failed: usize) -> (&'static str, &'static str) {
     if failed == 0 {
         ("OK", "OK")
     } else if succeeded == 0 {
@@ -949,7 +1015,7 @@ pub(crate) fn aggregate_foreach(succeeded: usize, failed: usize) -> (&'static st
 /// string-valued top-level keys in the child's `trigger_context`, which the
 /// runner's generic injector ([`inject_trigger_context`]) turns into template
 /// vars. Pure for tests.
-pub(crate) fn current_task_template_vars(item: &serde_json::Value) -> Vec<(String, String)> {
+pub fn current_task_template_vars(item: &serde_json::Value) -> Vec<(String, String)> {
     let mut out = vec![("current_task".to_string(), item.to_string())];
     if let Some(obj) = item.as_object() {
         for (k, v) in obj {
@@ -1020,7 +1086,7 @@ async fn execute_foreach(
     start: Instant,
     launch: ChildLaunch<'_>,
 ) -> StepOutcome {
-    let parent_shadow = super::shadow::parent_is_shadow(state, parent_run_id).await;
+    let parent_variant = super::shadow::parent_variant(state, parent_run_id).await;
     // The fan-out is defined around the SHARED worktree (the items file +
     // current_task.json + the children's commits all live there).
     let ws = match parent_workspace {
@@ -1262,20 +1328,25 @@ async fn execute_foreach(
         // everything. Deterministic, 0 token. An Interrupted parent run also
         // reconciles its persisted children below before continuing.
         if !item_id.is_empty() {
+            // KT-1745: the workspace is written by agents; Kronn's own git on it
+            // is the pinned, hook-less lane builder.
             let git_done = !quota_waiting_child
-                && crate::core::cmd::async_git_cmd()
-                    .args([
-                        "log",
-                        "--oneline",
-                        "--fixed-strings",
-                        "--grep",
-                        &format!("[{item_id}]"),
-                    ])
-                    .current_dir(&ws)
-                    .output()
-                    .await
-                    .map(|o| o.status.success() && !o.stdout.is_empty())
-                    .unwrap_or(false);
+                && match crate::core::lane_git::async_git(std::path::Path::new(&ws)) {
+                    Ok(mut log) => log
+                        .args([
+                            "log",
+                            "--oneline",
+                            "--no-ext-diff",
+                            "--fixed-strings",
+                            "--grep",
+                            &format!("[{item_id}]"),
+                        ])
+                        .output()
+                        .await
+                        .map(|o| o.status.success() && !o.stdout.is_empty())
+                        .unwrap_or(false),
+                    Err(_) => false,
+                };
             if git_done
                 || child_done_ids.contains(&item_id)
                 || legacy_child_done_indexes.contains(&idx)
@@ -1341,11 +1412,11 @@ async fn execute_foreach(
                         );
                         let mut add = vec!["add".to_string(), ".kronn/decisions.md".to_string()];
                         add.extend(files.iter().map(|(p, _)| p.clone()));
-                        let _ = crate::core::cmd::async_git_cmd()
-                            .args(add.iter().map(|s| s.as_str()))
-                            .current_dir(&ws)
-                            .output()
-                            .await;
+                        if let Ok(mut stage) =
+                            crate::core::lane_git::async_git(std::path::Path::new(&ws))
+                        {
+                            let _ = stage.args(add.iter().map(|s| s.as_str())).output().await;
+                        }
                         let subject =
                             format!("Kronn AutoPilot [{item_id}] — mechanical (engine-applied)");
                         let body = files
@@ -1353,22 +1424,27 @@ async fn execute_foreach(
                             .map(|(p, _)| p.as_str())
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let commit = crate::core::cmd::async_git_cmd()
-                            .args([
-                                "-c",
-                                "user.email=autopilot@kronn.local",
-                                "-c",
-                                "user.name=Kronn AutoPilot",
-                                "commit",
-                                "--no-verify",
-                                "-m",
-                                &subject,
-                                "-m",
-                                &body,
-                            ])
-                            .current_dir(&ws)
-                            .output()
-                            .await;
+                        let commit =
+                            match crate::core::lane_git::async_git(std::path::Path::new(&ws)) {
+                                Ok(mut commit) => {
+                                    commit
+                                        .args([
+                                            "-c",
+                                            "user.email=autopilot@kronn.local",
+                                            "-c",
+                                            "user.name=Kronn AutoPilot",
+                                            "commit",
+                                            "--no-verify",
+                                            "-m",
+                                            &subject,
+                                            "-m",
+                                            &body,
+                                        ])
+                                        .output()
+                                        .await
+                                }
+                                Err(refusal) => Err(std::io::Error::other(refusal)),
+                            };
                         let committed = commit.map(|o| o.status.success()).unwrap_or(false);
                         if committed {
                             tracing::info!(target: "kronn::sub_workflow", item_id=%item_id, files=files.len(), "mechanical item engine-applied (0 tokens)");
@@ -1417,11 +1493,8 @@ async fn execute_foreach(
         if parent_resumes_quota {
             tctx.insert(super::quota_wait::PARENT_RESUMES_KEY.into(), json!(true));
         }
-        if parent_shadow {
-            tctx.insert(
-                super::shadow::VARIANT_KEY.into(),
-                json!(super::shadow::SHADOW),
-            );
+        if let Some(variant) = &parent_variant {
+            tctx.insert(super::shadow::VARIANT_KEY.into(), json!(variant));
         }
         for (k, v) in current_task_template_vars(item) {
             tctx.insert(k, serde_json::Value::String(v));
@@ -1516,6 +1589,7 @@ async fn execute_foreach(
                 trigger_context: Some(trigger_context),
                 step_results: vec![],
                 tokens_used: 0,
+                shadow_tokens_used: 0,
                 workspace_path: None,
                 started_at: now,
                 finished_at: None,
@@ -1590,6 +1664,7 @@ async fn execute_foreach(
                     Some(st) if st.tier.is_none() => st.tier = Some(tier),
                     None => {
                         s.agent_settings = Some(crate::models::AgentSettings {
+                            fallback: None,
                             tools: None,
                             model: None,
                             tier: Some(tier),
@@ -1858,7 +1933,6 @@ mod tests {
         let child_wf = crate::models::Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: "child-wf".into(),
@@ -1902,6 +1976,7 @@ mod tests {
             trigger_context: None,
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: None,
             started_at: chrono::Utc::now(),
             finished_at: None,

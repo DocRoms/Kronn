@@ -15,32 +15,7 @@ use chrono::{DateTime, Datelike, Duration, SecondsFormat, TimeZone, Timelike, Ut
 use chrono_tz::Tz;
 use std::collections::HashMap;
 
-/// Whether `name` belongs to Kronn's built-ins (`run.*`, `time.*`, `now*`,
-/// the repository profile's `project.*` and the workflow's `refs.*`).
-/// No declared variable, trigger field or launch value may use it, since a
-/// built-in is trusted for what produced it, not for its name.
-pub fn is_reserved_name(name: &str) -> bool {
-    let base = name.split('|').next().unwrap_or_default().trim();
-    base == "run"
-        || base.starts_with("run.")
-        || base == "time"
-        || base.starts_with("time.")
-        || base.starts_with("now")
-        || base.starts_with("project.")
-        || base == "refs"
-        || base.starts_with("refs.")
-}
-
-/// The first reserved name among `names`, as a user-facing refusal.
-pub fn refuse_reserved_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
-    match names.into_iter().find(|name| is_reserved_name(name)) {
-        Some(name) => Err(format!(
-            "Le nom de variable `{}` est réservé à Kronn (`run.*`, `time.*`, `now*`, `project.*`, `refs.*`) ; choisis un autre nom.",
-            name.trim()
-        )),
-        None => Ok(()),
-    }
-}
+pub use crate::models::quick::{is_reserved_name, refuse_reserved_names};
 
 /// Template context holding all available variables.
 #[derive(Debug, Clone)]
@@ -222,6 +197,17 @@ impl TemplateContext {
         self.values.insert("previous_step.provenance".into(), json);
     }
 
+    /// The summary of a step's shadows and merge (KT-1694) as
+    /// `steps.<name>.shadows` and `previous_step.shadows`: read-only JSON for a
+    /// step after it, e.g. a PublishPageData writing it into a Page dataset. A
+    /// step without shadows records the summary with no execution.
+    pub fn set_step_shadows(&mut self, step_name: &str, summary_json: &str) {
+        self.values
+            .insert(format!("steps.{step_name}.shadows"), summary_json.into());
+        self.values
+            .insert("previous_step.shadows".into(), summary_json.into());
+    }
+
     /// Records the type of the step that produced `step_name`'s output; call
     /// after [`Self::set_step_output`], which forgets the previous one.
     pub fn set_step_kind(&mut self, step_name: &str, kind: Option<&str>) {
@@ -264,7 +250,7 @@ impl TemplateContext {
 
         // An output without an envelope must not leave an older step's
         // structured values behind under this step's name or `previous_step`.
-        for field in ["data", "summary", "status", "data_json"] {
+        for field in ["data", "summary", "status", "data_json", "shadows"] {
             self.values.remove(&format!("steps.{step_name}.{field}"));
             self.values.remove(&format!("previous_step.{field}"));
         }
@@ -709,7 +695,7 @@ pub fn placeholder_paths(template: &str) -> Result<Vec<String>> {
 }
 
 /// Split the `|sh` filter off a path: `issue.title|sh` → (`issue.title`, true).
-pub(crate) fn split_shell_filter(path: &str) -> (&str, bool) {
+pub fn split_shell_filter(path: &str) -> (&str, bool) {
     match path.rsplit_once('|') {
         Some((base, filter)) if filter.trim() == "sh" && !base.trim().is_empty() => {
             (base.trim(), true)
@@ -768,19 +754,19 @@ fn split_fallback(key: &str) -> Result<(&str, Option<&str>)> {
 ///   - numbers / booleans / null → their stringified form
 ///   - arrays / objects → pretty-printed JSON (operator-friendly inside a
 ///     markdown code block, indexable downstream)
-pub(crate) fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -> Option<String> {
+pub fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -> Option<String> {
     resolve_typed_path(values, key).map(|v| stringify_json_leaf(&v))
 }
 
 /// The JSON behind an anchor: the step envelope for `data`, the recorded
-/// attempt summary for `provenance`.
+/// attempt summary for `provenance`, the shadows summary for `shadows`.
 fn anchored_json<'a>(
     values: &'a HashMap<String, String>,
     prefix: &str,
     anchor: &str,
 ) -> Option<&'a String> {
-    if anchor == "provenance" {
-        return values.get(&format!("{prefix}.provenance"));
+    if matches!(anchor, "provenance" | "shadows") {
+        return values.get(&format!("{prefix}.{anchor}"));
     }
     values
         .get(&format!("{prefix}.data_json"))
@@ -793,7 +779,7 @@ fn anchored_json<'a>(
 /// field (`"comments": "{{steps.review.data.inlineComments}}"` → a real array),
 /// which `stringify_json_leaf` could only express as an escaped string. Also
 /// resolves a bare `<prefix>.data` / `.data_json` to the whole parsed payload.
-pub(crate) fn resolve_typed_path(
+pub fn resolve_typed_path(
     values: &HashMap<String, String>,
     key: &str,
 ) -> Option<serde_json::Value> {
@@ -802,7 +788,7 @@ pub(crate) fn resolve_typed_path(
     // payload field (`steps.X.data.provenance`): take the first position whose
     // anchored JSON actually exists, then walk what follows it.
     for (idx, anchor) in parts.iter().enumerate().skip(1) {
-        if !matches!(*anchor, "data" | "data_json" | "provenance") {
+        if !matches!(*anchor, "data" | "data_json" | "provenance" | "shadows") {
             continue;
         }
         let Some(json) = anchored_json(values, &parts[..idx].join("."), anchor) else {
@@ -893,6 +879,7 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
             | StepType::TransformData
             | StepType::PublishPageData
             | StepType::TaskBoard
+            | StepType::Decide
             // SubWorkflow's output is the child run's final envelope
             // (standardised) → `{{steps.<subwf>.data}}` is valid.
             | StepType::SubWorkflow
@@ -1880,6 +1867,40 @@ mod tests {
     }
 
     #[test]
+    fn the_shadows_summary_of_a_step_renders_as_json_and_resolves_by_path() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("advise", "plain text");
+        ctx.set_step_shadows(
+            "advise",
+            r#"{"step":"advise","executions":[{"key":"main","status":"success"}],"merge":null,"determinism":null}"#,
+        );
+        let rendered = ctx.render_strict("{{steps.advise.shadows}}").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["executions"][0]["key"], "main");
+        assert_eq!(
+            ctx.render_strict("{{steps.advise.shadows.executions.0.status}}")
+                .unwrap(),
+            "success"
+        );
+        assert_eq!(
+            ctx.render_strict("{{previous_step.shadows.step}}").unwrap(),
+            "advise"
+        );
+        assert_eq!(
+            ctx.resolve_value("steps.advise.shadows.executions")
+                .unwrap()
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        // A step that recorded none leaves the path unknown: strict fails.
+        assert!(ctx.render_strict("{{steps.other.shadows}}").is_err());
+        // A new output of the step forgets the summary of its earlier run.
+        ctx.set_step_output("advise", "again");
+        assert!(ctx.render_strict("{{steps.advise.shadows}}").is_err());
+    }
+
+    #[test]
     fn a_data_field_named_provenance_still_resolves_under_data() {
         let mut ctx = TemplateContext::new();
         ctx.set_step_output(
@@ -2715,6 +2736,8 @@ mod tests {
             retry: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             directive_ids: vec![],
             profile_ids: vec![],
             delay_after_secs: None,
@@ -2760,6 +2783,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

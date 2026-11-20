@@ -3,54 +3,33 @@
 //! Ticks every 30s, checks triggers, enforces concurrency limits,
 //! and spawns runs.
 
-pub mod api_auth_failure;
-pub mod api_call_binary;
-pub mod api_call_executor;
-pub mod api_call_ratelimit;
-pub mod api_call_security;
-pub mod api_call_step;
-pub mod authoring_doctrine;
+pub use kronn_l1::workflows::*;
+pub mod agent_fallback_step;
 pub mod autocode_issue_template;
 pub mod batch_apicall_step;
 pub mod batch_step;
-pub mod big_ticket_template;
 pub mod cancellation;
 pub mod collect_api_data_step;
 pub mod concurrency;
+pub mod decide_step;
 pub mod delegate_subtasks_step;
-pub mod doctrine_warnings;
 pub mod exec_step;
-pub mod gate_checkpoint;
-pub mod gate_step;
-pub mod guard_counters;
-pub mod interrupted_worktrees;
-pub mod json_data_step;
 pub mod notify_step;
-pub mod project_scope;
 pub mod publish_page_step;
 pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod quota_wait;
 pub mod readiness;
-pub mod refs;
-pub mod run_artifacts;
 pub mod run_effect;
 pub mod run_pins;
-pub mod run_scope;
 pub mod runner;
-pub mod safety;
 pub mod shadow;
+pub mod shadow_merge;
+pub mod shadow_summary;
 pub mod step_agents;
-pub mod step_output_format;
-pub mod step_room;
-pub mod steps;
 pub mod sub_workflow_step;
 pub mod task_board_step;
-pub mod template;
-pub mod tracker;
 pub mod transform_data_step;
-pub mod triage;
-pub mod trigger;
 pub mod trigger_workflow_step;
 pub mod watch_trigger;
 pub mod workspace;
@@ -65,9 +44,35 @@ use crate::models::*;
 use crate::AppState;
 
 /// What a run's admission records atomically with its insert.
-pub(crate) enum AdmissionMark {
+pub enum AdmissionMark {
     TrackerIssue(String),
     WatchOccurrence(crate::db::workflow_watch_state::WatchOccurrence),
+}
+
+/// One citation re-verification tick, called by the engine loop.
+async fn citation_drift_tick(state: &crate::AppState) {
+    let cron = state.config.read().await.audit_reverify_cron.clone();
+    if !crate::core::citation_drift::tick_is_due(cron.as_deref()) {
+        return;
+    }
+    let projects = match state
+        .db
+        .with_read_conn(crate::db::projects::list_projects)
+        .await
+    {
+        Ok(projects) => projects,
+        Err(e) => {
+            tracing::warn!("Citation re-verification skipped: {e}");
+            return;
+        }
+    };
+    let paths: Vec<std::path::PathBuf> = projects
+        .iter()
+        .map(|p| crate::core::scanner::resolve_host_path(&p.path))
+        .collect();
+    let _ =
+        tokio::task::spawn_blocking(move || crate::core::citation_drift::reverify_projects(&paths))
+            .await;
 }
 
 /// The workflow engine — runs in the background, checks triggers, spawns runs.
@@ -126,7 +131,7 @@ impl WorkflowEngine {
             self.quota_rechecker
                 .recheck_pass(&self.state, Utc::now())
                 .await;
-            crate::core::citation_drift::scheduled_tick(&self.state).await;
+            citation_drift_tick(&self.state).await;
         }
     }
 
@@ -184,11 +189,8 @@ impl WorkflowEngine {
     }
 
     /// One scheduler tick over `(since, now]`, for tests outside this module.
-    #[cfg(test)]
-    pub(crate) async fn check_triggers_since(
-        &self,
-        since: chrono::DateTime<Utc>,
-    ) -> anyhow::Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn check_triggers_since(&self, since: chrono::DateTime<Utc>) -> anyhow::Result<()> {
         *self.last_trigger_check.lock().await = since;
         self.check_triggers().await
     }
@@ -470,6 +472,7 @@ impl WorkflowEngine {
             trigger_context: Some(trigger_ctx),
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: None,
             started_at: now,
             finished_at: None,
@@ -615,6 +618,7 @@ mod tests {
                 StepType::TriggerWorkflow => "TriggerWorkflow",
                 StepType::DelegateSubtasks => "DelegateSubtasks",
                 StepType::TaskBoard => "TaskBoard",
+                StepType::Decide => "Decide",
             }
         }
         let rust: std::collections::BTreeSet<&str> = [
@@ -633,6 +637,7 @@ mod tests {
             StepType::TriggerWorkflow,
             StepType::DelegateSubtasks,
             StepType::TaskBoard,
+            StepType::Decide,
         ]
         .iter()
         .map(variant_name)
@@ -679,7 +684,6 @@ mod tests {
         Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             id: id.into(),
             name: id.into(),
@@ -801,6 +805,7 @@ mod tests {
             trigger_context: None,
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: None,
             started_at: Utc::now(),
             finished_at: None,
@@ -1023,6 +1028,8 @@ mod tests {
             retry: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             directive_ids: vec![],
             profile_ids: vec![],
             delay_after_secs: None,
@@ -1068,6 +1075,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -1199,6 +1207,7 @@ mod tests {
             trigger_context: Some(serde_json::json!({"type": "cron"})),
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: None,
             started_at: now,
             finished_at: None,
@@ -1249,6 +1258,7 @@ mod tests {
             trigger_context: Some(ctx.clone()),
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: None,
             started_at: Utc::now(),
             finished_at: None,

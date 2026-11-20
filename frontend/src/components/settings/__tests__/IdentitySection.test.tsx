@@ -32,6 +32,7 @@ const { config, contacts, setAuthToken } = vi.hoisted(() => ({
   contacts: {
     networkInfo: vi.fn(),
     inviteCode: vi.fn(),
+    pairingCode: vi.fn(),
   },
   setAuthToken: vi.fn(),
 }));
@@ -297,6 +298,22 @@ describe('IdentitySection — plain-HTTP exposure (KT-1596)', () => {
     expect(await screen.findByText('kronns:me@kronn.example.com:443')).toBeInTheDocument();
     expect(screen.getByText('settings.exposeSecurityNote')).toBeInTheDocument();
     expect(screen.getByText('settings.networkReachable')).toBeInTheDocument();
+  });
+
+  // KT-1650 — the invite code is only an address; a pairing code carries the
+  // one-time secret that lets someone add this instance, and is generated on demand.
+  it('generates a pairing code on demand and shows it', async () => {
+    config.getServerConfig.mockResolvedValue({
+      domain: null, port: 3140, max_concurrent_agents: 5, auth_enabled: true,
+      pseudo: 'me', avatar_email: '', bio: '',
+    });
+    contacts.pairingCode.mockResolvedValue(`kronn:me@10.0.0.5:3140#${'ab'.repeat(32)}`);
+    await mountIdentity();
+    expect(screen.queryByTestId('pairing-code')).not.toBeInTheDocument();
+    expect(contacts.pairingCode).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByTestId('pairing-code-generate')); });
+    expect(contacts.pairingCode).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('pairing-code')).toHaveTextContent(`kronn:me@10.0.0.5:3140#${'ab'.repeat(32)}`);
   });
 
   it('says nothing about plain HTTP once a proxy is declared', async () => {

@@ -13,10 +13,13 @@ Rust backend (axum) + React/TypeScript frontend (Vite) + nginx gateway, all in D
 ```
 Kronn/
 ├── backend/                    # Rust backend (axum web server)
-│   ├── Cargo.toml              # Dependencies: axum 0.8, tokio, serde, ts-rs, anyhow (versions: docs/stack.md)
+│   ├── Cargo.toml              # Workspace root + `kronn` package. Dependencies: axum 0.8, tokio, serde, ts-rs, anyhow (versions: docs/stack.md)
+│   ├── crates/l0..l3/          # Manifests of the layer crates (sources stay in src/): docs/architecture/backend-crates.md
 │   └── src/
 │       ├── main.rs             # Entrypoint, server startup, graceful shutdown (SIGTERM/SIGINT)
-│       ├── lib.rs              # Router definition (build_router), auth middleware, CORS, AppState
+│       ├── lib.rs              # Top crate root: router definition (build_router), auth middleware, CORS
+│       ├── layer0.rs..layer3.rs # Roots of the layer crates: which module belongs to which crate
+│       ├── uptests/            # Wrappers for tests compiled by a higher crate than their module
 │       ├── models/             # Data models, one module per domain; mod.rs re-exports them (`pub use *`)
 │       ├── api/                # HTTP handlers (one file per domain)
 │       │   ├── mod.rs          # Re-exports
@@ -34,7 +37,7 @@ Kronn/
 │       │   ├── disc_prompts.rs # Pure prompt builders (~625L, 9 tests): build_agent_prompt, build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext struct
 │       │   ├── disc_git.rs     # Discussion Git actions, optionally scoped to one declared CLI workspace
 │       │   ├── disc_workspace.rs # Joined-session worktree declaration plus advisory history-rewrite lease
-│       │   ├── contacts.rs     # Contacts CRUD + invite codes + network info + ping
+│       │   ├── contacts.rs     # Contacts CRUD + invite codes + pairing codes (`/pairing-offer`, `/pair`) + network info + ping
 │       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence (Origin-checked; accepted contacts only, unknown codes recorded as requests) + PartialResponseRecovered / BatchRunProgress / BatchRunFinished broadcasts
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
 │       │   ├── plugin_portability.rs # Versioned multi-plugin bundle preview/export/import; encrypted values, trust/scope checks, idempotence and audit
@@ -114,6 +117,7 @@ Kronn/
 │       │   ├── model_catalog/  # ACP/Codex discovery, HTTP reconciliation, preflight and one-time seed migration
 │       │   ├── host_mcp_discovery.rs # 0.6.0: read-only scan of ~/.claude.json, ~/.gemini/settings.json, ~/.codex/config.toml, ~/.copilot/mcp-config.json. Returns DiscoveredHostMcp with HostScope (ClaudeUser, ClaudeLocal{path}, Gemini, Codex, Copilot) + KronnOwnership (NotManaged | ManagedByMarker(uuid) | ManagedByHash(uuid)). Phase 1 of inbound/outbound feature. Never writes disk.
 │       │   ├── oauth2_cache.rs # OAuth2 client-credentials token cache + exchanger (0.5.0). In-memory HashMap<config_id, CachedToken> behind a tokio::sync::Mutex. resolve_token() checks cache → exchanges on miss/expiry → returns bearer. 30s safety margin before provider expiry. Error-transparent: token-exchange failures are bubbled up as human-readable strings for prompt injection.
+│       │   ├── atomic_file.rs # Atomic file replacement (unpredictable sibling temp, then rename); layer 0 so that fs_guard and mcp_scanner share it.
 │       │   ├── agent_skill.rs # Agent Skills file format (agentskills.io): parse, validate (name/description bounds) and render a SKILL.md; Kronn's own fields go under `metadata`; Claude Code `arguments` + `metadata.kronn-variables` (JSON)
 │       │   ├── skill_migration.rs # "Migrate everything to .agents/skills": read-only plan (moves, conflicts, blocked) then apply; nothing overwritten without a chosen version, symlinks refused, never commits
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.

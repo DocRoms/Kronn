@@ -37,6 +37,7 @@ const mkRun = (steps: StepResult[]): WorkflowRun => ({
   trigger_context: null,
   step_results: steps,
   tokens_used: 0,
+  shadow_tokens_used: 0,
   workspace_path: null,
   started_at: '2026-11-10T08:00:00Z',
   finished_at: '2026-11-10T08:00:01Z',

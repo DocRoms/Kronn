@@ -3,7 +3,8 @@ import { newTabClickProps } from '../../lib/newTabNavigation';
 import { workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
-import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch, QuotaWait } from '../../types/generated';
+import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch, QuotaWait, StepShadowComparison } from '../../types/generated';
+import { formatCost, runSpend } from '../../lib/shadowRuns';
 import { quotaPauseLabel } from '../../lib/quotaPause';
 import { QuotaAgentSwitch } from './QuotaPauseControls';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle, Clock } from 'lucide-react';
@@ -13,10 +14,13 @@ import { StepTokensBadge } from './StepTokens';
 import { stepTokensUnknown } from './stepTokenStatus';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import { collectSourceWeights, isHeavyOutput, stepOutputBytes } from '../../lib/heavyOutput';
+import { runPossibleSecrets } from '../../lib/docsPossibleSecrets';
 import { formatBytes } from '../../lib/live-page-weight';
 import { useHeavyOutputThreshold } from '../../hooks/useHeavyOutputThreshold';
 import { HeavyOutputBadge, HeavyOutputNotice, SourceWeights } from './HeavyOutput';
 import { CopyIdPill } from '../CopyIdPill';
+import { splitStepNotices } from '../../lib/fallbackNotice';
+import { FallbackNoticeLine } from '../FallbackNoticeLine';
 import { authRefusalSentence, runAuthRefusals } from '../../lib/authRefusal';
 import {
   runStatusTimeline,
@@ -131,6 +135,8 @@ export function RunStatusTrail({
 export interface RunDetailProps {
   run: WorkflowRun;
   workflowSteps?: WorkflowStep[];
+  /** The run's steps that ran shadows: their spend is part of the run's total. */
+  shadowSteps?: StepShadowComparison[];
   onDelete: () => void;
   /** Cancel a Running workflow run. Button is only rendered for Running status. */
   onCancel?: () => void;
@@ -701,13 +707,14 @@ function ProducedBranchesPanel({
   );
 }
 
-export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
+export function RunDetail({ run, workflowSteps, shadowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
   const { t } = useT();
   const heavyOutputKb = useHeavyOutputThreshold();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const statusTimeline = runStatusTimeline(run);
   const uncertainEffect = uncertainSideEffectIntent(run);
   const quotaWait = pendingQuotaWait(run);
+  const spend = runSpend(run, shadowSteps ?? []);
 
   const CONDITION_LABELS: Record<string, string> = {
     Stop: 'Stop',
@@ -778,7 +785,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             )}
           </button>
         )}
-        {run.tokens_used > 0 && (
+        {spend.tokens > 0 && (
           // 0.8.2 — Explicit "total" scope. Pre-fix this badge sat next to
           // the gate's `0 tokens consumed` and read as a contradiction
           // ("you said 0, then 3579?"). The two numbers are legitimate:
@@ -787,9 +794,17 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
           // disambiguates without dropping the run-cost-to-date info.
           <span
             className="text-xs text-muted"
-            title={t('wf.tokensTotalHint')}
+            title={spend.shadowTokens > 0
+              ? `${t('wf.tokensTotalHint')} ${t('wf.tokensTotalShadows', run.tokens_used.toLocaleString(), spend.shadowTokens.toLocaleString())}`
+              : t('wf.tokensTotalHint')}
+            data-testid="wf-run-total"
           >
-            {run.tokens_used} {t('wf.tokensTotal')}
+            {spend.tokens.toLocaleString()} {t('wf.tokensTotal')}
+            {spend.cost != null && (
+              <span title={spend.partial ? t('wf.costTotalPartialHint') : undefined}>
+                {' \u00b7 '}{spend.partial ? '\u2265 ' : ''}{formatCost(spend.cost)}
+              </span>
+            )}
           </span>
         )}
         {(run.status === 'Running' || run.status === 'WaitingQuota') && onCancel && (
@@ -924,6 +939,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'TransformData' ? 'data'
                       : ws_step.step_type.type === 'PublishPageData' ? 'page'
                       : ws_step.step_type.type === 'TaskBoard' ? 'data'
+                      : ws_step.step_type.type === 'Decide' ? 'gate'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'subwf'
                       : ws_step.step_type.type === 'TriggerWorkflow' ? 'subwf'
                       : 'agent'
@@ -939,6 +955,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'TransformData' ? 'TRANSFORM'
                       : ws_step.step_type.type === 'PublishPageData' ? 'PAGE'
                       : ws_step.step_type.type === 'TaskBoard' ? 'BOARD'
+                      : ws_step.step_type.type === 'Decide' ? 'DECIDE'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'SUB-WF'
                       : ws_step.step_type.type === 'TriggerWorkflow' ? 'TRIGGER'
                       : 'AGENT'}
@@ -1010,6 +1027,33 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
               </p>
             ))}
             <small>{t('wf.authRefused.hint')}</small>
+          </div>
+        );
+      })()}
+
+      {(() => {
+        // KT-1796 — a possible secret fails no step: said here, never silent.
+        const possible = runPossibleSecrets(run);
+        if (possible.length === 0) return null;
+        return (
+          <div className="wf-possible-secrets" role="note" data-testid="wf-possible-secrets">
+            <strong><AlertTriangle size={13} /> {t('wf.possibleSecrets.title')}</strong>
+            {possible.map(step => (
+              <div key={step.stepName}>
+                <p className="text-faint">{t('wf.possibleSecrets.step', step.stepName)}</p>
+                {step.unreadable && <p>{t('wf.possibleSecrets.unreadable')}</p>}
+                <ul>
+                  {step.documents.map(doc => (
+                    <li key={doc.path}>
+                      {t('wf.possibleSecrets.lines', doc.path, doc.lines.join(', '))}
+                      {doc.moreLines > 0 && <> {t('wf.possibleSecrets.moreLines', doc.moreLines)}</>}
+                    </li>
+                  ))}
+                  {step.moreDocuments > 0 && <li>{t('wf.possibleSecrets.moreDocuments', step.moreDocuments)}</li>}
+                </ul>
+              </div>
+            ))}
+            <small>{t('wf.possibleSecrets.hint')}</small>
           </div>
         );
       })()}
@@ -1264,9 +1308,18 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       <HeavyOutputNotice stepName={sr.step_name} bytes={outputBytes} sources={sourceWeights} />
                     )}
                     {!heavyOutput && <SourceWeights sources={sourceWeights} />}
-                    <div className="wf-step-output-code">
-                      {sr.output || t('wf.noOutput')}
-                    </div>
+                    {(() => {
+                      // KT-1518 — the step moved on its agent's fallback chain.
+                      const { notices, rest } = splitStepNotices(sr.output ?? '');
+                      return (
+                        <>
+                          {notices.map((notice, at) => <FallbackNoticeLine key={at} notice={notice} />)}
+                          <div className="wf-step-output-code">
+                            {(notices.length > 0 ? rest : sr.output) || t('wf.noOutput')}
+                          </div>
+                        </>
+                      );
+                    })()}
                     <div className="flex-row gap-6 mt-3 text-xs text-faint">
                       <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}>{sr.status}</span></span>
                       {sr.duration_ms > 0 && <span>{t('wf.duration')}: {(sr.duration_ms / 1000).toFixed(1)}s</span>}

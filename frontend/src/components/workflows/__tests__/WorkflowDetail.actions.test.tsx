@@ -18,8 +18,9 @@
 // per-test overrides on the workflows.* methods this component calls.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
+import { workflows as workflowsApi } from '../../../lib/api';
 
 const { cancelRun, resumeRun, decideRun, listBatchRunSummaries, getRun } = vi.hoisted(() => ({
   cancelRun: vi.fn(),
@@ -247,14 +248,22 @@ describe('WorkflowDetail — header actions', () => {
     expect(props.onEdit).toHaveBeenCalledWith('shadow');
   });
 
-  it('summarises an active shadow: versions tested and projects covered', () => {
+  it('summarises the active shadows of the steps: how many, on how many steps, in which projects', () => {
     renderDetail({
-      workflow: mkWorkflow({ shadow: { enabled: true, project_ids: ['p1'], skills: { 'custom-a': 'custom-a@2' }, quick_prompt_versions: { qp1: 3 } } }),
+      workflow: mkWorkflow({
+        steps: [
+          { name: 'review', step_type: { type: 'Agent' }, agent: 'ClaudeCode', prompt_template: 'x', shadows: [
+            { id: 'a', label: '', enabled: true, project_ids: ['p1'], skills: { 'custom-a': 'custom-a@2' } },
+            { id: 'b', label: '', enabled: true, project_ids: ['p1'], quick_prompt_versions: { qp1: 3 } },
+          ] },
+          { name: 'after', step_type: { type: 'Agent' }, agent: 'ClaudeCode', prompt_template: 'y' },
+        ] as unknown as Workflow['steps'],
+      }),
       projects: [{ id: 'p1', name: 'Alpha' }] as unknown as Props['projects'],
     });
     const entry = screen.getByTestId('wf-shadow-entry');
     expect(entry).toHaveAttribute('data-active', 'true');
-    expect(entry.textContent).toMatch(/wf\.shadow\.entryOn/);
+    expect(entry.textContent).toMatch(/wf\.shadow\.entryShadowsMany.*wf\.shadow\.entryStepsOne/);
     expect(entry).toHaveAccessibleName(expect.stringContaining('wf.shadow.entryTitleOn'));
   });
 
@@ -733,75 +742,63 @@ describe('WorkflowDetail — compact run rows', () => {
   });
 });
 
-describe('WorkflowDetail — shadow runs (KT-1449)', () => {
+describe('WorkflowDetail — step shadows (KT-1459)', () => {
   const normal = mkRun({ id: 'n1', status: 'Success', tokens_used: 300, step_results: [mkStepResult({ step_name: 'lire', output: 'a' })] });
-  const shadow = mkRun({ id: 's1', status: 'Failed', tokens_used: 200, trigger_context: { __variant__: 'shadow', __shadow_of__: 'n1' }, step_results: [mkStepResult({ step_name: 'lire', output: 'b' })] });
+  const former = mkRun({ id: 's1', status: 'Failed', tokens_used: 200, trigger_context: { __variant__: 'shadow', __shadow_of__: 'n1' }, step_results: [mkStepResult({ step_name: 'lire', output: 'b' })] });
   const expand = (container: HTMLElement, runId: string) => {
     const row = container.querySelector<HTMLButtonElement>(`[data-run-id="${runId}"] .wf-run-compact`)!;
     if (row.getAttribute('aria-expanded') !== 'true') fireEvent.click(row);
   };
-
-  it('lists a normal run and its shadow as one row showing both sides', () => {
-    const { container } = renderDetail({ runs: [shadow, normal] });
-    const rows = container.querySelectorAll('[data-testid="wf-run-item"]');
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toHaveAttribute('data-run-id', 'n1');
-    expect(rows[0]).toHaveAttribute('data-shadow-run-id', 's1');
-    const pair = screen.getByTestId('wf-run-shadow-paired');
-    expect(pair).toHaveAttribute('data-status', 'Failed');
-    expect(pair.textContent).toContain('200 tk');
-    expect(rows[0].querySelector('.wf-run-compact-meta')?.textContent).toContain('300 tk');
-    expect(screen.queryByTestId('wf-run-shadow-badge')).toBeNull();
+  const execution = (shadowId: string | undefined, extra: Record<string, unknown> = {}) => ({
+    shadow_id: shadowId, label: shadowId ?? '', status: 'success', output: 'verdict',
+    identity: { agent: 'ClaudeCode', model: 'opus', prompt: 'qp@1', skills: [] },
+    tokens_used: 100, duration_ms: 1000, cost_usd: 0.1, model: 'opus', ...extra,
   });
 
-  it('opens on the comparison, then switches to the normal and the shadow run', async () => {
-    const { props, container } = renderDetail({ runs: [shadow, normal] });
-    expand(container, 'n1');
-    const tabs = within(screen.getByTestId('wf-run-pair-tabs')).getAllByRole('tab');
-    expect(tabs.map(tab => tab.getAttribute('data-testid'))).toEqual(['wf-run-pair-tab-normal', 'wf-run-pair-tab-compare', 'wf-run-pair-tab-shadow']);
-    expect(screen.getByTestId('wf-run-pair-tab-compare')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByTestId('wf-run-pair-panel-compare')).toHaveAttribute('aria-labelledby', 'wf-run-pair-n1-compare-tab');
-    expect(await screen.findByTestId('wf-shadow-diff-lire')).toBeInTheDocument();
-    expect(screen.queryByTitle('wf.deleteRun')).toBeNull();
-
-    fireEvent.click(screen.getByTestId('wf-run-pair-tab-normal'));
-    expect(screen.getByTestId('wf-run-pair-tab-normal')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.queryByTestId('wf-shadow-compare')).toBeNull();
-    fireEvent.click(screen.getByTitle('wf.deleteRun'));
-    expect(props.onDeleteRun).toHaveBeenLastCalledWith('n1');
-
-    // Arrow keys move between the views, as tabs do.
-    fireEvent.keyDown(screen.getByTestId('wf-run-pair-tab-normal'), { key: 'ArrowRight' });
-    expect(screen.getByTestId('wf-run-pair-tab-compare')).toHaveAttribute('aria-selected', 'true');
-    fireEvent.keyDown(screen.getByTestId('wf-run-pair-tab-compare'), { key: 'ArrowRight' });
-    expect(screen.getByTestId('wf-run-pair-tab-shadow')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByTestId('wf-run-pair-tab-shadow')).toHaveFocus();
-    expect(screen.getByTestId('wf-run-pair-tab-compare')).toHaveAttribute('tabindex', '-1');
-    fireEvent.click(screen.getByTitle('wf.deleteRun'));
-    expect(props.onDeleteRun).toHaveBeenLastCalledWith('s1');
-  });
-
-  it('keeps a shadow whose normal run is not loaded as its own row', () => {
-    const { container } = renderDetail({ runs: [shadow] });
-    const rows = container.querySelectorAll('[data-testid="wf-run-item"]');
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toHaveAttribute('data-run-id', 's1');
-    expect(screen.getByTestId('wf-run-shadow-badge')).toBeInTheDocument();
-    expand(container, 's1');
+  it('lists every run as its own row: a step shadow is no run', () => {
+    const { container } = renderDetail({ runs: [normal, mkRun({ id: 'n2', status: 'Success' })] });
+    expect(container.querySelectorAll('[data-testid="wf-run-item"]')).toHaveLength(2);
     expect(screen.queryByTestId('wf-run-pair-tabs')).toBeNull();
+    expect(screen.queryByTestId('wf-run-shadow-paired')).toBeNull();
+  });
+
+  it('keeps a run of the former workflow-level shadow as its own row, with its badge', () => {
+    const { container } = renderDetail({ runs: [former, normal] });
+    const rows = container.querySelectorAll('[data-testid="wf-run-item"]');
+    expect([...rows].map(row => row.getAttribute('data-run-id'))).toEqual(['s1', 'n1']);
+    expect(screen.getAllByTestId('wf-run-shadow-badge')).toHaveLength(1);
+    expand(container, 's1');
     expect(screen.getByTitle('wf.deleteRun')).toBeInTheDocument();
   });
 
-  it('lists the pair when only the shadow matches the filter', () => {
-    const many = Array.from({ length: 12 }, (_, i) => mkRun({ id: `ok-${i}`, status: 'Success' }));
-    const { container } = renderDetail({ runs: [shadow, normal, ...many] });
-    fireEvent.click(screen.getByRole('button', { name: 'wf.runs.filter.failed' }));
-    const rows = container.querySelectorAll('[data-testid="wf-run-item"]');
-    expect([...rows].map(row => row.getAttribute('data-run-id'))).toEqual(['n1']);
+  it('marks, on its row, a run whose audit reported possible secrets', () => {
+    // KT-1796 — a successful run stays collapsed: the row itself says it.
+    const flagged = { ...normal, id: 'p1', state: { '__kronn.docs_possible_secrets.lire': '{"documents":[{"path":"docs/a.md","lines":[2],"more_lines":0}],"more_documents":0}' } };
+    const { container } = renderDetail({ runs: [flagged, normal] });
+    const badges = screen.getAllByTestId('wf-run-possible-secrets');
+    expect(badges).toHaveLength(1);
+    expect(container.querySelector('[data-run-id="p1"]')?.contains(badges[0])).toBe(true);
   });
 
-  it('a focus on a paired shadow opens its row on the shadow view', () => {
-    renderDetail({ runs: [shadow, normal], focusRunId: 's1' });
-    expect(screen.getByTestId('wf-run-pair-tab-shadow')).toHaveAttribute('aria-selected', 'true');
+  it('shows, in a run whose step ran shadows, the main execution beside them', async () => {
+    vi.mocked(workflowsApi.stepShadows).mockResolvedValue([{
+      step_name: 'lire', result_index: 0,
+      main: execution(undefined, { output: 'main verdict' }),
+      shadows: [execution('qwen', { label: 'Qwen', output: 'qwen verdict', identity: { agent: 'Ollama', model: 'qwen3', prompt: 'qp@1', skills: [] }, model: 'qwen3' })],
+    }] as never);
+    const { container } = renderDetail({ runs: [normal] });
+    expand(container, 'n1');
+    expect(await screen.findByTestId('wf-step-shadow-compare-lire')).toBeInTheDocument();
+    expect(workflowsApi.stepShadows).toHaveBeenCalledWith('wf-1', 'n1');
+    expect(screen.getByTestId('wf-shadow-exec-lire-main')).toBeInTheDocument();
+    expect(screen.getByTestId('wf-shadow-exec-lire-qwen-differs').textContent).toContain('Ollama');
+  });
+
+  it('shows no comparison in a run whose steps ran no shadow', async () => {
+    vi.mocked(workflowsApi.stepShadows).mockResolvedValue([]);
+    const { container } = renderDetail({ runs: [normal] });
+    expand(container, 'n1');
+    await waitFor(() => expect(workflowsApi.stepShadows).toHaveBeenCalled());
+    expect(screen.queryByTestId('wf-step-shadow-compare')).toBeNull();
   });
 });

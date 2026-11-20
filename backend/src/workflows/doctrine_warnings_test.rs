@@ -29,7 +29,6 @@ fn workflow(steps: Vec<WorkflowStep>) -> Workflow {
         variables: vec![],
         enabled: false,
         retention: None,
-        shadow: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
@@ -162,6 +161,7 @@ fn warnings_never_block_and_the_summary_names_them() {
         &HashMap::new(),
         &HashMap::new(),
         &[github()],
+        None,
         &mut |_| Ok(None),
     );
     assert!(verdict.ready, "{verdict:?}");

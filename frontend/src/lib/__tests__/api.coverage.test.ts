@@ -163,6 +163,19 @@ describe('api.contacts', () => {
       await exec((contacts as { inviteCode: () => Promise<unknown> }).inviteCode(), 'GET', '/contacts/invite-code');
     });
   }
+  if ('pairingCode' in contacts) {
+    it('pairingCode', async () => {
+      await exec((contacts as { pairingCode: () => Promise<unknown> }).pairingCode(), 'POST', '/contacts/pairing-offer');
+    });
+    it('pairingCode for an existing contact', async () => {
+      const body = await exec(
+        (contacts as { pairingCode: (id: string) => Promise<unknown> }).pairingCode('c-1'),
+        'POST',
+        '/contacts/pairing-offer',
+      );
+      expect(body).toEqual({ contact_id: 'c-1' });
+    });
+  }
   if ('networkInfo' in contacts) {
     it('networkInfo', async () => {
       await exec((contacts as { networkInfo: () => Promise<unknown> }).networkInfo(), 'GET', '/contacts/network-info');

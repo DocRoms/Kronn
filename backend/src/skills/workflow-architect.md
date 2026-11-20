@@ -249,6 +249,8 @@ Emits a literal JSON payload as the step's structured envelope. Zero token, zero
 
 No templating at runtime — the value is returned verbatim. If you need substitution, use an `Agent` or `ApiCall` step that produces the JSON.
 
+**Ids in a payload**: `{{refs.<name>}}` is not rendered here either. A value that is the whole id of a custom skill (`custom-x`, `custom-x@N`) is exported with the workflow and points at the imported skill after an import. Any other object id written in a payload (Page, workflow, Quick Prompt, Quick API, Quick Exec, directive, profile) is plain text: it is not exported and not remapped. Declare those in `refs` and read them from a templated step.
+
 ```json
 {
   "name": "host-list",
@@ -501,8 +503,8 @@ Use it when a plan is already split into subtasks (each with its DoD, order, blo
 - **Workers**: the first `worker:<key>` tag of a subtask found in `worker_map`, else `default_worker`. Native/HTTP agents only (no CLI session). A subtask with no worker stops the step before anything launches.
 - **Order**: plan order (subtask rank), blockers and `concurrency` (1-8) decide what launches; a stop never cancels a running worker.
 - **Review**: the step's `agent` + `agent_settings` review each delivery with the DoD, the diff and the worker's report; `prompt_template` adds guidance. Verdict: `approve` (needs evidence for every DoD item), `request_changes` (back to the worker, counts a round), `reassign` (to another `worker_map` key, once), `escalate` (stops for a human). Each review counts against the run's `max_llm_calls`. The diff is cut at 40,000 characters and an HTTP reviewer cannot read the worktree: for a larger change, prefer a CLI reviewer (Claude Code, Codex) or smaller subtasks.
-- **Integration**: approved work lands on `target_branch` (default: the run's branch, so later steps see it), with `validations` run first. A dirty target refuses the step before launch.
-- **Output**: `data = { discussion_id, campaign_id, target_branch, review_calls, subtasks: [{ task, status, integrated_sha, review_rounds, attempts, integration_conflicts, worker, cost_usd, tokens }] }`.
+- **Integration**: approved work lands on `target_branch` (default: the run's branch, so later steps see it), with `validations` run first. A dirty target refuses the step before launch; a branch checked out nowhere has its ref moved. `OK` = every subtask integrated, even when its task stays awaiting the merge.
+- **Output**: `data = { discussion_id, campaign_id, target_branch, review_calls, subtasks: [{ task, status, integrated_sha, review_rounds, attempts, integration_conflicts, worker, cost_usd, cost_unknown_reason, tokens }] }`.
 - **Resume**: re-running the step picks its campaign back up; nothing launches twice and a recorded verdict is not paid for again.
 - **Forbidden in `on_failure`**.
 
@@ -515,6 +517,25 @@ Reads or changes the planning tasks sharing one `tag` as a board with three colu
   "name": "board",
   "step_type": { "type": "TaskBoard" },
   "task_board": { "tag": "todo", "operation": "toggle", "task": "{{task}}" }
+}
+```
+
+### 16. `Decide` — a decision model answers typed questions (0 agent tokens)
+
+Asks the decision model the user set in Config › Agents › Ollama (row « Décision ») one or more typed questions about a rendered `state` (usually `{{steps.<name>.output}}`), in one local call of under a second once the model is loaded. Question kinds: `noul` (yes/no), `choice` (2-26 options, ids in lowercase/digits/`_`), `score` (2-10 levels, lowest first). Each answer becomes a signal for `on_result`: `<id>_yes` / `<id>_no`, `<id>_<option>`, `<id>_<level number from 1>`. An answer below `min_confidence` (defaults per kind, measured: noul 0.85, choice 0.35, score 0.30) emits `<id>_unsure` and `low_confidence` instead: route `low_confidence` to a stronger `Agent` step or a `Gate`, never ignore it. Rules match any signal the step emits, in rule order. Use it instead of an Agent for "continue or not?", "which tier?", "what did the review say?". Unavailable (greyed out, refused at launch) while no decision model is configured; local Ollama only.
+
+```json
+{
+  "name": "ready",
+  "step_type": { "type": "Decide" },
+  "decide": {
+    "state": "{{steps.tests.output}}",
+    "questions": [{ "id": "ship", "kind": "noul", "instructions": "Did every check pass, with nothing left to fix?" }]
+  },
+  "on_result": [
+    { "contains": "ship_yes", "action": { "type": "Goto", "step_name": "merge" } },
+    { "contains": "low_confidence", "action": { "type": "Goto", "step_name": "review" } }
+  ]
 }
 ```
 
@@ -606,7 +627,7 @@ A workflow is created via `POST /api/workflows` with this JSON structure:
 | `prompt_template` | string | Required by schema. For non-Agent steps, set to `""` — the engine doesn't read it. |
 | `mode` | object | Always `{ "type": "Normal" }` |
 | `mcp_config_ids` | array | MCP config IDs to inject (usually `[]` — project MCPs are auto-injected) |
-| `external_effect` | bool | `true` on every step that acts outside Kronn: posts, comments, sends a message or a mail, deploys, pushes, moves a ticket, writes to a third-party API. A shadow run skips it. Default `false`; see Versions and shadow runs |
+| `external_effect` | bool | `true` on every step that acts outside Kronn: posts, comments, sends a message or a mail, deploys, pushes, moves a ticket, writes to a third-party API. A shadow never runs it, and the step cannot carry shadows. Default `false`; see Versions and shadow runs |
 
 ### Fields specific to `Agent`
 
@@ -743,6 +764,16 @@ The step's output envelope exposes `data = { child_run_id, child_workflow_id, ch
 | `delegate_subtasks.validations` | array | `[{ command, timeout_secs? }]` run on each approved candidate. |
 | `delegate_subtasks.target_branch` / `timeout_secs` | string / number | Default: the run's branch / 21600. |
 
+### Fields specific to `Decide`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `decide.state` | string | **REQUIRED.** What the model reads, templated. |
+| `decide.questions` | array | **REQUIRED.** 1-64 `{ id, kind: noul\|choice\|score, instructions, options?, levels? }`. |
+| `decide.questions[].options` | object | `choice`: 2-26 `option_id → meaning`; `noul`: optional meanings of `true` / `false`. |
+| `decide.questions[].levels` | array | `score`: 2-10 level names, lowest first. |
+| `decide.min_confidence` | number | 0-1. Default per kind: noul 0.85, choice 0.35, score 0.30. |
+
 ### Workflow-level fields (top-level, NOT per-step)
 
 These shape engine behavior across the whole run.
@@ -754,7 +785,7 @@ These shape engine behavior across the whole run.
 | `on_failure` | array of WorkflowStep | Rollback chain. **Fires only on `Failed`** (not Cancelled, not StoppedByGuard, not Gate reject). `Gate` is forbidden inside (deadlock). Each rollback step sees `{{failed_step.name}}` and `{{failed_step.output}}` |
 | `exec_allowlist` | array of string | Binaries that `Exec` steps may invoke for this workflow. Empty = Exec disabled (the safe default). Match is exact on the bare binary name (no path, no glob, no shell metas) |
 | `variables` | array of PromptVariable | Run inputs shared by Workflow/QP/QA/QE. Each declaration chooses `user_input`, `project_env`, or `kronn_context`; values become `{{var_name}}` in step prompts |
-| `refs` | object | `Record<name, { kind, id }>`, `kind` one of `page`, `workflow`, `quick_prompt`, `quick_api`, `quick_exec`, `skill`; name `[a-z][a-z0-9_]{0,40}`. Steps read the id as `{{refs.<name>}}` instead of a pasted id; Exec steps also get `KRONN_REF_<NAME>`. Saving checks the object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports point each ref at the imported copy |
+| `refs` | object | `Record<name, { kind, id }>`, `kind` one of `page`, `workflow`, `quick_prompt`, `quick_api`, `quick_exec`, `skill`; name `[a-z][a-z0-9_]{0,40}`. Steps read the id as `{{refs.<name>}}` instead of a pasted id; Exec steps also get `KRONN_REF_<NAME>`. Saving checks the object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports point each ref at the imported copy; a pasted id is not exported, except a custom skill's whole id |
 
 ### PromptVariable sources — references, never captured values
 
@@ -806,6 +837,7 @@ The optional `control` is `{ "type": "text" }`, `{ "type": "textarea" }`, or
 - `{{steps.STEP_NAME.data}}` — structured/extracted data from any named step (compact JSON if object/array, raw string if `data` was a plain string)
 - `{{steps.STEP_NAME.data_json}}` — same data, always-serialized JSON (use when piping into an HTTP body or another JSON parser)
 - `{{steps.STEP_NAME.data.<path>}}` / `{{previous_step.data.<path>}}` — **nested-path traversal** through the structured `data`. Dot-separated; numeric segments index arrays. Examples: `{{steps.run-tests.data.exit_code}}`, `{{steps.analyze.data.subtasks.0.title}}`, `{{steps.fetch.data.items.2.id}}`. Returns the leaf as a string (scalars stringified, objects/arrays pretty-printed JSON). Missing fields stay visible in previews and fail closed before execution, so broken refs never render silently empty or reach an external API
+- `{{steps.STEP_NAME.shadows}}` / `{{previous_step.shadows}}` — a read-only JSON **summary of the step's shadows and merge**, for a step after it (typically a `PublishPageData` with `value_from: "steps.advise.shadows"` so a Page shows them). Always present once the step has run: `executions` is empty for a step without shadows. Paths work as for `.data` (`{{steps.advise.shadows.merge.status}}`, `{{steps.advise.shadows.executions.1.agent}}`). Never an output, a prompt or a setting: shape and rules in Versions and shadow runs › Showing the shadows in a Page
 - `{{state.<key>}}` — durable run state. Agents emit `---STATE:key=value---` in their output; the runner persists on the run row and exposes here on next iterations. Use for loops with feedback (review writes verdict, next implement reads it)
 - `{{iter.<step_name>}}` — per-step revisit counter (1, 2, 3…). Useful in Goto loops (e.g. "iteration {{iter.implement}} of 5")
 - `{{artifacts.<name>}}` — content of an artifact declared in `Workflow.artifacts` and emitted via `---ARTIFACT:<name>---...---END_ARTIFACT---`. Pre-seeded as empty string before round 1 so referencing it on the first iteration renders cleanly
@@ -814,7 +846,7 @@ The optional `control` is `{ "type": "text" }`, `{ "type": "textarea" }`, or
 - `{{issue.title}}` / `{{issue.body}}` / `{{issue.number}}` / `{{issue.url}}` / `{{issue.labels}}` — populated only when trigger is Tracker
 - `{{trigger.body}}` / `{{trigger.status}}` / `{{trigger.fingerprint}}` / `{{trigger.body_truncated}}`, plus `{{trigger.etag}}` / `{{trigger.last_modified}}` when the server sent them and `{{trigger.extract}}` in JsonPath mode — populated only when trigger is Watch (the response that changed, credentials removed, body cut at 64 KiB)
 - `{{run.id}}` — id of the current workflow run (a SubWorkflow child run has its own)
-- `{{run.variant}}` — `normal`, or `shadow` in a shadow run and its sub-runs. Put it in every name or path both runs would otherwise share (see Versions and shadow runs)
+- `{{run.variant}}` — always `normal` for a run (a step shadow re-runs one step inside the main run, it is not a run of its own); kept so a branch or path name written for the variant still renders (see Versions and shadow runs)
 - `{{refs.<name>}}` — the id of the object the workflow's `refs.<name>` names (see Workflow-level fields)
 - `{{project.<path>}}` — the run's repository profile `kronn/project.toml`, read once at run start at the commit of the main checkout's default-branch ref (never the worktree) and pinned with the run, so resumes and child runs see the same values. Use it instead of hard-coding what is specific to a repository: `{{project.validation.targets.lint.command}}`, `{{project.forge.base_branch}}`, `{{project.forge.labels.<name>.name}}`, `{{project.tracker.statuses.<name>}}`, `{{project.tracker.transitions.<name>.to}}`, `{{project.delivery.workflows.<name>.workflow}}`. Tables and arrays render as JSON. Without `??` a missing profile or key fails the run before its first step; schema: `docs/guides/project-profile.md`
 - `{{<path> ?? "text"}}` — the one explicit fallback (`'text'` also works, no escapes). Renders the literal when the path is absent or JSON null; a present empty string stays empty. Use it when a step may not have run on every path, e.g. `{{steps.porte_check.data.stdout ?? ""}}` after a `Goto` that skips `porte_check`, or `{{artifacts.review ?? ""}}` on round 1. Without `??`, an absent reference fails the step before it runs. A guarded reference may name a later step, never an unknown one, and never hides an unsupported filter
@@ -1220,18 +1252,18 @@ Do not paraphrase, do not move the disclaimer above the signal line, do not omit
 
 ## Versions and shadow runs
 
-Kronn keeps every saved version of a custom skill and of a Quick Prompt. A workflow can run a **shadow**: a second run on the same inputs that loads other versions, so a human compares it with the normal run before switching. Read this before choosing `skill_ids`, before writing a step that acts outside Kronn, and when the user asks to test a new prompt or skill version on real runs.
+Kronn keeps every saved version of a custom skill and of a Quick Prompt. An Agent step can carry **shadows**: each re-runs that step beside its main execution, on exactly the same input, with its own agent, model, prompt or skills (or none of these, to measure how deterministic the step is), so a human compares them with the main output before switching. Read this before choosing `skill_ids`, before writing a step that acts outside Kronn, and when the user asks to test a new prompt or skill version on real runs.
 
 ### Reading versions
 
 - `skill_get({skill_id})` returns a custom skill with its `versions` (`version_index`, `created_at`, `current`; newest first, no body). `skill_get({skill_id: "custom-x@N"})` returns version N whole. Builtin skills have no versions.
 - `qp_get({qp_id})` returns a Quick Prompt with its `versions`; `qp_get({qp_id, version: N})` returns version N whole (template, variables, bindings as saved then). Each save of a Quick Prompt adds a version; v1 is its creation.
-- `workflow_get` returns the workflow's `shadow` config when it has one.
+- `workflow_get` returns each step's `shadows` when it has some.
 - A project's skill or Quick Prompt, and its versions, are read only where that project is in reach (the room's or workflow's project, or a project a human granted). Restoring a skill version or deleting a Quick Prompt version is a human action in its version history; no agent tool does it.
 
 ### Writing a skill
 
-Agents create and edit custom skills like Quick Prompts: `skill_create` saves one as version 1 in the room's or workflow's project (`project_id` may name that project only), and `skill_update` changes only the fields passed, keeping the project and `allowed_tools`. Each save that changes a skill adds a version; one that changes nothing adds none. A step, Quick Prompt or discussion pinned to `custom-x@N` keeps version N; an enabled workflow loading the bare `custom-x` is disabled by an agent's edit until a human enables it again. Only a custom skill of a project in reach is writable (a room without a project: the global skills it created, once a human granted « General · write »); builtin skills never. `allowed_tools` pre-approve agent tools, so only a human sets them. To try a new version on real runs, a human picks it in the workflow's **Shadow runs** settings. Restoring a version and deleting a skill stay human.
+Agents create and edit custom skills like Quick Prompts: `skill_create` saves one as version 1 in the room's or workflow's project (`project_id` may name that project only), and `skill_update` changes only the fields passed, keeping the project and `allowed_tools`. Each save that changes a skill adds a version; one that changes nothing adds none. A step, Quick Prompt or discussion pinned to `custom-x@N` keeps version N; an enabled workflow loading the bare `custom-x` is disabled by an agent's edit until a human enables it again. Only a custom skill of a project in reach is writable (a room without a project: the global skills it created, once a human granted « General · write »); builtin skills never. `allowed_tools` pre-approve agent tools, so only a human sets them. To try a new version on real runs, a human picks it in the step's **Shadows** settings. Restoring a version and deleting a skill stay human.
 
 ### Pinning a skill version
 
@@ -1241,26 +1273,86 @@ Agents create and edit custom skills like Quick Prompts: `skill_create` saves on
 
 An Agent step with `quick_prompt_id` may set `quick_prompt_version: N`: it loads version N of that Quick Prompt (template, variables, skills, profiles, directives, agent and tier as saved then), frozen; unset, the step follows every edit of the Quick Prompt. Pin a production step before anyone edits its Quick Prompt, so an edit reaches it only when a human picks the new version. Read it with `qp_get({qp_id, version: N})` first; a version that does not exist fails the run. An imported workflow loses the pin (its Quick Prompt comes without history).
 
-### Shadow runs
+### Step shadows
 
-When a human enables `shadow` on a workflow, each normal run of a covered project (`shadow.project_ids`, empty = every run) also starts one shadow run on the same inputs. The shadow loads `shadow.skills` (a skill id → its replacement, e.g. `custom-x` → `custom-x@3`) and `shadow.quick_prompt_versions` (a Quick Prompt id → a version index), and differs from the normal run in four ways:
+A step carries `shadows: [...]`, 0 to 8 per step. Every time the step runs in a covered project, each enabled shadow re-runs **only that step**, beside the main execution, on exactly the input the main step receives: the same rendered prompt context, the same previous outputs and variables. **Only the main output continues the workflow**; a shadow's output never feeds a later step (a later step reads only a summary of what ran, `{{steps.<name>.shadows}}`, never an output). A shadow has:
 
-- it **skips every step marked `external_effect: true` and every Gate** (recorded as success, signal `SKIPPED_SHADOW`); a step left unmarked runs twice, once per run;
-- it gets **its own worktree** unless `workspace_config.main_tree_read_only` is set; its sub-runs are shadows too;
-- it sends no failure notification and does not count against the concurrency limit;
-- `{{run.variant}}` renders `shadow` (`normal` in the normal run).
+| Field | Meaning |
+|---|---|
+| `id`, `label`, `enabled` | `id` is a slug (`a-z 0-9 . _ -`, at most 40, unique in the step): the shadow's column in the comparison. `label` is the name shown; `enabled: false` keeps the shadow saved without running it |
+| `project_ids`, `sample_every` | the projects the shadow covers (empty = every run) and `N`: one run in N gets the shadow, to bound cost |
+| `agent` | `{agent, model, connection_id, reasoning_effort}` in place of the step's own. `connection_id` names a custom HTTP connection; a local Ollama, a LiteLLM proxy or another hosted model is an `agent` type with its `model` |
+| `prompt` | `{type: "quick_prompt", id, version?}` or `{type: "inline", template}` in place of the step's own prompt, rendered on the same context |
+| `skills`, `quick_prompt_versions` | skill id → replacement (`custom-x` → `custom-x@3`), or `""` to **drop** the skill and measure what it brings; Quick Prompt id → version |
+| `budget` | `{max_tokens, max_duration_secs, max_cost_usd}`. `max_duration_secs` is enforced (the shadow is stopped, status `timed_out`) and replaces the workflow's timeout for the shadow, so a slow local model may outlast the main step, which never waits for it. Tokens and cost are checked when the shadow ends (status `over_budget`, output kept); `max_tokens` also caps the generation of an agent that takes a cap |
 
-What this asks of a workflow you author or edit, shadow enabled or not:
+A shadow with none of `agent`, `prompt`, `skills` and `quick_prompt_versions` is **identical** to its step: it measures how many distinct outputs the same agent gives on the same input. A shadow may change one level or several.
 
-- **Mark each step that acts outside Kronn** with `external_effect: true`: an ApiCall or Notify that posts, comments, sends or moves a ticket, an Exec that pushes, deploys or writes to a remote service, an Agent step whose job is to post. A step writing inside Kronn (PublishPageData to a Page people read, a task, a launch) runs in the shadow too: mark it as well when the shadow must not do it. When unsure, mark it: a skipped step costs the shadow one comparison, an unmarked one acts twice.
-- **Never let both runs share a name or a path.** Worktrees share the repository's branches, and a path outside the run's worktree is the same for both runs: write `fix/{{issue.number}}-{{run.variant}}`, `/srv/reports/{{run.variant}}/…`. `{{run.artifacts_dir}}` is already per run.
-- **A step after a skipped one** reads, in the shadow, the skip notice as its `output` and no `data`: guard its `data` reads with `{{path ?? ""}}`.
+What a shadow never does:
 
-Enabling, configuring or promoting a shadow is **human-only**: an agent cannot set or change `shadow` through `workflow_create_draft` or `workflow_update`, because a shadow starts extra runs. When the user asks for one, explain it and point them to the workflow editor's **Shadow runs** settings (enable, projects, the skill and Quick Prompt versions to try), then to the **Resources** panel of a Page the workflow feeds, where a human promotes the tested version to the normal runs. You can read the config (`workflow_get`), compare runs (`workflow_runs`, `workflow_run_get`) and prepare the version to test.
+- it **never runs a step marked `external_effect: true`, and never a Gate**: only an Agent step can carry shadows, and not one marked `external_effect` (saving refuses it; a hand-edited one is recorded as `skipped`). Nothing outside Kronn happens in a shadow, and a later step marked `external_effect` runs once, in the main path;
+- it **never fails or delays the main step**: an error, a stall, a time or token budget spent only settles that shadow's row; the main step does not wait for it and the run does not record it as a failure;
+- it gets **no room and no Kronn tool**, and runs in the main run's working directory: attach shadows to steps that analyse or review, not to steps that edit files.
+
+### Merging the shadows into the step output
+
+Off by default, a step with shadows only **compares** them. A step may also carry `shadow_merge: {enabled, shadows, timeout_secs, agent}`: the main execution and the shadows it selects are **condensed into one result, which becomes the step's output** for the rest of the workflow. The main and shadow outputs stay stored and visible for comparison.
+
+| Field | Meaning |
+|---|---|
+| `enabled` | `false` keeps the setting saved without merging (default `true` once the object exists; absent = off) |
+| `shadows` | the ids of the shadows that merge with the main execution: one, several, or none named = **all** of the step's shadows. Each must be a shadow the step carries |
+| `timeout_secs` | how long the merge waits for the selected shadows, 1 to 3600 (default 600) |
+| `agent` | the agent of the condense pass, like a shadow's `agent` (agent, model, connection); unset runs it on the step's own agent. Usually the strongest model |
+
+How a merge runs, once the main execution has succeeded:
+
+- it **waits for the selected shadows** up to `timeout_secs`, then goes on with those that finished (a shadow that failed, timed out, is skipped, was not sampled or is still running is reported **missing**, with the reason); the main run never waits for a dead shadow beyond the timeout;
+- a **condense pass** (an Agent step with the step's own output format and signals) reads the main output and the shadow outputs, groups the points that say the same thing, **verifies every point a shadow raised against the code** before keeping it (a local model may invent), calibrates severity, and writes the single result in the format the step asks for. It also writes a provenance block: per point, which executions found it, kept / duplicate / dropped as unverified, with the evidence or the reason;
+- **a point it cannot verify is never published**: the engine refuses a result where a shadow-only point is kept without `verified: true` and evidence, where a dropped point's text still appears in the result, or whose provenance is missing or invalid. The main output then stays the step's output and the merge says why (`rejected`); a failed condense pass (`failed`) or no shadow finished (`skipped`) leave it as well;
+- the merged result replaces the step's `output` (and the step's signals are read from it), so `{{steps.<step>.output}}`, `.data` and `.summary` hold the merged result. The condense pass's tokens are added to the step's `tokens_used` and reported in the merge.
+
+The run view shows the merge under the step: its status, the missing shadows, a table of each execution's contribution (kept, only this one, duplicate, dropped as unverified), the provenance of every point, what the condense pass spent, and the merged result diffed against each execution. `GET /api/workflows/{id}/runs/{run_id}/step-shadows` returns it as `merge` on each step.
+
+### Showing the shadows in a Page
+
+A Page only reads datasets a workflow published. A step after the shadowed one reads `{{steps.<name>.shadows}}` (also `{{previous_step.shadows}}`), a JSON summary, and a `PublishPageData` write with `value_from: "steps.<name>.shadows"` puts it in a dataset:
+
+```json
+{ "step": "advise",
+  "executions": [ { "key": "main" | "<shadow id>", "label": "...", "identical": false, "agent": "ClaudeCode", "model": "...",
+                    "transport": "cli" | "http" | "local",
+                    "status": "success" | "failed" | "skipped" | "over_budget" | "timed_out" | "interrupted" | "running",
+                    "tokens": 1200, "cost_usd": 0.02, "duration_ms": 31000 } ],
+  "merge": null | { "status": "merged" | "rejected" | "failed" | "skipped" | "waiting",
+                    "included": ["argon"], "missing": [ { "key": "qwen", "reason": "..." } ],
+                    "points": { "kept": 5, "unique": 2, "duplicate": 3, "dropped": 1 },
+                    "per_execution": { "main": { "kept": 3, "duplicate": 0, "dropped": 0 } } },
+  "determinism": null | { "identical_runs": 2, "distinct_outputs": 1 } }
+```
+
+- `executions` lists the main execution first, then each shadow that started, in start order. `key` is `main` or the shadow id; `identical` is true for a shadow that changes nothing of its step (the main execution is never `identical`); `transport` is `cli` (an agent CLI), `http` (a remote endpoint such as LiteLLM) or `local` (Ollama); `tokens`, `cost_usd`, `duration_ms` and `model` are `null` until known. An unmeasured cost is `null`, never `0`.
+- `merge` is `null` when the step merges nothing (no `shadow_merge`, or the main execution failed). `included` are the shadows whose output went into the condense pass, `missing` those that did not, with the reason. `points` counts the merge's points: `kept` (published), `unique` (kept points only one execution found), `duplicate`, `dropped` (not verified, never published); `per_execution` credits each execution with its own `kept`, `duplicate` and `dropped`.
+- `determinism` is `null` without an identical shadow; otherwise how many executions (the main one and the identical shadows that produced an output) gave how many distinct outputs, timings left out.
+- **The merge is over when the next step renders**: it runs inside the shadowed step's own execution, so the step after it waits for it (up to the merge's `timeout_secs`). A shadow with no merge, or one the merge does not wait for, may still be going: it is reported `running`, and a summary read later is not rewritten. A resumed run rebuilds it from what was stored.
+- **No output, prompt or secret is in it**: only the identity (agent, model, transport), the status, the measures and the merge's counts. The shadows' outputs and the merge's points stay in the run view; only the main (or merged) output continues the workflow.
+- A step without shadows has `{"step": "<name>", "executions": [], "merge": null, "determinism": null}`, so a template needs not know whether the step carries some. The save-time check of `{{steps.X.…}}` references does not cover `.shadows`: a misspelt step name fails when the run renders it.
+
+Only a person sets `shadow_merge`, like `shadows`: an agent cannot set or change it (a save that sends the steps back keeps the stored one). It costs one more agent call per run (the condense pass) on top of the shadows; shadows on local models cost no hosted tokens, and the condense pass reads the outputs, not the whole input again, unless a point needs verification. Point the user to the step editor's **Shadows** section, **Merge with the main execution**.
+
+The run view compares, per step, the main execution and its shadows side by side (`GET /api/workflows/{id}/runs/{run_id}/step-shadows`): a header per execution says what differs (agent, model, prompt version, skill versions) and groups what is identical; tokens, cost and duration; the output diff against the main one, or between any two; and, for identical shadows, how many distinct outputs there are out of N+1.
+
+What this asks of a workflow you author or edit:
+
+- **Mark each step that acts outside Kronn** with `external_effect: true`: an ApiCall or Notify that posts, comments, sends or moves a ticket, an Exec that pushes, deploys or writes to a remote service, an Agent step whose job is to post. A step writing inside Kronn (PublishPageData to a Page people read, a task, a launch) is not an Agent step and carries no shadow, but a shadow of an Agent step that writes there through a tool would write too: keep such work out of the steps that carry shadows. When unsure, mark it.
+- **Split a review step from the step that posts it.** A shadow compares what a step produces; the step that publishes it then reads the main output only.
+- **`{{run.variant}}` is always `normal`**: a shadow is not a run, so a branch or path named with it needs no change and never collides.
+
+Creating, editing, removing or promoting a shadow, and setting `shadow_merge`, is **human-only**: an agent cannot set or change `shadows` or `shadow_merge` through `workflow_create_draft` or `workflow_update` (a save that sends the steps back keeps the stored shadows), because a shadow starts extra executions. A workflow saved before step shadows had a workflow-level `shadow`: it became one shadow on each of its Agent steps, with the same overrides. When the user asks for one, explain it and point them to the step editor's **Shadows** section (create, edit and remove shadows: agent, model, prompt, skills, projects, sampling, budget), then to the **Resources** panel of a Page the workflow feeds, where a human adds a shadow testing a version, changes what a shadow tests, removes a shadow, or promotes a shadow's tested version to its step. You can read the config (`workflow_get`), compare runs (`workflow_runs`, `workflow_run_get`) and prepare the version to test.
 
 ### Named refs
 
-`refs: {name: {kind, id}}` at the workflow level names a Page, workflow, Quick Prompt, Quick API, Quick Exec or skill once; steps write `{{refs.<name>}}` instead of a pasted id (accepted even in Exec inline code) and Exec steps also read `KRONN_REF_<NAME>` from their environment. Saving checks that each object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports remap each ref, so prefer a ref to an id written into a step.
+`refs: {name: {kind, id}}` at the workflow level names a Page, workflow, Quick Prompt, Quick API, Quick Exec or skill once; steps write `{{refs.<name>}}` instead of a pasted id (accepted even in Exec inline code) and Exec steps also read `KRONN_REF_<NAME>` from their environment. Saving checks that each object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports remap each ref, so prefer a ref to an id written into a step. An id pasted in a script, a prompt or a payload is not exported, with one exception: a custom skill named by its whole id anywhere in a step travels with the workflow (in a script or a prompt the id is kept as written, never remapped).
 
 ## Reach — the projects a workflow and its agents touch
 

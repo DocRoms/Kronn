@@ -10,44 +10,7 @@ use crate::models::{
     StepType, WorkflowStep,
 };
 
-/// An agent as Kronn launched it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentIdentity {
-    pub agent_type: AgentType,
-    /// The concrete model, when Kronn resolved one at launch.
-    pub model: Option<String>,
-}
-
-// `AgentType` has unit variants only, so equality is total.
-impl Eq for AgentIdentity {}
-
-/// Who asks the broker for a call.
-#[derive(Debug, Clone)]
-pub enum ApiCaller {
-    /// A person in the UI (Quick API launcher, wizard test).
-    Human,
-    /// An agent; `identity: None` means no Kronn-issued identity (no token),
-    /// which is treated as a remote agent.
-    Agent {
-        identity: Option<AgentIdentity>,
-        discussion_ids: Vec<String>,
-        workflow_run_id: Option<String>,
-    },
-    /// A non-agent step of a human-enabled workflow; its data reaches the
-    /// workflow's agents, listed here (`None` = an agent Kronn cannot name).
-    Workflow { agents: Vec<Option<AgentIdentity>> },
-}
-
-impl ApiCaller {
-    /// An agent without any Kronn-issued identity.
-    pub fn unidentified_agent() -> Self {
-        Self::Agent {
-            identity: None,
-            discussion_ids: Vec::new(),
-            workflow_run_id: None,
-        }
-    }
-}
+pub use crate::models::quick::{AgentIdentity, ApiCaller};
 
 /// An agent the data may reach, with its locality already decided.
 #[derive(Debug, Clone)]
@@ -132,7 +95,9 @@ pub fn audience_slot(step: &WorkflowStep) -> Option<Option<&WorkflowStep>> {
         | StepType::JsonData
         | StepType::TransformData
         | StepType::PublishPageData
-        | StepType::TaskBoard => None,
+        | StepType::TaskBoard
+        // Reads with the local decision model only, never an agent.
+        | StepType::Decide => None,
         // Any other step (sub-workflows, Quick Prompt batches, and every
         // step type added later) may hand the data to an agent Kronn
         // cannot name: unknown, hence remote.
@@ -271,7 +236,7 @@ fn describe_subjects(subjects: &[ApiAccessSubject]) -> String {
 /// A path's segments, or `None` when the path is ambiguous: an empty segment,
 /// a dot segment, or an encoded slash, backslash or dot that a server could
 /// read differently from this matcher.
-fn request_segments(path: &str) -> Option<Vec<String>> {
+pub fn request_segments(path: &str) -> Option<Vec<String>> {
     let trimmed = path.strip_prefix('/').unwrap_or(path);
     let trimmed = trimmed.strip_suffix('/').unwrap_or(trimmed);
     if trimmed.is_empty() {
@@ -294,7 +259,7 @@ fn request_segments(path: &str) -> Option<Vec<String>> {
 /// written as its UTF-8 escapes: the form the request URL is sent in. So `/users/%6De` is `/users/me` and `%3a` is `%3A`.
 /// `None` for an escape that could change the path's shape (slash, backslash,
 /// dot), a raw backslash, or a malformed escape.
-fn canonical_segment(segment: &str) -> Option<String> {
+pub fn canonical_segment(segment: &str) -> Option<String> {
     let mut out = String::with_capacity(segment.len());
     let mut chars = segment.chars();
     while let Some(c) = chars.next() {
@@ -429,7 +394,7 @@ fn segment_matches(want: &str, got: &str) -> bool {
     }
 }
 
-fn template_matches<S: AsRef<str>>(template: &str, segments: &[S]) -> bool {
+pub fn template_matches<S: AsRef<str>>(template: &str, segments: &[S]) -> bool {
     let declared = template_segments(template);
     declared.len() == segments.len()
         && declared
@@ -561,7 +526,7 @@ pub async fn principal_for(
     state: &crate::AppState,
     caller: &ApiCaller,
 ) -> Result<Principal, String> {
-    let base_url = crate::api::ollama::resolve_base_url_pub(None);
+    let base_url = crate::api::ollama_health::resolve_base_url_pub(None);
     let member = |identity: Option<AgentIdentity>| Member {
         local: identity.as_ref().is_some_and(|i| is_local(i, &base_url)),
         identity,
@@ -598,9 +563,9 @@ pub async fn principal_for(
                     // The definition the run executes is its pin, never the
                     // editable one; a run without a readable pin is unknown.
                     let workflow = match run_id {
-                        Some(run_id) => {
-                            Some(crate::workflows::run_pins::pinned_workflow(conn, &run_id)?)
-                        }
+                        Some(run_id) => Some(crate::db::workflow_run_pins::pinned_workflow(
+                            conn, &run_id,
+                        )?),
                         None => None,
                     };
                     Ok((audience, workflow))
@@ -772,7 +737,3 @@ pub fn describe_policy(policy: &ApiAccessPolicy) -> String {
     }
     out
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "api_access_test.rs"]
-mod tests;

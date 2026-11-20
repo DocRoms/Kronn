@@ -67,7 +67,7 @@ vi.mock('../../../lib/I18nContext', () => ({
 import { WorkflowWizard } from '../WorkflowWizard';
 import { jsonPathToTarget } from '../../../lib/workflowUiUtils';
 import { buildBlankStep } from '../../../lib/workflowUiUtils';
-import { pages as pagesApi, projects as projectsApi, workflows as workflowsApi } from '../../../lib/api';
+import { config as configApi, pages as pagesApi, projects as projectsApi, workflows as workflowsApi } from '../../../lib/api';
 
 // ── Fixtures ────────────────────────────────────────────────────────
 
@@ -984,7 +984,7 @@ describe('WorkflowWizard — step-type swaps', () => {
     fireEvent.click(option);
   };
 
-  it('keeps the thirteen types collapsed and groups them by purpose when opened', () => {
+  it('keeps the fourteen types collapsed and groups them by purpose when opened', () => {
     toSteps();
     expect(document.querySelector('.wf-step-type-catalog')).toBeNull();
 
@@ -994,7 +994,36 @@ describe('WorkflowWizard — step-type swaps', () => {
     expect(screen.getByText('wiz.stepTypeGroupAi')).toBeInTheDocument();
     expect(screen.getByText('wiz.stepTypeGroupData')).toBeInTheDocument();
     expect(screen.getByText('wiz.stepTypeGroupControl')).toBeInTheDocument();
-    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(13);
+    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(14);
+  });
+
+  // KT-1367 — the Decide step is greyed out, with the way to unlock it,
+  // until a decision model is set.
+  it('offers the Decide step only once a decision model is configured', async () => {
+    toSteps();
+    const card = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    fireEvent.click(card.querySelector('.wf-step-type-current') as HTMLButtonElement);
+    const decide = card.querySelector<HTMLButtonElement>('.wf-step-type-option[data-type="decide"]')!;
+    await waitFor(() => expect(decide).toBeDisabled());
+    expect(decide).toHaveTextContent('wiz.stepTypeDecideUnavailable');
+    fireEvent.click(decide);
+    expect(screen.queryByTestId('decide-form')).toBeNull();
+  });
+
+  it('adds a Decide step with its form and the signals to branch on once a model is set', async () => {
+    vi.mocked(configApi.getModelTiers).mockResolvedValue({ ollama: { decision: 'clef-flash:9b' } } as never);
+    toSteps();
+    const card = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    fireEvent.click(card.querySelector('.wf-step-type-current') as HTMLButtonElement);
+    const decide = card.querySelector<HTMLButtonElement>('.wf-step-type-option[data-type="decide"]')!;
+    await waitFor(() => expect(decide).toBeEnabled());
+    fireEvent.click(decide);
+    const form = screen.getByTestId('decide-form');
+    expect(form).toBeInTheDocument();
+    expect(screen.queryByText('wiz.decideNoModel')).toBeNull();
+    expect(screen.getByTestId('decide-signals')).toHaveTextContent('ok_yes');
+    expect(screen.getByTestId('decide-signals')).toHaveTextContent('low_confidence');
+    vi.mocked(configApi.getModelTiers).mockResolvedValue({ tiers: {} } as never);
   });
 
   it('lets a TriggerWorkflow step target any workflow, this one included, and keeps a SubWorkflow target when swapped (KT-796)', async () => {
@@ -1478,48 +1507,70 @@ describe('jsonPathToTarget', () => {
 
 afterEach(() => cleanup());
 
-// ── Shadow runs: reachable in both modes, openable from the detail page ──
+// ── Step shadows: on the step in both modes, openable from the detail page ──
 
-describe('WorkflowWizard — shadow runs settings', () => {
-  it('offers the shadow card in the simple Task step', () => {
+describe('WorkflowWizard — step shadows settings', () => {
+  const shadowed = (extra: Partial<WorkflowStep> = {}) => mkStep({ shadows: [{ id: 'twin', label: '', enabled: true }], ...extra });
+
+  it('offers the shadows of the one step in the simple Task step', () => {
     renderWizard();
     fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'Named' } });
     fireEvent.click(screen.getByText('wiz.next'));
-    expect(screen.getByTestId('wf-shadow-card')).toBeInTheDocument();
-    // Collapsed while the shadow is off: nothing to review yet.
-    expect(screen.queryByTestId('wf-shadow-enabled')).toBeNull();
+    expect(screen.getByTestId('wf-step-shadows-simple')).toBeInTheDocument();
+    // Collapsed while the step has none: nothing to review yet.
+    expect(screen.queryByTestId('wf-step-shadows-simple-add')).toBeNull();
+    expect(screen.queryByTestId('wiz-external-effect-simple')).toBeNull();
   });
 
-  it('opens a simple workflow on its shadow settings, expanded, with the step flag beside it', async () => {
+  it('opens a simple workflow on the shadows of its step, expanded, with the step flag beside them', async () => {
     const original = Element.prototype.scrollIntoView;
     const scrollIntoView = vi.fn();
     Element.prototype.scrollIntoView = scrollIntoView;
     try {
-      renderWizard({ editWorkflow: mkWorkflow(), initialSection: 'shadow' });
-      const card = screen.getByTestId('wf-shadow-card');
-      const toggle = within(card).getByRole('button', { expanded: true });
+      renderWizard({ editWorkflow: mkWorkflow({ steps: [shadowed()] }), initialSection: 'shadow' });
+      const section = screen.getByTestId('wf-step-shadows-simple');
+      const toggle = within(section).getByRole('button', { expanded: true });
       await waitFor(() => expect(toggle).toHaveFocus());
       expect(scrollIntoView).toHaveBeenCalled();
-      expect(screen.queryByTestId('wiz-external-effect-simple')).toBeNull();
-      fireEvent.click(screen.getByTestId('wf-shadow-enabled'));
-      expect(screen.getByTestId('wf-shadow-nothing-skipped')).toHaveTextContent('wf.shadow.nothingSkippedSimple');
+      expect(screen.getByTestId('wf-shadow-twin')).toBeInTheDocument();
+      // A step that acts outside Kronn cannot carry shadows: the section says so.
       fireEvent.click(screen.getByTestId('wiz-external-effect-simple'));
       expect(screen.getByTestId('wiz-external-effect-simple')).toBeChecked();
-      expect(screen.getByTestId('wf-shadow-skipped')).toBeInTheDocument();
+      expect(screen.getByTestId('wf-step-shadows-simple-ineligible')).toHaveTextContent('wf.shadow.outsideKronn');
+      expect(screen.getByTestId('wf-step-shadows-simple-add')).toBeDisabled();
     } finally {
       Element.prototype.scrollIntoView = original;
     }
   });
 
-  it('opens an advanced workflow on the Config step with the shadow card expanded', () => {
+  it('adds and removes a shadow on the step from the simple Task step', () => {
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [shadowed()] }), initialSection: 'shadow' });
+    fireEvent.click(screen.getByTestId('wf-step-shadows-simple-add'));
+    expect(screen.getByTestId('wf-shadow-shadow-2')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('wf-shadow-twin-remove'));
+    expect(screen.queryByTestId('wf-shadow-twin')).toBeNull();
+    expect(screen.getByTestId('wf-shadow-shadow-2')).toBeInTheDocument();
+  });
+
+  it('opens an advanced workflow on its steps, with the shadows of the first step expanded', () => {
     renderWizard({
       editWorkflow: mkWorkflow({ steps: [mkStep(), mkStep({ id: '22222222-2222-4222-8222-222222222222', name: 'second' })] }),
       initialSection: 'shadow',
     });
-    const card = screen.getByTestId('wf-shadow-card');
-    expect(within(card).getByRole('button', { expanded: true })).toBeInTheDocument();
-    // Config also holds the execution limits: this is the advanced step 4.
-    expect(screen.getByTestId('wf-shadow-enabled')).toBeInTheDocument();
+    const section = screen.getByTestId('wf-step-shadows-0');
+    expect(within(section).getByRole('button', { expanded: true })).toBeInTheDocument();
+    expect(screen.getByTestId('wf-step-shadows-0-add')).toBeInTheDocument();
+    // The other step keeps its settings closed.
+    expect(screen.queryByTestId('wf-step-shadows-1')).toBeNull();
     expect(screen.queryByTestId('wiz-external-effect-simple')).toBeNull();
+  });
+
+  it('opens on the step that carries shadows rather than the first one', () => {
+    renderWizard({
+      editWorkflow: mkWorkflow({ steps: [mkStep(), shadowed({ id: '22222222-2222-4222-8222-222222222222', name: 'second' })] }),
+      initialSection: 'shadow',
+    });
+    expect(screen.getByTestId('wf-step-shadows-1-add')).toBeInTheDocument();
+    expect(screen.getByTestId('wf-shadow-twin')).toBeInTheDocument();
   });
 });

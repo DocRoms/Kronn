@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         connect_info::ConnectInfo,
-        ws::{Message, WebSocket},
+        ws::{CloseFrame, Message, WebSocket},
         Query, State, WebSocketUpgrade,
     },
     http::HeaderMap,
@@ -114,7 +114,7 @@ mod rate_limit {
     }
 
     /// Clear bookkeeping for a specific IP (used by tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn reset(ip: IpAddr) {
         if let Ok(mut map) = state().lock() {
             map.remove(&ip);
@@ -164,7 +164,7 @@ mod rate_limit {
 /// so we can unit-test the handshake policy without standing up a
 /// full WebSocket harness. Mirrors the in-line logic in `handle_socket`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PrePresenceAction {
+pub enum PrePresenceAction {
     /// Heartbeat — answer Pong, stay unverified.
     Heartbeat,
     /// Caller can run the Presence verification path.
@@ -173,7 +173,7 @@ pub(crate) enum PrePresenceAction {
     Drop,
 }
 
-pub(crate) fn classify_pre_presence(msg: &WsMessage) -> PrePresenceAction {
+pub fn classify_pre_presence(msg: &WsMessage) -> PrePresenceAction {
     match msg {
         WsMessage::Ping { .. } => PrePresenceAction::Heartbeat,
         WsMessage::Presence { .. } => PrePresenceAction::Presence,
@@ -193,7 +193,7 @@ pub(crate) fn classify_pre_presence(msg: &WsMessage) -> PrePresenceAction {
 ///
 /// Pure decision so we can unit-test the policy without mounting a
 /// full WebSocket harness.
-pub(crate) fn should_reject_empty_invite(invite_code: &str, is_local: bool) -> bool {
+pub fn should_reject_empty_invite(invite_code: &str, is_local: bool) -> bool {
     invite_code.is_empty() && !is_local
 }
 
@@ -267,7 +267,7 @@ pub async fn ws_handler(
     let has_valid_token =
         {
             let expected = config.server.auth_token.as_deref();
-            let bearer = crate::bearer_credential(&headers);
+            let bearer = crate::http_transport::bearer_credential(&headers);
             bearer.is_some_and(|bearer| {
                 crate::core::bridge_token::operator_token_matches(expected, bearer)
             }) || query.token.as_deref().is_some_and(|token| {
@@ -313,14 +313,14 @@ pub async fn ws_handler(
 }
 
 /// Subprotocol the server selects; the credential rides beside it.
-pub(crate) const WS_PROTOCOL: &str = "kronn";
+pub const WS_PROTOCOL: &str = "kronn";
 /// Prefix of the subprotocol that carries the operator token, base64url
 /// encoded: a browser cannot set headers on a WebSocket, and a URL query
 /// ends up in proxy logs.
-pub(crate) const WS_AUTH_PROTOCOL_PREFIX: &str = "kronn.auth.";
+pub const WS_AUTH_PROTOCOL_PREFIX: &str = "kronn.auth.";
 
 /// The operator token offered as a `kronn.auth.<base64url>` subprotocol.
-pub(crate) fn subprotocol_credential(headers: &HeaderMap) -> Option<String> {
+pub fn subprotocol_credential(headers: &HeaderMap) -> Option<String> {
     use base64::Engine as _;
     headers
         .get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
@@ -338,7 +338,7 @@ pub(crate) fn subprotocol_credential(headers: &HeaderMap) -> Option<String> {
 
 /// Where a WS upgrade comes from, judged by its `Origin` header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WsOrigin {
+pub enum WsOrigin {
     /// No header: not a browser (a federation peer, a CLI, a test client).
     Absent,
     /// An exact origin of this Kronn's frontend.
@@ -351,15 +351,19 @@ pub(crate) enum WsOrigin {
 /// webview included), the gateway ports under Docker only, the configured domain, the Tauri
 /// webview, the dev UI when `kronn start-dev` exported it, and the operator's
 /// own list (LAN or Tailscale aliases).
-pub(crate) fn allowed_ws_origins(
+pub fn allowed_ws_origins(
     server: &crate::models::ServerConfig,
     dev_ui: Option<&str>,
     in_docker: bool,
 ) -> Vec<String> {
     let port = server.listening_port();
-    let mut origins = crate::frontend_origins(&None, port, in_docker);
+    let mut origins = crate::http_transport::frontend_origins(&None, port, in_docker);
     if server.domain.is_some() {
-        origins.extend(crate::frontend_origins(&server.domain, port, in_docker));
+        origins.extend(crate::http_transport::frontend_origins(
+            &server.domain,
+            port,
+            in_docker,
+        ));
     }
     origins.extend(
         [
@@ -387,7 +391,7 @@ pub(crate) fn allowed_ws_origins(
 }
 
 /// Classify the upgrade's `Origin` against the exact allowed list.
-pub(crate) fn classify_ws_origin(origin: Option<&str>, allowed: &[String]) -> WsOrigin {
+pub fn classify_ws_origin(origin: Option<&str>, allowed: &[String]) -> WsOrigin {
     let Some(origin) = origin else {
         return WsOrigin::Absent;
     };
@@ -400,7 +404,7 @@ pub(crate) fn classify_ws_origin(origin: Option<&str>, allowed: &[String]) -> Ws
 /// Canonical `scheme://host[:port]` (lowercase, default port dropped, a
 /// trailing slash allowed), or None for anything else: paths, queries,
 /// credentials, `null`, or an authority the URL parser does not read whole.
-pub(crate) fn normalize_origin(origin: &str) -> Option<String> {
+pub fn normalize_origin(origin: &str) -> Option<String> {
     let origin = origin.trim();
     if origin.contains(['\\', ' ', '\t']) {
         return None;
@@ -480,7 +484,7 @@ mod pending {
 /// `$remote_addr`). Natively axum talks to clients directly, so the header is
 /// attacker-controlled and ignored. `X-Forwarded-For` is never read: the
 /// gateway does not set it, so it would pass through from the client as is.
-pub(crate) fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr, in_docker: bool) -> IpAddr {
+pub fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr, in_docker: bool) -> IpAddr {
     if !in_docker || !is_trusted_client_ip(socket_ip) {
         return socket_ip;
     }
@@ -493,7 +497,7 @@ pub(crate) fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr, in_docke
 
 /// Inputs of the "is this the local frontend" decision for one WS upgrade.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WsTrust {
+pub struct WsTrust {
     pub client_ip: IpAddr,
     pub in_docker: bool,
     /// `auth_enabled` and a token configured, as in `auth_middleware`.
@@ -514,7 +518,7 @@ pub(crate) struct WsTrust {
 /// only loopback qualifies; under Docker any private source does, because
 /// Docker Desktop NATs the host browser to a network gateway whose range
 /// varies, and the HTTP API is open in that mode anyway.
-pub(crate) fn ws_client_is_local(t: WsTrust) -> bool {
+pub fn ws_client_is_local(t: WsTrust) -> bool {
     if t.has_valid_token {
         return true;
     }
@@ -522,7 +526,7 @@ pub(crate) fn ws_client_is_local(t: WsTrust) -> bool {
         return false;
     }
     let local_set = if t.in_docker {
-        crate::is_local_ip(&t.client_ip.to_string())
+        crate::http_transport::is_local_ip(&t.client_ip.to_string())
     } else {
         t.client_ip.is_loopback()
     };
@@ -539,7 +543,7 @@ pub(crate) fn ws_client_is_local(t: WsTrust) -> bool {
 /// Loopback OR private-range (RFC1918 / IPv6 ULA / link-local). Used for the
 /// Docker gateway check and the Docker auth-off trust; never on its own to
 /// grant trust natively.
-pub(crate) fn is_trusted_client_ip(ip: IpAddr) -> bool {
+pub fn is_trusted_client_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         IpAddr::V6(v6) => {
@@ -552,16 +556,21 @@ pub(crate) fn is_trusted_client_ip(ip: IpAddr) -> bool {
 
 /// Who a connection was admitted as.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Admission {
+pub enum Admission {
     Frontend,
-    /// An accepted contact, by the invite code it presented.
+    /// An accepted contact, by its id: its invite code and secret were
+    /// checked at Presence, and only the id is trusted from then on.
     Peer(String),
 }
 
+/// WebSocket close code of a refused peer (the 4000 range is for applications).
+const WS_REFUSED_CLOSE_CODE: u16 = 4401;
+/// How long a refused peer's socket may take to deliver its close reason.
+const REFUSAL_GRACE: Duration = Duration::from_secs(3);
 /// A client must present itself within this window.
 const PRESENCE_DEADLINE: Duration = Duration::from_secs(10);
 /// How often a quiet peer's authorization is read again.
-pub(crate) const PEER_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
+pub const PEER_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Minimum spacing between two answered heartbeats.
 const HEARTBEAT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -581,6 +590,8 @@ async fn handle_socket(
     let watch_rx = admission_rx.clone();
     // Heartbeat answers go to this socket only, never onto the shared bus.
     let (direct_tx, mut direct_rx) = tokio::sync::mpsc::channel::<WsMessage>(4);
+    // A refused peer is told how to re-pair: the send half writes the close frame.
+    let (refuse_tx, mut refuse_rx) = tokio::sync::mpsc::channel::<&'static str>(1);
     // Keys of relayable frames received from this peer, never echoed back.
     let echo_guard = Mutex::new(PeerEchoGuard::default());
 
@@ -604,13 +615,18 @@ async fn handle_socket(
                     continue;
                 }
                 Some(direct) = direct_rx.recv() => direct,
+                Some(reason) = refuse_rx.recv() => {
+                    let frame = CloseFrame { code: WS_REFUSED_CLOSE_CODE, reason: reason.into() };
+                    let _ = ws_sender.send(Message::Close(Some(frame))).await;
+                    break;
+                }
                 recv = broadcast_rx.recv() => match recv {
                     Ok(msg) => {
                         let admission = admission_rx.borrow().clone();
                         match admission {
                             None => continue,
                             Some(Admission::Frontend) => {}
-                            Some(Admission::Peer(code)) => {
+                            Some(Admission::Peer(contact_id)) => {
                                 // A peer only gets relayable frames, never its own echo.
                                 if !msg.is_peer_relayable() {
                                     continue;
@@ -621,7 +637,7 @@ async fn handle_socket(
                                     }
                                 }
                                 // Only a member of that shared discussion gets it.
-                                match PeerAuth::InviteCode(code).may_receive(&state, &msg).await {
+                                match PeerAuth::ContactId(contact_id).may_receive(&state, &msg).await {
                                     None => break,
                                     Some(false) => continue,
                                     Some(true) => {}
@@ -645,7 +661,7 @@ async fn handle_socket(
 
     let recv = async {
         let mut slot = Some(slot);
-        let mut peer_code: Option<String> = None;
+        let mut peer_contact: Option<String> = None;
         let mut last_heartbeat: Option<tokio::time::Instant> = None;
         let presence_deadline = tokio::time::Instant::now() + PRESENCE_DEADLINE;
         // The frontend may stay quiet for long; a peer must send something
@@ -689,6 +705,7 @@ async fn handle_socket(
             if slot.is_some() {
                 let WsMessage::Presence {
                     ref from_invite_code,
+                    ref from_secret,
                     ..
                 } = ws_msg
                 else {
@@ -696,15 +713,26 @@ async fn handle_socket(
                     continue;
                 };
                 let Some(admission) =
-                    admit_presence(&state, from_invite_code, peer_ip, is_local).await
+                    admit_presence(&state, from_invite_code, from_secret, peer_ip, is_local).await
                 else {
+                    if !is_local {
+                        // Same words whatever the reason: the peer learns how to
+                        // re-pair, not which check failed.
+                        let _ = refuse_tx.send(crate::db::contacts::WS_REFUSED_REASON).await;
+                        tokio::time::sleep(REFUSAL_GRACE).await;
+                    }
                     break;
                 };
                 slot = None;
-                if let Admission::Peer(code) = &admission {
-                    peer_code = Some(code.clone());
-                    // The contact comes online for the local frontend.
-                    let _ = state.ws_broadcast.send(ws_msg.clone());
+                if let Admission::Peer(contact_id) = &admission {
+                    peer_contact = Some(contact_id.clone());
+                    // The contact comes online for the local frontend, without
+                    // the secret it presented.
+                    let mut online = ws_msg.clone();
+                    if let WsMessage::Presence { from_secret, .. } = &mut online {
+                        from_secret.clear();
+                    }
+                    let _ = state.ws_broadcast.send(online);
                 }
                 admission_tx.send_replace(Some(admission));
                 continue;
@@ -712,14 +740,18 @@ async fn handle_socket(
 
             // Only an accepted contact feeds shared discussions; the frontend
             // writes through the HTTP API and sends nothing else here.
-            let Some(code) = peer_code.as_deref() else {
+            let Some(contact_id) = peer_contact.as_deref() else {
                 continue;
             };
             if !ws_msg.is_peer_relayable() {
                 continue;
             }
-            match ingest_relayable_frame(&state, &ws_msg, &PeerAuth::InviteCode(code.to_owned()))
-                .await
+            match ingest_relayable_frame(
+                &state,
+                &ws_msg,
+                &PeerAuth::ContactId(contact_id.to_owned()),
+            )
+            .await
             {
                 Ingest::Revoked => {
                     tracing::warn!("WS: peer {peer_ip} is no longer authorized, closing");
@@ -748,8 +780,8 @@ async fn handle_socket(
         loop {
             every.tick().await;
             let admission = watch_rx.borrow().clone();
-            if let Some(Admission::Peer(code)) = admission {
-                if !peer_authorized(&state, &code).await {
+            if let Some(Admission::Peer(contact_id)) = admission {
+                if !peer_authorized(&state, &contact_id).await {
                     tracing::warn!("WS: peer {peer_ip} was revoked, closing");
                     break;
                 }
@@ -773,16 +805,19 @@ async fn handle_socket(
     }
 }
 
-/// P2P is enabled and `code` is an accepted contact.
-pub(crate) async fn peer_authorized(state: &AppState, code: &str) -> bool {
-    PeerAuth::InviteCode(code.to_owned()).check(state).await
+/// P2P is enabled and `contact_id` is still an accepted contact.
+pub async fn peer_authorized(state: &AppState, contact_id: &str) -> bool {
+    PeerAuth::ContactId(contact_id.to_owned())
+        .check(state)
+        .await
 }
 
 /// Decide a connection's Presence. The empty code is the frontend's, valid
 /// only on a connection already trusted as the frontend at upgrade.
-pub(crate) async fn admit_presence(
+pub async fn admit_presence(
     state: &AppState,
     invite_code: &str,
+    secret: &str,
     peer_ip: IpAddr,
     is_local: bool,
 ) -> Option<Admission> {
@@ -801,27 +836,30 @@ pub(crate) async fn admit_presence(
     if !state.p2p.enabled() {
         return None;
     }
-    admit_peer_presence(state, invite_code, peer_ip)
+    admit_peer_presence(state, invite_code, secret, peer_ip)
         .await
-        .then(|| Admission::Peer(invite_code.to_owned()))
+        .map(Admission::Peer)
 }
 
-/// Decide a peer's Presence: only an accepted contact is admitted. Every
-/// refusal is charged to the IP before any side effect; an unknown
-/// well-formed code is then recorded as a contact request (never dialled nor
-/// admitted until the operator adds it), within the request quota.
-pub(crate) async fn admit_peer_presence(
+/// Decide a peer's Presence: only an accepted contact that presents its
+/// pairing secret is admitted (its id is returned). The invite code is public
+/// and names the contact; it never admits on its own (KT-1650). Every refusal is
+/// charged to the IP before any side effect; an unknown well-formed code is then
+/// recorded as a contact request (never dialled nor admitted until the operator
+/// pairs it), within the request quota.
+pub async fn admit_peer_presence(
     state: &AppState,
     invite_code: &str,
+    secret: &str,
     peer_ip: IpAddr,
-) -> bool {
-    let code = invite_code.to_owned();
+) -> Option<String> {
+    let (code, presented) = (invite_code.to_owned(), secret.to_owned());
     let verdict = state
         .db
-        .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &code))
+        .with_conn(move |conn| crate::db::contacts::authenticate_peer(conn, &code, &presented))
         .await;
     match verdict {
-        Ok(crate::db::contacts::InviteAuth::Accepted(_)) => return true,
+        Ok(crate::db::contacts::InviteAuth::Accepted(contact)) => return Some(contact.id),
         Ok(crate::db::contacts::InviteAuth::NotAccepted { pseudo, status }) => {
             tracing::warn!("WS: refusing contact {pseudo} from {peer_ip}: status {status}");
         }
@@ -829,12 +867,12 @@ pub(crate) async fn admit_peer_presence(
             if rate_limit::charge(peer_ip) {
                 record_contact_request(state, invite_code, peer_ip).await;
             }
-            return false;
+            return None;
         }
         Err(error) => tracing::warn!("WS: contact lookup failed for {peer_ip}: {error}"),
     }
     rate_limit::charge(peer_ip);
-    false
+    None
 }
 
 /// Insert a remote chat message into the local discussion.
@@ -986,29 +1024,22 @@ fn handle_discussion_invite(
     Ok(true)
 }
 
-/// The peer a relayable frame comes from, authorized again at each write.
+/// The peer a relayable frame comes from, authorized again at each write. It
+/// is always a contact id: the id was settled by the pairing secret (inbound) or
+/// by dialling the contact (outbound), never by a public invite code.
 #[derive(Debug, Clone)]
-pub(crate) enum PeerAuth {
-    /// Inbound: the invite code its Presence was admitted with.
-    InviteCode(String),
-    /// Outbound: the contact this instance dialled.
+pub enum PeerAuth {
     ContactId(String),
 }
 
 impl PeerAuth {
     /// The id of the accepted contact behind this peer, or None once it is
     /// no longer accepted.
-    pub(crate) fn accepted_contact_id(
+    pub fn accepted_contact_id(
         &self,
         conn: &rusqlite::Connection,
     ) -> anyhow::Result<Option<String>> {
         match self {
-            Self::InviteCode(code) => Ok(
-                match crate::db::contacts::authenticate_invite_code(conn, code)? {
-                    crate::db::contacts::InviteAuth::Accepted(contact) => Some(contact.id),
-                    _ => None,
-                },
-            ),
             Self::ContactId(id) => {
                 Ok(crate::db::contacts::contact_id_is_accepted(conn, id)?.then(|| id.clone()))
             }
@@ -1016,13 +1047,13 @@ impl PeerAuth {
     }
 
     /// Still an accepted contact (P2P being on is checked by the callers).
-    pub(crate) fn authorized(&self, conn: &rusqlite::Connection) -> anyhow::Result<bool> {
+    pub fn authorized(&self, conn: &rusqlite::Connection) -> anyhow::Result<bool> {
         Ok(self.accepted_contact_id(conn)?.is_some())
     }
 
     /// None once the peer is no longer accepted; otherwise whether it is a
     /// member of the shared discussion `shared_id`.
-    pub(crate) fn membership(
+    pub fn membership(
         &self,
         conn: &rusqlite::Connection,
         shared_id: &str,
@@ -1040,7 +1071,7 @@ impl PeerAuth {
     }
 
     /// `membership` with P2P on; None when P2P is off or the DB fails.
-    pub(crate) async fn check_member(&self, state: &AppState, shared_id: &str) -> Option<bool> {
+    pub async fn check_member(&self, state: &AppState, shared_id: &str) -> Option<bool> {
         if !state.p2p.enabled() {
             return None;
         }
@@ -1064,7 +1095,7 @@ impl PeerAuth {
     }
 
     /// Whether `msg` may go to this peer: None to close the connection.
-    pub(crate) async fn may_receive(&self, state: &AppState, msg: &WsMessage) -> Option<bool> {
+    pub async fn may_receive(&self, state: &AppState, msg: &WsMessage) -> Option<bool> {
         match relay_shared_id(msg) {
             Some(shared_id) => self.check_member(state, shared_id).await,
             None => Some(false),
@@ -1072,7 +1103,7 @@ impl PeerAuth {
     }
 
     /// P2P on and still an accepted contact (DB errors deny).
-    pub(crate) async fn check(&self, state: &AppState) -> bool {
+    pub async fn check(&self, state: &AppState) -> bool {
         if !state.p2p.enabled() {
             return false;
         }
@@ -1091,7 +1122,7 @@ impl PeerAuth {
 }
 
 /// The shared discussion a relayable frame belongs to.
-pub(crate) fn relay_shared_id(msg: &WsMessage) -> Option<&str> {
+pub fn relay_shared_id(msg: &WsMessage) -> Option<&str> {
     match msg {
         WsMessage::ChatMessage {
             shared_discussion_id,
@@ -1119,7 +1150,7 @@ pub(crate) fn relay_shared_id(msg: &WsMessage) -> Option<&str> {
 
 /// What to do with an ingested relayable frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ingest {
+pub enum Ingest {
     /// New: broadcast it on the local bus.
     Broadcast,
     /// Duplicate, dropped or consumed: do not broadcast.
@@ -1140,11 +1171,7 @@ pub(crate) enum Ingest {
 /// Shared by the inbound `handle_socket` and the outbound `ws_client` receive
 /// halves so a frame is persisted exactly once regardless of which socket it
 /// arrives on.
-pub(crate) async fn ingest_relayable_frame(
-    state: &AppState,
-    msg: &WsMessage,
-    peer: &PeerAuth,
-) -> Ingest {
+pub async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -> Ingest {
     match ingest_authorized(state, msg, peer).await {
         Some(true) => Ingest::Broadcast,
         Some(false) => Ingest::Skip,
@@ -1371,6 +1398,7 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             from_invite_code,
             ..
         } => {
+            let host_peer = peer.clone();
             // Already have this file? Do nothing. This is the idempotency guard
             // AND it breaks the pending/ready re-broadcast ping-pong: the origin
             // peer (which holds the file) receives our local emits below, finds
@@ -1437,13 +1465,16 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             // Fetch the binary in the background — a network round-trip we must
             // NOT block the recv loop on.
             let st = state.clone();
+            // The host is the peer this frame arrived from, already authenticated
+            // by its pairing secret: the public `from_invite_code` it carries
+            // never picks which contact we download from.
             let (sid, mid, fid, fname, mime, host) = (
                 shared_discussion_id.clone(),
                 message_id.clone(),
                 file_id.clone(),
                 filename.clone(),
                 mime_type.clone(),
-                from_invite_code.clone(),
+                host_peer,
             );
             let sz = *size;
             // Turning P2P off cancels the transfer.
@@ -1517,6 +1548,7 @@ mod handshake_tests {
         let m = WsMessage::Presence {
             from_pseudo: "x".into(),
             from_invite_code: "".into(),
+            from_secret: String::new(),
             online: true,
         };
         assert_eq!(classify_pre_presence(&m), PrePresenceAction::Presence);
@@ -2202,7 +2234,11 @@ mod origin_and_admission_tests {
         AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
     }
 
-    async fn insert_contact(state: &AppState, code: &str, status: &str) {
+    /// The pairing secret the contacts of these tests were paired with.
+    const SECRET: &str = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12";
+
+    /// A contact paired with [`SECRET`] (both directions), in `status`; its id.
+    async fn insert_contact(state: &AppState, code: &str, status: &str) -> String {
         let contact = crate::models::Contact {
             id: uuid::Uuid::new_v4().to_string(),
             pseudo: "Peer".into(),
@@ -2213,11 +2249,23 @@ mod origin_and_admission_tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
+        let (id, status) = (contact.id.clone(), status.to_owned());
         state
             .db
-            .with_conn(move |conn| crate::db::contacts::insert_contact(conn, &contact))
+            .with_conn(move |conn| {
+                crate::db::contacts::insert_contact(conn, &contact)?;
+                crate::db::contacts::set_pairing_secrets(
+                    conn,
+                    &contact.id,
+                    &crate::db::contacts::hash_secret(SECRET),
+                    SECRET,
+                )?;
+                crate::db::contacts::update_contact_status(conn, &contact.id, &status)?;
+                Ok(())
+            })
             .await
             .unwrap();
+        id
     }
 
     async fn contacts(state: &AppState) -> Vec<crate::models::Contact> {
@@ -2236,7 +2284,7 @@ mod origin_and_admission_tests {
         rate_limit::reset(ip);
         for n in 0..10 {
             let code = format!("kronn:Stranger{n}@10.0.0.{n}:3456");
-            assert!(!admit_peer_presence(&state, &code, ip).await);
+            assert!(admit_peer_presence(&state, &code, "", ip).await.is_none());
         }
         assert!(rate_limit::is_banned(ip), "unknown codes must count");
         let recorded = contacts(&state).await;
@@ -2263,7 +2311,7 @@ mod origin_and_admission_tests {
             ));
             rate_limit::reset(ip);
             let code = format!("kronn:Flood{n}@10.1.0.{}:3456", n % 250 + 1);
-            assert!(!admit_peer_presence(&state, &code, ip).await);
+            assert!(admit_peer_presence(&state, &code, "", ip).await.is_none());
             rate_limit::reset(ip);
         }
         assert_eq!(
@@ -2277,18 +2325,77 @@ mod origin_and_admission_tests {
         let state = state();
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 66, 0, 2));
         rate_limit::reset(ip);
-        insert_contact(&state, "kronn:Ok@10.0.0.50:3456", "accepted").await;
+        let ok = insert_contact(&state, "kronn:Ok@10.0.0.50:3456", "accepted").await;
         insert_contact(&state, "kronn:Wait@10.0.0.51:3456", "pending").await;
         insert_contact(&state, "kronn:Req@10.0.0.52:3456", "requested").await;
         insert_contact(&state, "kronn:No@10.0.0.53:3456", "refused").await;
-        assert!(admit_peer_presence(&state, "kronn:Ok@10.0.0.50:3456", ip).await);
+        assert_eq!(
+            admit_peer_presence(&state, "kronn:Ok@10.0.0.50:3456", SECRET, ip).await,
+            Some(ok)
+        );
         for code in [
             "kronn:Wait@10.0.0.51:3456",
             "kronn:Req@10.0.0.52:3456",
             "kronn:No@10.0.0.53:3456",
         ] {
-            assert!(!admit_peer_presence(&state, code, ip).await, "{code}");
+            assert!(
+                admit_peer_presence(&state, code, SECRET, ip)
+                    .await
+                    .is_none(),
+                "{code}"
+            );
         }
+        rate_limit::reset(ip);
+    }
+
+    /// KT-1650 — the public invite code names a contact, it never admits it: no
+    /// secret, a wrong one, or the code itself in the secret's place is refused.
+    #[tokio::test]
+    async fn the_public_invite_code_alone_never_admits_a_peer() {
+        let state = state();
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 66, 0, 4));
+        rate_limit::reset(ip);
+        let code = "kronn:Ok@10.0.0.50:3456";
+        insert_contact(&state, code, "accepted").await;
+        // A contact of an older version: accepted, but it never got a secret.
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::contacts::insert_contact(
+                    conn,
+                    &crate::models::Contact {
+                        id: "old".into(),
+                        pseudo: "Old".into(),
+                        avatar_email: None,
+                        kronn_url: "http://10.0.0.60:3456".into(),
+                        invite_code: "kronn:Old@10.0.0.60:3456".into(),
+                        status: "accepted".into(),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        let wrong = "cd34".repeat(16);
+        for presented in ["", code, wrong.as_str()] {
+            assert!(
+                admit_peer_presence(&state, code, presented, ip)
+                    .await
+                    .is_none(),
+                "{presented:?}"
+            );
+        }
+        for presented in ["", "kronn:Old@10.0.0.60:3456", SECRET] {
+            assert!(
+                admit_peer_presence(&state, "kronn:Old@10.0.0.60:3456", presented, ip)
+                    .await
+                    .is_none(),
+                "an unpaired contact is refused whatever it presents: {presented:?}"
+            );
+        }
+        // Refusing a known code is not a contact request: nothing new is stored.
+        assert_eq!(contacts(&state).await.len(), 2);
         rate_limit::reset(ip);
     }
 
@@ -2297,25 +2404,25 @@ mod origin_and_admission_tests {
         let state = state();
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 66, 0, 3));
         rate_limit::reset(ip);
-        insert_contact(&state, "kronn:Ok@10.0.0.50:3456", "accepted").await;
+        let id = insert_contact(&state, "kronn:Ok@10.0.0.50:3456", "accepted").await;
         assert_eq!(
-            admit_presence(&state, "kronn:Ok@10.0.0.50:3456", ip, false).await,
+            admit_presence(&state, "kronn:Ok@10.0.0.50:3456", SECRET, ip, false).await,
             None,
             "P2P is off by default"
         );
         state.p2p.set(true);
         assert_eq!(
-            admit_presence(&state, "kronn:Ok@10.0.0.50:3456", ip, false).await,
-            Some(Admission::Peer("kronn:Ok@10.0.0.50:3456".into()))
+            admit_presence(&state, "kronn:Ok@10.0.0.50:3456", SECRET, ip, false).await,
+            Some(Admission::Peer(id))
         );
         let long = format!("kronn:{}@10.0.0.50:3456", "x".repeat(300));
-        assert_eq!(admit_presence(&state, &long, ip, false).await, None);
+        assert_eq!(admit_presence(&state, &long, SECRET, ip, false).await, None);
         assert!(contacts(&state).await.len() == 1, "nothing recorded");
         assert_eq!(
-            admit_presence(&state, "", ip, true).await,
+            admit_presence(&state, "", "", ip, true).await,
             Some(Admission::Frontend)
         );
-        assert_eq!(admit_presence(&state, "", ip, false).await, None);
+        assert_eq!(admit_presence(&state, "", "", ip, false).await, None);
         rate_limit::reset(ip);
     }
 
@@ -2338,6 +2445,12 @@ mod origin_and_admission_tests {
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                     },
+                )?;
+                crate::db::contacts::set_pairing_secrets(
+                    conn,
+                    "c-a",
+                    &crate::db::contacts::hash_secret(SECRET),
+                    SECRET,
                 )?;
                 for (shared, msg) in [("shared-a", "a-msg"), ("shared-b", "b-msg")] {
                     crate::db::discussions::ensure_mirror_by_shared_id(conn, shared, "T", "H")?;
@@ -2388,7 +2501,7 @@ mod origin_and_admission_tests {
             pending: false,
         };
         assert_eq!(
-            ingest_relayable_frame(&state, &frame, &PeerAuth::InviteCode(code.into())).await,
+            ingest_relayable_frame(&state, &frame, &PeerAuth::ContactId("c-a".into())).await,
             Ingest::Skip
         );
         assert!(bus.try_recv().is_err(), "no placeholder reaches room B");
@@ -2409,7 +2522,7 @@ mod origin_and_admission_tests {
     #[tokio::test]
     async fn a_download_publishes_nothing_once_the_sender_is_revoked() {
         let state = state();
-        let code = two_rooms(&state).await;
+        let _code = two_rooms(&state).await;
         let base = tempfile::TempDir::new().unwrap();
         let room_a = state
             .db
@@ -2421,7 +2534,7 @@ mod origin_and_admission_tests {
             .unwrap();
         let attachment =
             |file_id: &str, message_id: &str| crate::api::federation::FederatedAttachment {
-                host: PeerAuth::InviteCode(code.into()),
+                host: PeerAuth::ContactId("c-a".into()),
                 shared_id: "shared-a".into(),
                 discussion_id: room_a.clone(),
                 file_id: file_id.into(),
@@ -2508,7 +2621,7 @@ mod origin_and_admission_tests {
     #[tokio::test]
     async fn a_publication_queued_behind_a_busy_db_respects_p2p_turned_off() {
         let state = state();
-        let code = two_rooms(&state).await;
+        let _code = two_rooms(&state).await;
         let base = tempfile::TempDir::new().unwrap();
         let room_a = state
             .db
@@ -2528,7 +2641,7 @@ mod origin_and_admission_tests {
         .unwrap();
         let target = staged.target().to_path_buf();
         let attachment = crate::api::federation::FederatedAttachment {
-            host: PeerAuth::InviteCode(code.into()),
+            host: PeerAuth::ContactId("c-a".into()),
             shared_id: "shared-a".into(),
             discussion_id: room_a,
             file_id: "f-busy".into(),
@@ -2558,8 +2671,8 @@ mod origin_and_admission_tests {
     #[tokio::test]
     async fn an_unrelated_config_save_does_not_cut_an_authorized_peer() {
         let state = state();
-        let code = two_rooms(&state).await;
-        let peer = PeerAuth::InviteCode(code.into());
+        let _code = two_rooms(&state).await;
+        let peer = PeerAuth::ContactId("c-a".into());
         // Another setting being saved holds the config lock meanwhile.
         let saving = state.config.write().await;
         let wait = Duration::from_secs(2);
@@ -2577,7 +2690,7 @@ mod origin_and_admission_tests {
     #[tokio::test]
     async fn turning_p2p_off_waits_for_a_publication_in_progress_and_none_starts_after() {
         let state = state();
-        let code = two_rooms(&state).await;
+        let _code = two_rooms(&state).await;
         // A publication in progress holds the gate's read side.
         let gate = state.p2p.clone();
         let (held_tx, held_rx) = std::sync::mpsc::channel();
@@ -2624,7 +2737,7 @@ mod origin_and_admission_tests {
         .unwrap();
         let target = staged.target().to_path_buf();
         let attachment = crate::api::federation::FederatedAttachment {
-            host: PeerAuth::InviteCode(code.into()),
+            host: PeerAuth::ContactId("c-a".into()),
             shared_id: "shared-a".into(),
             discussion_id: room_a,
             file_id: "f-after".into(),
@@ -2664,7 +2777,7 @@ mod origin_and_admission_tests {
         let ingest = {
             let state = state.clone();
             tokio::spawn(async move {
-                ingest_relayable_frame(&state, &frame, &PeerAuth::InviteCode(code.into())).await
+                ingest_relayable_frame(&state, &frame, &PeerAuth::ContactId("c-a".into())).await
             })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
