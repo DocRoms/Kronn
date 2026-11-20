@@ -9445,7 +9445,9 @@ pub async fn decide_review_as(
     let is_principal = caller.disc_id == exec.parent_discussion_id
         && bridge.is_none_or(|bridge| {
             bridge_is_execution_principal(bridge, &exec)
-                && (!shared_room || bridge.own_sessions.contains(&caller.id))
+                && (!shared_room
+                    || (bridge.own_sessions.contains(&caller.id)
+                        && !grant_holds_the_worker_session(bridge, &exec)))
         });
     if !is_worker && !is_principal {
         return Ok(ReviewOutcome::NotAddressed);
@@ -18540,6 +18542,11 @@ fn principal_session_is_the_grants(
     if !worker_shares_the_principal_room(conn, execution)? {
         return Ok(true);
     }
+    // The launch that holds the worker's session is the worker, whatever
+    // other session it joined and names.
+    if grant_holds_the_worker_session(bridge, execution) {
+        return Ok(false);
+    }
     // The worker's own session lives in that room too: holding it proves the
     // worker, never the principal.
     Ok(
@@ -18550,6 +18557,15 @@ fn principal_session_is_the_grants(
             },
         ),
     )
+}
+
+fn grant_holds_the_worker_session(
+    bridge: &crate::core::bridge_token::BridgeCaller,
+    execution: &TaskExecution,
+) -> bool {
+    execution
+        .worker_cli_session_id
+        .is_some_and(|worker| bridge.own_sessions.contains(&worker))
 }
 
 fn worker_shares_the_principal_room(

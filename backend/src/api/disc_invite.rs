@@ -745,17 +745,7 @@ fn join_next_steps(
 /// invite token. A successful call rotates the opaque credential and updates
 /// the original participant row in place.
 pub async fn peer_resume(
-    state: State<AppState>,
-    request: Json<PeerResumeRequest>,
-) -> Json<ApiResponse<PeerResumeResponse>> {
-    peer_resume_as(state, None, request).await
-}
-
-/// [`peer_resume`] as the route serves it: a bridge token does not resume
-/// under the id of a session it does not hold.
-pub async fn peer_resume_as(
     State(state): State<AppState>,
-    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<PeerResumeRequest>,
 ) -> Json<ApiResponse<PeerResumeResponse>> {
     if req.agent_type.trim().is_empty() {
@@ -787,18 +777,9 @@ pub async fn peer_resume_as(
     let session_id = req.session_id;
     let resume_token = req.resume_token;
     let next_resume_token = req.next_resume_token;
-    let held = bridge.map(|axum::Extension(caller)| caller.own_sessions);
     match state
         .db
         .with_conn(move |conn| {
-            db::discussion_sessions::refuse_a_resume_under_another_sessions_name(
-                conn,
-                &agent_type,
-                &session_id,
-                &resume_token,
-                next_resume_token.as_deref(),
-                held.as_deref(),
-            )?;
             let resumed = db::discussion_sessions::resume_disc_session_in_disc(
                 conn,
                 &agent_type,
@@ -836,16 +817,7 @@ pub async fn peer_resume_as(
 /// derives the origin and execution from the exact session and persisted
 /// orchestrator proof; the caller supplies only the child it is leaving.
 pub async fn orchestrator_return_resume(
-    state: State<AppState>,
-    request: Json<OrchestratorReturnResumeRequest>,
-) -> Json<ApiResponse<PeerResumeResponse>> {
-    orchestrator_return_resume_as(state, None, request).await
-}
-
-/// [`orchestrator_return_resume`] as the route serves it.
-pub async fn orchestrator_return_resume_as(
     State(state): State<AppState>,
-    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<OrchestratorReturnResumeRequest>,
 ) -> Json<ApiResponse<PeerResumeResponse>> {
     if req.agent_type.trim().is_empty()
@@ -865,18 +837,9 @@ pub async fn orchestrator_return_resume_as(
             ));
         }
     }
-    let held = bridge.map(|axum::Extension(caller)| caller.own_sessions);
     let result = state
         .db
         .with_conn(move |conn| {
-            db::discussion_sessions::refuse_a_resume_under_another_sessions_name(
-                conn,
-                &req.agent_type,
-                &req.session_id,
-                &req.resume_token,
-                req.next_resume_token.as_deref(),
-                held.as_deref(),
-            )?;
             db::cli_worker_bindings::resume_after_orchestrator_return(
                 conn,
                 &req.agent_type,

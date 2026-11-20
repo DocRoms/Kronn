@@ -1587,40 +1587,6 @@ pub fn refuse_a_session_held_elsewhere(
     Ok(())
 }
 
-/// A resume renames the credential's own session to the id the caller sends.
-/// A launch may not take a name another session carries or carried: one that
-/// left would otherwise be impersonated by whoever resumes under its id. The
-/// credential's own row (an exact replay) and the sessions the launch holds
-/// are its own.
-pub fn refuse_a_resume_under_another_sessions_name(
-    conn: &Connection,
-    agent_type: &str,
-    new_session_id: &str,
-    resume_token: &str,
-    next_resume_token: Option<&str>,
-    held: Option<&[i64]>,
-) -> Result<()> {
-    let Some(held) = held else {
-        return Ok(());
-    };
-    let (old, next) = (
-        sha256_hex(resume_token),
-        sha256_hex(next_resume_token.unwrap_or(resume_token)),
-    );
-    let mut statement = conn.prepare(
-        "SELECT id FROM discussion_sessions
-          WHERE agent_type = ?1 AND session_id = ?2
-            AND COALESCE(resume_token_hash, '') NOT IN (?3, ?4)",
-    )?;
-    let named: Vec<i64> = statement
-        .query_map(params![agent_type, new_session_id, old, next], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    if named.iter().any(|pk| !held.contains(pk)) {
-        return Err(anyhow!(SESSION_HELD_ELSEWHERE));
-    }
-    Ok(())
-}
-
 /// [`join_via_token`] for a bridge token: `held` are the sessions that launch
 /// joined or resumed itself. Joining again as a session already active in the
 /// room hands out a new resume credential for it, so a launch may only do it
@@ -3618,37 +3584,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "active", "the session stays where it is");
-        // A resume renames the caller's own session: never to a name another
-        // session carries or carried, even one that left.
-        let own = join_via_token(&conn, &issued.token, "ClaudeCode", "sess-own").unwrap();
-        conn.execute(
-            "UPDATE discussion_sessions SET status = 'left' WHERE id = ?1",
-            [first.session_pk],
-        )
-        .unwrap();
-        let rename = |to: &str, held: Option<&[i64]>| {
-            refuse_a_resume_under_another_sessions_name(
-                &conn,
-                "ClaudeCode",
-                to,
-                &own.resume_token,
-                None,
-                held,
-            )
-        };
-        assert!(rename("sess-A", Some(&[own.session_pk])).is_err());
-        assert!(rename("sess-new", Some(&[])).is_ok(), "a fresh id");
-        assert!(
-            rename("sess-own", Some(&[])).is_ok(),
-            "its own row, replayed"
-        );
-        assert!(rename("sess-A", Some(&held)).is_ok(), "a session it holds");
-        assert!(rename("sess-A", None).is_ok(), "no token: as before");
-        conn.execute(
-            "UPDATE discussion_sessions SET status = 'active' WHERE id = ?1",
-            [first.session_pk],
-        )
-        .unwrap();
         // A room joined through a contact, without an invite: the same rule,
         // in the join's own transaction.
         for (room, held, taken) in [

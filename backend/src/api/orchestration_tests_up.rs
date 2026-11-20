@@ -32739,6 +32739,27 @@ async fn a_declared_session_holds_a_role_only_with_a_grant_that_can_hold_it() {
     )
     .await;
     assert!(!cancelled.success, "the worker is not its own principal");
+    // Nor by a fresh session it joined in the room beside its own.
+    let Json(cancelled) = task_exec_cancel(
+        State(state.clone()),
+        Path(exec_id.clone()),
+        Some(axum::Extension(BridgeCaller {
+            own_sessions: vec![worker_pk, 103],
+            ..grant(&[parent.as_str()], None)
+        })),
+        Json(TaskExecCancelRequest {
+            source_agent: "ClaudeCode".into(),
+            source_session_id: "principal".into(),
+            room_agent: None,
+            reason: "stop".into(),
+            cleanup_policy: None,
+        }),
+    )
+    .await;
+    assert!(
+        !cancelled.success,
+        "the worker's launch is never the principal"
+    );
     assert_eq!(
         (execution_state(&db, &exec_id).await, pinned().await),
         before
