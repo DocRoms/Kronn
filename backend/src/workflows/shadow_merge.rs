@@ -1344,7 +1344,7 @@ mod tests {
         assert!(check_file_line(&roots, "lane.rs", 1, None).is_err());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // the escaping link is made with std::os::unix::fs::symlink
     #[test]
     fn a_citation_tells_nothing_about_what_lies_outside_the_tree_or_holds_secrets() {
         let env = env();
