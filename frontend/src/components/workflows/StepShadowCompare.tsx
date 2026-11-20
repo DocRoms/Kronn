@@ -13,8 +13,8 @@ import { diffLines } from '../../lib/qp-history-diff';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import {
   clip, comparableOutput, compareIdentities, determinism, executionKey, fieldValue, formatCost, hasOutput,
-  mergeExecutionLabel, mergeStatusKey, mergeTally, percent, readableOutput, shadowLabel, shadowStatusKey,
-  type IdentityField,
+  mergeExecutionLabel, mergeStatusKey, mergeTally, percent, readableFieldValue, readableOutput, shadowLabel, shadowStatusKey,
+  type IdentityField, type IdentityNames,
 } from '../../lib/shadowRuns';
 import type { ShadowExecution, ShadowMergeReport, StepShadowComparison } from '../../types/generated';
 import { useStepShadows } from './useStepShadows';
@@ -45,12 +45,13 @@ function DiffBlock({ left, right, leftLabel, rightLabel, testId }: {
 }
 
 /** What one execution shows: its name, how it ended, what differs, what it spent. */
-function ExecutionHeader({ step, execution, main, differing, label, t, testId }: {
+function ExecutionHeader({ step, execution, main, differing, label, names, t, testId }: {
   step: string;
   execution: ShadowExecution;
   main: ShadowExecution;
   differing: readonly IdentityField[];
   label: string;
+  names: IdentityNames;
   t: Translate;
   testId: string;
 }) {
@@ -66,7 +67,7 @@ function ExecutionHeader({ step, execution, main, differing, label, t, testId }:
           {differing.map(field => (
             <div key={field} className="wf-shadow-exec-field" data-field={field}>
               <dt className="text-muted">{t(`wf.shadow.compare.field.${field}`)}</dt>
-              <dd>{fieldValue(execution, field) || '—'}</dd>
+              <dd title={fieldValue(execution, field)}>{readableFieldValue(execution, field, names, t('wf.shadow.compare.promptWritten')) || '—'}</dd>
             </div>
           ))}
         </dl>
@@ -202,7 +203,7 @@ function MergeSection({ comparison, merge, t }: { comparison: StepShadowComparis
   );
 }
 
-function StepComparison({ comparison, t }: { comparison: StepShadowComparison; t: Translate }) {
+function StepComparison({ comparison, names, t }: { comparison: StepShadowComparison; names: IdentityNames; t: Translate }) {
   const { main, shadows, step_name: step } = comparison;
   const executions = useMemo(() => [main, ...shadows], [main, shadows]);
   const mainLabel = t('wf.shadow.compare.main');
@@ -227,7 +228,7 @@ function StepComparison({ comparison, t }: { comparison: StepShadowComparison; t
           ? <span className="text-muted">—</span>
           : identical.map(entry => (
             <span key={entry.field} className="wf-shadow-identical-field" data-field={entry.field}>
-              {t(`wf.shadow.compare.field.${entry.field}`)} <b>{entry.value}</b>
+              {t(`wf.shadow.compare.field.${entry.field}`)} <b title={entry.value}>{readableFieldValue(main, entry.field, names, t('wf.shadow.compare.promptWritten'))}</b>
             </span>
           ))}
       </p>
@@ -244,6 +245,7 @@ function StepComparison({ comparison, t }: { comparison: StepShadowComparison; t
             main={main}
             differing={differing}
             label={labelOf(execution)}
+            names={names}
             t={t}
             testId="wf-shadow-exec"
           />
@@ -319,7 +321,9 @@ export function StepShadowCompare({ workflowId, runId, runStatus }: { workflowId
   return <StepShadowCompareView steps={useStepShadows(workflowId, runId, runStatus)} />;
 }
 
-export function StepShadowCompareView({ steps }: { steps: StepShadowComparison[] }) {
+const NO_NAMES: IdentityNames = {};
+
+export function StepShadowCompareView({ steps, names = NO_NAMES }: { steps: StepShadowComparison[]; names?: IdentityNames }) {
   const { t } = useT();
   if (steps.length === 0) return null;
   return (
@@ -327,7 +331,7 @@ export function StepShadowCompareView({ steps }: { steps: StepShadowComparison[]
       <header className="wf-shadow-cmp-head">
         <strong className="wf-shadow-cmp-title"><FlaskConical size={13} aria-hidden /> {t('wf.shadow.compare.title')}</strong>
       </header>
-      {steps.map(comparison => <StepComparison key={`${comparison.step_name}#${comparison.result_index}`} comparison={comparison} t={t} />)}
+      {steps.map(comparison => <StepComparison key={`${comparison.step_name}#${comparison.result_index}`} comparison={comparison} names={names} t={t} />)}
     </section>
   );
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { comparableOutput, mergeTally, readableOutput, runSpend, runTokens, shadowLabel, shadowName } from '../shadowRuns';
+import { comparableOutput, fieldValue, mergeTally, readableFieldValue, readableOutput, runSpend, runTokens, shadowLabel, shadowName } from '../shadowRuns';
 import type { ShadowExecution, ShadowMergeReport, StepResult, StepShadowComparison } from '../../types/generated';
 
 describe('shadow outputs compared field by field (key order ignored)', () => {
@@ -134,5 +134,28 @@ describe('runTokens', () => {
   it('adds what the shadows spent to the steps of a run row', () => {
     expect(runTokens({ tokens_used: 900, shadow_tokens_used: 350 })).toBe(1250);
     expect(runTokens({ tokens_used: 0, shadow_tokens_used: 70 })).toBe(70);
+  });
+});
+
+// KT-1946 — the comparison printed ids (`qp-…@8`, `custom-…@3`) for what an execution loaded.
+describe('readableFieldValue', () => {
+  const names = { quickPrompts: [{ id: 'qp-review', name: 'PR review' }], skills: [{ id: 'custom-rubric', name: 'pr-review-generic' }] };
+  const ran = (prompt: string, skills: string[]) =>
+    ({ shadow_id: null, identity: { agent: 'ClaudeCode', model: 'opus', prompt, skills } }) as unknown as ShadowExecution;
+
+  it('names the Quick Prompt and the skills with their versions', () => {
+    const execution = ran('qp-review@8', ['git-conventions', 'custom-rubric@9']);
+    expect(readableFieldValue(execution, 'prompt', names, 'WRITTEN')).toBe('PR review v8');
+    expect(readableFieldValue(execution, 'skills', names, 'WRITTEN')).toBe('git-conventions, pr-review-generic v9');
+    // The stored value is untouched: it is what two executions are compared on.
+    expect(fieldValue(execution, 'prompt')).toBe('qp-review@8');
+  });
+
+  it('says a prompt was written, keeps an id nothing names, and leaves the other fields alone', () => {
+    const execution = ran('inline:3fa9', ['custom-gone@2']);
+    expect(readableFieldValue(execution, 'prompt', names, 'WRITTEN')).toBe('WRITTEN');
+    expect(readableFieldValue(execution, 'skills', {}, 'WRITTEN')).toBe('gone v2');
+    expect(readableFieldValue(execution, 'agent', names, 'WRITTEN')).toBe('ClaudeCode');
+    expect(readableFieldValue(ran('', []), 'prompt', names, 'WRITTEN')).toBe('');
   });
 });

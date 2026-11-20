@@ -722,6 +722,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
+  const shadowLoadNames = useMemo(() => ({ quickPrompts: availableQuickPrompts, skills: availableSkills }), [availableQuickPrompts, availableSkills]);
   const [availableQuickApis, setAvailableQuickApis] = useState<QuickApi[]>([]);
   const [quickApisLoaded, setQuickApisLoaded] = useState(false);
   const [availableQuickExecs, setAvailableQuickExecs] = useState<QuickExec[]>([]);
@@ -1675,6 +1676,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 step={steps[0]}
                 choices={agentChoices}
                 modelTiers={agentAccess?.model_tiers}
+                names={shadowLoadNames}
                 mainPicker={hasShadowBlock(steps[0]) ? renderAgentTierPicker(steps[0], patch => updateStep(0, patch)) : undefined}
                 onEdit={edit => applyShadowEdit(0, edit)}
                 addWhenEmpty
@@ -2413,6 +2415,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       nextStepName={steps[i + 1]?.name}
                       choices={agentChoices}
                       modelTiers={agentAccess?.model_tiers}
+                      names={shadowLoadNames}
                       mainPicker={hasShadowBlock(step) ? renderAgentTierPicker(step, patch => updateStep(i, patch)) : undefined}
                       onEdit={edit => applyShadowEdit(i, edit)}
                       addWhenEmpty

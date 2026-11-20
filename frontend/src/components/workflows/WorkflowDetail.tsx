@@ -11,14 +11,14 @@ import { UnsafeStepsPanel } from './UnsafeStepsPanel';
 import { WorkflowScopeEditor } from '../WorkflowScope';
 import { TrustBadge, TrustLevelControl } from '../TrustLevel';
 import { SafetyWarnings } from './SafetyWarnings';
-import { workflows as workflowsApi, quickPrompts as quickPromptsApi, executionVariables as executionVariablesApi } from '../../lib/api';
+import { workflows as workflowsApi, quickPrompts as quickPromptsApi, skills as skillsApi, executionVariables as executionVariablesApi } from '../../lib/api';
 import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
 import { requiresFullAccessToRun } from '../../lib/agentFullAccess';
 import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
 import { DecisionModelPicker } from '../DecisionModelPicker';
 import { decideModelChoice, type DecisionModelChoice } from '../../lib/decisionModels';
-import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier, Project, UnsafeExecStep } from '../../types/generated';
+import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier, Project, Skill, UnsafeExecStep } from '../../types/generated';
 import {
   Trash2, Play, Loader2, Check, X, ChevronLeft, ChevronRight, ChevronDown,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
@@ -1892,12 +1892,20 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
   // fetch per workflow view is fine; the list is small (<100 QPs typically).
   const [quickPromptsById, setQuickPromptsById] = useState<Map<string, QuickPrompt>>(new Map());
   const hasBatchStep = workflow.steps.some(s => s.step_type?.type === 'BatchQuickPrompt');
+  // KT-1946 — a shadowed step names the prompt and skills each of its rows runs.
+  const hasShadows = workflow.steps.some(s => (s.shadows?.length ?? 0) > 0);
+  const [skillNames, setSkillNames] = useState<Skill[]>([]);
   useEffect(() => {
-    if (!hasBatchStep) return;
+    if (!hasBatchStep && !hasShadows) return;
     quickPromptsApi.list()
       .then(list => setQuickPromptsById(new Map(list.map(qp => [qp.id, qp]))))
       .catch(() => {});
-  }, [hasBatchStep]);
+  }, [hasBatchStep, hasShadows]);
+  useEffect(() => {
+    if (!hasShadows) return;
+    skillsApi.list().then(setSkillNames).catch(() => {});
+  }, [hasShadows]);
+  const loadNames = useMemo(() => ({ quickPrompts: [...quickPromptsById.values()], skills: skillNames }), [quickPromptsById, skillNames]);
 
   // Fetch batch summaries to map "linear run → its child batch" so the runs
   // list can show a "📋 N conversations" chip on each linear run that spawned
@@ -2156,6 +2164,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                             nextStepName={workflow.steps[i + 1]?.name}
                             choices={agentChoices}
                             modelTiers={agentAccess?.model_tiers}
+                            names={loadNames}
                             mainPicker={hasShadowBlock(step) ? agentPicker(step, i) : undefined}
                             onEdit={onChangeStepShadows ? edit => void onChangeStepShadows(i, edit) : undefined}
                             t={t}
@@ -2668,7 +2677,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
             />
             <ExecutionVariablesInspector runId={run.id} />
             {/* KT-1459 — the steps of this run that ran shadows, side by side. */}
-            <StepShadowCompareView steps={shadowSteps} />
+            <StepShadowCompareView steps={shadowSteps} names={loadNames} />
             </>)}</WithStepShadows>
             {childBatch && onNavigateToBatch && (
               <button

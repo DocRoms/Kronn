@@ -19,7 +19,7 @@ import {
 } from '../../lib/shadowMerge';
 import { MAX_SHADOWS, stepCanCarryShadows } from './shadowEditorModel';
 import { ShadowAgentPicker, TransportBadge, type MainAgent } from './ShadowAgentPicker';
-import { agentModelLabel, stepMainAgent } from './shadowRowModel';
+import { agentModelLabel, shadowDifferences, stepLoadLabel, stepMainAgent, type LoadNames } from './shadowRowModel';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
 import './StepShadowRows.css';
 import type { ModelTiersConfig, StepShadow, WorkflowStep } from '../../types/generated';
@@ -35,6 +35,8 @@ interface Props {
   modelTiers?: ModelTiersConfig | null;
   /** Applies an edit; without it the rows only show. */
   onEdit?: (edit: ShadowEdit) => void;
+  /** Quick Prompt and skill names: with them each row says the prompt and skills it runs. */
+  names?: LoadNames;
   /** Offer « + Shadow » on a step that has none yet. */
   addWhenEmpty?: boolean;
   /** The step's own agent/model picker: it moves into the Principal row once the step has shadows. */
@@ -114,7 +116,7 @@ function Toggle({ kind, on, label, title, disabled, onClick, testId }: {
   );
 }
 
-export function StepShadowRows({ step, nextStepName, choices, modelTiers, onEdit, addWhenEmpty = false, mainPicker, t, testId = 'wf-shadow-rows' }: Props) {
+export function StepShadowRows({ step, nextStepName, choices, modelTiers, names, onEdit, addWhenEmpty = false, mainPicker, t, testId = 'wf-shadow-rows' }: Props) {
   const shadows = step.shadows ?? [];
   const merge = step.shadow_merge;
   if (!stepCanCarryShadows(step) || (shadows.length === 0 && !(addWhenEmpty && onEdit))) return null;
@@ -126,6 +128,7 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, onEdit
   const agentName = (shadow: StepShadow) => agentModelLabel(shadow.agent, main, targets, t, modelTiers);
   const mergedNames = shadows.filter(shadow => merged.includes(shadow.id)).map(shadow => t('wf.shadow.rows.shadowNamed', agentName(shadow)));
   const editable = !!onEdit;
+  const load = names ? stepLoadLabel(step, names, t) : '';
 
   return (
     <div className="wf-shadow-rows" data-testid={testId} data-block={shadows.length > 0} onClick={event => event.stopPropagation()}>
@@ -140,6 +143,7 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, onEdit
             <span className="wf-shadow-chip" data-testid={`${testId}-principal-active`}>{t('wf.shadow.rows.alwaysActive')}</span>
             {merged.length > 0 && <span className="wf-shadow-base" data-testid={`${testId}-principal-base`}>{t('wf.shadow.rows.mergeBase')}</span>}
           </span>
+          {load && <span className="wf-shadow-load" data-testid={`${testId}-principal-load`}>{load}</span>}
         </div>
       )}
       {shadows.map(shadow => {
@@ -148,6 +152,7 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, onEdit
         const active = shadow.enabled !== false;
         const name = agentName(shadow);
         const tooltip = shadow.label || shadow.id;
+        const differences = names ? shadowDifferences(step, shadow, names, t) : [];
         const mergeTip = nextStepName ? t('wf.shadow.rows.mergeTip', name, nextStepName) : t('wf.shadow.rows.mergeTipLast', name);
         return (
           <div key={shadow.id} className="wf-shadow-subrow" data-role="shadow" data-testid={rowId} data-paused={!active} data-merged={isMerged} title={tooltip}>
@@ -198,6 +203,13 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, onEdit
                 </button>
               )}
             </span>
+            {names && (
+              <span className="wf-shadow-load" data-testid={`${rowId}-load`} data-same={differences.length === 0}>
+                {differences.length === 0
+                  ? <span className="wf-shadow-load-same">{t('wf.shadow.rows.diff.same')}</span>
+                  : differences.map(text => <span key={text} className="wf-shadow-diff">{text}</span>)}
+              </span>
+            )}
           </div>
         );
       })}

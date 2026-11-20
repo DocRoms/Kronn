@@ -58,6 +58,34 @@ export function fieldValue(execution: ShadowExecution, field: IdentityField): st
   }
 }
 
+/** Quick Prompt and skill names, to print an identity as a person reads it. */
+export interface IdentityNames {
+  quickPrompts?: readonly { id: string; name: string }[];
+  skills?: readonly { id: string; name: string }[];
+}
+
+/** `custom-x@3` → « name v3 », `qp-id@8` → « name v8 »; an id nothing names stays as it is. */
+function namedVersion(ref: string, known: readonly { id: string; name: string }[] | undefined): string {
+  const at = ref.lastIndexOf('@');
+  const [id, version] = at > 0 && /^\d+$/.test(ref.slice(at + 1)) ? [ref.slice(0, at), ref.slice(at + 1)] : [ref, ''];
+  const name = known?.find(entry => entry.id === id)?.name ?? id.replace(/^custom-/, '');
+  return version ? `${name} v${version}` : name;
+}
+
+/**
+ * KT-1946 — what an execution loaded for one field, in names: the stored value keeps
+ * ids (`qp-id@8`, `custom-x@3`), which say nothing to the person comparing two runs.
+ */
+export function readableFieldValue(execution: ShadowExecution, field: IdentityField, names: IdentityNames, writtenPrompt: string): string {
+  const identity: ExecutionIdentity = execution.identity;
+  if (field === 'prompt') {
+    if (!identity.prompt) return '';
+    return identity.prompt.startsWith('inline:') ? writtenPrompt : namedVersion(identity.prompt, names.quickPrompts);
+  }
+  if (field === 'skills') return [...(identity.skills ?? [])].map(skill => namedVersion(skill, names.skills)).sort().join(', ');
+  return fieldValue(execution, field);
+}
+
 export interface IdentityDiff {
   /** The fields every execution shares, with their common value (empty ones left out). */
   identical: { field: IdentityField; value: string }[];

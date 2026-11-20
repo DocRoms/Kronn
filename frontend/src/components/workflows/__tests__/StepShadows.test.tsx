@@ -328,7 +328,9 @@ describe('StepShadowCompare (KT-1459)', () => {
     vi.mocked(workflowsApi.stepShadows).mockResolvedValue([comparison(main, same, qwen)]);
     renderCompare();
     const identical = await screen.findByTestId('wf-shadow-identical-review');
-    expect(identical.textContent).toContain('qp-review@13');
+    // KT-1946 — a version reads « v13 »; the stored id stays in the tooltip.
+    expect(identical.textContent).toContain('qp-review v13');
+    expect(identical.querySelector('[title="qp-review@13"]')).not.toBeNull();
     expect(identical.textContent).toContain('rust');
     expect(identical.textContent).not.toContain('Ollama');
 

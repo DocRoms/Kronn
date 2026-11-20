@@ -69,6 +69,27 @@
   white-space: nowrap;
 }
 .wf-shadow-base { color: var(--kr-text-muted); font-size: var(--kr-fs-2xs); white-space: nowrap; }
+/* KT-1946 — what the row runs with, on its own line under the agent. */
+.wf-shadow-load {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 6px;
+  min-width: 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+}
+.wf-shadow-diff {
+  padding: 0 7px;
+  border: 1px solid rgba(var(--kr-purple-rgb), 0.55);
+  border-radius: var(--kr-r-pill);
+  background: rgba(var(--kr-purple-rgb), 0.12);
+  color: var(--kr-text-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.wf-shadow-load-same { font-style: italic; }
 
 /* Agent/model picker: same trigger look as the step's own agent picker. */
 .wf-shadow-picker { display: inline-flex; min-width: 0; }

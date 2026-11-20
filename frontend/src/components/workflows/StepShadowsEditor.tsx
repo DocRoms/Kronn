@@ -14,6 +14,7 @@ import { freshShadowId, shadowTally } from '../../lib/shadowMerge';
 import { isIdenticalShadow, pruneMerge, shadowTestedCount } from '../../lib/shadowRuns';
 import { StepMergeEditor } from './StepShadowMergeEditor';
 import { MAX_SHADOWS, stepCanCarryShadows, useVersions, type Versions } from './shadowEditorModel';
+import { shadowSkillIds } from './shadowRowModel';
 import type {
   AgentType, Project, QuickPrompt, ShadowAgent, ShadowBudget, ShadowMerge, ShadowPrompt, Skill, StepShadow, WorkflowStep,
 } from '../../types/generated';
@@ -220,9 +221,9 @@ function ShadowEditor({ shadow, shadows, onChange, onRemove, step, projects, ski
   const promptKind = prompt?.type ?? 'none';
   const testId = `wf-shadow-${shadow.id}`;
   const setPrompt = (next: ShadowPrompt | undefined) => onChange({ ...shadow, prompt: next });
-  // What the step loads: its own skills, else its Quick Prompt's.
   const stepQp = step.quick_prompt_id ? quickPrompts.find(qp => qp.id === step.quick_prompt_id) : undefined;
-  const stepSkills = step.skill_ids?.length ? step.skill_ids : stepQp?.skill_ids ?? [];
+  // KT-1946 — the skills this shadow loads: another Quick Prompt brings its own.
+  const stepSkills = shadowSkillIds(step, shadow, { quickPrompts });
   const customSkills = [...new Map(stepSkills.filter(id => skillBaseId(id).startsWith('custom-'))
     .map(id => [skillBaseId(id), skillPinnedVersion(id)] as const))];
   const unversioned = [...new Set(stepSkills.filter(id => !skillBaseId(id).startsWith('custom-')))];
