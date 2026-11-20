@@ -116,7 +116,7 @@ pub fn apply(
         }
     }
     let trust = crate::core::adr::Trust::CardAccepted(&[]);
-    if let Err(e) = crate::core::td_index::resync(&docs, trust) {
+    if let Err(e) = crate::core::td_index::resync(&root, &docs, trust) {
         tracing::warn!("Tech-debt index resync after a dispute decision failed: {e}");
     }
     crate::core::td_tasks::close_inactive_logged(

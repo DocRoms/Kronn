@@ -258,7 +258,7 @@ fn digest(text: &str) -> String {
 }
 
 /// The digest of every section, as recorded with the citation fingerprints.
-pub(crate) fn section_digests(content: &str) -> BTreeMap<String, String> {
+pub fn section_digests(content: &str) -> BTreeMap<String, String> {
     split_sections(content)
         .into_iter()
         .map(|s| (s.key, digest(&s.text)))
@@ -677,7 +677,7 @@ fn clause_says_file_gone(clause: &str, file: &str) -> bool {
 /// fact, is its own claim and keeps the citation broken. Only an explicit
 /// absence counts: "`a.rs` is used to check tokens" stays a claim that the file
 /// exists.
-pub(crate) fn says_cite_gone(content: &str, cite: &str) -> bool {
+pub fn says_cite_gone(content: &str, cite: &str) -> bool {
     let mut found = false;
     for clause in content.lines().flat_map(clauses) {
         for raw in crate::core::anti_halluc::extract_source_markers(clause) {
@@ -874,7 +874,7 @@ fn is_list_item(line: &str) -> bool {
 
 /// The changelog, release notes and history / archive docs name files that
 /// are gone because that is their job: they are not claims about the code now.
-pub(crate) fn is_historical_doc(doc: &str) -> bool {
+pub fn is_historical_doc(doc: &str) -> bool {
     let lower = doc.to_lowercase();
     let mut parts: Vec<&str> = lower.split('/').collect();
     let name = parts.pop().unwrap_or_default();
@@ -989,23 +989,21 @@ const WALK_SKIPPED_DIRS: &[&str] = &[
 
 /// `git ls-files` (tracked and untracked-not-ignored), `None` outside git.
 fn git_files(project: &Path) -> Option<Vec<String>> {
-    let out = crate::core::cmd::git_cmd()
-        .arg("-C")
-        .arg(project)
-        .args([
+    // KT-1595: no program the repository's configuration names runs, and a
+    // blocking `.gitignore` or include fails the listing in bounded time.
+    let out = crate::core::cmd::agent_git_output(
+        project,
+        &[
             "ls-files",
             "-z",
             "--cached",
             "--others",
             "--exclude-standard",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
+        ],
+        &[],
+    )?;
     Some(
-        String::from_utf8_lossy(&out.stdout)
+        String::from_utf8_lossy(&out)
             .split('\0')
             .filter(|f| !f.is_empty())
             .map(str::to_string)
@@ -1076,7 +1074,7 @@ fn is_generated_output(path: &str) -> bool {
         ".kronn-document-budgets.json",
         "checksums.json",
         citation_drift::CITATIONS_FILENAME,
-        crate::core::doc_provenance::PROVENANCE_FILENAME,
+        crate::core::kronn_state::PROVENANCE_FILENAME,
         crate::core::kronn_state::KRONN_STATE_FILENAME,
         crate::core::audit_run_state::RUN_STATE_FILENAME,
     ]
@@ -1084,14 +1082,7 @@ fn is_generated_output(path: &str) -> bool {
 }
 
 fn is_git_ignored(project: &Path, path: &str) -> bool {
-    crate::core::cmd::git_cmd()
-        .arg("-C")
-        .arg(project)
-        .args(["check-ignore", "-q", "--", path])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    crate::core::anti_halluc::is_git_ignored(project, path)
 }
 
 /// Decides whether a path a doc names is really gone. The file index is built
@@ -1136,7 +1127,7 @@ impl<'a> PathResolver<'a> {
 /// A doc that still holds raw `{{PLACEHOLDER}}` slots is the Kronn template,
 /// not yet this project's: the example paths it carries are not claims.
 fn is_unfilled_template(content: &str) -> bool {
-    crate::api::audit::validation::count_raw_placeholders(content) > 0
+    crate::core::anti_halluc::count_raw_placeholders(content) > 0
 }
 
 /// The paths of one section's prose no citation of that section covers.
@@ -1154,7 +1145,7 @@ fn section_prose_paths(project: &Path, section: &Section) -> Vec<String> {
 
 /// Per section key, the prose paths of a doc that are gone. Empty for a
 /// historical doc.
-pub(crate) fn missing_by_section(
+pub fn missing_by_section(
     project: &Path,
     doc: &str,
     content: &str,
@@ -1179,7 +1170,7 @@ pub(crate) fn missing_by_section(
 /// Per section key, the gone prose paths of `doc` that no human
 /// acknowledgement accepted: what is still to be shown, and what keeps the
 /// doc "to re-verify".
-pub(crate) fn unaccepted_missing(
+pub fn unaccepted_missing(
     project: &Path,
     doc: &str,
     content: &str,
@@ -1225,7 +1216,7 @@ pub fn vanished_paths(project: &Path, doc: &str) -> Vec<VanishedPaths> {
 
 /// Whether the prose of `doc` names a path that is gone and that no human
 /// acknowledgement accepted, section by section.
-pub(crate) fn has_stale_prose_paths(project: &Path, doc: &str, content: &str) -> bool {
+pub fn has_stale_prose_paths(project: &Path, doc: &str, content: &str) -> bool {
     !unaccepted_missing(project, doc, content).is_empty()
 }
 

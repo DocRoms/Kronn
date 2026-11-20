@@ -149,6 +149,29 @@ fn the_last_fenced_block_is_parsed() {
 
 // ── citation check ──
 
+/// KT-1595 round 5 (NEW-3): the quote check is no oracle on an outside file.
+#[cfg(unix)] // creates symlinks through std::os::unix
+#[test]
+fn a_citation_through_a_link_is_refused_not_checked_against_the_outside_file() {
+    let (_d, root) = repo();
+    let external = tempfile::tempdir().unwrap();
+    std::fs::write(
+        external.path().join("secret.rs"),
+        "fn a() {}\nlet token = OUTSIDE_SECRET_VALUE;\nfn b() {}\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        external.path().join("secret.rs"),
+        root.join("src/secret.rs"),
+    )
+    .unwrap();
+    let verdict = verify_citation(
+        &root,
+        &cite("src/secret.rs", 2, "let token = OUTSIDE_SECRET"),
+    );
+    assert!(verdict.is_err(), "{verdict:?}");
+}
+
 #[test]
 fn a_citation_checks_file_line_and_quote() {
     let (_d, root) = repo();

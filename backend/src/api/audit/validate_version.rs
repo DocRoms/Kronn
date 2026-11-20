@@ -48,7 +48,7 @@ pub struct ValidateVersionOutcome {
 /// range or `#symbol` does not hold. A block that only moved (same content at
 /// other lines) is not broken, it is re-anchored; one whose content changed is,
 /// moved or not. Sorted by doc, then citation.
-pub(crate) fn broken_citations(project_path: &FsPath) -> Vec<BrokenDocCitation> {
+pub fn broken_citations(project_path: &FsPath) -> Vec<BrokenDocCitation> {
     let report = citation_drift::check(project_path);
     let mut out: Vec<BrokenDocCitation> = Vec::new();
     // The fingerprint's own verdict, never the re-anchor suggestion's: a
@@ -72,15 +72,21 @@ pub(crate) fn broken_citations(project_path: &FsPath) -> Vec<BrokenDocCitation> 
     out
 }
 
-/// A file as it was before the validation: absent, or its bytes and mode.
+/// A file as it was before the validation: absent, or its bytes. Its mode is
+/// not saved: the rooted replace keeps the mode of the file it replaces.
 enum Saved {
     Absent,
-    Present(Vec<u8>, std::fs::Permissions),
+    Present(Vec<u8>),
 }
 
 /// Every file the validation writes, as it was, to put back when a later
 /// write fails: the docs the re-anchor rewrites and the three records.
-struct Snapshot(Vec<(std::path::PathBuf, Saved)>);
+struct Snapshot {
+    /// The project folder every file is read and put back under, through the
+    /// rooted primitive (KT-1595).
+    root: std::path::PathBuf,
+    files: Vec<(std::path::PathBuf, Saved)>,
+}
 
 impl Snapshot {
     /// A file that exists but cannot be read is an error: without its bytes the
@@ -95,14 +101,9 @@ impl Snapshot {
         paths.push(kronn_state::state_path(project_path));
         let mut saved = Vec::with_capacity(paths.len());
         for path in paths {
-            let read = std::fs::read(&path).and_then(|bytes| {
-                std::fs::metadata(&path).map(|meta| Saved::Present(bytes, meta.permissions()))
-            });
-            match read {
-                Ok(file) => saved.push((path, file)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    saved.push((path, Saved::Absent))
-                }
+            match crate::core::fs_guard::guarded_read(project_path, &path) {
+                Ok(Some(bytes)) => saved.push((path, Saved::Present(bytes))),
+                Ok(None) => saved.push((path, Saved::Absent)),
                 Err(e) => {
                     return Err(format!(
                         "Cannot read {} to protect it during the validation: {e}",
@@ -111,23 +112,26 @@ impl Snapshot {
                 }
             }
         }
-        Ok(Self(saved))
+        Ok(Self {
+            root: project_path.to_path_buf(),
+            files: saved,
+        })
     }
 
     /// Put every file back; the ones that could not be, with the reason.
+    /// A restored file keeps the permissions it has NOW (the rooted replace
+    /// keeps those of an existing file), not the ones it had when saved: only
+    /// the bytes are put back. Fine for docs, which a run never `chmod`s.
     fn restore(&self) -> Vec<String> {
         let mut failed = Vec::new();
-        for (path, saved) in &self.0 {
+        for (path, saved) in &self.files {
             let done = match saved {
-                Saved::Present(bytes, permissions) => {
-                    crate::core::mcp_scanner::atomic_write_bytes(path, bytes)
-                        .and_then(|()| {
-                            std::fs::set_permissions(path, permissions.clone())
-                                .map_err(|e| e.to_string())
-                        })
+                Saved::Present(bytes) => {
+                    crate::core::fs_guard::guarded_replace(&self.root, path, bytes)
                         .map_err(|e| format!("{}: {e}", path.display()))
                 }
-                Saved::Absent => match std::fs::remove_file(path) {
+                Saved::Absent => match crate::core::fs_guard::guarded_remove_file(&self.root, path)
+                {
                     Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                         Err(format!("{}: {e}", path.display()))
                     }
@@ -148,7 +152,7 @@ impl Snapshot {
 /// placeholder left in a doc, an unreadable record) or a write that failed:
 /// then nothing is left half done, the docs and the records are put back (and
 /// when one cannot be, the error names it).
-pub(crate) fn validate_current_version(
+pub fn validate_current_version(
     project_path: &FsPath,
     by: &str,
 ) -> Result<ValidateVersionOutcome, String> {

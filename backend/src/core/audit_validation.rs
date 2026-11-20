@@ -1,10 +1,15 @@
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
+pub use crate::core::td_sheet::{
+    append_history_entry, replace_current_status, STATUS_ACCEPTED_DECISION, STATUS_CONFIRMED,
+    STATUS_DEFERRED, STATUS_REJECTED,
+};
+pub use crate::core::td_sheet::{index_status_decision, td_decision, TdDecision};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TdResolutionAction {
+pub enum TdResolutionAction {
     Confirm,
     Reject,
     AcceptDecision,
@@ -12,7 +17,7 @@ pub(crate) enum TdResolutionAction {
 }
 
 impl TdResolutionAction {
-    pub(crate) fn from_option_id(value: &str) -> Option<Self> {
+    pub fn from_option_id(value: &str) -> Option<Self> {
         match value {
             "confirm" => Some(Self::Confirm),
             "reject" => Some(Self::Reject),
@@ -58,7 +63,7 @@ impl TdResolutionAction {
 /// Where a human took a TD decision. Both are human decisions: the ADR an
 /// acceptance appends is trusted the same way (KT-1174).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TdDecisionOrigin {
+pub enum TdDecisionOrigin {
     Card,
     Review,
 }
@@ -79,140 +84,8 @@ impl TdDecisionOrigin {
     }
 }
 
-const STATUS_CONFIRMED: &str = "Confirmed by user";
-const STATUS_REJECTED: &str = "Rejected";
-pub(crate) const STATUS_ACCEPTED_DECISION: &str = "Accepted decision";
-const STATUS_DEFERRED: &str = "Deferred";
-
-/// A human decision a validation card wrote on a TD sheet. The sheet is the
-/// authority: re-audits and later validations read it back from here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TdDecision {
-    Confirmed,
-    Rejected,
-    AcceptedDecision,
-    Deferred,
-}
-
-impl TdDecision {
-    /// Settled TDs are never asked again. A deferred TD is: the user postponed
-    /// the decision, they did not take it.
-    pub fn is_settled(self) -> bool {
-        !matches!(self, Self::Deferred)
-    }
-
-    /// Rejected findings and accepted trade-offs are not active debt: they
-    /// leave the index and are not re-emitted.
-    pub fn leaves_index(self) -> bool {
-        matches!(self, Self::Rejected | Self::AcceptedDecision)
-    }
-
-    /// The `Status` value a human decision writes on a sheet.
-    pub(crate) fn status_label(self) -> &'static str {
-        match self {
-            Self::Confirmed => STATUS_CONFIRMED,
-            Self::Rejected => STATUS_REJECTED,
-            Self::AcceptedDecision => STATUS_ACCEPTED_DECISION,
-            Self::Deferred => STATUS_DEFERRED,
-        }
-    }
-
-    fn from_status(value: &str) -> Option<Self> {
-        let value = value
-            .trim()
-            .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '*')
-            .trim()
-            .to_lowercase();
-        let starts = |status: &str| value.starts_with(&status.to_lowercase());
-        if starts(STATUS_CONFIRMED) || value == "confirmed" {
-            Some(Self::Confirmed)
-        } else if starts(STATUS_REJECTED) {
-            Some(Self::Rejected)
-        } else if starts(STATUS_ACCEPTED_DECISION) {
-            Some(Self::AcceptedDecision)
-        } else if starts(STATUS_DEFERRED) {
-            Some(Self::Deferred)
-        } else {
-            None
-        }
-    }
-}
-
-/// The decision an index row's `Status` cell states, for a sheet that says
-/// nothing itself (no file, or a file without a status): the human statuses,
-/// and a debt the index marks resolved, which is no longer active.
-pub fn index_status_decision(value: &str) -> Option<TdDecision> {
-    TdDecision::from_status(value).or_else(|| {
-        let lower = value
-            .trim()
-            .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '*')
-            .trim()
-            .to_lowercase();
-        ["resolved", "closed", "fixed", "done"]
-            .iter()
-            .any(|word| lower == *word || lower.starts_with(&format!("{word} ")))
-            .then_some(TdDecision::Rejected)
-    })
-}
-
-fn status_value(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    ["- **status**:", "**status**:", "status:"]
-        .iter()
-        .find(|prefix| lower.starts_with(*prefix))
-        .map(|prefix| &trimmed[prefix.len()..])
-}
-
-/// End of the YAML front matter (index of the closing `---`), if any.
-fn frontmatter_end(lines: &[&str]) -> Option<usize> {
-    if lines.first().is_none_or(|line| line.trim() != "---") {
-        return None;
-    }
-    lines
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(index, line)| (line.trim() == "---").then_some(index))
-}
-
-/// The decision recorded on a TD sheet, if any. Reads the body `Status` line
-/// (outside code fences) first, then a `status:` key of the front matter, then
-/// the last `audit_history` entry. Any other status (Verified in source,
-/// Inferred, ...) is no decision.
-pub fn td_decision(content: &str) -> Option<TdDecision> {
-    let lines: Vec<&str> = content.lines().collect();
-    let fm_end = frontmatter_end(&lines);
-    let body_start = fm_end.map_or(0, |end| end + 1);
-    let mut in_fence = false;
-    for line in &lines[body_start..] {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if !in_fence {
-            if let Some(value) = status_value(line) {
-                return TdDecision::from_status(value);
-            }
-        }
-    }
-    let frontmatter = &lines[1..fm_end?];
-    let top_level = frontmatter.iter().find_map(|line| {
-        let indent = line.len() - line.trim_start().len();
-        (indent <= 2).then(|| status_value(line)).flatten()
-    });
-    if let Some(value) = top_level {
-        return TdDecision::from_status(value);
-    }
-    frontmatter
-        .iter()
-        .rev()
-        .find_map(|line| status_value(line))
-        .and_then(TdDecision::from_status)
-}
-
 /// `td_decision` of `<td_dir>/<id>.md`; `None` when the sheet is unreadable.
-pub(crate) fn read_td_decision(td_dir: &Path, td_id: &str) -> Option<TdDecision> {
+pub fn read_td_decision(td_dir: &Path, td_id: &str) -> Option<TdDecision> {
     if !valid_td_id(td_id) {
         return None;
     }
@@ -222,9 +95,9 @@ pub(crate) fn read_td_decision(td_dir: &Path, td_id: &str) -> Option<TdDecision>
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TdResolution {
-    pub(crate) td_id: String,
-    pub(crate) action: TdResolutionAction,
+pub struct TdResolution {
+    pub td_id: String,
+    pub action: TdResolutionAction,
 }
 
 /// A sheet the review lists (`TD-*`, and the `CQ-*` / `PERF-*` detail files of
@@ -304,44 +177,6 @@ fn canonical_child(parent: &Path, child: &Path) -> Result<PathBuf> {
     Ok(child)
 }
 
-pub(crate) fn replace_current_status(lines: &mut [String], status: &str) -> Result<()> {
-    let body_start = if lines.first().is_some_and(|line| line.trim() == "---") {
-        lines
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find_map(|(index, line)| (line.trim() == "---").then_some(index + 1))
-            .ok_or_else(|| anyhow!("TD detail has unterminated YAML frontmatter"))?
-    } else {
-        0
-    };
-    for line in &mut lines[body_start..] {
-        let trimmed = line.trim_start();
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("- **status**:")
-            || lower.starts_with("**status**:")
-            || lower.starts_with("status:")
-        {
-            let indent_len = line.len() - trimmed.len();
-            let colon = trimmed
-                .find(':')
-                .ok_or_else(|| anyhow!("malformed TD status line"))?;
-            *line = format!("{}{} {}", &line[..indent_len], &trimmed[..=colon], status);
-            return Ok(());
-        }
-    }
-    // A sheet whose only current status is a front matter key.
-    for line in &mut lines[..body_start.saturating_sub(1)] {
-        let trimmed = line.trim_start();
-        let indent_len = line.len() - trimmed.len();
-        if indent_len <= 2 && trimmed.to_ascii_lowercase().starts_with("status:") {
-            *line = format!("{}status: {}", &line[..indent_len], status);
-            return Ok(());
-        }
-    }
-    Err(anyhow!("TD detail has no current Status field"))
-}
-
 /// The reason a person typed, trimmed; `None` when there is none.
 fn typed_reason(reason: Option<&str>) -> Option<&str> {
     reason.map(str::trim).filter(|r| !r.is_empty())
@@ -356,255 +191,6 @@ fn append_audit_history(
     // The typed reason is the "why"; the fixed note only stands in for it.
     let note = typed_reason(reason).unwrap_or_else(|| action.history_note(origin));
     append_history_entry(lines, action.status(), origin.reviewer(), note)
-}
-
-fn indent_of(line: &str) -> usize {
-    line.len() - line.trim_start().len()
-}
-
-fn is_list_item(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed == "-" || trimmed.starts_with("- ")
-}
-
-/// A quote opens a quoted scalar only at the start of a value: an apostrophe
-/// inside a plain scalar (`don't`) is just a character.
-fn opens_quote(prev: Option<char>) -> bool {
-    prev.is_none_or(|p| p.is_whitespace() || "{[,:".contains(p))
-}
-
-/// Where the trailing comment of a line starts: a `#` outside quotes, at the
-/// start or after whitespace.
-fn comment_start(text: &str) -> Option<usize> {
-    let mut quote = None::<char>;
-    let mut prev: Option<char> = None;
-    let mut chars = text.char_indices();
-    while let Some((at, c)) = chars.next() {
-        match quote {
-            Some('"') if c == '\\' => {
-                chars.next();
-            }
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None if matches!(c, '"' | '\'') && opens_quote(prev) => quote = Some(c),
-            None if c == '#' && prev.is_none_or(char::is_whitespace) => return Some(at),
-            None => {}
-        }
-        prev = Some(c);
-    }
-    None
-}
-
-/// The value of a `key:` line, without its trailing comment (`""` for a
-/// block key); `None` when the line is another key.
-fn key_value(line: &str, key: &str) -> Option<String> {
-    let rest = line.trim_start().strip_prefix(key)?.strip_prefix(':')?;
-    let value = comment_start(rest).map_or(rest, |at| &rest[..at]);
-    Some(value.trim().to_string())
-}
-
-/// The trailing ` # comment` of a `key:` line, with its leading space; empty
-/// when there is none.
-fn comment_of(line: &str) -> String {
-    comment_start(line).map_or_else(String::new, |at| format!(" {}", &line[at..]))
-}
-
-/// Splits the inside of a flow mapping on its top-level commas.
-fn split_flow(inner: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let (mut depth, mut quote) = (0usize, None::<char>);
-    let mut prev: Option<char> = None;
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (Some('"'), '\\') => {
-                current.push(c);
-                if let Some(escaped) = chars.next() {
-                    current.push(escaped);
-                }
-                prev = Some('\\');
-                continue;
-            }
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '"' | '\'') if opens_quote(prev) => quote = Some(c),
-            (None, '[' | '{') => depth += 1,
-            (None, ']' | '}') => depth = depth.saturating_sub(1),
-            (None, ',') if depth == 0 => {
-                parts.push(std::mem::take(&mut current));
-                prev = Some(c);
-                continue;
-            }
-            _ => {}
-        }
-        current.push(c);
-        prev = Some(c);
-    }
-    parts.push(current);
-    parts
-        .into_iter()
-        .map(|part| part.trim().to_string())
-        .filter(|part| !part.is_empty())
-        .collect()
-}
-
-/// Appends one `audit_history` entry, unless the same status by the same
-/// reviewer with the same note was already recorded today. A new note on the
-/// same status is a new entry: the reason a person types is never dropped.
-pub(crate) fn append_history_entry(
-    lines: &mut Vec<String>,
-    status: &str,
-    reviewer: &str,
-    note: &str,
-) -> Result<()> {
-    let date = Utc::now().date_naive().format("%Y-%m-%d").to_string();
-    let signature = format!("status: {status}");
-    let reviewer_line = format!("reviewer: {reviewer}");
-    let note = serde_json::to_string(note)?;
-    let note_line = format!("note: {note}");
-    if lines.windows(4).any(|window| {
-        window
-            .iter()
-            .any(|line| line.trim() == format!("- date: {date}"))
-            && window.iter().any(|line| line.trim() == signature)
-            && window.iter().any(|line| line.trim() == reviewer_line)
-            && window.iter().any(|line| line.trim() == note_line)
-    }) {
-        return Ok(());
-    }
-
-    if lines.first().is_none_or(|line| line.trim() != "---") {
-        return Err(anyhow!("TD detail has no YAML frontmatter"));
-    }
-    let frontmatter_end = lines
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(index, line)| (line.trim() == "---").then_some(index))
-        .ok_or_else(|| anyhow!("TD detail has unterminated YAML frontmatter"))?;
-    // A flow-style empty list is not a block to append to. Its trailing
-    // comment stays.
-    if let Some(flow) = lines[..frontmatter_end]
-        .iter()
-        .position(|line| key_value(line, "audit_history") == Some("[]".to_string()))
-    {
-        let comment = comment_of(&lines[flow]);
-        lines[flow] = format!(
-            "{}audit_history:{comment}",
-            " ".repeat(indent_of(&lines[flow]))
-        );
-    }
-    if lines[..frontmatter_end]
-        .iter()
-        .any(|line| key_value(line, "audit_history").is_some_and(|value| !value.is_empty()))
-    {
-        return Err(anyhow!(
-            "TD detail has an audit_history that is not a block list"
-        ));
-    }
-    // An entry has the shape of the list it joins: standard YAML parsers reject
-    // a sequence whose items sit at two different indents (KT-1309).
-    let entry = |item_indent: usize, key_col: usize| {
-        vec![
-            format!("{}- date: {date}", " ".repeat(item_indent)),
-            format!("{}status: {status}", " ".repeat(key_col)),
-            format!("{}{reviewer_line}", " ".repeat(key_col)),
-            format!("{}note: {note}", " ".repeat(key_col)),
-        ]
-    };
-
-    if let Some(history_index) = lines[..frontmatter_end]
-        .iter()
-        .position(|line| key_value(line, "audit_history").is_some())
-    {
-        let key_indent = indent_of(&lines[history_index]);
-        let mut last = history_index;
-        let mut shape: Option<(usize, usize)> = None;
-        for (index, line) in lines
-            .iter()
-            .enumerate()
-            .take(frontmatter_end)
-            .skip(history_index + 1)
-        {
-            if line.trim().is_empty() || line.trim_start().starts_with('#') {
-                continue;
-            }
-            let indent = indent_of(line);
-            let item = is_list_item(line);
-            if indent < key_indent || (indent == key_indent && !item) {
-                break;
-            }
-            last = index;
-            if shape.is_none() && item {
-                let after_dash = &line.trim_start()[1..];
-                let gap = after_dash.len() - after_dash.trim_start().len();
-                shape = Some((indent, indent + 1 + gap.max(1)));
-            }
-        }
-        let (item_indent, key_col) = shape.unwrap_or((key_indent + 2, key_indent + 4));
-        lines.splice(last + 1..last + 1, entry(item_indent, key_col));
-    } else if let Some(metadata_index) = lines[..frontmatter_end]
-        .iter()
-        .position(|line| key_value(line, "metadata").is_some())
-    {
-        let metadata_indent = indent_of(&lines[metadata_index]);
-        let value = key_value(&lines[metadata_index], "metadata").unwrap_or_default();
-        if value.starts_with('{') {
-            // A flow mapping is rewritten as a block, its pairs kept as written.
-            // An `audit_history` pair it already holds (empty) is the one the
-            // entry joins: the key is written once.
-            let inner = value
-                .strip_prefix('{')
-                .and_then(|v| v.strip_suffix('}'))
-                .ok_or_else(|| anyhow!("TD detail has a metadata flow mapping on several lines"))?;
-            let child_indent = metadata_indent + 2;
-            let mut block = vec![format!(
-                "{}metadata:{}",
-                " ".repeat(metadata_indent),
-                comment_of(&lines[metadata_index])
-            )];
-            for pair in split_flow(inner) {
-                let (key, pair_value) = pair.split_once(':').unwrap_or((pair.as_str(), ""));
-                if key.trim().trim_matches(['"', '\'']) == "audit_history" {
-                    if !matches!(pair_value.trim(), "" | "[]" | "~" | "null") {
-                        return Err(anyhow!(
-                            "TD detail has an audit_history that is not a block list"
-                        ));
-                    }
-                    continue;
-                }
-                block.push(format!("{}{pair}", " ".repeat(child_indent)));
-            }
-            block.push(format!("{}audit_history:", " ".repeat(child_indent)));
-            block.extend(entry(child_indent + 2, child_indent + 4));
-            lines.splice(metadata_index..=metadata_index, block);
-            return Ok(());
-        }
-        if !value.is_empty() {
-            return Err(anyhow!("TD detail has a metadata that is not a mapping"));
-        }
-        let child_indent = lines
-            .iter()
-            .take(frontmatter_end)
-            .skip(metadata_index + 1)
-            .find(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
-            .map(|line| indent_of(line))
-            .filter(|indent| *indent > metadata_indent)
-            .unwrap_or(metadata_indent + 2);
-        let mut block = vec![format!("{}audit_history:", " ".repeat(child_indent))];
-        block.extend(entry(child_indent + 2, child_indent + 4));
-        lines.splice(metadata_index + 1..metadata_index + 1, block);
-    } else {
-        let mut block = vec![
-            "metadata:".to_string(),
-            "  type: tech-debt".to_string(),
-            "  audit_history:".to_string(),
-        ];
-        block.extend(entry(4, 6));
-        lines.splice(frontmatter_end..frontmatter_end, block);
-    }
-    Ok(())
 }
 
 /// A sheet without a `Status` field gets one, under its title, so a decision
@@ -681,7 +267,7 @@ fn ensure_frontmatter(lines: &mut Vec<String>) {
     lines.splice(0..0, block.map(str::to_string));
 }
 
-fn update_td(
+pub fn update_td(
     content: &str,
     action: TdResolutionAction,
     origin: TdDecisionOrigin,
@@ -758,9 +344,9 @@ The audit records this finding as a decision, not debt. Reopen it only with new 
 /// What a TD card recorded: the TDs written, and the ones that could not be,
 /// each with the reason (KT-1348).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct TdCardOutcome {
-    pub(crate) applied: Vec<String>,
-    pub(crate) failed: Vec<(String, String)>,
+pub struct TdCardOutcome {
+    pub applied: Vec<String>,
+    pub failed: Vec<(String, String)>,
 }
 
 fn failure_lines(failed: &[(String, String)]) -> String {
@@ -780,7 +366,7 @@ fn failure_lines(failed: &[(String, String)]) -> String {
 impl TdCardOutcome {
     /// The lines a card answer shows for the TDs that were not recorded; empty
     /// when every one was.
-    pub(crate) fn failure_note(&self) -> String {
+    pub fn failure_note(&self) -> String {
         if self.failed.is_empty() {
             return String::new();
         }
@@ -798,7 +384,7 @@ impl TdCardOutcome {
 /// never blocks the others, and its error names it. The whole batch is tried as
 /// one atomic write first; only when that fails is each TD tried on its own.
 /// Fails only when no TD at all could be recorded.
-pub(crate) fn apply_td_resolutions(
+pub fn apply_td_resolutions(
     conn: &Connection,
     discussion_id: &str,
     resolutions: &[TdResolution],
@@ -859,7 +445,7 @@ pub(crate) fn apply_td_resolutions(
 /// Writes human TD decisions on the sheets of `project_path`. Every id is
 /// checked and every new content computed before the first write; a failed
 /// write restores the files already written.
-pub(crate) fn apply_td_resolutions_at(
+pub fn apply_td_resolutions_at(
     project_path: &Path,
     resolutions: &[(&TdResolution, Option<&str>)],
     origin: TdDecisionOrigin,
@@ -962,7 +548,10 @@ pub(crate) fn apply_td_resolutions_at(
         let mut content = original
             .clone()
             .unwrap_or_else(|| "# Architecture decisions (why, not what)\n".to_string());
-        let date = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        let date = chrono::Utc::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
         let before: Vec<String> = crate::core::adr::parse(&content)
             .into_iter()
             .map(|adr| adr.id)
@@ -999,7 +588,10 @@ pub(crate) fn apply_td_resolutions_at(
     // empty folder behind. `docs_dir` is canonical, so the folder lands in it.
     let mut created_td_dir = false;
     if td_missing {
-        match std::fs::create_dir(&td_dir) {
+        // Every write below goes through the rooted primitive (KT-1595): a
+        // folder swapped for a link since the checks above is never written
+        // through.
+        match crate::core::fs_guard::guarded_create_dir_all(&root, &td_dir) {
             Ok(()) => created_td_dir = true,
             Err(error) => {
                 outcome = Err(anyhow!(error).context(format!("cannot create {}", td_dir.display())))
@@ -1010,7 +602,8 @@ pub(crate) fn apply_td_resolutions_at(
         if outcome.is_err() {
             break;
         }
-        if let Err(error) = crate::core::mcp_scanner::atomic_write(path, content) {
+        if let Err(error) = crate::core::fs_guard::guarded_replace(&root, path, content.as_bytes())
+        {
             outcome = Err(anyhow!(error));
             break;
         }
@@ -1023,7 +616,7 @@ pub(crate) fn apply_td_resolutions_at(
     }
     if outcome.is_ok() {
         if let Some((path, original, content)) = &decision_update {
-            match crate::core::mcp_scanner::atomic_write(path, content) {
+            match crate::core::fs_guard::guarded_replace(&root, path, content.as_bytes()) {
                 Ok(()) => written.push((path.as_path(), original.as_deref())),
                 Err(error) => outcome = Err(anyhow!(error)),
             }
@@ -1032,8 +625,11 @@ pub(crate) fn apply_td_resolutions_at(
     if let Err(error) = outcome {
         for (path, original) in written {
             let restored = match original {
-                Some(original) => crate::core::mcp_scanner::atomic_write(path, original),
-                None => std::fs::remove_file(path).map_err(|e| e.to_string()),
+                Some(original) => {
+                    crate::core::fs_guard::guarded_replace(&root, path, original.as_bytes())
+                }
+                None => crate::core::fs_guard::guarded_remove_file(&root, path)
+                    .map_err(|e| e.to_string()),
             };
             if let Err(restore) = restored {
                 tracing::error!("Could not restore {}: {restore}", path.display());
@@ -1041,7 +637,7 @@ pub(crate) fn apply_td_resolutions_at(
         }
         if created_td_dir {
             // Empty again once its sheets are gone; a failure leaves it be.
-            let _ = std::fs::remove_dir(&td_dir);
+            let _ = crate::core::fs_guard::guarded_remove_dir(&root, &td_dir);
         }
         return Err(error);
     }
@@ -1055,7 +651,7 @@ pub(crate) fn apply_td_resolutions_at(
     // The decision is on the sheets; the index status column follows them.
     // Only the ADRs this decision appended settle here: the human accepted them.
     let trust = crate::core::adr::Trust::CardAccepted(&card_adrs);
-    if let Err(error) = crate::core::td_index::resync(&docs_dir, trust) {
+    if let Err(error) = crate::core::td_index::resync(&root, &docs_dir, trust) {
         tracing::warn!("Tech-debt index resync after a TD decision failed: {error}");
     }
     Ok(())
@@ -1440,27 +1036,6 @@ mod tests {
     }
 
     #[test]
-    fn a_hash_inside_quotes_is_not_taken_for_a_comment() {
-        // Was refused as "a metadata flow mapping on several lines".
-        let input = "---\nname: td-x\nmetadata: {type: tech-debt, note: \"a #b\"}\n---\n\n# TD-x\n\n- **Status**: Inferred\n";
-        let written = update_td(
-            input,
-            TdResolutionAction::Confirm,
-            TdDecisionOrigin::Review,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            strict_front_matter(&written)["metadata"]["note"].as_str(),
-            Some("a #b")
-        );
-        assert_eq!(comment_start("a: \"x # y\" # z"), Some(11));
-        assert_eq!(comment_start("a: 'x # y'"), None);
-        assert_eq!(comment_start("a: it's # z"), Some(8));
-        assert_eq!(comment_start("a: b#c"), None);
-    }
-
-    #[test]
     fn a_history_that_is_not_a_block_list_is_refused_not_duplicated() {
         for input in [
             "---\nname: td-x\nmetadata:\n  audit_history: [{date: 2026-09-01}]\n---\n\n# TD-x\n\n- **Status**: Inferred\n",
@@ -1585,6 +1160,37 @@ mod tests {
             .unwrap();
         let sheet = std::fs::read_to_string(docs.join("tech-debt/TD-20261016-rowonly.md")).unwrap();
         assert!(sheet.contains("- **Severity**: High"), "{sheet}");
+    }
+
+    /// KT-1595: a docs folder swapped for a link after the checks never
+    /// receives the first decision's `tech-debt/` folder nor its sheet.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_docs_folder_swapped_after_the_checks_never_receives_the_first_decision() {
+        use crate::core::fs_guard::swap_probe;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-rowonly | Row only | API | High | Open |\n",
+        )
+        .unwrap();
+        let resolution = TdResolution {
+            td_id: "TD-20261016-rowonly".into(),
+            action: TdResolutionAction::Confirm,
+        };
+        swap_probe::arm(&docs, outside.path());
+        let result = apply_td_resolutions_at(
+            &root,
+            &[(&resolution, Some("Seen in prod."))],
+            TdDecisionOrigin::Review,
+        );
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[cfg(unix)] // creates symlinks through std::os::unix

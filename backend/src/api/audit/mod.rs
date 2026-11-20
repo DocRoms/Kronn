@@ -13,35 +13,35 @@ use axum::response::sse::Event;
 use futures::{Stream, StreamExt};
 
 pub mod accept;
-mod agent_launch;
+pub mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
 pub mod briefing_cards;
-pub(crate) mod briefing_docs;
-pub(crate) mod briefing_load;
+pub mod briefing_docs;
+pub mod briefing_load;
 #[cfg(test)]
 mod briefing_residuals_tests;
-pub(crate) mod briefing_rules;
+pub mod briefing_rules;
 mod commit_context;
 pub mod cross_audit;
-pub(crate) mod docs_write;
+pub mod docs_write;
 mod document_repair;
 pub mod drift;
 pub mod full;
 pub mod helpers;
 pub mod info;
-pub(crate) mod project_doc;
+pub mod project_doc;
 pub mod provenance;
 pub mod reconciliation;
 pub mod redact_artifacts;
 pub mod revalidate;
 pub mod run;
-pub(crate) mod run_state;
+pub mod run_state;
 #[cfg(test)]
 mod step_closing_tests;
-pub(crate) mod step_guard;
-pub(crate) mod step_remit;
+pub mod step_guard;
+pub mod step_remit;
 pub mod td_review;
 pub mod td_tasks;
 pub mod validate;
@@ -69,9 +69,7 @@ pub use validate_version::validate_current_docs;
 // `crate::api::audit::Foo`. The remaining `pub(crate)` helpers
 // (`build_validation_prompt`, `build_briefing_prompt`) stay
 // `super::helpers::name`-reachable for sub-modules without leaking.
-pub(crate) use helpers::{
-    check_ai_dir_permissions, detect_project_skill_markers, detect_project_skills,
-};
+pub use helpers::{check_ai_dir_permissions, detect_project_skill_markers, detect_project_skills};
 
 pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
@@ -188,19 +186,19 @@ mod detach_sse_stream_tests {
     }
 }
 
-pub(crate) const PROMPT_PREAMBLE: &str = include_str!("prompts/prompt-preamble.md");
+pub const PROMPT_PREAMBLE: &str = include_str!("prompts/prompt-preamble.md");
 
 #[derive(Clone, Copy)]
-pub(crate) struct AnalysisStep {
-    pub(crate) target_file: &'static str,
-    pub(crate) prompt: &'static str,
+pub struct AnalysisStep {
+    pub target_file: &'static str,
+    pub prompt: &'static str,
     /// Source file patterns to hash for drift detection.
     /// Special values: "__GIT_SOURCE_TREE__" (F27 content+structure fingerprint of the
     /// source tree, excluding Kronn outputs — the preferred whole-repo signal);
     /// "__GIT_HEAD__"/"__GIT_LS_FILES__" (legacy, kept for back-compat only).
     /// Glob patterns: "*.json", ".github/workflows/*"
     /// Empty = step is excluded from drift detection.
-    pub(crate) sources: &'static [&'static str],
+    pub sources: &'static [&'static str],
 }
 
 /// 0.8.7 — Anti-hallu canonical section body (without the `<!-- kronn:section -->`
@@ -213,7 +211,7 @@ pub(crate) struct AnalysisStep {
 /// Lives here (not in `core::anti_halluc`) because the audit step 0 is the
 /// only writer ; the runtime `PREAMBLE` now points to this section instead
 /// of duplicating it.
-pub(crate) const ANTI_HALLU_SECTION_BODY: &str = include_str!("prompts/anti-hallu-section-body.md");
+pub const ANTI_HALLU_SECTION_BODY: &str = include_str!("prompts/anti-hallu-section-body.md");
 
 /// 0.8.7 — Audit STEP 0 doctrine (used by the `apply_anti_hallu_section`
 /// deterministic function in `anti_hallu_step.rs`, NOT as an LLM prompt).
@@ -229,13 +227,13 @@ pub(crate) const ANTI_HALLU_SECTION_BODY: &str = include_str!("prompts/anti-hall
 /// that map to `ANALYSIS_STEPS[step - 1]`. Inserting STEP 0 would shift
 /// everything.
 #[allow(dead_code)] // doc-only constant ; the real work is in anti_hallu_step.rs
-pub(crate) const STEP_0_ANTI_HALLU: AnalysisStep = AnalysisStep {
+pub const STEP_0_ANTI_HALLU: AnalysisStep = AnalysisStep {
     target_file: "docs/AGENTS.md",
     prompt: include_str!("prompts/step0-anti-hallu.md"),
     sources: &["docs/AGENTS.md"],
 };
 
-pub(crate) const ANALYSIS_STEPS: &[AnalysisStep] = &[
+pub const ANALYSIS_STEPS: &[AnalysisStep] = &[
     // Step 1: Project analysis + index
     AnalysisStep {
         target_file: "docs/AGENTS.md",
@@ -344,13 +342,13 @@ pub(crate) const ANALYSIS_STEPS: &[AnalysisStep] = &[
 // Drift reports checksum mismatches without rewriting documentation.
 // The other focused kinds emit their dimension-specific findings.
 
-pub(crate) const DRIFT_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const DRIFT_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "REVIEW",
     prompt: include_str!("prompts/drift.md"),
     sources: &["docs/checksums.json"],
 }];
 
-pub(crate) const SECURITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const SECURITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "docs/inconsistencies-security.md",
     prompt: include_str!("prompts/security.md"),
     sources: &[
@@ -367,7 +365,7 @@ pub(crate) const SECURITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
     ],
 }];
 
-pub(crate) const DOCKER_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const DOCKER_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "docs/inconsistencies-docker.md",
     prompt: include_str!("prompts/docker.md"),
     sources: &[
@@ -380,31 +378,31 @@ pub(crate) const DOCKER_STEPS: &[AnalysisStep] = &[AnalysisStep {
     ],
 }];
 
-pub(crate) const PERFORMANCE_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const PERFORMANCE_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "docs/inconsistencies-performance.md",
     prompt: include_str!("prompts/performance.md"),
     sources: &["__GIT_SOURCE_TREE__"],
 }];
 
-pub(crate) const ACCESSIBILITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const ACCESSIBILITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "docs/inconsistencies-accessibility.md",
     prompt: include_str!("prompts/accessibility.md"),
     sources: &["__GIT_SOURCE_TREE__"],
 }];
 
-pub(crate) const RGAA_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const RGAA_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "docs/inconsistencies-rgaa.md",
     prompt: include_str!("prompts/rgaa.md"),
     sources: &[],
 }];
 
-pub(crate) const DATABASE_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const DATABASE_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "docs/inconsistencies-database.md",
     prompt: include_str!("prompts/database.md"),
     sources: &["__GIT_SOURCE_TREE__"],
 }];
 
-pub(crate) const API_DESIGN_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const API_DESIGN_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "docs/inconsistencies-api.md",
     prompt: include_str!("prompts/api-design.md"),
     sources: &["__GIT_SOURCE_TREE__"],
@@ -417,7 +415,7 @@ pub(crate) const API_DESIGN_STEPS: &[AnalysisStep] = &[AnalysisStep {
 /// dogfooding: a Full audit surfaced docs & infra debt but zero findings
 /// about the CODE (templates, styles, backend smells) — "un audit qui ne
 /// sort pas de soucis de qualité de code, c'est super limité".
-pub(crate) const CODE_QUALITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
+pub const CODE_QUALITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "docs/inconsistencies-code-quality.md",
     prompt: include_str!("prompts/code-quality.md"),
     sources: &["__GIT_SOURCE_TREE__"],
@@ -426,11 +424,11 @@ pub(crate) const CODE_QUALITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
 /// Relevance gate prepended to every CHAINED sub-audit step: a dimension
 /// that doesn't apply to the audited project must cost one line, not a
 /// full agent pass ("si pas utile au projet → on passe").
-pub(crate) const CHAINED_STEP_GATE: &str = include_str!("prompts/chained-step-gate.md");
+pub const CHAINED_STEP_GATE: &str = include_str!("prompts/chained-step-gate.md");
 
 /// The prompt of one audit step, dated: a model cannot know today's date, and
 /// a step that names it in its own words (a TD file name) must still get it.
-pub(crate) fn dated_step_prompt(
+pub fn dated_step_prompt(
     gate: &str,
     step_prompt: &str,
     now: chrono::DateTime<chrono::Utc>,
@@ -452,13 +450,13 @@ pub(crate) fn dated_step_prompt(
 
 /// Steps 1 to 7 fill a documentation template. Once their target is filled,
 /// a later audit re-verifies it instead of looking for placeholders.
-pub(crate) const REVERIFIED_STEPS: usize = 7;
+pub const REVERIFIED_STEPS: usize = 7;
 
-pub(crate) const REVERIFY_BLOCK: &str = include_str!("prompts/reverify-block.md");
+pub const REVERIFY_BLOCK: &str = include_str!("prompts/reverify-block.md");
 
 /// A legacy `ai/index.md` layout is moved to `docs/` by its migration first:
 /// an audit there would write a second tree beside it.
-pub(crate) fn legacy_layout_refusal(project: &std::path::Path) -> Option<serde_json::Value> {
+pub fn legacy_layout_refusal(project: &std::path::Path) -> Option<serde_json::Value> {
     crate::core::scanner::needs_docs_migration(project).then(|| {
         serde_json::json!({
             "error": "This project still uses the legacy ai/index.md layout. \
@@ -472,7 +470,7 @@ pub(crate) fn legacy_layout_refusal(project: &std::path::Path) -> Option<serde_j
 /// explicit choice: every run that writes the folder (Full, partial,
 /// revalidation) refuses it the same way. `recorded_run`: a Full run this
 /// instance recorded stands for the record (see `DocsFolderState`).
-pub(crate) fn docs_folder_choice_refusal(
+pub fn docs_folder_choice_refusal(
     project: &std::path::Path,
     docs_root: &crate::core::docs_location::DocsRoot,
     recorded_run: bool,
@@ -493,7 +491,7 @@ pub(crate) fn docs_folder_choice_refusal(
 }
 
 /// Whether this instance recorded a Full run for the project.
-pub(crate) async fn has_recorded_full_run(state: &crate::AppState, project_id: &str) -> bool {
+pub async fn has_recorded_full_run(state: &crate::AppState, project_id: &str) -> bool {
     let id = project_id.to_string();
     state
         .db
@@ -504,7 +502,7 @@ pub(crate) async fn has_recorded_full_run(state: &crate::AppState, project_id: &
 
 /// Template steps reverify a filled target; finding and review steps always
 /// preserve existing text, including documents outside their nominal target.
-pub(crate) fn reverifies_target(
+pub fn reverifies_target(
     project: &std::path::Path,
     step_1_based: usize,
     step: &AnalysisStep,
@@ -518,10 +516,7 @@ pub(crate) fn reverifies_target(
 
 /// The step's own instructions, headed by the re-verification block when the
 /// target is already filled.
-pub(crate) fn step_prompt_body(
-    step: &AnalysisStep,
-    reverify: bool,
-) -> std::borrow::Cow<'static, str> {
+pub fn step_prompt_body(step: &AnalysisStep, reverify: bool) -> std::borrow::Cow<'static, str> {
     if reverify {
         let block = if step.target_file.ends_with("REVIEW") || !step.target_file.ends_with(".md") {
             REVERIFY_BLOCK.replace(
@@ -545,7 +540,7 @@ pub(crate) fn step_prompt_body(
 /// Which prompt gate a step gets: chained sub-audit steps (past the
 /// foundation) open with the relevance gate; foundation steps and
 /// standalone sub-audits (deliberately chosen by the user) never do.
-pub(crate) fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &'static str {
+pub fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &'static str {
     if step_1_based >= first_chained_step {
         CHAINED_STEP_GATE
     } else {
@@ -558,7 +553,7 @@ pub(crate) fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &
 /// that ends on a reference block (versions table, briefing, rules, signals) is
 /// read by a small model as loaded context to answer, not as work to run. The
 /// directive names the step and its target, and says no human answers.
-pub(crate) fn step_closing_directive(
+pub fn step_closing_directive(
     step_1_based: usize,
     step: &AnalysisStep,
     docs_root: &crate::core::docs_location::DocsRoot,
@@ -592,7 +587,7 @@ pub(crate) fn step_closing_directive(
 /// The prompt one attempt sends: the step's reference blocks and instructions,
 /// then the retry feedback when there is one, then ALWAYS the closing directive
 /// — nothing may follow it (KT-1278).
-pub(crate) fn finish_step_prompt(
+pub fn finish_step_prompt(
     prompt: &str,
     feedback: Option<&str>,
     step_1_based: usize,
@@ -608,14 +603,14 @@ pub(crate) fn finish_step_prompt(
 
 /// The chain for `kind` with every target, source and prompt rewritten under
 /// the project's docs root (KT-1192). Identity for `docs/`.
-pub(crate) fn steps_for(
+pub fn steps_for(
     kind: crate::models::AuditKind,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> Vec<AnalysisStep> {
     relocate_steps(assemble_chained_steps(kind), docs_root)
 }
 
-pub(crate) fn relocate_steps(
+pub fn relocate_steps(
     steps: Vec<AnalysisStep>,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> Vec<AnalysisStep> {
@@ -654,7 +649,7 @@ fn relocate_sources(
     })
 }
 
-pub(crate) fn assemble_chained_steps(kind: crate::models::AuditKind) -> Vec<AnalysisStep> {
+pub fn assemble_chained_steps(kind: crate::models::AuditKind) -> Vec<AnalysisStep> {
     use crate::models::AuditKind;
     if !matches!(kind, AuditKind::Full) {
         return kind_to_steps(kind).to_vec();
@@ -678,7 +673,7 @@ pub(crate) fn assemble_chained_steps(kind: crate::models::AuditKind) -> Vec<Anal
 /// lot-3 #4): the deterministic detector signals, the stack-specific checklist
 /// AND the known-debt digest block travel together — a partial re-run of step 8 with only half the
 /// inputs would duplicate priors or miss anchored signals.
-pub(crate) fn step8_context_block(
+pub fn step8_context_block(
     signals: &[crate::core::audit_detectors::DetectedSignal],
     ecosystems: &[crate::core::audit_ecosystems::Ecosystem],
     prior_td_digests: &[reconciliation::PriorDigest],
@@ -701,7 +696,7 @@ pub(crate) fn step8_context_block(
 /// The decisions in force since before the run (`baseline` is
 /// `decisions.md` as the run found it), for every step that writes TD sheets
 /// (an `inconsistencies-*.md` index). Empty for other steps and when none.
-pub(crate) fn decisions_context_block(
+pub fn decisions_context_block(
     project: &std::path::Path,
     step: &AnalysisStep,
     baseline: &str,
@@ -713,7 +708,7 @@ pub(crate) fn decisions_context_block(
     {
         return String::new();
     }
-    let block = crate::core::adr::in_force_prompt_block(&docs_root.dir(project), baseline);
+    let block = crate::core::adr::in_force_prompt_block(project, &docs_root.dir(project), baseline);
     if block.is_empty() {
         block
     } else {
@@ -730,7 +725,7 @@ pub(crate) fn decisions_context_block(
 /// Whether a chained step can be refreshed via partial-audit: only steps
 /// with a REAL docs/ target are verifiable post-run — the synthetic REVIEW
 /// pseudo-step (no file) would pass the validator on exit code 0 alone.
-pub(crate) fn partial_selectable(
+pub fn partial_selectable(
     step: &AnalysisStep,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> bool {
@@ -739,37 +734,7 @@ pub(crate) fn partial_selectable(
         && docs_root.contains(step.target_file)
 }
 
-/// Agents eligible to RUN an audit: the pipeline's only deliverable is
-/// files written into `docs/`, so an agent that cannot write there can only
-/// produce a silent no-op that the validator then flags step by step.
-///
-/// Two kinds of agent can: a CLI with its own filesystem, and an HTTP agent
-/// whose file tools Kronn executes on its behalf (KT-338), scoped to the
-/// project by `agent_launch` (KT-924). Every HTTP agent is admitted (KT-980):
-/// sending the repository to a hosted provider is the user's choice, warned
-/// about in the UI. A `Custom` agent is only launched with a validated named
-/// connection (`AuditAgentLauncher::for_request`).
-///
-/// ALLOWLIST, not denylist (Codex A4 v2): a new/unknown variant must force
-/// a compiler decision here instead of being audit-capable by default.
-/// Mirrored by the UI's `canRunAudit`, enforced here because MCP/bridge
-/// callers bypass the UI entirely.
-pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
-    use crate::models::AgentType;
-    match agent {
-        AgentType::ClaudeCode
-        | AgentType::Codex
-        | AgentType::OpenCode
-        | AgentType::GeminiCli
-        | AgentType::Kiro
-        | AgentType::CopilotCli
-        | AgentType::Ollama
-        | AgentType::LiteLlm
-        | AgentType::Nvidia
-        | AgentType::Custom => true,
-        AgentType::Vibe => false,
-    }
-}
+pub use crate::core::cross_audit::agent_can_audit;
 
 /// The agents `agent_can_audit` admits, for the refusal message. Kept beside the
 /// predicate and pinned to it by a test, so the message cannot name an agent the
@@ -790,7 +755,7 @@ const AUDIT_AGENTS: [crate::models::AgentType; 10] = [
 /// Why `agent` was refused, and who would have been accepted. One wording for the
 /// Full and the partial launch: the two used to disagree, and neither said which
 /// agents to pick instead.
-pub(crate) fn audit_refusal_message(agent: &crate::models::AgentType) -> String {
+pub fn audit_refusal_message(agent: &crate::models::AgentType) -> String {
     let accepted = AUDIT_AGENTS
         .iter()
         .map(crate::api::disc_helpers::agent_display_name)
@@ -801,7 +766,7 @@ pub(crate) fn audit_refusal_message(agent: &crate::models::AgentType) -> String 
     )
 }
 
-pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [AnalysisStep] {
+pub fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [AnalysisStep] {
     use crate::models::AuditKind;
     match kind {
         AuditKind::Full => ANALYSIS_STEPS,
@@ -827,7 +792,7 @@ mod kind_dispatch_tests {
 
     #[test]
     fn public_docs_match_chained_audit_contract() {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let repo_root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("backend crate must live below the repository root");
         let readme = std::fs::read_to_string(repo_root.join("README.md"))
@@ -1265,7 +1230,7 @@ mod prompt_tests {
 
     #[test]
     fn template_internal_anchors_resolve_to_a_heading() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .unwrap()
             .join("templates/docs");
@@ -2044,7 +2009,7 @@ mod prompt_tests {
     fn docs_agents_md_template_teaches_the_human_decision_card() {
         // KT-1329 — colleagues' agents never asked for an arbitration because
         // nothing they read at project level mentioned the card.
-        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let tpl_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root")
             .join("templates/docs/AGENTS.md");
@@ -2067,7 +2032,7 @@ mod prompt_tests {
         // policy, and the test policy are project parameters (set once
         // during audit), not fixed doctrine. An existing non-English doc
         // must be preserved, never force-translated.
-        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let tpl_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root")
             .join("templates/docs/AGENTS.md");
@@ -2124,7 +2089,7 @@ mod prompt_tests {
         // doc as an orphan (non-blocking, but still a real drift signal),
         // so this test pins both halves of the contract: the link text
         // in AGENTS.md, and the linked file actually existing.
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let workspace_root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root");
         let tpl_path = workspace_root.join("templates/docs/AGENTS.md");
@@ -2183,7 +2148,7 @@ mod prompt_tests {
         // already pins for docs/architecture/overview.md.
         let step1 = &ANALYSIS_STEPS[0];
         assert_eq!(step1.target_file, "docs/AGENTS.md");
-        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let tpl_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root")
             .join("templates/docs/AGENTS.md");
@@ -2262,7 +2227,7 @@ mod prompt_tests {
 
     #[test]
     fn a_filled_target_gets_the_reverification_prompt_and_a_template_the_fill_prompt() {
-        let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates");
+        let templates = std::path::Path::new(crate::BACKEND_DIR).join("../templates");
         let project = tempfile::tempdir().unwrap();
         let now = chrono::Utc::now();
         let prompt_of = |index: usize| {
@@ -2386,7 +2351,7 @@ mod prompt_tests {
         // that tells the agent to "replace {{X}}" must cite a token the
         // template it fills actually contains, or a weak model is pointed
         // at a placeholder that doesn't exist and may skip the real one.
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let workspace_root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root");
         // Generic meta-language ("replace ALL {{PLACEHOLDERS}}") — every
@@ -2463,7 +2428,7 @@ mod prompt_tests {
         assert!(step.prompt.contains("fails this step"));
         assert!(commit_context::writes_commits_doc(step.target_file));
         let template = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            std::path::Path::new(crate::BACKEND_DIR)
                 .parent()
                 .unwrap()
                 .join("templates/docs/workflow/commits.md"),
@@ -2506,7 +2471,7 @@ mod prompt_tests {
         // agent fills `{{ARCHITECTURE_MERMAID}}` into a section
         // that doesn't exist and the placeholder leaks into the
         // final docs/architecture/overview.md.
-        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let tpl_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root")
             .join("templates/docs/architecture/overview.md");
@@ -3171,9 +3136,8 @@ mod prompt_tests {
     fn launch_audit_request_ts_file_covers_all_rust_fields() {
         // The .ts file lives outside the crate; resolve via
         // CARGO_MANIFEST_DIR which points at `backend/`.
-        let manifest = crate::core::child_env::var("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR set by cargo");
-        let ts_path = std::path::Path::new(&manifest)
+        let manifest = crate::BACKEND_DIR;
+        let ts_path = std::path::Path::new(manifest)
             .join("..")
             .join("frontend")
             .join("src")

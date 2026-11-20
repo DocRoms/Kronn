@@ -109,7 +109,7 @@ struct CodexMcpEntry {
     default_tools_approval_mode: Option<String>,
 }
 
-pub(crate) fn default_startup_timeout() -> u32 {
+pub fn default_startup_timeout() -> u32 {
     30
 }
 
@@ -124,23 +124,23 @@ fn is_true(v: &bool) -> bool {
 
 /// Vibe config.toml `[[mcp_servers]]` entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct VibeMcpEntry {
-    pub(crate) name: String,
-    pub(crate) transport: String,
+pub struct VibeMcpEntry {
+    pub name: String,
+    pub transport: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) command: Option<String>,
+    pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) args: Option<Vec<String>>,
+    pub args: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) url: Option<String>,
+    pub url: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub(crate) env: HashMap<String, String>,
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct VibeConfig {
+pub struct VibeConfig {
     #[serde(default)]
-    pub(crate) mcp_servers: Vec<VibeMcpEntry>,
+    pub mcp_servers: Vec<VibeMcpEntry>,
 }
 
 // ─── .mcp.json file format (Claude Code) ─────────────────────────────────────
@@ -193,7 +193,7 @@ const MCP_ARG_SECRET_MARKERS: &[&str] = &[
 /// value, is enough to trip it) — fail-closed means a false positive costs
 /// Kronn an MCP server it could have safely included, while a false negative
 /// costs a leaked secret.
-pub(crate) fn mcp_args_carry_secret(args: &[String]) -> bool {
+pub fn mcp_args_carry_secret(args: &[String]) -> bool {
     args.iter().any(|arg| {
         let Some(flag) = arg.strip_prefix('-') else {
             return false;
@@ -209,7 +209,7 @@ pub(crate) fn mcp_args_carry_secret(args: &[String]) -> bool {
 /// `args` entry names a credential flag (KT-542 review: the no-secret
 /// promise covers `args`, not only `env`). A Docker `${KRONN_MCP_…}`
 /// reference is not a value: the agent's own environment resolves it.
-pub(crate) fn mcp_entry_leaks_secret(entry: &McpServerEntry) -> bool {
+pub fn mcp_entry_leaks_secret(entry: &McpServerEntry) -> bool {
     entry
         .env
         .values()
@@ -425,7 +425,7 @@ pub fn outside_agent_files_dir(project_path: &str) -> Option<PathBuf> {
 /// Returns `false` when the bridge path can't be resolved (host-CLI safety, cf.
 /// [`disc_introspection_mcp_path_for_shared_config`]); the caller then removes
 /// any stale files instead.
-pub(crate) fn write_kronn_internal_only(project_path: &str) -> Result<bool, String> {
+pub fn write_kronn_internal_only(project_path: &str) -> Result<bool, String> {
     let mut only_internal = McpJsonFile {
         mcp_servers: HashMap::new(),
     };
@@ -744,7 +744,7 @@ pub fn write_mcp_json_to_subpath(
     merge_mcp_json_file(project_path, &file, data, &BTreeSet::new()).map(|_| ())
 }
 
-pub(crate) fn write_owned_mcp_json_to_subpath(
+pub fn write_owned_mcp_json_to_subpath(
     project_path: &str,
     subpath: &str,
     data: &McpJsonFile,
@@ -767,144 +767,17 @@ pub(crate) fn write_owned_mcp_json_to_subpath(
     save_mcp_ownership(project_path, &state)
 }
 
-/// Write content to a file atomically: write to a temp sibling then rename.
-/// This prevents agents from reading a partially-written config file.
-pub(crate) fn write_atomic_temp(target: &Path, content: &[u8]) -> Result<PathBuf, String> {
-    // A fixed `<target>.tmp` name is unsafe in a user-controlled project: a
-    // pre-created symlink at that path makes `fs::write` follow it and mutate
-    // an arbitrary file outside the project. Use an unpredictable sibling and
-    // `create_new` so an existing filesystem object is never followed.
-    let tmp = target.with_extension(format!("kronn-{}.tmp", uuid::Uuid::new_v4()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut temp_file = options
-        .open(&tmp)
-        .map_err(|e| format!("Failed to create temp {}: {e}", tmp.display()))?;
-    if let Err(e) = std::io::Write::write_all(&mut temp_file, content) {
-        drop(temp_file);
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("Failed to write temp {}: {e}", tmp.display()));
-    }
-    drop(temp_file);
-    Ok(tmp)
-}
-
-fn commit_atomic_temp(tmp: &Path, target: &Path) -> Result<(), String> {
-    std::fs::rename(tmp, target).map_err(|e| {
-        // Clean up temp file on rename failure
-        let _ = std::fs::remove_file(tmp);
-        format!(
-            "Failed to rename {} → {}: {}",
-            tmp.display(),
-            target.display(),
-            e
-        )
-    })
-}
-
-pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
-    atomic_write_bytes(target, content.as_bytes())
-}
-
-pub(crate) fn atomic_write_bytes(target: &Path, content: &[u8]) -> Result<(), String> {
-    let tmp = write_atomic_temp(target, content)?;
-    commit_atomic_temp(&tmp, target)
-}
-
-/// Atomically replace a file only if it is still byte-identical to what the
-/// merge parsed (`Some`) or is still absent (`None`). The temp is fully written
-/// first, keeping the compare→rename window as small as the portable filesystem
-/// API allows. This prevents a normal concurrent CLI/user edit from being
-/// silently lost while Kronn is serializing a merged config.
-pub(crate) fn atomic_write_if_unchanged(
-    target: &Path,
-    content: &str,
-    observed: Option<&[u8]>,
-) -> Result<(), String> {
-    let tmp = write_atomic_temp(target, content.as_bytes())?;
-    let unchanged = match (observed, std::fs::read(target)) {
-        (Some(expected), Ok(current)) => current == expected,
-        (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => true,
-        _ => false,
-    };
-    if !unchanged {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "{} changed concurrently while its MCP config was being merged; refusing overwrite",
-            target.display()
-        ));
-    }
-    commit_atomic_temp(&tmp, target)
-}
-
-/// Atomically replace a file only if it is still byte-identical to `observed`,
-/// while preserving the target's existing permissions. Permissions are copied
-/// to the temporary sibling *before* the rename, so there is no post-rename
-/// window where a normal 0644 document becomes the temp file's defensive 0600.
-/// The byte comparison is the final operation before rename, minimizing the
-/// remaining portable check-to-commit race window.
-pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
-    target: &Path,
-    content: &str,
-    observed: &[u8],
-) -> Result<(), String> {
-    let metadata = std::fs::symlink_metadata(target).map_err(|e| {
-        format!(
-            "Failed to stat {} before atomic write: {e}",
-            target.display()
-        )
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "{} is a symlink; refusing atomic permission-preserving write",
-            target.display()
-        ));
-    }
-    if !metadata.is_file() {
-        return Err(format!(
-            "{} is not a regular file; refusing atomic permission-preserving write",
-            target.display()
-        ));
-    }
-    let permissions = metadata.permissions();
-    let tmp = write_atomic_temp(target, content.as_bytes())?;
-    if let Err(e) = std::fs::set_permissions(&tmp, permissions) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "Failed to preserve permissions for {} before atomic rename: {e}",
-            target.display()
-        ));
-    }
-    let current = match std::fs::read(target) {
-        Ok(current) => current,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!(
-                "Failed to read {} before atomic rename: {e}",
-                target.display()
-            ));
-        }
-    };
-    if current != observed {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "{} changed concurrently while its audit artifact was being sanitized; refusing overwrite",
-            target.display()
-        ));
-    }
-    commit_atomic_temp(&tmp, target)
-}
+#[cfg(any(windows, any(test, feature = "test-support")))]
+pub use crate::core::atomic_file::atomic_write_if_unchanged_preserving_permissions;
+pub use crate::core::atomic_file::{
+    atomic_write, atomic_write_bytes, atomic_write_if_unchanged, write_atomic_temp,
+};
 
 /// File mtime as of `read_target_mtime` invocation. Returned as
 /// `Option<SystemTime>` because the file may not exist yet (legitimate
 /// for a first-time sync) — `None` means "no prior version to defend
 /// against", and `atomic_write_checked` will not abort on absent files.
-pub(crate) fn read_target_mtime(target: &Path) -> Option<std::time::SystemTime> {
+pub fn read_target_mtime(target: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(target)
         .ok()
         .and_then(|m| m.modified().ok())
@@ -951,7 +824,7 @@ impl std::fmt::Display for AtomicWriteCheckedError {
 
 /// Plan returned by a `HostMcpSync::prepare` call. Carries everything
 /// the generic driver needs to commit the write.
-pub(crate) struct HostSyncPlan {
+pub struct HostSyncPlan {
     /// Absolute path of the host config file on disk.
     pub path: PathBuf,
     /// Serialised file content, ready for `atomic_write_checked`.
@@ -973,7 +846,7 @@ pub(crate) struct HostSyncPlan {
 /// scope-aware JSON for Claude, flat JSON for Copilot/Gemini). Each one
 /// replaces only the entries Kronn owns and writes the rest back. The driver
 /// `run_host_sync` handles the cross-cutting concerns.
-pub(crate) trait HostMcpSync: Sync {
+pub trait HostMcpSync: Sync {
     /// Human-readable label for log lines and the workflow-run gate.
     fn label(&self) -> &'static str;
 
@@ -1004,7 +877,7 @@ pub(crate) trait HostMcpSync: Sync {
 /// The workflow-run gate (TD-host-sync-workflow-race) is handled at
 /// `sync_affected_projects` entry, OUT of this loop, so all four CLIs
 /// back off in lockstep.
-pub(crate) fn run_host_sync(t: &dyn HostMcpSync, conn: &rusqlite::Connection, secret: &str) {
+pub fn run_host_sync(t: &dyn HostMcpSync, conn: &rusqlite::Connection, secret: &str) {
     let label = t.label();
     let plan = match t.prepare(conn, secret) {
         Some(p) => p,
@@ -1065,7 +938,7 @@ pub(crate) fn run_host_sync(t: &dyn HostMcpSync, conn: &rusqlite::Connection, se
 /// to do post-success work (e.g. chmod 0600 the new file) can branch
 /// without re-stating the file. A `false` return doesn't differentiate
 /// concurrent-write from IO failure — the log line already did.
-pub(crate) fn write_host_config_checked(
+pub fn write_host_config_checked(
     target: &Path,
     content: &str,
     expected_mtime: Option<std::time::SystemTime>,
@@ -1112,7 +985,7 @@ pub(crate) fn write_host_config_checked(
 /// rename, both bump mtime. mtime monotonicity is enough to catch the
 /// race; flock would only help against concurrent *Kronn* writers,
 /// which don't happen (sync is sequential).
-pub(crate) fn atomic_write_checked(
+pub fn atomic_write_checked(
     target: &Path,
     content: &str,
     expected_mtime: Option<std::time::SystemTime>,
@@ -1153,7 +1026,7 @@ pub(crate) fn atomic_write_checked(
 /// Old stale entries (from renamed MCPs, deleted configs, etc.) are removed.
 /// Claude Code only loads MCPs that are BOTH in `.mcp.json` AND whitelisted,
 /// so the whitelist must be a superset of `.mcp.json` keys.
-pub(crate) fn sync_claude_enabled_servers(
+pub fn sync_claude_enabled_servers(
     project_path: &str,
     mcp_servers: &HashMap<String, McpServerEntry>,
 ) {
@@ -1233,7 +1106,7 @@ pub(crate) fn sync_claude_enabled_servers(
 /// (the 2026-06-30 incident class): writing the entry with `env: {}` strips
 /// them, and skipping just the entry deletes it from the regenerated file.
 /// A config with no expected keys degrades to an empty map.
-pub(crate) fn decrypt_env_strict(
+pub fn decrypt_env_strict(
     config: &crate::models::McpConfig,
     secret: &str,
 ) -> Result<HashMap<String, String>, String> {
@@ -1262,7 +1135,7 @@ pub(crate) fn decrypt_env_strict(
 /// rtk_detect). Absolute paths and an unset KRONN_HOST_BIN are unverifiable
 /// from the container → keep the entry (a startup warning on the host beats
 /// silently dropping a working MCP).
-pub(crate) fn host_mcp_command_available(command: &str) -> bool {
+pub fn host_mcp_command_available(command: &str) -> bool {
     if !crate::core::env::is_docker() {
         return is_command_available(command);
     }
@@ -1798,7 +1671,7 @@ fn ensure_redirectors(project_path: &str) {
 
 // ─── Vibe per-project sync ────────────────────────────────────────────────────
 
-pub(crate) fn merge_vibe_config(
+pub fn merge_vibe_config(
     project_path: &str,
     file: &Path,
     entries: &[VibeMcpEntry],
@@ -1823,8 +1696,9 @@ pub(crate) fn merge_vibe_config(
             Err(e) => {
                 backup_before_refusal(project_path, file)?;
                 return Err(format!(
-                    "Invalid existing Vibe config {}: {e}; refusing overwrite",
-                    file.display()
+                    "Invalid existing Vibe config {}: {}; refusing overwrite",
+                    file.display(),
+                    crate::core::redact::toml_error_summary(&raw, &e)
                 ));
             }
         }
@@ -2119,7 +1993,7 @@ fn detect_codex_config_drift(active_dir: &Path) {
 ///                   abandon the sync without writing to avoid clobbering
 ///                   the user's existing provider config.
 #[derive(Debug)]
-pub(crate) enum CodexLoadOutcome {
+pub enum CodexLoadOutcome {
     Loaded(toml::value::Table),
     Empty,
     Aborted,
@@ -2131,7 +2005,7 @@ pub(crate) enum CodexLoadOutcome {
 ///
 /// Extracted from `sync_codex_global_config` so the data-preservation logic
 /// is unit-testable in isolation.
-pub(crate) fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutcome {
+pub fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutcome {
     if !codex_config.exists() {
         return CodexLoadOutcome::Empty;
     }
@@ -2159,7 +2033,7 @@ pub(crate) fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutco
             tracing::error!(
                 "Failed to parse Codex config {} ({}). Backed up to {} and aborting sync to preserve user data.",
                 codex_config.display(),
-                e,
+                crate::core::redact::toml_error_summary(&content, &e),
                 backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<no-backup>".to_string())
             );
             CodexLoadOutcome::Aborted
@@ -2229,7 +2103,7 @@ fn merge_owned_json_servers(
 /// HostMcpSync impl for OpenAI Codex CLI. TOML format, stdio-only,
 /// merges with the existing `[model_providers]` / `[profiles]` etc.
 /// `~/.codex/config.toml` (single global file — no per-project support).
-pub(crate) struct CodexSync;
+pub struct CodexSync;
 
 impl HostMcpSync for CodexSync {
     fn label(&self) -> &'static str {
@@ -2424,7 +2298,7 @@ impl HostMcpSync for CodexSync {
 
 /// HostMcpSync impl for Copilot CLI (`~/.copilot/mcp-config.json`).
 /// Top-level JSON, stdio-only; the user's own servers stay.
-pub(crate) struct CopilotSync;
+pub struct CopilotSync;
 
 impl HostMcpSync for CopilotSync {
     fn label(&self) -> &'static str {
@@ -2710,7 +2584,7 @@ fn current_host_sync_gate() -> HostSyncGate {
 
 /// Refusal shown when an isolated instance is asked to write an API key into
 /// a home-directory CLI file.
-pub(crate) const HOME_CREDENTIAL_WRITE_REFUSED: &str =
+pub const HOME_CREDENTIAL_WRITE_REFUSED: &str =
     "This Kronn instance runs on an isolated KRONN_DATA_DIR, so it does not write API keys \
      into the CLI files of the home directory. Set KRONN_HOST_HOME to the home to write into, \
      or KRONN_HOST_MCP_SYNC=1 to write into this home anyway.";
@@ -2718,7 +2592,7 @@ pub(crate) const HOME_CREDENTIAL_WRITE_REFUSED: &str =
 /// Same rule as the MCP host sync, but `KRONN_HOST_MCP_SYNC=0` switches off
 /// MCP entries only: it must neither stop the default instance from syncing
 /// keys nor let an isolated one skip the isolation check.
-pub(crate) fn home_credential_write_refusal() -> Option<&'static str> {
+pub fn home_credential_write_refusal() -> Option<&'static str> {
     let opt_in = |value: &str| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true");
     match host_sync_gate_from_env(opt_in) {
         HostSyncGate::Enabled => None,
@@ -2974,7 +2848,7 @@ fn withheld_from_host_config(
     true
 }
 
-pub(crate) fn should_host_sync(config: &crate::models::McpConfig) -> bool {
+pub fn should_host_sync(config: &crate::models::McpConfig) -> bool {
     use crate::models::HostSyncMode;
     matches!(
         config.host_sync,
@@ -3151,7 +3025,7 @@ const BACKUP_ROTATION_SLOTS: usize = 5;
 /// corruptions = first backup lost. Rotation gives the user a recovery
 /// window of N corruption events instead of one. See
 /// `TD-20260427-host-sync-backup-rotation` (now resolved).
-pub(crate) fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
+pub fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
     if max_n == 0 {
         return None;
     }
@@ -3201,7 +3075,7 @@ pub(crate) fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
 ///     (orphan cleanup — config was deleted from Kronn)
 ///   - entries WITHOUT `_kronn` marker → PRESERVED as-is (user-managed)
 ///   - new Kronn configs → ADDED
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn merge_kronn_entries(
     existing: &mut serde_json::Value,
     kronn_entries: HashMap<String, serde_json::Value>,
@@ -3256,7 +3130,7 @@ fn merge_kronn_entries(
 /// config's `is_global` / `project_ids`. Preserves user-managed
 /// entries (no `_kronn` marker) and unrelated keys (cache, recents,
 /// onboarding state).
-pub(crate) struct ClaudeSync;
+pub struct ClaudeSync;
 
 impl HostMcpSync for ClaudeSync {
     fn label(&self) -> &'static str {
@@ -3622,7 +3496,7 @@ fn count_project_scopes(existing: &serde_json::Value) -> usize {
 /// HostMcpSync impl for Gemini CLI (`~/.gemini/settings.json`).
 /// Top-level JSON; uses `httpUrl` for Streamable HTTP transport
 /// (Gemini convention — Claude calls the same field `url`).
-pub(crate) struct GeminiSync;
+pub struct GeminiSync;
 
 const GEMINI_KRONN_STATE: &str = ".gemini/kronn-mcp-state.json";
 
@@ -3780,7 +3654,7 @@ impl HostMcpSync for GeminiSync {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn count_kronn_entries(value: &serde_json::Value) -> usize {
     value
         .get("mcpServers")
@@ -4600,7 +4474,7 @@ pub fn get_incompatibilities(servers: &[crate::models::McpServer]) -> Vec<McpInc
 
 /// Check if a command binary is available in PATH (or is an absolute path that exists).
 /// Used to warn about missing MCP server commands before writing configs.
-pub(crate) fn is_command_available(command: &str) -> bool {
+pub fn is_command_available(command: &str) -> bool {
     // Absolute path — check directly
     if command.starts_with('/') {
         return Path::new(command).exists();
@@ -4655,8 +4529,8 @@ mod inject_context_tests {
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
-pub(crate) mod host_sync_tests {
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+pub mod host_sync_tests {
     use super::*;
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
@@ -4739,10 +4613,10 @@ pub(crate) mod host_sync_tests {
 
     /// Restores the test process environment even if an assertion panics.
     /// Callers are `#[serial]` because Rust process environments are global.
-    pub(crate) struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    pub struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvRestore {
-        pub(crate) fn capture(names: &[&'static str]) -> Self {
+        pub fn capture(names: &[&'static str]) -> Self {
             Self(
                 names
                     .iter()
@@ -5957,9 +5831,7 @@ Always send emails from contact@example.com
         home
     }
 
-    pub(crate) fn tree_digest(
-        dir: &Path,
-    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    pub fn tree_digest(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
         use sha2::Digest;
         let mut out = std::collections::BTreeMap::new();
         let mut stack = vec![dir.to_path_buf()];

@@ -50,8 +50,8 @@ A review worktree is disposable only when removing it loses nothing:
 It is never force-removed, and only a `<slug>--review-<id>` directory directly under
 `.kronn/worktrees/` qualifies. A kept worktree is retried by the sweep.
 
-[src: file: backend/src/core/worktree.rs:1593-1659#create_review_worktree]
-[src: file: backend/src/core/worktree.rs:1681-1713#release_review_worktree]
+[src: file: backend/src/core/worktree.rs:2060-2126#create_review_worktree]
+[src: file: backend/src/core/worktree.rs:2144-2176#release_review_worktree]
 [src: file: backend/src/api/discussions/crud.rs:839-870#provision_review_workspace]
 
 ## Agents cannot move a main checkout
@@ -64,7 +64,16 @@ repository's `.git/info/exclude`, so a user project's `git status` stays clean w
 touching its tracked `.gitignore` — tested). The shim refuses
 `git checkout`, `git switch`, `git reset` and `git stash` (except `stash list` and
 `stash show`) when the repository is a **main checkout** (its git dir is its common
-git dir). The agent sees:
+git dir). KT-1753 adds the commands that discard the owner's work just as surely:
+`git restore` of the whole tree (`.` in any spelling such as `./` or `./.`, the
+top-level pathspecs `:/`, `:/*` and `:(top)`, a path that resolves to the top level
+itself, `..` from a sub-directory, a restore whose pathspecs only exclude (`:!x`,
+`:^x`, `:(exclude)x`, and behind the top-level magic `:/!x`, `:/^x`), and one that reads
+its pathspecs from a file; `--staged` alone is harmless), `git clean` unless it
+is a dry run (`-n`, `--dry-run`) and a forced `git branch` (`-f`, `--force`, `-D`, and
+the forced rename or copy `-M`, `-C`, `--move --force`, `--copy --force`; `-d`, a plain
+`-m` and listing pass, and the value of an option such as `--sort -refname` is not read
+as an option). The agent sees:
 
 ```
 kronn: refused 'git checkout' in /path/to/project, the project's main checkout.
@@ -73,8 +82,11 @@ Work in a dedicated worktree instead (git worktree add <dir> <rev>), or ask the 
 Nothing was changed.
 ```
 
-A linked worktree (an agent's own checkout, a task worker's lane, a review) and
-every other git command go straight to the real git. `-C <dir>` and git's global
+A linked worktree (an agent's own checkout, a task worker's lane, a review), a
+throwaway repository under the agent's own `$TMPDIR` (a test fixture made with
+`tempfile`, KT-1719: a worker can run the git-based test suites) and every other
+git command go straight to the real git. A `$TMPDIR` that is `/`, the home folder
+or a folder above it exempts nothing. `-C <dir>` and git's global
 options are followed, so `git -C /main checkout` from a worktree is refused too.
 
 The human's confirmation is `KRONN_MAIN_CHECKOUT_GIT_CONFIRMED=1` in the launch

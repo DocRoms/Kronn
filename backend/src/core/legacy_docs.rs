@@ -67,7 +67,7 @@ pub struct LegacyMigrationReport {
 }
 
 impl LegacyMigrationReport {
-    pub(crate) fn skipped(reason: impl Into<String>) -> Self {
+    pub fn skipped(reason: impl Into<String>) -> Self {
         Self {
             migrated: false,
             skip_reason: reason.into(),
@@ -86,7 +86,12 @@ pub fn is_kronn_managed_docs(docs_dir: &Path) -> bool {
     let Ok(content) = fs::read_to_string(&agents) else {
         return false;
     };
-    let first_line = first_content_line(&content);
+    is_kronn_signature(&content)
+}
+
+/// Whether `content` (an `AGENTS.md`) opens with Kronn's signature line.
+pub fn is_kronn_signature(content: &str) -> bool {
+    let first_line = first_content_line(content);
     KRONN_SIGNATURE_LINES
         .iter()
         .any(|s| first_line.trim() == *s)
@@ -229,8 +234,7 @@ pub fn move_user_docs_to_legacy_in(
 ///   - it must not be confused with the project's templated docs
 ///   - we want a single source of truth for the wording (one place
 ///     to update if the message changes across releases)
-pub(crate) const LEGACY_README_BODY: &str =
-    "# Legacy docs — preserved from before Kronn bootstrap\n\
+pub const LEGACY_README_BODY: &str = "# Legacy docs — preserved from before Kronn bootstrap\n\
 \n\
 This folder holds documentation that lived in `docs/` BEFORE this project was \
 onboarded to Kronn. The audit moved it here automatically so the freshly-\
@@ -357,7 +361,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
         let template = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs/AGENTS.md"),
+            std::path::Path::new(crate::BACKEND_DIR).join("../templates/docs/AGENTS.md"),
         )
         .unwrap();
         assert!(template.trim_start().starts_with("<!--"));

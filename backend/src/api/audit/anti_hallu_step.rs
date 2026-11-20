@@ -105,11 +105,18 @@ fn canonical_block_for_today() -> String {
 pub fn apply(project_path: &Path) -> std::io::Result<AntiHalluApplyResult> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     let agents_md = docs_dir.join("AGENTS.md");
-    if !agents_md.is_file() {
-        return Ok(AntiHalluApplyResult::FileMissing);
-    }
-
-    let original = std::fs::read_to_string(&agents_md)?;
+    // KT-1595: step 0 runs on every audit (resumes included) and from the
+    // inject route, so the file is read and replaced through the rooted
+    // primitive under the project. A link at `AGENTS.md` or in a parent folder
+    // (another project's file, a swapped `docs`) is refused with an error:
+    // Kronn's section is never written through it.
+    let original_bytes = match crate::core::fs_guard::guarded_read(project_path, &agents_md) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(AntiHalluApplyResult::FileMissing),
+        Err(e) => return Err(e),
+    };
+    let original = String::from_utf8(original_bytes.clone())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let (mut new_content, result) = transform(&original);
     // The inserted Kronn blocks name the project's docs root (KT-1192).
     let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
@@ -120,7 +127,13 @@ pub fn apply(project_path: &Path) -> std::io::Result<AntiHalluApplyResult> {
             .replace(body, &docs_root.relocate(body));
     }
     if !matches!(result, AntiHalluApplyResult::NoOp) {
-        std::fs::write(&agents_md, new_content)?;
+        crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+            project_path,
+            &agents_md,
+            &new_content,
+            &original_bytes,
+        )
+        .map_err(std::io::Error::other)?;
     }
     Ok(result)
 }
@@ -128,7 +141,7 @@ pub fn apply(project_path: &Path) -> std::io::Result<AntiHalluApplyResult> {
 /// Pure transformation — extracted so we can unit-test without touching the
 /// filesystem. Takes the current file content, returns the new content +
 /// what changed.
-pub(crate) fn transform(content: &str) -> (String, AntiHalluApplyResult) {
+pub fn transform(content: &str) -> (String, AntiHalluApplyResult) {
     // First, ensure the self-describing spec-pointer header is at the top.
     // `spec_added` tracks whether we changed anything so the headline
     // result reflects a write even when the anti-hallu section is already
@@ -720,7 +733,7 @@ mod tests {
         // placeholder). A drift here = the section in newly-bootstrapped
         // projects diverges from what subsequent audits would refresh,
         // creating a churning loop on every re-audit.
-        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let template_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("backend has a parent")
             .join("templates/docs/AGENTS.md");
@@ -747,6 +760,72 @@ mod tests {
         assert_eq!(
             template_body_trimmed, const_body,
             "templates/docs/AGENTS.md anti-hallu section body must match ANTI_HALLU_SECTION_BODY const",
+        );
+    }
+}
+
+/// KT-1595 — `apply` runs on every audit (resumes included) and from the
+/// inject route; these tests are not behind `full-tests` because they are the
+/// swap guarantee.
+#[cfg(all(test, unix))] // creates symlinks through std::os::unix
+mod apply_link_tests {
+    use super::*;
+
+    const AGENTS: &str = "# Project\n\nplain content\n";
+
+    #[test]
+    fn a_link_at_agents_md_is_refused_and_the_file_behind_it_is_untouched() {
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let other = tempfile::TempDir::new().unwrap();
+        std::fs::write(other.path().join("AGENTS.md"), AGENTS).unwrap();
+        std::os::unix::fs::symlink(other.path().join("AGENTS.md"), docs.join("AGENTS.md")).unwrap();
+
+        let outcome = apply(project.path());
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(other.path().join("AGENTS.md")).unwrap(),
+            AGENTS
+        );
+    }
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_read_never_receives_the_section() {
+        use crate::core::fs_guard::swap_probe;
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("AGENTS.md"), AGENTS).unwrap();
+        let other = tempfile::TempDir::new().unwrap();
+        std::fs::write(other.path().join("AGENTS.md"), AGENTS).unwrap();
+        swap_probe::arm_after(&docs, other.path(), 1);
+
+        let _ = apply(project.path());
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(other.path().join("AGENTS.md")).unwrap(),
+            AGENTS
+        );
+        assert_eq!(std::fs::read_dir(other.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_regular_agents_md_still_gets_the_section() {
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("AGENTS.md"), AGENTS).unwrap();
+        assert_eq!(
+            apply(project.path()).unwrap(),
+            AntiHalluApplyResult::Inserted
+        );
+        let after = std::fs::read_to_string(docs.join("AGENTS.md")).unwrap();
+        assert!(
+            after.contains("kronn:section name=\"anti-hallu\""),
+            "{after}"
         );
     }
 }

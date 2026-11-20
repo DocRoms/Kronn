@@ -1,17 +1,18 @@
 //! Shared git operation helpers used by both project and discussion endpoints.
 
 use crate::core::cmd::sync_cmd;
+use crate::core::commit_policy::CommitPolicy;
 use crate::models::*;
 use std::path::Path;
 
 const PROJECT_GIT_GRAPH_LIMIT: usize = 80;
-pub(crate) const GIT_COMMIT_PAGE_DEFAULT: u32 = 40;
-pub(crate) const GIT_COMMIT_PAGE_MAX: u32 = 100;
+pub const GIT_COMMIT_PAGE_DEFAULT: u32 = 40;
+pub const GIT_COMMIT_PAGE_MAX: u32 = 100;
 
 /// Parse `git diff --name-status <base>...HEAD` output into structured file
 /// statuses. Each non-rename line is `<code>\t<path>`; rename/copy lines are
 /// `R<score>\t<old>\t<new>` (we keep the destination path).
-pub(crate) fn parse_committed_diff(diff_output: &str) -> Vec<GitFileStatus> {
+pub fn parse_committed_diff(diff_output: &str) -> Vec<GitFileStatus> {
     diff_output
         .lines()
         .filter_map(|line| {
@@ -75,7 +76,7 @@ fn run_git_commit_page(
     limit: u32,
 ) -> Result<(Vec<GitCommitSummary>, u32, bool), String> {
     let (offset, limit) = normalized_commit_page(offset, limit);
-    let count = crate::core::cmd::git_cmd()
+    let count = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["rev-list", "--count", range, "--"])
         .current_dir(repo_path)
         .output()
@@ -93,7 +94,7 @@ fn run_git_commit_page(
 
     let skip = format!("--skip={offset}");
     let max_count = format!("--max-count={limit}");
-    let log = crate::core::cmd::git_cmd()
+    let log = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "log",
             "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s",
@@ -123,7 +124,7 @@ pub fn run_git_range_page(
     commit_limit: u32,
 ) -> Result<(Vec<GitFileStatus>, Vec<GitCommitSummary>, u32, bool), String> {
     let range = format!("{base_sha}..{head_sha}");
-    let diff = crate::core::cmd::git_cmd()
+    let diff = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["diff", "--name-status", &range, "--"])
         .current_dir(repo_path)
         .output()
@@ -148,7 +149,7 @@ pub fn run_git_diff_range(
     file_path: &str,
 ) -> Result<GitDiffResponse, String> {
     let range = format!("{base_sha}..{head_sha}");
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["diff", &range, "--", file_path])
         .current_dir(repo_path)
         .output()
@@ -199,7 +200,7 @@ pub fn run_git_status_page_without_pr_lookup(
 /// Selected discussion workspaces replace branch-relative evidence with their
 /// durable base..head range. Skip the redundant branch diff/count/log while
 /// still collecting the independent working-tree and repository metadata.
-pub(crate) fn run_git_status_without_commit_evidence(
+pub fn run_git_status_without_commit_evidence(
     repo_path: &Path,
     github_env: &[(String, String)],
 ) -> Result<GitStatusResponse, String> {
@@ -221,7 +222,7 @@ fn run_git_status_impl(
     lookup_pr: Option<&[(String, String)]>,
 ) -> Result<GitStatusResponse, String> {
     let run = |args: &[&str]| -> Result<String, String> {
-        let output = crate::core::cmd::git_cmd()
+        let output = crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -230,7 +231,7 @@ fn run_git_status_impl(
     };
 
     let run_with_status = |args: &[&str]| -> (String, bool) {
-        match crate::core::cmd::git_cmd()
+        match crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -277,7 +278,10 @@ fn run_git_status_impl(
     let is_default_branch = !default_branch.is_empty() && branch == default_branch;
 
     // Parse porcelain v1 status
-    let status_output = run(&["status", "--porcelain=v1", "-u"])?;
+    let status_output = run(&crate::core::lane_git::with_ignore_submodules(
+        repo_path,
+        &["status", "--porcelain=v1", "-u"],
+    ))?;
     let files: Vec<GitFileStatus> = status_output
         .lines()
         .filter(|l| l.len() >= 3)
@@ -435,14 +439,14 @@ fn run_git_status_impl(
 }
 
 fn run_git(repo_path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    crate::core::cmd::git_cmd()
+    crate::core::lane_git::git_or_refuse(repo_path)
         .args(args)
         .current_dir(repo_path)
         .output()
         .map_err(|error| format!("Failed to run git: {error}"))
 }
 
-fn git_output(repo_path: &Path, args: &[&str]) -> Result<String, String> {
+pub fn git_output(repo_path: &Path, args: &[&str]) -> Result<String, String> {
     let output = run_git(repo_path, args)?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -587,7 +591,13 @@ pub fn run_git_switch_branch(
         .find(|candidate| candidate.name == branch)
         .ok_or_else(|| "Branche introuvable. Actualisez la liste puis réessayez.".to_string())?;
 
-    let dirty = git_output(repo_path, &["status", "--porcelain=v1", "-uall"])?;
+    let dirty = git_output(
+        repo_path,
+        &crate::core::lane_git::with_ignore_submodules(
+            repo_path,
+            &["status", "--porcelain=v1", "-uall"],
+        ),
+    )?;
     if !dirty.is_empty() {
         return Err(
             "Le changement de branche est bloqué : le projet contient des modifications locales. Committez ou mettez-les de côté explicitement, puis réessayez."
@@ -631,7 +641,7 @@ pub fn run_git_switch_branch(
 /// Supports HTTPS, SSH URLs and SCP-like Git remotes. Local filesystem
 /// remotes intentionally return `None`. Any credentials embedded in an HTTP
 /// remote are removed before the URL reaches the frontend.
-pub(crate) fn normalize_git_remote_web_url(raw: &str) -> Option<String> {
+pub fn normalize_git_remote_web_url(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
@@ -675,7 +685,7 @@ pub(crate) fn normalize_git_remote_web_url(raw: &str) -> Option<String> {
 }
 
 fn git_remote_web_url(repo_path: &Path) -> Option<String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output()
@@ -692,7 +702,7 @@ fn git_remote_web_url(repo_path: &Path) -> Option<String> {
 /// Returns an empty string when none resolves (detached / fresh repo).
 pub fn resolve_default_branch(repo_path: &Path) -> String {
     let ok = |args: &[&str]| -> bool {
-        crate::core::cmd::git_cmd()
+        crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -721,7 +731,7 @@ pub fn run_git_diff_committed(
     file_path: &str,
 ) -> Result<GitDiffResponse, String> {
     let git_stdout = |args: &[&str]| -> String {
-        crate::core::cmd::git_cmd()
+        crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -748,7 +758,7 @@ pub fn run_git_diff_committed(
 
 pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse, String> {
     let run_diff = |args: &[&str]| -> String {
-        crate::core::cmd::git_cmd()
+        crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -757,9 +767,15 @@ pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse
     };
 
     // Unstaged diff
-    let unstaged = run_diff(&["diff", "--", file_path]);
+    let unstaged = run_diff(&crate::core::lane_git::with_ignore_submodules(
+        repo_path,
+        &["diff", "--", file_path],
+    ));
     // Staged diff
-    let staged = run_diff(&["diff", "--cached", "--", file_path]);
+    let staged = run_diff(&crate::core::lane_git::with_ignore_submodules(
+        repo_path,
+        &["diff", "--cached", "--", file_path],
+    ));
 
     // For untracked or newly added files, git diff returns nothing.
     let untracked_diff = if unstaged.is_empty() && staged.is_empty() {
@@ -805,7 +821,7 @@ pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse
     })
 }
 
-fn parse_git_blame_porcelain(output: &str) -> Vec<GitBlameLine> {
+pub fn parse_git_blame_porcelain(output: &str) -> Vec<GitBlameLine> {
     let mut lines = Vec::new();
     let mut commit = String::new();
     let mut line_number = 0u32;
@@ -857,7 +873,7 @@ fn parse_git_blame_porcelain(output: &str) -> Vec<GitBlameLine> {
 
 /// Return one Git author/date annotation per current working-tree line.
 pub fn run_git_blame(repo_path: &Path, file_path: &str) -> Result<GitBlameResponse, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["blame", "--line-porcelain", "--", file_path])
         .current_dir(repo_path)
         .output()
@@ -877,13 +893,13 @@ pub fn run_git_blame(repo_path: &Path, file_path: &str) -> Result<GitBlameRespon
 }
 
 /// How many containing branches we report before truncating.
-const COMMIT_BRANCHES_CAP: usize = 12;
+pub const COMMIT_BRANCHES_CAP: usize = 12;
 
 /// A commit-ish is only ever accepted as a hex hash here. It is interpolated
 /// into a git invocation, and blame only ever hands us hashes — so anything
 /// else is either a bug or an attempt, and both deserve a refusal rather than
 /// a best effort.
-fn valid_commit_ish(sha: &str) -> bool {
+pub fn valid_commit_ish(sha: &str) -> bool {
     let len = sha.len();
     (7..=40).contains(&len) && sha.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -904,7 +920,7 @@ pub fn run_git_commit_detail(
     // Unit separator between fields, so a subject containing tabs or pipes
     // can't shift the parse.
     let format = "%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%s%x1f%b";
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["show", "--no-patch", &format!("--format={format}"), sha])
         .current_dir(repo_path)
         .output()
@@ -924,7 +940,7 @@ pub fn run_git_commit_detail(
     // `diff-tree` rather than `git show --name-only`: `--no-patch` would have
     // suppressed the file list too, and a merge commit prints nothing without
     // `-m` — so an empty result here means "nothing attributable", not an error.
-    let files = crate::core::cmd::git_cmd()
+    let files = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "diff-tree",
             "--no-commit-id",
@@ -943,7 +959,7 @@ pub fn run_git_commit_detail(
         })
         .unwrap_or(0);
 
-    let mut branches: Vec<String> = crate::core::cmd::git_cmd()
+    let mut branches: Vec<String> = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "branch",
             "-a",
@@ -982,7 +998,7 @@ pub fn run_git_commit_detail(
 
 /// Bytes of patch we are willing to ship for one commit. Past this the reader
 /// is not reading anymore, and the JSON response starts costing real memory.
-const COMMIT_PATCH_MAX_BYTES: usize = 400 * 1024;
+pub const COMMIT_PATCH_MAX_BYTES: usize = 400 * 1024;
 
 /// KT-75 — the historical patch of one commit: `parent → commit`, every file,
 /// every hunk. `--root` is what makes the first commit of a repository work at
@@ -995,7 +1011,7 @@ pub fn run_git_commit_patch(
         return Err("invalid commit hash".to_string());
     }
 
-    let header = crate::core::cmd::git_cmd()
+    let header = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["show", "--no-patch", "--format=%H%x1f%h%x1f%s", sha])
         .current_dir(repo_path)
         .output()
@@ -1014,7 +1030,7 @@ pub fn run_git_commit_patch(
 
     // No parent listed → root commit. Asked separately because `--root` changes
     // what the patch means, and the UI says so.
-    let is_root = crate::core::cmd::git_cmd()
+    let is_root = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["rev-list", "--parents", "-n", "1", sha])
         .current_dir(repo_path)
         .output()
@@ -1027,7 +1043,7 @@ pub fn run_git_commit_patch(
         .unwrap_or(false);
 
     // `-m` splits a merge into one patch per parent instead of printing nothing.
-    let patch_out = crate::core::cmd::git_cmd()
+    let patch_out = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "show",
             "--format=",
@@ -1065,7 +1081,7 @@ pub fn run_git_commit_patch(
         full.to_string()
     };
 
-    let files_changed = crate::core::cmd::git_cmd()
+    let files_changed = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "diff-tree",
             "--no-commit-id",
@@ -1103,20 +1119,32 @@ pub fn run_git_commit(
     amend: bool,
     sign: bool,
 ) -> Result<GitCommitResponse, String> {
-    run_git_commit_with_child_lock(repo_path, files, message, amend, sign, None)
+    commit_explicit_paths(repo_path, files, message, amend, sign, None, None)
 }
 
 /// Stage each explicit path (`git add`, or `git rm --cached` for a path that no
 /// longer exists) and return how many were staged. A path git refuses is skipped.
-fn stage_explicit_paths(repo_path: &Path, clean_files: &[&str]) -> Result<usize, String> {
+fn stage_explicit_paths(
+    repo_path: &Path,
+    clean_files: &[&str],
+    worker: bool,
+) -> Result<usize, String> {
     let mut added = 0;
     for &clean_file in clean_files {
         let file_abs = repo_path.join(clean_file);
 
         if file_abs.exists() {
-            let add_output = crate::core::cmd::git_cmd()
+            if worker {
+                refuse_new_embedded_repository(repo_path, clean_file, &file_abs)?;
+                // A submodule is staged by its sha: `git add` would compare its
+                // working tree, which starts a `git status` inside it.
+                if stage_gitlink_by_sha(repo_path, clean_file, &file_abs)? {
+                    added += 1;
+                    continue;
+                }
+            }
+            let add_output = git_in(repo_path, worker)?
                 .args(["add", "--", clean_file])
-                .current_dir(repo_path)
                 .output()
                 .map_err(|e| format!("Failed to run git add: {}", e))?;
             if add_output.status.success() {
@@ -1129,9 +1157,8 @@ fn stage_explicit_paths(repo_path: &Path, clean_files: &[&str]) -> Result<usize,
                 );
             }
         } else {
-            let rm_output = crate::core::cmd::git_cmd()
+            let rm_output = git_in(repo_path, worker)?
                 .args(["rm", "--cached", "--ignore-unmatch", "--", clean_file])
-                .current_dir(repo_path)
                 .output();
             if rm_output.map(|o| o.status.success()).unwrap_or(false) {
                 added += 1;
@@ -1141,34 +1168,152 @@ fn stage_explicit_paths(repo_path: &Path, clean_files: &[&str]) -> Result<usize,
     Ok(added)
 }
 
-/// Give the repository a fallback git identity when none is configured.
-fn ensure_git_identity(repo_path: &Path) {
-    let has_user = crate::core::cmd::git_cmd()
-        .args(["config", "user.name"])
-        .current_dir(repo_path)
+/// When `clean_file` is itself a gitlink of the worktree's index, stage the
+/// submodule's current `HEAD` with `update-index --cacheinfo` and return `true`
+/// (`git add` would run `git status` inside the submodule, where a program its
+/// configuration names would run). A gitlink whose submodule is not materialised has
+/// nothing to stage: `true` too. Any other path returns `false`.
+fn stage_gitlink_by_sha(
+    repo_path: &Path,
+    clean_file: &str,
+    file_abs: &Path,
+) -> Result<bool, String> {
+    let wanted = clean_file.trim_end_matches('/');
+    let listed = git_in(repo_path, true)?
+        .args(["ls-files", "--stage", "-z", "--", wanted])
         .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false);
-    if !has_user {
-        let _ = crate::core::cmd::git_cmd()
-            .args(["config", "user.name", "Kronn"])
-            .current_dir(repo_path)
-            .status();
-        let _ = crate::core::cmd::git_cmd()
-            .args(["config", "user.email", "kronn@localhost"])
-            .current_dir(repo_path)
-            .status();
+        .map_err(|e| format!("Failed to run git ls-files: {e}"))?;
+    let is_gitlink = listed.stdout.split(|byte| *byte == 0).any(|entry| {
+        let entry = String::from_utf8_lossy(entry);
+        entry
+            .split_once('\t')
+            .is_some_and(|(meta, path)| meta.starts_with("160000 ") && path == wanted)
+    });
+    if !is_gitlink {
+        return Ok(false);
+    }
+    if std::fs::symlink_metadata(file_abs.join(".git")).is_err() {
+        return Ok(true);
+    }
+    // The submodule's own lane: vetted, pinned, and refused when it is not one.
+    let head = crate::core::lane_git::git(file_abs)?
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()
+        .map_err(|e| format!("Failed to read the submodule HEAD: {e}"))?;
+    let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if !head.status.success() || sha.len() < 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "cannot read the HEAD of the submodule `{wanted}`: {}",
+            String::from_utf8_lossy(&head.stderr).trim()
+        ));
+    }
+    let update = git_in(repo_path, true)?
+        .args([
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{sha},{wanted}"),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run git update-index: {e}"))?;
+    if update.status.success() {
+        Ok(true)
+    } else {
+        Err(format!(
+            "git update-index failed for `{wanted}`: {}",
+            String::from_utf8_lossy(&update.stderr).trim()
+        ))
     }
 }
 
-/// Run `git commit <commit_args>` and return the new short HEAD, optionally
-/// retaining the backend's data-directory lock in Git and any hook descendants
-/// across backend death.
+/// The first nested git repository at or under `path` (a `.git` entry), looking a
+/// few levels down and skipping build output.
+fn embedded_repository(path: &Path, depth: usize) -> Option<std::path::PathBuf> {
+    if path.join(".git").exists() {
+        return Some(path.to_path_buf());
+    }
+    if depth == 0 || !path.is_dir() {
+        return None;
+    }
+    let entries = std::fs::read_dir(path).ok()?;
+    for entry in entries.flatten().take(5_000) {
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some("node_modules" | "target" | ".git")) {
+            continue;
+        }
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if let Some(found) = embedded_repository(&entry.path(), depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// A repository a worker created inside its worktree is never staged by Kronn: it
+/// would become a gitlink whose own configuration (the worker wrote it) Kronn's
+/// later `git add -A` / `commit -a` would read. A gitlink the index already holds
+/// (a real submodule) is fine.
+fn refuse_new_embedded_repository(
+    repo_path: &Path,
+    clean_file: &str,
+    file_abs: &Path,
+) -> Result<(), String> {
+    let Some(nested) = embedded_repository(file_abs, 4) else {
+        return Ok(());
+    };
+    let relative = nested.strip_prefix(repo_path).unwrap_or(&nested);
+    let known = git_in(repo_path, true)?
+        .args(["ls-files", "--stage", "--"])
+        .arg(relative)
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).starts_with("160000 "))
+        .unwrap_or(false);
+    if known {
+        return Ok(());
+    }
+    Err(format!(
+        "EmbeddedRepository: `{clean_file}` contains a git repository the task created at `{}`; \
+         Kronn does not stage a new embedded repository (its configuration is worker-written). \
+         Remove its `.git` or leave it out of the commit.",
+        relative.display()
+    ))
+}
+
+/// `git` in `repo_path`: for a commit Kronn makes for a worker (`worker`), the
+/// lane's pinned builder ([`crate::core::lane_git`]); for a commit the user asks
+/// for in their own checkout, plain git with the repository's hooks. A commit the
+/// user asks for in a Kronn-managed worktree (a discussion's, an agent's) is the
+/// pinned, hook-less command too: that worktree is written by an agent, so its
+/// hooks and `.git` pointer are not the user's.
+fn git_in(repo_path: &Path, worker: bool) -> Result<std::process::Command, String> {
+    if worker {
+        return crate::core::lane_git::git(repo_path);
+    }
+    crate::core::lane_git::git_keeping_owner_hooks(repo_path)
+}
+
+/// Run `git commit <commit_args>` as the project's commit identity and return
+/// the new short HEAD, optionally retaining the backend's data-directory lock in
+/// Git and any hook descendants across backend death.
+///
+/// `hooks` is `None` for a commit the user asked for in their own checkout (the
+/// repository's hooks run, as ever). `Some((hooks_policy, gate))` is a commit
+/// Kronn makes for a worker (KT-1745): git runs no hook that lives in the
+/// worktree, and the gating hook `gate` runs first as `hooks_policy` allows, its
+/// refusal being a `HookRefused`. The identity reaches git as `GIT_AUTHOR_*` /
+/// `GIT_COMMITTER_*`; no config is written (KT-1750).
 fn run_commit_command(
     repo_path: &Path,
     commit_args: &[&str],
     data_dir_lock: Option<&std::fs::File>,
+    hooks: Option<(crate::models::WorkerCommitHooks, &str)>,
+    policy: &CommitPolicy,
+    amend: bool,
 ) -> Result<String, String> {
+    if let Some((hooks_policy, gate)) = hooks {
+        crate::core::commit_hooks::run_gating_hook(repo_path, hooks_policy, gate)
+            .map_err(|refusal| refusal.to_string())?;
+    }
     // Only `git commit` executes hooks. Keep the inherited descriptor alive
     // through this spawn; descendants retain it until the whole hook tree exits.
     let child_lock = data_dir_lock
@@ -1177,8 +1322,9 @@ fn run_commit_command(
         .map_err(|error| {
             format!("Failed to inherit data-directory lock for git commit: {error}")
         })?;
-    let mut commit_command = crate::core::cmd::git_cmd();
-    commit_command.args(commit_args).current_dir(repo_path);
+    let mut commit_command = git_in(repo_path, hooks.is_some())?;
+    commit_command.args(commit_args);
+    policy.apply_identity(&mut commit_command, amend);
     #[cfg(unix)]
     if let Some(child_lock) = child_lock.as_ref() {
         crate::core::config::inherit_data_dir_lock_on_command(&mut commit_command, child_lock);
@@ -1200,9 +1346,8 @@ fn run_commit_command(
         return Err(format!("git commit failed: {}", stderr.trim()));
     }
 
-    let hash_output = crate::core::cmd::git_cmd()
+    let hash_output = git_in(repo_path, hooks.is_some())?
         .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("Failed to get commit hash: {}", e))?;
 
@@ -1213,6 +1358,9 @@ fn run_commit_command(
 
 /// Stage and commit explicit paths, optionally retaining the backend's
 /// data-directory lock in Git and any hook descendants across backend death.
+///
+/// This is a commit Kronn makes for a worker: no hook of the worktree runs
+/// (KT-1745), see [`run_git_commit_for_worker`].
 pub fn run_git_commit_with_child_lock(
     repo_path: &Path,
     files: &[String],
@@ -1221,22 +1369,68 @@ pub fn run_git_commit_with_child_lock(
     sign: bool,
     data_dir_lock: Option<&std::fs::File>,
 ) -> Result<GitCommitResponse, String> {
+    run_git_commit_for_worker(
+        repo_path,
+        files,
+        message,
+        amend,
+        sign,
+        data_dir_lock,
+        crate::models::WorkerCommitHooks::default(),
+    )
+}
+
+/// [`run_git_commit_with_child_lock`] under the project's worker commit hook
+/// policy (KT-1745): git never resolves a hook inside the worktree, and the
+/// `pre-commit` hook runs only as `policy` allows.
+pub fn run_git_commit_for_worker(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    amend: bool,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+    policy: crate::models::WorkerCommitHooks,
+) -> Result<GitCommitResponse, String> {
+    commit_explicit_paths(
+        repo_path,
+        files,
+        message,
+        amend,
+        sign,
+        data_dir_lock,
+        Some(policy),
+    )
+}
+
+fn commit_explicit_paths(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    amend: bool,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+    hooks_policy: Option<crate::models::WorkerCommitHooks>,
+) -> Result<GitCommitResponse, String> {
     // git add each file individually, skip missing files gracefully
     let clean_files = files
         .iter()
         .map(|file| file.trim_matches('"'))
         .collect::<Vec<_>>();
-    if stage_explicit_paths(repo_path, &clean_files)? == 0 {
+    let worker = hooks_policy.is_some();
+    if stage_explicit_paths(repo_path, &clean_files, worker)? == 0 {
         return Err("No files could be staged".to_string());
     }
 
-    ensure_git_identity(repo_path);
+    let policy = CommitPolicy::for_repo(repo_path);
 
     let mut commit_args = vec!["commit"];
     if amend {
         commit_args.push("--amend");
     }
-    commit_args.push("-s"); // signoff by default
+    if policy.signoff {
+        commit_args.push("-s");
+    }
     if sign {
         commit_args.push("-S");
     } else {
@@ -1252,7 +1446,14 @@ pub fn run_git_commit_with_child_lock(
     commit_args.push("--");
     commit_args.extend(clean_files);
 
-    let hash = run_commit_command(repo_path, &commit_args, data_dir_lock)?;
+    let hash = run_commit_command(
+        repo_path,
+        &commit_args,
+        data_dir_lock,
+        hooks_policy.map(|hooks_policy| (hooks_policy, "pre-commit")),
+        &policy,
+        amend,
+    )?;
 
     Ok(GitCommitResponse {
         hash,
@@ -1263,19 +1464,29 @@ pub fn run_git_commit_with_child_lock(
 /// Whether `repo_path` is in the middle of a merge: git keeps `MERGE_HEAD` in
 /// the worktree's own git dir, so this holds per linked worktree.
 pub fn merge_in_progress(repo_path: &Path) -> bool {
-    crate::core::cmd::git_cmd()
-        .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
-        .current_dir(repo_path)
-        .output()
+    crate::core::lane_git::git(repo_path)
+        .and_then(|mut git| {
+            git.args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                .output()
+                .map_err(|error| error.to_string())
+        })
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// Run a `git diff`-style command and split its NUL-separated path list.
+/// Run a `git diff`-style command on a worker's worktree and split its
+/// NUL-separated path list.
 fn git_path_list(repo_path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(args)
-        .current_dir(repo_path)
+    let mut git = crate::core::lane_git::git(repo_path)?;
+    if let Some((subcommand, rest)) = args.split_first() {
+        git.arg(subcommand)
+            .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(crate::core::lane_git::ignore_submodules(
+                repo_path, subcommand,
+            ))
+            .args(rest);
+    }
+    let output = git
         .output()
         .map_err(|e| format!("Failed to run git {}: {}", args.join(" "), e))?;
     if !output.status.success() {
@@ -1296,9 +1507,8 @@ fn git_path_list(repo_path: &Path, args: &[&str]) -> Result<Vec<String>, String>
 /// base. Several bases (a criss-cross history) widen the set, never narrow it;
 /// with none (unrelated histories) every path where the two sides differ counts.
 fn paths_changed_by_merged_side(repo_path: &Path) -> Result<Vec<String>, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(repo_path)?
         .args(["merge-base", "--all", "HEAD", "MERGE_HEAD"])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("Failed to run git merge-base: {}", e))?;
     let mut bases = String::from_utf8_lossy(&output.stdout)
@@ -1346,6 +1556,26 @@ pub fn run_git_merge_commit_with_child_lock(
     sign: bool,
     data_dir_lock: Option<&std::fs::File>,
 ) -> Result<GitCommitResponse, String> {
+    run_git_merge_commit_for_worker(
+        repo_path,
+        files,
+        message,
+        sign,
+        data_dir_lock,
+        crate::models::WorkerCommitHooks::default(),
+    )
+}
+
+/// [`run_git_merge_commit_with_child_lock`] under the project's worker commit
+/// hook policy (KT-1745).
+pub fn run_git_merge_commit_for_worker(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+    hooks_policy: crate::models::WorkerCommitHooks,
+) -> Result<GitCommitResponse, String> {
     let clean_files = files
         .iter()
         .map(|file| file.trim_matches('"'))
@@ -1377,7 +1607,7 @@ pub fn run_git_merge_commit_with_child_lock(
         ));
     }
 
-    if stage_explicit_paths(repo_path, &clean_files)? == 0 {
+    if stage_explicit_paths(repo_path, &clean_files, true)? == 0 {
         return Err("No files could be staged".to_string());
     }
 
@@ -1438,16 +1668,25 @@ pub fn run_git_merge_commit_with_child_lock(
     };
     let message = message.as_str();
 
-    ensure_git_identity(repo_path);
+    let policy = CommitPolicy::for_repo(repo_path);
 
-    let mut commit_args = vec!["commit", "-s"];
+    let mut commit_args = vec!["commit"];
+    if policy.signoff {
+        commit_args.push("-s");
+    }
     commit_args.push(if sign { "-S" } else { "--no-gpg-sign" });
     commit_args.extend(["-m", message]);
-    let hash = run_commit_command(repo_path, &commit_args, data_dir_lock)?;
+    let hash = run_commit_command(
+        repo_path,
+        &commit_args,
+        data_dir_lock,
+        Some((hooks_policy, "pre-merge-commit")),
+        &policy,
+        false,
+    )?;
 
-    let has_second_parent = crate::core::cmd::git_cmd()
+    let has_second_parent = git_in(repo_path, true)?
         .args(["rev-parse", "-q", "--verify", "HEAD^2"])
-        .current_dir(repo_path)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -1465,7 +1704,7 @@ pub fn run_git_merge_commit_with_child_lock(
 
 /// The HTTPS URL of a GitHub remote (SSH or HTTPS form), without any
 /// credential in it.
-fn github_https_url(remote_url: &str) -> Option<String> {
+pub fn github_https_url(remote_url: &str) -> Option<String> {
     let path = remote_url
         .strip_prefix("git@github.com:")
         .or_else(|| remote_url.strip_prefix("ssh://git@github.com/"))
@@ -1481,21 +1720,23 @@ fn github_https_url(remote_url: &str) -> Option<String> {
 /// in a variable a hook reads by name. It travels as an `http.extraHeader`
 /// scoped to github.com through `GIT_CONFIG_*`, with hooks off, no
 /// credential helper (a repository's could receive it) and TLS verified.
-fn authenticated_push_command(
+pub fn authenticated_push_command(
     repo_path: &Path,
     https_url: &str,
     branch: &str,
     token: &str,
-) -> std::process::Command {
+) -> Result<std::process::Command, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let header = format!(
         "Authorization: Basic {}",
         STANDARD.encode(format!("x-access-token:{token}"))
     );
-    let mut cmd = crate::core::cmd::git_cmd();
+    // KT-1745 — the repository is the registered one (the pointer of a managed
+    // worktree is never followed): a configuration the worker wrote cannot pick
+    // the proxy, the CA, a `url.*.insteadOf` or a program this push, which
+    // carries the token, goes through.
+    let mut cmd = crate::core::lane_git::git(repo_path)?;
     cmd.args([
-        "-c",
-        "core.hooksPath=/dev/null",
         "-c",
         "credential.helper=",
         "-c",
@@ -1506,11 +1747,10 @@ fn authenticated_push_command(
         https_url,
         branch,
     ])
-    .current_dir(repo_path)
     .env("GIT_CONFIG_COUNT", "1")
     .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
     .env("GIT_CONFIG_VALUE_0", header);
-    cmd
+    Ok(cmd)
 }
 
 /// Push the current branch to origin. `github_env` is the project's GitHub
@@ -1520,10 +1760,12 @@ pub fn run_git_push(
     repo_path: &Path,
     github_env: &[(String, String)],
 ) -> Result<GitPushResponse, String> {
-    let branch_output = crate::core::cmd::git_cmd()
+    // KT-1745 — a push from a managed worktree (a discussion's) goes through the
+    // lane builder too: the repository is pinned, never read from the worktree's
+    // `.git` file, and no hook runs.
+    let branch_output = crate::core::lane_git::git(repo_path)?
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["branch", "--show-current"])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("Failed to get branch: {}", e))?;
 
@@ -1538,24 +1780,25 @@ pub fn run_git_push(
         .iter()
         .find(|(name, value)| name == "GH_TOKEN" && !value.is_empty())
         .map(|(_, value)| value.as_str());
-    let authenticated = token.and_then(|token| {
-        let remote_url = crate::core::cmd::git_cmd()
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args(["remote", "get-url", "origin"])
-            .current_dir(repo_path)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-        github_https_url(&remote_url).map(|url| (url, token))
-    });
+    let authenticated = match token {
+        Some(token) => {
+            let remote_url = crate::core::lane_git::git(repo_path)?
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args(["remote", "get-url", "origin"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            github_https_url(&remote_url).map(|url| (url, token))
+        }
+        None => None,
+    };
 
     let mut cmd = match authenticated {
-        Some((url, token)) => authenticated_push_command(repo_path, &url, &branch, token),
+        Some((url, token)) => authenticated_push_command(repo_path, &url, &branch, token)?,
         None => {
             // The user's own credentials (SSH agent, credential helper).
-            let mut cmd = crate::core::cmd::git_cmd();
-            cmd.args(["push", "-u", "origin", &branch])
-                .current_dir(repo_path);
+            let mut cmd = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?;
+            cmd.args(["push", "-u", "origin", &branch]);
             cmd
         }
     };
@@ -1834,7 +2077,7 @@ pub fn run_exec(
 /// Detect the git hosting provider from the remote origin URL.
 /// Returns "github", "gitlab", or "unknown".
 pub fn detect_provider(repo_path: &Path) -> &'static str {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output();
@@ -1859,7 +2102,7 @@ pub fn detect_provider(repo_path: &Path) -> &'static str {
 /// `gh` or `glab` in a repository. They start git there themselves, so they
 /// get the git-host environment, never the backend's (KT-1006); `gh` also
 /// gets the project's GitHub variables (its §4.5 connection), nothing else.
-fn host_cli_command(
+pub fn host_cli_command(
     program: &str,
     repo_path: &Path,
     github_env: &[(String, String)],
@@ -1871,6 +2114,10 @@ fn host_cli_command(
         crate::core::github_connection::apply_launch_env(&mut command, github_env);
     }
     child_env::seal(&mut command, ChildRoute::GitHost, child_env::GITHUB_ENV);
+    // They start git themselves (`gh pr create` runs `git status`): in a managed
+    // worktree that git is pinned to the registered repository, with no hook and
+    // no file-system monitor (KT-1745), never to what the worker's `.git` names.
+    crate::core::lane_git::pin_foreign_command(&mut command, repo_path);
     command
 }
 
@@ -1885,7 +2132,7 @@ pub fn run_create_pr(
     github_env: &[(String, String)],
 ) -> Result<String, String> {
     // Ensure the branch is pushed before creating the PR
-    let has_upstream = crate::core::cmd::git_cmd()
+    let has_upstream = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
         .current_dir(repo_path)
         .output()
@@ -1965,7 +2212,7 @@ const PR_URL_LOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(
 
 type PrUrlCache =
     std::collections::HashMap<(std::path::PathBuf, String), (Option<String>, std::time::Instant)>;
-static PR_URLS: std::sync::LazyLock<std::sync::Mutex<PrUrlCache>> =
+pub static PR_URLS: std::sync::LazyLock<std::sync::Mutex<PrUrlCache>> =
     std::sync::LazyLock::new(Default::default);
 
 /// [`check_pr_url`], reused for [`PR_URL_TTL`] per repository and branch,
@@ -2007,7 +2254,7 @@ pub fn forget_pr_urls(repo_path: &Path) {
 }
 
 /// Run `command`, giving up after `limit`.
-fn output_within(
+pub fn output_within(
     mut command: std::process::Command,
     limit: std::time::Duration,
 ) -> Option<std::process::Output> {
@@ -2116,1217 +2363,4 @@ pub fn default_pr_template(branch: &str) -> String {
 *Created via [Kronn](https://github.com/DocRoms/Kronn)*",
         branch = branch
     )
-}
-
-#[cfg(all(test, feature = "full-tests"))]
-mod tests {
-
-    /// `gh` and `glab` start git in the repository: they get the git-host
-    /// environment and the project's GitHub token, never the backend's.
-    #[cfg(unix)]
-    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
-    #[test]
-    fn gh_and_glab_run_without_the_backend_environment() {
-        use crate::core::child_env::probe;
-        probe::plant_real_sentinel();
-        let bin = tempfile::tempdir().unwrap();
-        let gh_out = probe::env_dumping_program(bin.path(), "gh");
-        let glab_out = probe::env_dumping_program(bin.path(), "glab");
-        let path = format!(
-            "{}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-            bin.path().display()
-        );
-        let repo = |remote: &str| {
-            let dir = tempfile::tempdir().unwrap();
-            for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
-                assert!(crate::core::cmd::git_cmd()
-                    .args(&args)
-                    .current_dir(dir.path())
-                    .status()
-                    .unwrap()
-                    .success());
-            }
-            dir
-        };
-        let github = repo("https://github.com/acme/app.git");
-        let gitlab = repo("https://gitlab.com/acme/app.git");
-        let project_env = vec![("GH_TOKEN".to_string(), "project-token".to_string())];
-        let home = bin.path().to_str().unwrap();
-        let create = probe::with_secret_parent(&path, home, || {
-            check_pr_url(github.path(), "feature", &project_env);
-            check_pr_url(gitlab.path(), "feature", &project_env);
-            host_cli_command("gh", github.path(), &project_env)
-        });
-
-        let gh = probe::read_dump(&gh_out);
-        probe::assert_dump_without_secrets(&gh, &["GH_TOKEN"]);
-        assert_eq!(
-            gh.get("GH_TOKEN").map(String::as_str),
-            Some("project-token"),
-            "gh gets the connected project's token, not the backend's"
-        );
-        let glab = probe::read_dump(&glab_out);
-        probe::assert_dump_without_secrets(&glab, &[]);
-
-        probe::assert_built_without_secrets(&create, &path, &["GH_TOKEN"]);
-        assert_eq!(
-            probe::env_of(&create).get("GH_TOKEN").map(String::as_str),
-            Some("project-token")
-        );
-    }
-
-    #[test]
-    fn github_remotes_map_to_a_credential_free_https_url() {
-        for remote in [
-            "git@github.com:acme/app.git",
-            "ssh://git@github.com/acme/app.git",
-            "https://github.com/acme/app.git",
-            "https://x-access-token:old@github.com/acme/app.git",
-        ] {
-            assert_eq!(
-                github_https_url(remote).as_deref(),
-                Some("https://github.com/acme/app.git"),
-                "{remote}"
-            );
-        }
-        assert_eq!(github_https_url("git@gitlab.com:acme/app.git"), None);
-        assert_eq!(github_https_url("/srv/git/app.git"), None);
-    }
-
-    /// The push token reaches no repository hook: neither in an argument, nor
-    /// in the environment, and the authenticated push runs no hook (B3-10).
-    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
-    #[test]
-    fn a_push_never_shows_its_token_to_a_pre_push_hook() {
-        use std::os::unix::fs::PermissionsExt;
-        let token = "ghp_sentinel_push_token";
-        let base = tempfile::tempdir().unwrap();
-        let remote = base.path().join("remote.git");
-        let repo = base.path().join("repo");
-        let git = |dir: &Path, args: &[&str]| {
-            let output = crate::core::cmd::git_cmd()
-                .args(args)
-                .current_dir(dir)
-                .env("GIT_AUTHOR_NAME", "Fixture")
-                .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
-                .env("GIT_COMMITTER_NAME", "Fixture")
-                .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "git {args:?}: {output:?}");
-        };
-        git(
-            base.path(),
-            &["init", "-q", "--bare", remote.to_str().unwrap()],
-        );
-        git(base.path(), &["init", "-q", repo.to_str().unwrap()]);
-        git(
-            &repo,
-            &["remote", "add", "origin", remote.to_str().unwrap()],
-        );
-        std::fs::write(repo.join("f.txt"), "x").unwrap();
-        git(&repo, &["add", "f.txt"]);
-        git(&repo, &["commit", "-q", "-m", "fixture"]);
-        let dump = base.path().join("hook.dump");
-        let hook = repo.join(".git/hooks/pre-push");
-        std::fs::write(
-            &hook,
-            format!(
-                "#!/bin/sh\n{{ echo \"$@\"; /usr/bin/env; git config --list; }} >> '{}'\n",
-                dump.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let encoded = {
-            use base64::{engine::general_purpose::STANDARD, Engine};
-            STANDARD.encode(format!("x-access-token:{token}"))
-        };
-
-        // A non-GitHub remote: the user's own push, hook included, no token.
-        let env = vec![("GH_TOKEN".to_string(), token.to_string())];
-        let pushed = run_git_push(&repo, &env).unwrap();
-        assert!(pushed.success, "{}", pushed.message);
-        let seen = std::fs::read_to_string(&dump).unwrap();
-        assert!(!seen.contains(token) && !seen.contains(&encoded), "{seen}");
-
-        // The authenticated form: token only in a scoped header, hooks off.
-        std::fs::remove_file(&dump).unwrap();
-        let branch = String::from_utf8(
-            crate::core::cmd::git_cmd()
-                .args(["branch", "--show-current"])
-                .current_dir(&repo)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        let mut command =
-            authenticated_push_command(&repo, remote.to_str().unwrap(), branch.trim(), token);
-        assert!(command
-            .get_args()
-            .all(|arg| !arg.to_string_lossy().contains(token)));
-        assert!(!crate::core::child_env::probe::env_of(&command)
-            .values()
-            .any(|value| value.contains(token)));
-        let output = command.output().unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert!(!dump.exists(), "the authenticated push ran a hook");
-    }
-    #[test]
-    fn status_without_pr_lookup_reports_only_a_link_already_known() {
-        let dir = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let status = crate::core::cmd::git_cmd()
-                .args(args)
-                .current_dir(dir.path())
-                .output()
-                .unwrap()
-                .status;
-            assert!(status.success(), "git {args:?}");
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "init",
-        ]);
-        git(&["checkout", "-q", "-b", "feature"]);
-
-        let unknown = run_git_status_page_without_pr_lookup(dir.path(), 0, 10).unwrap();
-        assert_eq!(unknown.branch, "feature");
-        assert_eq!(unknown.pr_url, None, "no lookup, nothing known");
-
-        PR_URLS.lock().unwrap().insert(
-            (dir.path().to_path_buf(), "feature".to_string()),
-            (
-                Some("https://example.test/pr/7".into()),
-                std::time::Instant::now(),
-            ),
-        );
-        let known = run_git_status_page_without_pr_lookup(dir.path(), 0, 10).unwrap();
-        assert_eq!(known.pr_url.as_deref(), Some("https://example.test/pr/7"));
-        forget_pr_urls(dir.path());
-    }
-
-    #[cfg(unix)] // stands in `sleep` and `echo` for the gh CLI; Windows has neither as a program
-    #[test]
-    fn a_pr_lookup_that_hangs_is_given_up_instead_of_blocking_the_discussion() {
-        // KT-983 — `gh pr view` runs on every git-status; a slow network must
-        // cost at most the limit, never the whole page.
-        let mut command = std::process::Command::new("sleep");
-        command.arg("5");
-        let started = std::time::Instant::now();
-        let output = super::output_within(command, std::time::Duration::from_millis(200));
-        assert!(output.is_none());
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
-        );
-
-        let mut quick = std::process::Command::new("echo");
-        quick.arg("https://example.test/pr/1");
-        let output = super::output_within(quick, std::time::Duration::from_secs(2)).unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            "https://example.test/pr/1"
-        );
-    }
-
-    use super::*;
-
-    #[test]
-    fn exec_refuses_env() {
-        assert!(validate_exec_command("env").is_err());
-        assert!(validate_exec_command("env FOO=1").is_err());
-    }
-
-    #[test]
-    fn exec_refuses_a_read_outside_the_project() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("proj");
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/lib.rs"), "pub fn x() {}").unwrap();
-        for cmd in [
-            "cat /etc/passwd",
-            "cat ../../x",
-            "head -n 3 ../secret",
-            "tail src/../../secret",
-            "find / -name passwd",
-            "stat /etc",
-            "grep -r root /etc",
-            "rg --file=/etc/passwd src",
-            "wc -l /etc/hosts",
-            "du -sh ..",
-            "file /bin/sh",
-            "tree /",
-            "ls /",
-        ] {
-            assert!(
-                validate_exec_command(cmd).is_ok(),
-                "{cmd} passes the allow-list"
-            );
-            assert!(exec_argv(&root, cmd).is_err(), "{cmd} must be refused");
-        }
-        for cmd in [
-            "cat src/lib.rs",
-            "head -n 1 src/lib.rs",
-            "grep -rn \"/api/\" src",
-            "find . -name \"*.rs\"",
-            "ls -la",
-            "wc -l src/lib.rs",
-            "git status",
-        ] {
-            assert!(exec_argv(&root, cmd).is_ok(), "{cmd} must be accepted");
-        }
-    }
-
-    #[cfg(unix)] // creates symlinks through std::os::unix
-    #[test]
-    fn exec_refuses_a_symlink_leaving_the_project() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("proj");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(dir.path().join("secret"), "s").unwrap();
-        std::os::unix::fs::symlink(dir.path().join("secret"), root.join("link")).unwrap();
-        assert!(exec_argv(&root, "cat link").is_err());
-    }
-
-    #[test]
-    fn exec_refuses_find_actions_and_git_no_index() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(exec_argv(root.path(), "find . -exec cat {} +").is_err());
-        assert!(exec_argv(root.path(), "find . -delete").is_err());
-        assert!(validate_exec_command("git diff --no-index /etc/passwd README.md").is_err());
-        assert!(validate_exec_command("git log --output=x").is_err());
-    }
-
-    #[cfg(unix)] // runs `cat` and `echo` as programs and reads /etc/passwd, which Windows lacks
-    #[test]
-    fn exec_runs_an_in_project_read_without_a_shell_or_the_backend_env() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("note é.txt"), "bonjour").unwrap();
-        let read = run_exec(dir.path(), "cat 'note é.txt'", &[]).unwrap();
-        assert_eq!(read.stdout, "bonjour");
-        assert_eq!(read.exit_code, 0);
-        // No shell: a variable stays literal instead of expanding.
-        let echoed = run_exec(dir.path(), "echo $HOME", &[]).unwrap();
-        assert_eq!(echoed.stdout.trim(), "$HOME");
-        assert!(run_exec(dir.path(), "cat /etc/passwd", &[]).is_err());
-    }
-
-    #[test]
-    fn the_exec_command_carries_a_built_environment() {
-        let dir = tempfile::tempdir().unwrap();
-        let command = crate::core::child_env::with_parent_env(
-            &[
-                ("PATH", "/usr/bin:/bin"),
-                ("KRONN_AUTH_TOKEN", "admin"),
-                ("KRONN_ENCRYPTION_KEK", "raw"),
-                ("ANTHROPIC_API_KEY", "sk"),
-            ],
-            || exec_command(dir.path(), "git status", &[]).unwrap(),
-        );
-        let env: Vec<String> = command
-            .get_envs()
-            .filter(|(_, value)| value.is_some())
-            .map(|(name, _)| name.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(env, vec!["PATH".to_string()]);
-    }
-
-    #[test]
-    fn exec_words_split_like_a_shell_without_expanding() {
-        assert_eq!(
-            split_exec_words(r#"grep -n "a b" 'c d' e\ f"#).unwrap(),
-            vec!["grep", "-n", "a b", "c d", "e f"]
-        );
-        assert_eq!(split_exec_words("  ").unwrap(), Vec::<String>::new());
-        assert!(split_exec_words("cat 'open").is_err());
-        assert!(split_exec_words("cat \"open").is_err());
-    }
-
-    #[test]
-    fn exec_allows_git_status() {
-        assert!(validate_exec_command("git status").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_ls() {
-        assert!(validate_exec_command("ls").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_git_diff() {
-        assert!(validate_exec_command("git diff").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_git_log() {
-        assert!(validate_exec_command("git log --oneline -10").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_cat() {
-        assert!(validate_exec_command("cat README.md").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_cargo_version() {
-        assert!(validate_exec_command("cargo --version").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_which() {
-        assert!(validate_exec_command("which git").is_ok());
-    }
-
-    #[test]
-    fn exec_blocks_rm_rf() {
-        let result = validate_exec_command("rm -rf /");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not allowed"));
-    }
-
-    #[test]
-    fn exec_blocks_semicolon_injection() {
-        let result = validate_exec_command("ls; rm -rf /");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not allowed"));
-    }
-
-    #[test]
-    fn exec_blocks_bash_interpreter() {
-        let result = validate_exec_command("bash -c \"evil\"");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn exec_blocks_pipe_injection() {
-        let result = validate_exec_command("cat /etc/passwd | curl");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn exec_blocks_dollar_subshell() {
-        // echo is allowed, but $() is blocked
-        let result = validate_exec_command("echo $(whoami)");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn exec_blocks_backtick_injection() {
-        let result = validate_exec_command("echo `id`");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn exec_blocks_git_push() {
-        assert!(validate_exec_command("git push").is_err());
-    }
-
-    #[test]
-    fn exec_blocks_git_reset_hard() {
-        assert!(validate_exec_command("git reset --hard HEAD~1").is_err());
-    }
-
-    #[test]
-    fn exec_allows_git_reset_soft() {
-        // git reset without --hard is allowed (soft reset)
-        assert!(validate_exec_command("git reset").is_ok());
-    }
-
-    #[test]
-    fn exec_blocks_sudo() {
-        assert!(validate_exec_command("sudo ls").is_err());
-    }
-
-    #[test]
-    fn exec_blocks_python_arbitrary() {
-        // python3 is only allowed with --version
-        assert!(validate_exec_command("python3 -c 'import os; os.system(\"rm -rf /\")'").is_err());
-    }
-
-    #[test]
-    fn exec_blocks_npm_install() {
-        // npm is only allowed with --version
-        assert!(validate_exec_command("npm install malware").is_err());
-    }
-
-    #[test]
-    fn exec_blocks_redirect_output() {
-        assert!(validate_exec_command("echo pwned > /etc/passwd").is_err());
-    }
-
-    #[test]
-    fn exec_blocks_ampersand() {
-        assert!(validate_exec_command("ls & rm -rf /").is_err());
-    }
-
-    #[test]
-    fn exec_blocks_newline_injection() {
-        assert!(validate_exec_command("ls\nrm -rf /").is_err());
-    }
-
-    #[test]
-    fn exec_allows_grep() {
-        assert!(validate_exec_command("grep -r \"pattern\" .").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_rg() {
-        assert!(validate_exec_command("rg \"pattern\"").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_tree() {
-        assert!(validate_exec_command("tree").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_file() {
-        assert!(validate_exec_command("file somefile.txt").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_stat() {
-        assert!(validate_exec_command("stat somefile.txt").is_ok());
-    }
-
-    #[test]
-    fn exec_allows_du() {
-        assert!(validate_exec_command("du -sh .").is_ok());
-    }
-
-    #[test]
-    fn remote_urls_are_normalized_for_the_browser_without_credentials() {
-        assert_eq!(
-            normalize_git_remote_web_url("git@github.com:DocRoms/Kronn.git"),
-            Some("https://github.com/DocRoms/Kronn".into())
-        );
-        assert_eq!(
-            normalize_git_remote_web_url("ssh://git@gitlab.example.com/team/app.git"),
-            Some("https://gitlab.example.com/team/app".into())
-        );
-        assert_eq!(
-            normalize_git_remote_web_url("https://oauth:secret@gitlab.com/team/app.git"),
-            Some("https://gitlab.com/team/app".into())
-        );
-        assert_eq!(normalize_git_remote_web_url("../local-repo"), None);
-    }
-
-    // ── Commit args tests ────────────────────────────────────────────────────
-
-    fn make_test_repo(name: &str) -> tempfile::TempDir {
-        let dir = tempfile::Builder::new()
-            .prefix(&format!("kronn-git-{}", name))
-            .tempdir()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::fs::write(dir.path().join("init.txt"), "init").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        dir
-    }
-
-    #[test]
-    fn git_status_exposes_repository_overview_metadata() {
-        let repo = make_test_repo("overview-metadata");
-        std::process::Command::new("git")
-            .args(["remote", "add", "origin", "git@github.com:team/demo.git"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["tag", "v1.2.3"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-
-        let status = run_git_status(repo.path()).unwrap();
-
-        assert_eq!(
-            status.remote_url.as_deref(),
-            Some("https://github.com/team/demo")
-        );
-        assert_eq!(
-            status.pull_requests_url.as_deref(),
-            Some("https://github.com/team/demo/pulls")
-        );
-        assert_eq!(status.last_tag.as_deref(), Some("v1.2.3"));
-    }
-
-    #[test]
-    fn git_branches_returns_bounded_local_branch_graph() {
-        let repo = make_test_repo("branch-graph");
-        std::process::Command::new("git")
-            .args(["switch", "-c", "feature/graph"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        std::fs::write(repo.path().join("feature.txt"), "feature").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "feature.txt"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "feature commit"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-
-        let graph = run_git_branches(repo.path()).unwrap();
-
-        assert_eq!(graph.current_branch, "feature/graph");
-        assert_eq!(graph.default_branch, "main");
-        assert!(graph
-            .branches
-            .iter()
-            .any(|branch| branch.name == "feature/graph" && branch.is_current));
-        assert!(graph
-            .branches
-            .iter()
-            .any(|branch| branch.name == "main" && !branch.is_remote));
-        assert_eq!(graph.commits[0].subject, "feature commit");
-        assert!(!graph.truncated);
-    }
-
-    #[test]
-    fn git_switch_changes_clean_local_branch() {
-        let repo = make_test_repo("switch-clean");
-        std::process::Command::new("git")
-            .args(["branch", "feature/safe"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-
-        let switched = run_git_switch_branch(repo.path(), "feature/safe").unwrap();
-
-        assert_eq!(switched.branch, "feature/safe");
-        assert_eq!(
-            git_output(repo.path(), &["branch", "--show-current"]).unwrap(),
-            "feature/safe"
-        );
-    }
-
-    #[test]
-    fn git_switch_refuses_dirty_worktree_without_changing_branch() {
-        let repo = make_test_repo("switch-dirty");
-        std::process::Command::new("git")
-            .args(["branch", "feature/blocked"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        std::fs::write(repo.path().join("init.txt"), "local edit").unwrap();
-
-        let error = run_git_switch_branch(repo.path(), "feature/blocked").unwrap_err();
-
-        assert!(error.contains("modifications locales"));
-        assert_eq!(
-            git_output(repo.path(), &["branch", "--show-current"]).unwrap(),
-            "main"
-        );
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join("init.txt")).unwrap(),
-            "local edit"
-        );
-    }
-
-    #[test]
-    fn git_switch_rejects_unknown_or_malformed_branch() {
-        let repo = make_test_repo("switch-invalid");
-
-        assert!(run_git_switch_branch(repo.path(), "--upload-pack=evil").is_err());
-        assert!(run_git_switch_branch(repo.path(), "missing").is_err());
-        assert_eq!(
-            git_output(repo.path(), &["branch", "--show-current"]).unwrap(),
-            "main"
-        );
-    }
-
-    #[test]
-    fn commit_adds_signoff_by_default() {
-        let repo = make_test_repo("signoff");
-        std::fs::write(repo.path().join("file.txt"), "content").unwrap();
-        let result = run_git_commit(
-            repo.path(),
-            &["file.txt".into()],
-            "test signoff",
-            false,
-            false,
-        );
-        assert!(result.is_ok(), "commit failed: {:?}", result.err());
-
-        // Check that the commit message contains Signed-off-by
-        let log = std::process::Command::new("git")
-            .args(["log", "-1", "--format=%B"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let msg = String::from_utf8_lossy(&log.stdout);
-        assert!(
-            msg.contains("Signed-off-by:"),
-            "Commit should have Signed-off-by, got: {}",
-            msg
-        );
-    }
-
-    // ── parse_committed_diff tests ───────────────────────────────────────────
-
-    #[test]
-    fn parse_committed_diff_handles_modified_added_deleted() {
-        let out = "M\tsrc/lib.rs\nA\tdocs/new.md\nD\told.txt";
-        let parsed = parse_committed_diff(out);
-        assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0].path, "src/lib.rs");
-        assert_eq!(parsed[0].status, "modified");
-        assert!(parsed[0].staged);
-        assert_eq!(parsed[1].path, "docs/new.md");
-        assert_eq!(parsed[1].status, "added");
-        assert_eq!(parsed[2].path, "old.txt");
-        assert_eq!(parsed[2].status, "deleted");
-    }
-
-    #[test]
-    fn parse_committed_diff_renames_use_destination_path() {
-        let out = "R100\told/path.rs\tnew/path.rs";
-        let parsed = parse_committed_diff(out);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].path, "new/path.rs");
-        assert_eq!(parsed[0].status, "renamed");
-    }
-
-    #[test]
-    fn parse_committed_diff_ignores_empty_and_garbage() {
-        let out = "\n\nZ\tweird\nM\tok.rs\n";
-        let parsed = parse_committed_diff(out);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].path, "ok.rs");
-    }
-
-    #[test]
-    fn parse_committed_diff_type_change_treated_as_modified() {
-        let out = "T\tsymlink.txt";
-        let parsed = parse_committed_diff(out);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].status, "modified");
-    }
-
-    #[test]
-    fn parse_git_blame_porcelain_returns_author_and_time_per_line() {
-        let output = "\
-0123456789abcdef0123456789abcdef01234567 1 1 1
-author Ada Lovelace
-author-mail <ada@example.test>
-author-time 1710000000
-author-tz +0100
-filename src/main.rs
-\tfirst
-fedcba9876543210fedcba9876543210fedcba98 2 2 1
-author Grace Hopper
-author-mail <grace@example.test>
-author-time 1720000000
-author-tz +0200
-filename src/main.rs
-\tsecond";
-        let lines = parse_git_blame_porcelain(output);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].line_number, 1);
-        assert_eq!(lines[0].author, "Ada Lovelace");
-        assert_eq!(lines[0].author_time, 1_710_000_000);
-        assert_eq!(lines[1].line_number, 2);
-        assert_eq!(lines[1].author, "Grace Hopper");
-        assert_eq!(lines[1].commit, "fedcba9876543210fedcba9876543210fedcba98");
-    }
-
-    // ── run_git_status committed_files integration tests ─────────────────────
-
-    fn make_branch_repo(name: &str) -> tempfile::TempDir {
-        let repo = make_test_repo(name);
-        // Create a feature branch with two commits worth of changes.
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "feature/x"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        std::fs::write(repo.path().join("added.txt"), "added").unwrap();
-        std::fs::write(repo.path().join("init.txt"), "modified").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "feature changes"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        repo
-    }
-
-    #[test]
-    fn run_git_status_exposes_committed_files_on_feature_branch() {
-        let repo = make_branch_repo("committed-feature");
-        let status = run_git_status(repo.path()).unwrap();
-        assert_eq!(status.branch, "feature/x");
-        assert_eq!(status.default_branch, "main");
-        assert!(!status.is_default_branch);
-        let paths: Vec<&str> = status
-            .committed_files
-            .iter()
-            .map(|f| f.path.as_str())
-            .collect();
-        assert!(
-            paths.contains(&"added.txt"),
-            "expected added.txt in {:?}",
-            paths
-        );
-        assert_eq!(status.commits.len(), 1);
-        assert_eq!(status.commits_total, 1);
-        assert_eq!(status.commits_offset, 0);
-        assert!(!status.commits_truncated);
-        assert_eq!(status.commits[0].subject, "feature changes");
-        assert!(
-            paths.contains(&"init.txt"),
-            "expected init.txt in {:?}",
-            paths
-        );
-        for f in &status.committed_files {
-            assert!(f.staged, "committed files should be marked staged: {:?}", f);
-        }
-    }
-
-    #[test]
-    fn run_git_status_pages_a_300_plus_commit_branch_without_materializing_it() {
-        let repo = make_test_repo("commit-pages");
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "feature/history"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        // One fast-import stream instead of 305 `git commit` processes.
-        let head = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let head = String::from_utf8(head.stdout).unwrap();
-        let now = chrono::Utc::now().timestamp();
-        let mut stream = String::new();
-        for index in 0..305 {
-            let message = format!("history {index}");
-            stream.push_str(&format!(
-                "commit refs/heads/feature/history\ncommitter Kronn Test <test@kronn.invalid> {} +0000\ndata {}\n{}\n",
-                now + index,
-                message.len(),
-                message
-            ));
-            if index == 0 {
-                stream.push_str(&format!("from {}\n", head.trim()));
-            }
-        }
-        let mut import = std::process::Command::new("git")
-            .args(["fast-import", "--quiet"])
-            .current_dir(repo.path())
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        use std::io::Write as _;
-        import
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stream.as_bytes())
-            .unwrap();
-        let output = import.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "fast-import failed ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let first = run_git_status_page(repo.path(), 0, 40, &[]).unwrap();
-        assert_eq!(first.commits_total, 305);
-        assert_eq!(first.commits_offset, 0);
-        assert_eq!(first.commits.len(), 40);
-        assert!(first.commits_truncated);
-        assert_eq!(first.commits[0].subject, "history 304");
-        assert_eq!(first.commits[39].subject, "history 265");
-
-        let second = run_git_status_page(repo.path(), 40, 40, &[]).unwrap();
-        assert_eq!(second.commits_total, 305);
-        assert_eq!(second.commits_offset, 40);
-        assert_eq!(second.commits.len(), 40);
-        assert!(second.commits_truncated);
-        assert_eq!(second.commits[0].subject, "history 264");
-
-        let last = run_git_status_page(repo.path(), 300, 1_000, &[]).unwrap();
-        assert_eq!(last.commits_total, 305);
-        assert_eq!(last.commits_offset, 300);
-        assert_eq!(last.commits.len(), 5);
-        assert!(!last.commits_truncated);
-        assert_eq!(last.commits[0].subject, "history 4");
-        assert_eq!(last.commits[4].subject, "history 0");
-    }
-
-    #[test]
-    fn resolve_default_branch_resolves_main_on_a_feature_branch() {
-        let repo = make_branch_repo("default-branch");
-        assert_eq!(resolve_default_branch(repo.path()), "main");
-    }
-
-    #[test]
-    fn run_git_diff_committed_shows_the_branch_diff_for_a_committed_file() {
-        // Regression for the GitPanel "committed on branch" bug: the file is
-        // committed (clean working tree), so a plain `git diff` is useless —
-        // the committed diff (`main...HEAD`) must surface the change.
-        let repo = make_branch_repo("committed-diff");
-        let res = run_git_diff_committed(repo.path(), "added.txt").unwrap();
-        assert!(
-            res.diff.contains("added.txt"),
-            "committed diff must reference the file, got: {:?}",
-            res.diff
-        );
-        assert!(
-            res.diff.contains("@@"),
-            "committed diff must contain a hunk header, got: {:?}",
-            res.diff
-        );
-    }
-
-    #[test]
-    fn run_git_status_committed_files_empty_on_default_branch() {
-        let repo = make_test_repo("on-main");
-        let status = run_git_status(repo.path()).unwrap();
-        assert!(status.is_default_branch);
-        assert!(
-            status.committed_files.is_empty(),
-            "expected no committed_files on default branch, got {:?}",
-            status.committed_files
-        );
-    }
-
-    #[test]
-    fn run_git_status_committed_and_uncommitted_are_disjoint_sections() {
-        let repo = make_branch_repo("disjoint");
-        // Add an uncommitted change on top of the committed work.
-        std::fs::write(repo.path().join("untracked.txt"), "wip").unwrap();
-        let status = run_git_status(repo.path()).unwrap();
-        let committed_paths: Vec<&str> = status
-            .committed_files
-            .iter()
-            .map(|f| f.path.as_str())
-            .collect();
-        let uncommitted_paths: Vec<&str> = status.files.iter().map(|f| f.path.as_str()).collect();
-        assert!(committed_paths.contains(&"added.txt"));
-        assert!(uncommitted_paths.contains(&"untracked.txt"));
-        // The committed section must NOT leak the uncommitted file (and vice versa for committed-only paths).
-        assert!(!committed_paths.contains(&"untracked.txt"));
-        assert!(!uncommitted_paths.contains(&"added.txt"));
-    }
-
-    #[test]
-    fn commit_without_sign_uses_no_gpg_sign() {
-        let repo = make_test_repo("nogpg");
-        // Set commit.gpgsign=true to simulate a user config that would fail without --no-gpg-sign
-        std::process::Command::new("git")
-            .args(["config", "commit.gpgsign", "true"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        // Set a nonexistent signing key to guarantee failure if --no-gpg-sign doesn't work
-        std::process::Command::new("git")
-            .args(["config", "user.signingkey", "/nonexistent/key"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-
-        std::fs::write(repo.path().join("file.txt"), "content").unwrap();
-        let result = run_git_commit(repo.path(), &["file.txt".into()], "no gpg", false, false);
-        assert!(
-            result.is_ok(),
-            "commit should succeed with --no-gpg-sign even when gpgsign=true: {:?}",
-            result.err()
-        );
-    }
-    // ─── KT-67 — commit detail behind an annotated line ─────────────────────
-
-    #[test]
-    fn commit_detail_refuses_anything_that_is_not_a_hash() {
-        // The value is interpolated into a git invocation and blame only ever
-        // hands us hashes, so a refusal is the right answer — not a best effort.
-        for bad in [
-            "HEAD",
-            "main",
-            "../../etc/passwd",
-            "abc123; rm -rf /",
-            "abc",                                       // too short
-            "0123456789012345678901234567890123456789a", // too long
-            "zzzzzzz",                                   // not hex
-            "",
-        ] {
-            assert!(!valid_commit_ish(bad), "{bad:?} must be refused");
-        }
-        for good in ["abc1234", "0123456789abcdef0123456789abcdef01234567"] {
-            assert!(valid_commit_ish(good), "{good:?} must be accepted");
-        }
-
-        let repo = make_test_repo("commit-detail-refuse");
-        let err = run_git_commit_detail(repo.path(), "HEAD").unwrap_err();
-        assert!(err.contains("invalid commit hash"), "{err}");
-    }
-
-    #[test]
-    fn commit_detail_reports_message_author_and_branches() {
-        let repo = make_test_repo("commit-detail-ok");
-        std::fs::write(repo.path().join("a.txt"), "a").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args([
-                "commit",
-                "-m",
-                "sujet du commit",
-                "-m",
-                "corps sur\nplusieurs lignes",
-            ])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let sha = String::from_utf8(
-            std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(repo.path())
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-
-        let detail = run_git_commit_detail(repo.path(), &sha).unwrap();
-        assert_eq!(detail.sha, sha);
-        assert_eq!(detail.short_sha, sha[..detail.short_sha.len()]);
-        assert_eq!(detail.subject, "sujet du commit");
-        assert!(
-            detail.body.contains("corps sur"),
-            "body was {:?}",
-            detail.body
-        );
-        assert_eq!(detail.author_name, "Test User");
-        assert_eq!(detail.author_email, "test@test.com");
-        assert!(detail.author_time > 0, "author_time must be a real epoch");
-        assert_eq!(detail.files_changed, 1);
-        assert!(
-            detail.branches.contains(&"main".to_string()),
-            "{:?}",
-            detail.branches
-        );
-        assert!(!detail.branches_truncated);
-    }
-
-    #[test]
-    fn commit_detail_truncates_a_long_branch_list_honestly() {
-        let repo = make_test_repo("commit-detail-branches");
-        let sha = String::from_utf8(
-            std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(repo.path())
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        // Every branch here contains the root commit.
-        for i in 0..COMMIT_BRANCHES_CAP + 3 {
-            std::process::Command::new("git")
-                .args(["branch", &format!("topic-{i}")])
-                .current_dir(repo.path())
-                .output()
-                .unwrap();
-        }
-
-        let detail = run_git_commit_detail(repo.path(), &sha).unwrap();
-        assert_eq!(
-            detail.files_changed, 1,
-            "the initial commit must count its root-tree file"
-        );
-        assert_eq!(
-            detail.branches.len(),
-            COMMIT_BRANCHES_CAP,
-            "list must be capped"
-        );
-        assert!(
-            detail.branches_truncated,
-            "a capped list must SAY it was capped — otherwise the UI implies it is complete",
-        );
-    }
-
-    #[test]
-    fn commit_detail_on_an_unknown_hash_fails_instead_of_inventing() {
-        let repo = make_test_repo("commit-detail-unknown");
-        let err = run_git_commit_detail(repo.path(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
-            .unwrap_err();
-        assert!(err.contains("git show failed"), "{err}");
-    }
-
-    fn commit_all(repo: &Path, message: &str) -> String {
-        std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", message])
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        String::from_utf8(
-            std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(repo)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string()
-    }
-
-    /// KT-75 — the patch must be the commit against its PARENT, not against
-    /// whatever the file looks like today.
-    #[test]
-    fn commit_patch_shows_the_change_as_it_was_made() {
-        let repo = make_test_repo("commit-patch-parent");
-        std::fs::write(repo.path().join("a.txt"), "premiere ligne\n").unwrap();
-        commit_all(repo.path(), "initial");
-        std::fs::write(
-            repo.path().join("a.txt"),
-            "premiere ligne\ndeuxieme ligne\n",
-        )
-        .unwrap();
-        let second = commit_all(repo.path(), "ajoute une ligne");
-        // The file moves on afterwards: the patch of `second` must not change.
-        std::fs::write(repo.path().join("a.txt"), "tout autre chose\n").unwrap();
-        commit_all(repo.path(), "reecrit tout");
-
-        let patch = run_git_commit_patch(repo.path(), &second).unwrap();
-        assert_eq!(patch.sha, second);
-        assert_eq!(patch.subject, "ajoute une ligne");
-        assert!(!patch.is_root);
-        assert_eq!(patch.files_changed, 1);
-        assert!(patch.patch.contains("+deuxieme ligne"), "{}", patch.patch);
-        assert!(
-            !patch.patch.contains("tout autre chose"),
-            "the later rewrite leaked into an older commit's patch: {}",
-            patch.patch
-        );
-        assert!(!patch.truncated);
-    }
-
-    /// The first commit has no parent. Without `--root`, `git show` prints the
-    /// message and no diff at all — the tab would open empty.
-    #[test]
-    fn commit_patch_covers_the_root_commit() {
-        // `make_test_repo` already lands one commit, so the root is ITS commit —
-        // asking git for it beats assuming the one we just made is first.
-        let repo = make_test_repo("commit-patch-root");
-        std::fs::write(repo.path().join("second.txt"), "suite\n").unwrap();
-        let child = commit_all(repo.path(), "deuxieme commit");
-        let root = String::from_utf8(
-            std::process::Command::new("git")
-                .args(["rev-list", "--max-parents=0", "HEAD"])
-                .current_dir(repo.path())
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        assert_ne!(root, child);
-
-        let patch = run_git_commit_patch(repo.path(), &root).unwrap();
-        assert!(patch.is_root, "the first commit must be reported as root");
-        assert!(
-            patch.patch.contains("+init"),
-            "root patch was {:?}",
-            patch.patch
-        );
-        assert_eq!(patch.files_changed, 1);
-        assert!(!run_git_commit_patch(repo.path(), &child).unwrap().is_root);
-    }
-
-    #[test]
-    fn commit_patch_truncates_on_a_line_boundary_and_says_so() {
-        let repo = make_test_repo("commit-patch-truncate");
-        // Comfortably past the cap, so the branch is actually exercised.
-        let big: String = (0..40_000).map(|i| format!("ligne numero {i}\n")).collect();
-        std::fs::write(repo.path().join("big.txt"), big).unwrap();
-        let sha = commit_all(repo.path(), "gros fichier");
-
-        let patch = run_git_commit_patch(repo.path(), &sha).unwrap();
-        assert!(patch.truncated, "a 600 KB patch must be reported as cut");
-        assert!(patch.patch.len() <= COMMIT_PATCH_MAX_BYTES);
-        assert!(
-            patch.patch.ends_with('\n'),
-            "the cut must land on a line boundary, not mid-hunk"
-        );
-    }
-
-    #[test]
-    fn commit_patch_refuses_a_non_hash_and_an_unknown_hash() {
-        let repo = make_test_repo("commit-patch-guards");
-        assert!(run_git_commit_patch(repo.path(), "HEAD")
-            .unwrap_err()
-            .contains("invalid commit hash"));
-        assert!(run_git_commit_patch(repo.path(), "../../etc/passwd")
-            .unwrap_err()
-            .contains("invalid commit hash"));
-        assert!(
-            run_git_commit_patch(repo.path(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
-                .unwrap_err()
-                .contains("git show failed")
-        );
-    }
 }

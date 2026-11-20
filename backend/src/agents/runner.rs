@@ -23,14 +23,14 @@ const MAX_CALLS_PER_TOOL: usize = 12;
 const MAX_WORKER_SEARCH_TEXT_CALLS: usize = 24;
 // A dimension audit writes many findings, then its index. These remain
 // per-attempt backstops; round, duration, repeat and error guards still apply.
-const MAX_AUDIT_WRITE_CALLS: usize = 64;
+pub const MAX_AUDIT_WRITE_CALLS: usize = 64;
 const MAX_AUDIT_SEARCH_CALLS: usize = 48;
 // 48, raised from 24 after a real delegation died of it: a task that crosses
 // an 11 000-line file needed ~30 honest 120-line slices, spent the budget
 // mid-exploration, and the run ended with no edit. The cap is a backstop now,
 // not the primary guard — identical repeats, same-answer digests and error
 // circuits catch an actual loop long before 48 reads do.
-pub(crate) const MAX_READ_FILE_CALLS: usize = 48;
+pub const MAX_READ_FILE_CALLS: usize = 48;
 // Reading the open web and enumerating a configured API are not the paid loop
 // this guard was sized against. A `web_fetch` is an HTTP GET that costs
 // nothing, and walking a repository's issues is enumeration, not repetition:
@@ -41,30 +41,30 @@ pub(crate) const MAX_READ_FILE_CALLS: usize = 48;
 // stop a loop, and they act long before these numbers do.
 const MAX_WEB_FETCH_CALLS: usize = 120;
 const MAX_API_ENUMERATION_CALLS: usize = 60;
-const MAX_ERRORS_PER_TOOL: usize = 3;
+pub const MAX_ERRORS_PER_TOOL: usize = 3;
 const MAX_ERROR_ONLY_TOOL_ROUNDS: usize = 6;
 // A refusal costs the model nothing, so it may ask again at once with new
 // arguments (KT-1545). Bounds on Kronn's own anti-loop refusals: per response,
 // later refused calls are dropped; per phase, refusal-only rounds lead to
 // synthesis (not for workers), then to a hard stop.
-const MAX_LOOP_REFUSALS_PER_RESPONSE: usize = 8;
-const MAX_REFUSAL_ONLY_ROUNDS_BEFORE_SYNTHESIS: usize = 2;
-const MAX_REFUSAL_ONLY_ROUNDS: usize = 3;
+pub const MAX_LOOP_REFUSALS_PER_RESPONSE: usize = 8;
+pub const MAX_REFUSAL_ONLY_ROUNDS_BEFORE_SYNTHESIS: usize = 2;
+pub const MAX_REFUSAL_ONLY_ROUNDS: usize = 3;
 // Refused calls listed in the room transcript per tool; the ceiling card and
 // the final diagnostic carry the count, so the rest need not each be a message.
-const MAX_REFUSAL_TRACES_PER_TOOL: usize = 2;
+pub const MAX_REFUSAL_TRACES_PER_TOOL: usize = 2;
 // Rounds an audit keeps, before its ceiling, to write its deliverable.
 const AUDIT_WRITE_RESERVE_ROUNDS: usize = 8;
 const ACP_DIAGNOSTIC_MAX_CHARS: usize = 1_024;
-const WORKER_EXPLORATION_NUDGE_AT: usize = 24;
+pub const WORKER_EXPLORATION_NUDGE_AT: usize = 24;
 // The window a worker gets to gather evidence before it must turn it into a
 // delivery. It used to be the global round cap by accident, so raising that
 // cap for analysis would have let a worker explore three times longer before
 // finalizing — a different question, and not one the incident asked. Fifty is
 // what the finalization flow was measured against; it stays.
-const WORKER_EXPLORATION_ROUNDS: usize = 50;
-const WORKER_FINALIZATION_ITERATIONS: usize = 12;
-const WORKER_FINALIZATION_READ_FILE_CALLS: usize = 3;
+pub const WORKER_EXPLORATION_ROUNDS: usize = 50;
+pub const WORKER_FINALIZATION_ITERATIONS: usize = 12;
+pub const WORKER_FINALIZATION_READ_FILE_CALLS: usize = 3;
 const WORKER_FINALIZATION_GIT_INSPECTION_CALLS: usize = 3;
 // A checkpoint must retain enough recent tool trajectory for the model to
 // continue its implementation plan. Resetting all the way to the brief was
@@ -77,60 +77,60 @@ const WORKER_CHECKPOINT_TOOL_ROUNDS: usize = WORKER_REPAIR_EDIT_ITERATIONS;
 // checkpoint prevents. Trim the retained tail against a small phase-local
 // target, then add explicit reply/tool headroom below.
 const WORKER_FINALIZATION_CTX_TARGET: u64 = 16_384;
-const WORKER_FINALIZATION_REPLY_HEADROOM: u64 = 4_096;
+pub const WORKER_FINALIZATION_REPLY_HEADROOM: u64 = 4_096;
 // One remembered tool call must not consume the only chance to execute the
 // required repair read. Two responses allow exactly one corrective retry; the
 // first successful read immediately advances the state, so at most one read is
 // ever executed by this phase.
-const WORKER_REPAIR_READ_ITERATIONS: usize = 2;
+pub const WORKER_REPAIR_READ_ITERATIONS: usize = 2;
 // Editing needs one more response than reading: a model may first repeat the
 // now-withdrawn read, then make one schema-invalid edit, and must receive that
 // executor error once to correct it. The first successful mutation advances
 // immediately, so this never executes more edits after success.
-const WORKER_REPAIR_EDIT_ITERATIONS: usize = 3;
-const WORKER_REPAIR_COMMIT_ITERATIONS: usize = 3;
-const WORKER_DELIVERY_ITERATIONS: usize = 3;
+pub const WORKER_REPAIR_EDIT_ITERATIONS: usize = 3;
+pub const WORKER_REPAIR_COMMIT_ITERATIONS: usize = 3;
+pub const WORKER_DELIVERY_ITERATIONS: usize = 3;
 // A worker response such as "I'll inspect that now" is an intention, not a
 // terminal result. Give it one corrective turn with the current bounded tool
 // catalogue, then fail explicitly instead of accepting prose without a commit
 // and DeliveryManifest or spending an open-ended local-model loop.
-const WORKER_PROSE_ONLY_ITERATIONS: usize = 2;
+pub const WORKER_PROSE_ONLY_ITERATIONS: usize = 2;
 // Older Ollama MLX servers lack prompt-prefix reuse and retain cache memory
 // (ollama/ollama#17829, #17875). Apply the delivery boundary below 0.34.
-const MLX_WORKER_EXPLORATION_ITERATIONS: usize = 32;
+pub const MLX_WORKER_EXPLORATION_ITERATIONS: usize = 32;
 // A scoped local subtask must turn repository evidence into a mutation instead
 // of paying for an open-ended repository tour. V15 of KT-404 had found the
 // named function after two observations but reached eighteen without changing
 // the workspace. Bound that exact signal for MLX only; finalization still
 // grants three exact CAS refreshes before its one-shot repair path.
-const MLX_WORKER_MAX_OBSERVATIONS_WITHOUT_MUTATION: usize = 12;
+pub const MLX_WORKER_MAX_OBSERVATIONS_WITHOUT_MUTATION: usize = 12;
 // Reserve a quarter of the context window for replies and tool results.
-const WORKER_CONTEXT_PRESSURE_PERCENT: u64 = 75;
+pub const WORKER_CONTEXT_PRESSURE_PERCENT: u64 = 75;
 // MLX fixes the slot when the model is loaded: a later request for 16K still
 // used a live 8K slot, while a cold 32K request loaded the real qwen3.8 model
 // in under eight seconds. The nominal 65K slot instead cost 31 GB and produced
 // no first tool call after seventeen minutes. Keep exploration below that
 // pathological tier; finalization still compacts its actual prompt to 16K.
-const MLX_WORKER_EFFECTIVE_CTX_CAP: u64 = 32_768;
+pub const MLX_WORKER_EFFECTIVE_CTX_CAP: u64 = 32_768;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerExplorationPolicy {
-    max_iterations: usize,
-    max_observations_without_mutation: Option<usize>,
-    context_pressure_percent: u64,
-    mlx_mitigation: bool,
-    mlx_detection_source: Option<&'static str>,
+pub struct WorkerExplorationPolicy {
+    pub max_iterations: usize,
+    pub max_observations_without_mutation: Option<usize>,
+    pub context_pressure_percent: u64,
+    pub mlx_mitigation: bool,
+    pub mlx_detection_source: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerExplorationBoundary {
+pub enum WorkerExplorationBoundary {
     RoundLimit,
     ObservationLimit,
     ContextPressure(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerRepairStage {
+pub enum WorkerRepairStage {
     Inactive,
     Read,
     Edit,
@@ -186,13 +186,13 @@ fn http_turn_phase(
     }
 }
 
-fn ollama_model_has_mlx_tag(model: &str) -> bool {
+pub fn ollama_model_has_mlx_tag(model: &str) -> bool {
     let tag = model.rsplit_once(':').map_or(model, |(_, tag)| tag);
     tag.split(|ch: char| !ch.is_ascii_alphanumeric())
         .any(|part| part.eq_ignore_ascii_case("mlx"))
 }
 
-fn worker_exploration_policy(
+pub fn worker_exploration_policy(
     model: &str,
     storage_format: Option<&str>,
     is_openai_wire: bool,
@@ -234,7 +234,7 @@ fn worker_exploration_policy(
     }
 }
 
-fn worker_effective_ctx_cap(
+pub fn worker_effective_ctx_cap(
     configured_ctx_cap: u64,
     tool_run_mode: crate::agents::tools::ToolRunMode,
     policy: WorkerExplorationPolicy,
@@ -246,7 +246,7 @@ fn worker_effective_ctx_cap(
     }
 }
 
-fn worker_oversized_prompt_remedy(
+pub fn worker_oversized_prompt_remedy(
     configured_ctx_cap: u64,
     policy: WorkerExplorationPolicy,
 ) -> &'static str {
@@ -259,7 +259,7 @@ fn worker_oversized_prompt_remedy(
     }
 }
 
-fn worker_exploration_boundary(
+pub fn worker_exploration_boundary(
     policy: WorkerExplorationPolicy,
     turn: usize,
     observations_without_mutation: usize,
@@ -294,7 +294,7 @@ fn worker_exploration_boundary(
 const CATALOGUE_BYTES_PER_TOKEN: u64 = 7;
 const CATALOGUE_BYTES_PER_TOKEN_SCALE: u64 = 2;
 
-fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
+pub fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
     let wire_bytes = super::vision::messages_wire_len(body) as u64;
     let mut estimate = (wire_bytes / 3) + 2048;
     for field in ["tools", "format"] {
@@ -309,25 +309,25 @@ fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerHistoryCheckpoint {
-    before_messages: usize,
-    after_messages: usize,
-    before_tokens: u64,
-    after_tokens: u64,
-    seed_messages: usize,
-    tail_messages: usize,
-    compacted_tool_results: usize,
-    final_num_ctx: u64,
+pub struct WorkerHistoryCheckpoint {
+    pub before_messages: usize,
+    pub after_messages: usize,
+    pub before_tokens: u64,
+    pub after_tokens: u64,
+    pub seed_messages: usize,
+    pub tail_messages: usize,
+    pub compacted_tool_results: usize,
+    pub final_num_ctx: u64,
 }
 
 #[derive(Debug, Clone)]
-struct WorkerCheckpointSeed {
+pub struct WorkerCheckpointSeed {
     messages: Vec<serde_json::Value>,
     source_message_count: usize,
 }
 
 impl WorkerCheckpointSeed {
-    fn from_body(body: &serde_json::Value) -> Self {
+    pub fn from_body(body: &serde_json::Value) -> Self {
         let messages = body["messages"].as_array().cloned().unwrap_or_default();
         let first_user = messages
             .iter()
@@ -412,7 +412,7 @@ fn recent_worker_protocol_tail(
         .collect()
 }
 
-const WORKER_CHECKPOINT_TOOL_RESULT_BYTES: usize = 4_096;
+pub const WORKER_CHECKPOINT_TOOL_RESULT_BYTES: usize = 4_096;
 const WORKER_CHECKPOINT_EXCERPT_HEAD_BYTES: usize = 1_024;
 const WORKER_CHECKPOINT_EXCERPT_TAIL_BYTES: usize = 256;
 const WORKER_CHECKPOINT_MAX_FACTS: usize = 24;
@@ -599,7 +599,7 @@ fn compact_worker_checkpoint_tool_results(body: &mut serde_json::Value) -> usize
 /// complete tool-call/result rounds. Large observation payloads are clamped;
 /// the code-generated facts below state only runner-observed mutations and the
 /// catalogue that is actually declared for the next request.
-fn checkpoint_worker_finalization_history(
+pub fn checkpoint_worker_finalization_history(
     body: &mut serde_json::Value,
     seed: &WorkerCheckpointSeed,
     checkpoint_prompt: &str,
@@ -670,7 +670,7 @@ fn checkpoint_worker_finalization_history(
     }
 }
 
-fn worker_context_pressure(
+pub fn worker_context_pressure(
     body: &serde_json::Value,
     ctx_cap: u64,
     pressure_percent: u64,
@@ -682,7 +682,7 @@ fn worker_context_pressure(
     (estimated.saturating_mul(100) >= ctx_cap.saturating_mul(pressure_percent)).then_some(estimated)
 }
 
-fn max_calls_for_tool(name: &str, run_mode: crate::agents::tools::ToolRunMode) -> usize {
+pub fn max_calls_for_tool(name: &str, run_mode: crate::agents::tools::ToolRunMode) -> usize {
     // Reading several small files is legitimate repository analysis. Keep the
     // stricter anti-loop cap for API/MCP calls, where varying arguments caused
     // the observed 47-call paid loop. Exact duplicate reads are still stopped
@@ -735,7 +735,7 @@ fn withdraw_tools_for_convergence(
     }
 }
 
-fn is_workspace_observation_tool(name: &str) -> bool {
+pub fn is_workspace_observation_tool(name: &str) -> bool {
     matches!(
         name,
         "read_file"
@@ -761,12 +761,12 @@ fn is_workspace_progress_tool(name: &str) -> bool {
 }
 
 /// Task mutations invalidate these readers even when their arguments are unchanged.
-fn is_progress_observation_tool(name: &str) -> bool {
+pub fn is_progress_observation_tool(name: &str) -> bool {
     matches!(name, "task_get" | "task_list" | "plan_get")
 }
 
 /// Mutations that invalidate task progress, including room-plan membership changes.
-fn is_progress_mutation_tool(name: &str) -> bool {
+pub fn is_progress_mutation_tool(name: &str) -> bool {
     matches!(
         name,
         "task_create"
@@ -781,7 +781,7 @@ fn is_progress_mutation_tool(name: &str) -> bool {
 
 /// Restore readers withdrawn for repetition after a task mutation. Readers blocked
 /// by their call ceiling or an open error circuit remain withdrawn.
-pub(crate) fn progress_readers_to_restore(
+pub fn progress_readers_to_restore(
     withdrawn: &std::collections::HashSet<String>,
     open_circuits: &std::collections::HashSet<String>,
     calls_per_tool: &std::collections::HashMap<String, usize>,
@@ -798,7 +798,7 @@ pub(crate) fn progress_readers_to_restore(
     )
 }
 
-fn observation_readers_to_restore(
+pub fn observation_readers_to_restore(
     withdrawn: &std::collections::HashSet<String>,
     open_circuits: &std::collections::HashSet<String>,
     calls_per_tool: &std::collections::HashMap<String, usize>,
@@ -826,7 +826,7 @@ fn observation_readers_to_restore(
 
 /// Preserve original reader declarations so a withdrawn reader can be restored
 /// without adding tools that were absent from the initial catalogue.
-fn progress_reader_declarations(catalogue: &[serde_json::Value]) -> Vec<serde_json::Value> {
+pub fn progress_reader_declarations(catalogue: &[serde_json::Value]) -> Vec<serde_json::Value> {
     catalogue
         .iter()
         .filter(|tool| {
@@ -840,7 +840,7 @@ fn progress_reader_declarations(catalogue: &[serde_json::Value]) -> Vec<serde_js
 
 /// Put back declarations the model can no longer see. Never widens the
 /// catalogue: a declaration already present is left alone.
-fn restore_tool_declarations(body: &mut serde_json::Value, restored: &[serde_json::Value]) {
+pub fn restore_tool_declarations(body: &mut serde_json::Value, restored: &[serde_json::Value]) {
     if restored.is_empty() {
         return;
     }
@@ -863,7 +863,7 @@ fn restore_tool_declarations(body: &mut serde_json::Value, restored: &[serde_jso
     }
 }
 
-fn invalidate_progress_observation_cache(
+pub fn invalidate_progress_observation_cache(
     seen_calls: &mut std::collections::HashMap<String, (bool, serde_json::Value)>,
     repeated_calls: &mut std::collections::HashMap<String, usize>,
     results_seen: &mut std::collections::HashMap<(String, u64), String>,
@@ -896,7 +896,7 @@ fn is_worker_finalization_tool(name: &str) -> bool {
     )
 }
 
-fn annotate_worker_exploration(
+pub fn annotate_worker_exploration(
     outcome: &mut crate::agents::tools::ToolOutcome,
     explored_without_progress: usize,
 ) {
@@ -929,7 +929,7 @@ fn annotate_worker_exploration(
 /// makes the signature about content. Every argument counts, so an `api_call`
 /// that only adds an `extract` or changes a query parameter asks a different
 /// question and is run, not answered as a repeat of the call it follows.
-fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, String) {
+pub fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, String) {
     let canonical_args = match arguments.as_object() {
         Some(map) => {
             let mut pairs: Vec<_> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -952,7 +952,7 @@ fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, St
 /// So annotate, never refuse: the payload the model just asked for stays intact
 /// and the note rides along with it. A model that is converging reads it and
 /// carries on; a model that is circling gets the only thing it was missing.
-fn annotate_unproductive_repetition(
+pub fn annotate_unproductive_repetition(
     outcome: &mut crate::agents::tools::ToolOutcome,
     tool: &str,
     canonical_args: &str,
@@ -1035,7 +1035,7 @@ fn outcome_digest_source(value: &serde_json::Value) -> String {
     }
 }
 
-fn tool_convergence_diagnostic(
+pub fn tool_convergence_diagnostic(
     calls: &std::collections::HashMap<String, usize>,
     errors: &std::collections::HashMap<String, usize>,
     refusals: &std::collections::HashMap<String, usize>,
@@ -1097,7 +1097,7 @@ fn remove_tool_declarations(
     }
 }
 
-fn retain_worker_finalization_tools(body: &mut serde_json::Value) {
+pub fn retain_worker_finalization_tools(body: &mut serde_json::Value) {
     let emptied = body
         .get_mut("tools")
         .and_then(serde_json::Value::as_array_mut)
@@ -1117,7 +1117,7 @@ fn retain_worker_finalization_tools(body: &mut serde_json::Value) {
     }
 }
 
-fn set_worker_tools_from_catalogue(
+pub fn set_worker_tools_from_catalogue(
     body: &mut serde_json::Value,
     original_catalogue: &[serde_json::Value],
     names: &[&str],
@@ -1164,7 +1164,7 @@ fn prelocalized_mutation_tool(scope: &crate::models::TaskWorkerScope) -> &'stati
 /// Freeze the first provider turn to one real read around the principal's
 /// authoritative target. The context padding is chosen by Kronn, not by the
 /// model, so a vague offset cannot turn back into repository exploration.
-fn constrain_prelocalized_read_tool(
+pub fn constrain_prelocalized_read_tool(
     body: &mut serde_json::Value,
     original_catalogue: &[serde_json::Value],
     scope: &crate::models::TaskWorkerScope,
@@ -1191,7 +1191,7 @@ fn constrain_prelocalized_read_tool(
     tool["function"]["parameters"]["additionalProperties"] = serde_json::json!(false);
 }
 
-fn constrain_prelocalized_edit_tool(
+pub fn constrain_prelocalized_edit_tool(
     body: &mut serde_json::Value,
     original_catalogue: &[serde_json::Value],
     scope: &crate::models::TaskWorkerScope,
@@ -1242,7 +1242,7 @@ fn constrain_prelocalized_edit_tool(
     tool["function"]["parameters"]["additionalProperties"] = serde_json::json!(false);
 }
 
-fn prelocalized_call_matches_scope(
+pub fn prelocalized_call_matches_scope(
     call: &crate::agents::tools::ToolCall,
     stage: WorkerRepairStage,
     scope: &crate::models::TaskWorkerScope,
@@ -1326,7 +1326,7 @@ fn prelocalized_call_matches_scope(
     }
 }
 
-fn constrain_worker_repair_tool(
+pub fn constrain_worker_repair_tool(
     body: &mut serde_json::Value,
     failed_call: &crate::agents::tools::ToolCall,
 ) {
@@ -1367,7 +1367,7 @@ fn constrain_worker_repair_tool(
     }
 }
 
-fn worker_repair_call_matches_target(
+pub fn worker_repair_call_matches_target(
     failed_call: &crate::agents::tools::ToolCall,
     repair_call: &crate::agents::tools::ToolCall,
 ) -> bool {
@@ -1400,7 +1400,7 @@ fn worker_repair_call_matches_target(
 
 /// Which pre-write validator refused an edit, if one did: its name leads the
 /// strict repair prompt.
-fn structural_refusal(outcome: &crate::agents::tools::ToolOutcome) -> Option<&'static str> {
+pub fn structural_refusal(outcome: &crate::agents::tools::ToolOutcome) -> Option<&'static str> {
     let error = outcome
         .content
         .get("error")
@@ -1414,7 +1414,7 @@ fn structural_refusal(outcome: &crate::agents::tools::ToolOutcome) -> Option<&'s
     }
 }
 
-fn worker_repair_iteration_limit(
+pub fn worker_repair_iteration_limit(
     stage: WorkerRepairStage,
     strict_syntax_repair: bool,
     prelocalized: bool,
@@ -1475,7 +1475,7 @@ fn restore_worker_tools_from_catalogue(
     }
 }
 
-fn declared_tool_names(body: &serde_json::Value) -> std::collections::HashSet<String> {
+pub fn declared_tool_names(body: &serde_json::Value) -> std::collections::HashSet<String> {
     body.get("tools")
         .and_then(serde_json::Value::as_array)
         .into_iter()
@@ -1488,7 +1488,7 @@ fn declared_tool_names(body: &serde_json::Value) -> std::collections::HashSet<St
         .collect()
 }
 
-fn invalidate_workspace_observation_cache(
+pub fn invalidate_workspace_observation_cache(
     seen_calls: &mut std::collections::HashMap<String, (bool, serde_json::Value)>,
     repeated_calls: &mut std::collections::HashMap<String, usize>,
     results_seen: &mut std::collections::HashMap<(String, u64), String>,
@@ -1501,26 +1501,6 @@ fn invalidate_workspace_observation_cache(
     seen_calls.retain(|signature, _| !is_observation_signature(signature));
     repeated_calls.retain(|signature, _| !is_observation_signature(signature));
     results_seen.retain(|(name, _), _| !is_workspace_observation_tool(name));
-}
-
-/// Detect if we're running inside WSL (vs Windows native).
-/// In WSL, /proc/version contains "microsoft" or "WSL".
-#[allow(dead_code)]
-fn is_wsl() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        // WSL2 always sets WSL_DISTRO_NAME — most reliable check
-        if crate::core::child_env::var("WSL_DISTRO_NAME").is_ok() {
-            return true;
-        }
-        std::fs::read_to_string("/proc/version")
-            .map(|v| v.contains("microsoft") || v.contains("WSL"))
-            .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
 }
 
 /// Output mode — how to interpret stdout from the agent
@@ -1686,7 +1666,7 @@ pub fn parse_claude_worker_stream_line(line: &str) -> StreamJsonEvent {
 /// A `--print` run has no permission channel: the model, trained on interactive
 /// Claude Code, otherwise tells the user to click an "Allow" that never appears
 /// (observed 2026-07-01, TD-20260701).
-pub(crate) const HEADLESS_NO_POPUP_NOTE: &str = "=== HEADLESS RUN ===\n\nYou run headless: there is no permission popup and nobody to click Allow, so if a tool is refused, say which one and stop instead of asking the user to approve it.";
+pub const HEADLESS_NO_POPUP_NOTE: &str = "=== HEADLESS RUN ===\n\nYou run headless: there is no permission popup and nobody to click Allow, so if a tool is refused, say which one and stop instead of asking the user to approve it.";
 
 /// KT-1599 — the tool names a Claude `result` line reports in
 /// `permission_denials`, deduplicated and in first-seen order. Only the name is
@@ -1778,12 +1758,12 @@ pub enum StreamJsonEvent {
 /// Line reader that never stops on invalid UTF-8: each line is decoded
 /// lossily, so one stray byte cannot leave a child blocked on a full pipe.
 /// Like tokio's `Lines`, it strips the trailing `\n` or `\r\n`.
-pub(crate) struct LossyLines<R> {
+pub struct LossyLines<R> {
     reader: R,
     buf: Vec<u8>,
 }
 
-pub(crate) fn lossy_lines<R: tokio::io::AsyncRead + Unpin>(reader: R) -> LossyLines<BufReader<R>> {
+pub fn lossy_lines<R: tokio::io::AsyncRead + Unpin>(reader: R) -> LossyLines<BufReader<R>> {
     LossyLines {
         reader: BufReader::new(reader),
         buf: Vec::new(),
@@ -1791,7 +1771,7 @@ pub(crate) fn lossy_lines<R: tokio::io::AsyncRead + Unpin>(reader: R) -> LossyLi
 }
 
 impl<R: tokio::io::AsyncBufRead + Unpin> LossyLines<R> {
-    pub(crate) async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+    pub async fn next_line(&mut self) -> std::io::Result<Option<String>> {
         self.buf.clear();
         if self.reader.read_until(b'\n', &mut self.buf).await? == 0 {
             return Ok(None);
@@ -1809,17 +1789,17 @@ impl<R: tokio::io::AsyncBufRead + Unpin> LossyLines<R> {
 /// Byte carry for a chunked stream: lines are decoded only once complete, so a
 /// character split across two network chunks is never cut in half.
 #[derive(Debug, Default)]
-pub(crate) struct ChunkLineBuffer {
+pub struct ChunkLineBuffer {
     pending: Vec<u8>,
 }
 
 impl ChunkLineBuffer {
-    pub(crate) fn push(&mut self, bytes: &[u8]) {
+    pub fn push(&mut self, bytes: &[u8]) {
         self.pending.extend_from_slice(bytes);
     }
 
     /// The next complete line, without its `\n`.
-    pub(crate) fn next_line(&mut self) -> Option<String> {
+    pub fn next_line(&mut self) -> Option<String> {
         let newline = self.pending.iter().position(|byte| *byte == b'\n')?;
         let rest = self.pending.split_off(newline + 1);
         let mut line = std::mem::replace(&mut self.pending, rest);
@@ -1827,12 +1807,12 @@ impl ChunkLineBuffer {
         Some(String::from_utf8_lossy(&line).into_owned())
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.pending.clear();
     }
 
     /// Whatever follows the last newline (a non-streamed body arrives whole).
-    pub(crate) fn take_rest(&mut self) -> String {
+    pub fn take_rest(&mut self) -> String {
         String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned()
     }
 }
@@ -1915,7 +1895,7 @@ impl StreamJsonFailure {
 
 /// How to handle stderr from an agent process
 #[derive(Clone, Copy)]
-enum StderrMode {
+pub enum StderrMode {
     /// Merge stderr into output stream (default — agent puts useful output on both)
     Merge,
     /// Only use stdout; log stderr but don't stream it (agent puts noise on stderr)
@@ -1928,37 +1908,37 @@ pub struct AgentProcess {
     pub child: tokio::process::Child,
     pub output_mode: OutputMode,
     pub work_dir: PathBuf,
-    agent_type: AgentType,
-    rx: mpsc::Receiver<String>,
+    pub agent_type: AgentType,
+    pub rx: mpsc::Receiver<String>,
     pub stderr_capture: Arc<Mutex<Vec<String>>>,
     /// Usage emitted by structured transports such as ACP. This is process
     /// telemetry, not a log scrape, so callers can attribute a completed run
     /// even when the transport has no stderr token marker.
-    usage: Arc<Mutex<AgentUsage>>,
-    stderr_task: Option<tokio::task::JoinHandle<()>>,
+    pub usage: Arc<Mutex<AgentUsage>>,
+    pub stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// HTTP agents run their provider/tool loop in a Tokio task rather than in
     /// `child`. Killing the lifeline process alone therefore does not stop the
     /// real work. Present only for HTTP agents; cancellation drops an in-flight
     /// request/tool future and prevents every later call in the same batch.
-    http_cancel: Option<tokio_util::sync::CancellationToken>,
+    pub http_cancel: Option<tokio_util::sync::CancellationToken>,
     /// On Unix, the process group ID of the spawned agent, used to terminate
     /// the entire process tree on cancellation. None on Windows.
-    pgid: Option<i32>,
+    pub pgid: Option<i32>,
     /// This transport delivers token fragments, not lines. Set by the ACP
     /// session core: every ACP agent — native or adapted — emits one
     /// `TextDelta` per model chunk, forwarded verbatim. Deducing this from the
     /// agent type is what broke: the type says which CLI runs, not how its
     /// output is framed.
-    token_fragments: bool,
+    pub token_fragments: bool,
     /// The run owns an activity watchdog that every runtime update beats (an
     /// ACP session: text, thoughts, tool calls, keepalives). Consumers then
     /// leave inactivity to it instead of timing the text alone.
-    activity_watched: bool,
+    pub activity_watched: bool,
     /// The launch's scoped bridge token; dropping the process revokes it.
-    bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
+    pub bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
     /// Set when the runtime refused the requested resume and the turn went out
     /// with the full history in a new session instead.
-    resume_fallback: Option<crate::models::SessionContinuityReason>,
+    pub resume_fallback: Option<crate::models::SessionContinuityReason>,
 }
 
 /// Reads an HTTP agent's tool activity from outside its run.
@@ -1990,19 +1970,19 @@ impl ToolActivityProbe {
     }
 
     /// One HTTP tool call, recorded as the tool loop records it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn record_http_call(&self, call: &crate::agents::tools::ToolCall) {
         record_http_tool_call(&self.0, None, call);
     }
 
     /// A probe no run backs, fed by the test the way an HTTP tool loop feeds it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn scripted() -> Self {
         Self(Arc::default())
     }
 
     /// One tool turn of a scripted run: its usage and, optionally, its tool.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn record_turn(&self, input_tokens: u64, output_tokens: u64, tool: Option<&str>) {
         let mut usage = self.0.lock().unwrap();
         usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
@@ -2035,55 +2015,25 @@ fn record_http_tool_call(
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct AgentUsage {
-    input_tokens: u64,
-    output_tokens: u64,
-    prompt_cache: PromptCacheUsage,
-    /// Cost the provider or CLI reported itself, summed over the run's
-    /// responses, in micro-USD. `None` when never reported.
-    cost_usd_micros: Option<u64>,
-    /// At least one response reported no cost: the sum is then only a part of
-    /// the run's cost, so the run's cost is unknown.
-    cost_incomplete: bool,
-    /// The category of the last native tool an HTTP agent called, and how
-    /// many it has called.
-    last_tool: Option<crate::models::ActivityCategory>,
-    tool_calls: u32,
-    /// The run's latest tool calls, for an audit's details panel.
-    recent: super::activity::RecentActivity,
-}
-
-/// Prompt-cache tokens a runtime reported beside its input and output.
-/// `None` means not reported, never zero.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct PromptCacheUsage {
-    pub cached_prompt_tokens: Option<u64>,
-    pub cache_write_prompt_tokens: Option<u64>,
-}
-
-/// One run's reported usage, parts kept apart. `input_tokens` is as the agent
-/// reports it, so whether it already contains the cached share depends on the
-/// agent (see `core::pricing::TokenCounters::from_agent_report`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReportedUsage {
+pub struct AgentUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub prompt_cache: PromptCacheUsage,
+    /// Cost the provider or CLI reported itself, summed over the run's
+    /// responses, in micro-USD. `None` when never reported.
+    pub cost_usd_micros: Option<u64>,
+    /// At least one response reported no cost: the sum is then only a part of
+    /// the run's cost, so the run's cost is unknown.
+    pub cost_incomplete: bool,
+    /// The category of the last native tool an HTTP agent called, and how
+    /// many it has called.
+    pub last_tool: Option<crate::models::ActivityCategory>,
+    pub tool_calls: u32,
+    /// The run's latest tool calls, for an audit's details panel.
+    pub recent: super::activity::RecentActivity,
 }
 
-impl PromptCacheUsage {
-    /// Read Anthropic's `cache_read_input_tokens` / `cache_creation_input_tokens`.
-    pub fn from_anthropic_usage(usage: &serde_json::Value) -> Self {
-        Self {
-            cached_prompt_tokens: usage
-                .get("cache_read_input_tokens")
-                .and_then(serde_json::Value::as_u64),
-            cache_write_prompt_tokens: usage
-                .get("cache_creation_input_tokens")
-                .and_then(serde_json::Value::as_u64),
-        }
-    }
-}
+pub use crate::models::{PromptCacheUsage, ReportedUsage};
 
 impl AgentProcess {
     /// Keep the launch's bridge token alive exactly as long as this process.
@@ -2244,7 +2194,7 @@ fn signal_group_after_exit(pgid: Option<i32>) {
 /// Returns true if at least one process exists, false only if confirmed dead (ESRCH).
 /// Treats permission errors and other errors as "possibly alive / not confirmed".
 #[cfg(unix)]
-fn group_has_processes(pgid: i32) -> bool {
+pub fn group_has_processes(pgid: i32) -> bool {
     if pgid <= 1 {
         return true;
     }
@@ -2573,10 +2523,10 @@ impl AgentIo for AgentProcess {
 /// (line accumulation, stream-json parsing, teardown) without spawning a CLI
 /// or burning tokens.
 ///
-/// `#[cfg(test)]` so it never ships in the binary. Visible to unit tests
+/// `#[cfg(any(test, feature = "test-support"))]` so it never ships in the binary. Visible to unit tests
 /// across the lib crate (cfg(test) is crate-wide); integration tests in
 /// `tests/` can't see it — but loop logic is unit-level anyway.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct ScriptedProcess {
     lines: std::collections::VecDeque<String>,
     output_mode: OutputMode,
@@ -2590,12 +2540,13 @@ pub struct ScriptedProcess {
     hangs_forever: bool,
     /// Usage a structured transport (ACP) would report for the run.
     reported_usage: Option<u64>,
+    reported_cost_usd_micros: Option<u64>,
     reported_prompt_cache: PromptCacheUsage,
     activity_watched: bool,
     first_line_after: Option<Duration>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ScriptedProcess {
     /// Scripted process in raw-line mode (each line emitted verbatim).
     pub fn raw(lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -2610,6 +2561,7 @@ impl ScriptedProcess {
             stderr: Vec::new(),
             hangs_forever: false,
             reported_usage: None,
+            reported_cost_usd_micros: None,
             reported_prompt_cache: PromptCacheUsage::default(),
             activity_watched: false,
             first_line_after: None,
@@ -2629,6 +2581,7 @@ impl ScriptedProcess {
             stderr: Vec::new(),
             hangs_forever: false,
             reported_usage: None,
+            reported_cost_usd_micros: None,
             reported_prompt_cache: PromptCacheUsage::default(),
             activity_watched: false,
             first_line_after: None,
@@ -2650,6 +2603,12 @@ impl ScriptedProcess {
     /// Simulate usage reported by a structured transport such as ACP.
     pub fn with_reported_usage(mut self, tokens: u64) -> Self {
         self.reported_usage = Some(tokens);
+        self
+    }
+
+    /// Simulate a cost reported by the provider or the CLI, in micro-USD.
+    pub fn with_reported_cost_usd_micros(mut self, micros: u64) -> Self {
+        self.reported_cost_usd_micros = Some(micros);
         self
     }
 
@@ -2683,7 +2642,7 @@ impl ScriptedProcess {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait::async_trait]
 impl AgentIo for ScriptedProcess {
     async fn next_line(&mut self) -> Option<String> {
@@ -2700,6 +2659,9 @@ impl AgentIo for ScriptedProcess {
     }
     fn reported_token_usage(&self) -> Option<u64> {
         self.reported_usage
+    }
+    fn reported_cost_usd_micros(&self) -> Option<u64> {
+        self.reported_cost_usd_micros
     }
     fn activity_watched(&self) -> bool {
         self.activity_watched
@@ -2779,56 +2741,15 @@ pub fn fix_file_ownership(work_dir: &Path) {
     }
 }
 
-/// Server-derived identity for one CLI-backed discussion agent executing a
-/// durable task. The child process forwards this opaque context through the
-/// Kronn MCP bridge; the backend still revalidates every field against the
-/// execution and dispatch rows before accepting a delivery.
-/// Identity of a room's own native agent for the current turn, derived by the
-/// dispatcher from the running dispatch job. Like the worker context it only
-/// travels in the process environment, never in the prompt or tool arguments.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RoomAgentBridgeContext {
-    pub discussion_id: String,
-    pub agent_type: String,
-    pub dispatch_job_id: String,
-    pub source_message_id: String,
-}
-
-/// Capability of a workflow Agent step whose `room_id` names a room (KT-793).
-/// Like the room agent's identity it only travels in the process environment;
-/// the backend accepts it while that very step runs, and only for that room.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct WorkflowStepBridgeContext {
-    pub discussion_id: String,
-    pub run_id: String,
-    pub step_key: String,
-    pub capability: String,
-}
-
-impl std::fmt::Debug for WorkflowStepBridgeContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkflowStepBridgeContext")
-            .field("discussion_id", &self.discussion_id)
-            .field("run_id", &self.run_id)
-            .field("step_key", &self.step_key)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TaskWorkerBridgeContext {
-    pub execution_id: String,
-    pub discussion_id: String,
-    pub agent_type: String,
-    pub dispatch_job_id: String,
-    pub source_message_id: String,
-}
+pub use crate::core::child_env::{
+    RoomAgentBridgeContext, TaskWorkerBridgeContext, WorkflowStepBridgeContext,
+};
 
 /// Codex intentionally forwards only named parent-process variables to stdio
 /// MCP children. Keep the allowlist narrow and shared with the global config
 /// writer; without it a Kronn-launched Codex sees the bridge but loses its
 /// discussion and task-worker capability at the process boundary.
-pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
+pub const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_DISCUSSION_ID",
     "KRONN_BACKEND_URL",
     "KRONN_BRIDGE_TOKEN",
@@ -2846,7 +2767,7 @@ pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_WAIT_TOTAL_SECS",
 ];
 
-pub(crate) fn codex_kronn_internal_env_override() -> String {
+pub fn codex_kronn_internal_env_override() -> String {
     format!(
         "mcp_servers.kronn-internal.env_vars={}",
         serde_json::to_string(KRONN_INTERNAL_CODEX_ENV_VARS)
@@ -2857,11 +2778,11 @@ pub(crate) fn codex_kronn_internal_env_override() -> String {
 /// Kronn's own server for a Codex discussion run, complete and approved, so the
 /// run does not depend on the global config sync (KT-953). Dotted keys merge
 /// with the user's config instead of replacing their other servers.
-pub(crate) fn codex_discussion_mcp_overrides() -> Vec<String> {
+pub fn codex_discussion_mcp_overrides() -> Vec<String> {
     render_codex_discussion_mcp_overrides(disc_introspection_mcp_command())
 }
 
-fn render_codex_discussion_mcp_overrides(launch: Option<InternalMcpCommand>) -> Vec<String> {
+pub fn render_codex_discussion_mcp_overrides(launch: Option<InternalMcpCommand>) -> Vec<String> {
     const KEY: &str = "mcp_servers.kronn-internal";
     // Without its command a key alone is an entry with no transport, and Codex
     // then rejects the whole configuration.
@@ -3137,7 +3058,7 @@ fn codex_task_worker_mcp_override() -> Option<String> {
     render_codex_task_worker_mcp_override(disc_introspection_mcp_command())
 }
 
-fn render_codex_task_worker_mcp_override(launch: Option<InternalMcpCommand>) -> Option<String> {
+pub fn render_codex_task_worker_mcp_override(launch: Option<InternalMcpCommand>) -> Option<String> {
     let launch = launch?;
     let command = serde_json::to_string(&launch.command).ok()?;
     let args = serde_json::to_string(&launch.args).ok()?;
@@ -3309,7 +3230,7 @@ pub struct AgentStartConfig<'a> {
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
     /// Test-only ACP boundary injection.  Production always spawns the
     /// vendor-native JSON-RPC transport in `start_native_acp`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub test_acp_transport: Option<std::sync::Arc<dyn crate::acp::AcpTransport>>,
     /// ADR-005 slice 1 (KT-847) — when `Some`, skills/directives/profiles
     /// are resolved through the run snapshot cache keyed by this id instead
@@ -3392,7 +3313,7 @@ impl<'a> AgentStartConfig<'a> {
             idle_timeout: None,
             run_progress: None,
             cancel_token: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_acp_transport: None,
             run_snapshot_id: None,
         }
@@ -3413,7 +3334,7 @@ pub struct ExternalHttpRuntime {
 /// The executor this HTTP run may use: `config.tools` when the verdict of
 /// `http_transport::http_tools_verdict` says attach, `None` otherwise (KT-1600).
 /// A refusal is logged so a model that "forgot" its tools is explainable.
-pub(crate) fn gate_http_tools(
+pub fn gate_http_tools(
     config: &AgentStartConfig<'_>,
 ) -> Option<std::sync::Arc<dyn crate::agents::tools::ToolExecutor>> {
     let executor = config.tools.clone()?;
@@ -3454,7 +3375,7 @@ pub(crate) fn gate_http_tools(
 /// the model refuse to call them (observed 2026-08-09 — `tools_declared=5` on
 /// the wire, yet it answered "je ne peux pas exécuter d'outils ici"). File
 /// access is absent either way.
-pub(crate) fn http_agent_tools_notice(has_tools: bool) -> &'static str {
+pub fn http_agent_tools_notice(has_tools: bool) -> &'static str {
     if has_tools {
         // Keep only rules here; tool descriptions travel in the request catalogue.
         "=== TOOLS ===\n\nYou have executable Kronn-native tools declared with \
@@ -3506,7 +3427,7 @@ fn prelocalized_http_worker_notice() -> &'static str {
 /// Speaks the OpenAI wire format on the shared HTTP path: same codec, same
 /// bearer auth, same `/v1/chat/completions` shape. Only the endpoint and the
 /// credential slot differ (LiteLLM proxy vs NVIDIA hosted) — KT-337.
-pub(crate) fn is_openai_wire_agent(agent_type: &AgentType) -> bool {
+pub fn is_openai_wire_agent(agent_type: &AgentType) -> bool {
     matches!(
         agent_type,
         AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom
@@ -3525,7 +3446,7 @@ pub(crate) fn is_openai_wire_agent(agent_type: &AgentType) -> bool {
 /// someone else scales, so holding them back only makes a batch slower. They
 /// still accept a cap when the operator sets one — there the limit is spend and
 /// provider rate limits, not this machine.
-pub(crate) fn is_local_agent(agent: &AgentType) -> bool {
+pub fn is_local_agent(agent: &AgentType) -> bool {
     matches!(
         agent,
         AgentType::ClaudeCode
@@ -3539,7 +3460,7 @@ pub(crate) fn is_local_agent(agent: &AgentType) -> bool {
     )
 }
 
-pub(crate) fn agent_concurrency_limits(
+pub fn agent_concurrency_limits(
     cfg: &crate::models::setup::AgentsConfig,
     local_global_limit: usize,
 ) -> String {
@@ -3596,7 +3517,7 @@ pub(crate) fn agent_concurrency_limits(
 /// The limits the dispatcher admits a job under: the per-agent and local-pool
 /// caps of [`agent_concurrency_limits`], plus KT-1632's cap on local task
 /// workers (Settings > Workers), which no per-agent cap can express.
-pub(crate) fn dispatch_concurrency_limits(config: &crate::models::AppConfig) -> String {
+pub fn dispatch_concurrency_limits(config: &crate::models::AppConfig) -> String {
     let mut limits: serde_json::Value = serde_json::from_str(&agent_concurrency_limits(
         &config.agents,
         config.server.max_concurrent_agents,
@@ -3611,14 +3532,14 @@ pub(crate) fn dispatch_concurrency_limits(config: &crate::models::AppConfig) -> 
     limits.to_string()
 }
 
-pub(crate) fn is_http_chat_agent(agent_type: &AgentType) -> bool {
+pub fn is_http_chat_agent(agent_type: &AgentType) -> bool {
     matches!(
         agent_type,
         AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom
     )
 }
 
-pub(crate) fn http_agent_identity_context(agent_type: &AgentType, model: &str) -> String {
+pub fn http_agent_identity_context(agent_type: &AgentType, model: &str) -> String {
     match agent_type {
         AgentType::Ollama => format!(
             "=== RUNTIME IDENTITY ===\nYou are the local model `{model}` served by Ollama. \
@@ -3653,7 +3574,7 @@ pub(crate) fn http_agent_identity_context(agent_type: &AgentType, model: &str) -
 
 /// Resolve only explicit operator configuration, without consulting the cache.
 /// Preflight must inspect durable unavailable assignments before any fallback.
-pub(crate) fn configured_model_flag(
+pub fn configured_model_flag(
     agent_type: &AgentType,
     tier: ModelTier,
     overrides: Option<&ModelTiersConfig>,
@@ -3705,7 +3626,7 @@ pub(crate) fn configured_model_flag(
 }
 
 /// Resolve a ModelTier to a concrete model without embedded runtime defaults.
-pub(crate) fn resolve_model_flag(
+pub fn resolve_model_flag(
     agent_type: &AgentType,
     tier: ModelTier,
     overrides: Option<&ModelTiersConfig>,
@@ -3730,7 +3651,7 @@ pub(crate) fn resolve_model_flag(
 /// fall back to the tier → model mapping (`resolve_model_flag`, which itself
 /// honors the global OllamaCard overrides). Kept pure + `pub(crate)` so the
 /// precedence is unit-tested without spawning a process.
-pub(crate) fn effective_model_flag(
+pub fn effective_model_flag(
     model_override: Option<&str>,
     agent_type: &AgentType,
     tier: ModelTier,
@@ -3747,7 +3668,7 @@ pub(crate) fn effective_model_flag(
 /// `--effort <level>`; the catalogue remains authoritative for which values a
 /// particular selected model accepts. Other runtimes must not receive a
 /// guessed parameter.
-pub(crate) fn agent_supports_reasoning_effort(agent_type: &AgentType) -> bool {
+pub fn agent_supports_reasoning_effort(agent_type: &AgentType) -> bool {
     matches!(agent_type, AgentType::Codex | AgentType::ClaudeCode)
 }
 
@@ -3798,7 +3719,7 @@ fn tier_reasoning_effort(
 /// unlaunchable effort into an omitted flag: a
 /// caller must surface the catalogue mismatch instead of claiming the CLI
 /// default applied the setting.
-fn resolve_reasoning_effort(
+pub fn resolve_reasoning_effort(
     effort_override: Option<&str>,
     model_override: Option<&str>,
     agent_type: &AgentType,
@@ -3832,7 +3753,7 @@ fn resolve_reasoning_effort(
 
 /// A near-miss (case, or stray whitespace on the catalogue side) is refused
 /// with the actual mismatch named, instead of the generic "absent" reason.
-fn effort_catalogue_decision(
+pub fn effort_catalogue_decision(
     candidate: &str,
     model: &str,
     modes: Option<&[String]>,
@@ -3860,7 +3781,7 @@ fn effort_catalogue_absent_error(candidate: &str, model: &str) -> String {
 
 /// Pure precedence portion of effort resolution. The catalogue validation is
 /// intentionally separate so it cannot be bypassed by an execution override.
-pub(crate) fn reasoning_effort_candidate(
+pub fn reasoning_effort_candidate(
     effort_override: Option<&str>,
     selected_model: Option<&str>,
     tier_model: Option<&str>,
@@ -3882,7 +3803,7 @@ pub(crate) fn reasoning_effort_candidate(
         .flatten()
 }
 
-pub(crate) fn effort_is_advertised(candidate: &str, modes: &[String]) -> bool {
+pub fn effort_is_advertised(candidate: &str, modes: &[String]) -> bool {
     modes.iter().any(|mode| mode == candidate)
 }
 
@@ -3890,7 +3811,7 @@ pub(crate) fn effort_is_advertised(candidate: &str, modes: &[String]) -> bool {
 /// applied to the run, since actual matching stays exact in
 /// `effort_is_advertised` above.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum EffortNearMiss<'a> {
+pub enum EffortNearMiss<'a> {
     /// The catalogue mode matches once case is ignored — name that spelling.
     Case(&'a str),
     /// The catalogue mode matches once trimmed — the catalogue entry itself,
@@ -3899,10 +3820,7 @@ pub(crate) enum EffortNearMiss<'a> {
     CatalogueWhitespace,
 }
 
-pub(crate) fn effort_close_match<'a>(
-    candidate: &str,
-    modes: &'a [String],
-) -> Option<EffortNearMiss<'a>> {
+pub fn effort_close_match<'a>(candidate: &str, modes: &'a [String]) -> Option<EffortNearMiss<'a>> {
     modes.iter().map(String::as_str).find_map(|mode| {
         if mode == candidate {
             None
@@ -3946,6 +3864,10 @@ pub async fn start_agent(
 pub const NATIVE_ACP_TASK_WORKER_REFUSAL: &str =
     "this agent runs on its native ACP transport, which cannot carry the task-worker delivery context or permission scope; use Claude Code, Codex, an HTTP model or an exact joined CLI session";
 
+/// KT-1758 — how a task worker's route refusal starts. A refusal that waiting
+/// cannot change: the launch path words it, the dispatch runtime recognises it.
+pub const TASK_WORKER_REFUSED_PREFIX: &str = "Task worker refused:";
+
 /// Prefix of the refusal of a native ACP launch without full access.
 pub const NATIVE_FULL_ACCESS_REQUIRED: &str = "native_full_access_required";
 
@@ -3953,7 +3875,7 @@ pub const NATIVE_FULL_ACCESS_REQUIRED: &str = "native_full_access_required";
 /// (`~/.ssh`, `~/.aws`, …, KT-1656): only the owner's full access does, and not
 /// one that carries read-only grants (a read policy is a restricted launch,
 /// whatever the agent's saved setting says). Every route asks this one place.
-pub(crate) fn reach_is_full_access(launch_full_access: bool, has_read_only_grants: bool) -> bool {
+pub fn reach_is_full_access(launch_full_access: bool, has_read_only_grants: bool) -> bool {
     launch_full_access && !has_read_only_grants
 }
 
@@ -4011,6 +3933,11 @@ pub fn native_full_access_refusal_in(agent: &AgentType, language: &str) -> Strin
     }
 }
 
+/// Why a generic `Custom` HTTP connection cannot run a task worker.
+pub const CUSTOM_HTTP_TASK_WORKER_REFUSAL: &str =
+    "a generic Custom HTTP connection cannot run a task worker; pick a CLI agent or a \
+     supported model provider (Ollama, LiteLLM, NVIDIA)";
+
 /// The worker policy shared by every launch route and by worker preparation.
 /// Returns the `full_access` the launch may use, or why a task worker cannot
 /// run on this agent's resolved transport. A worker never inherits the
@@ -4022,6 +3949,11 @@ pub fn task_worker_route_policy(
 ) -> Result<bool, &'static str> {
     if !task_worker {
         return Ok(full_access);
+    }
+    // KT-1745: the generic `Custom` HTTP connection has no worker lane contract
+    // (no pinned workspace tools, no commit primitive): it never runs a task.
+    if matches!(agent, AgentType::Custom) {
+        return Err(CUSTOM_HTTP_TASK_WORKER_REFUSAL);
     }
     match crate::acp::resolve_acp_route(agent) {
         crate::acp::AcpProductionRoute::NativeAcp => Err(NATIVE_ACP_TASK_WORKER_REFUSAL),
@@ -4087,7 +4019,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         native || config.full_access,
         config.task_worker_context.is_some(),
     )
-    .map_err(|reason| format!("Task worker refused: {reason}"))?;
+    .map_err(|reason| format!("{TASK_WORKER_REFUSED_PREFIX} {reason}"))?;
     // Read MCP context: use override if provided (general discussions),
     // otherwise read from project filesystem.
     let mcp_context = if let Some(override_ctx) = config.mcp_context_override {
@@ -4612,6 +4544,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
     let acp_route = crate::acp::resolve_acp_route(config.agent_type);
+    // The adapter toggle is process environment: a test that routed this
+    // launch must not be sent to the machine's CLI by another test's toggle.
+    #[cfg(any(test, feature = "test-support"))]
+    let acp_route = if acp_route == crate::acp::AcpProductionRoute::DirectCliMigration
+        && test_acp_routes::transport_for(&config, &work_dir).is_some()
+    {
+        crate::acp::AcpProductionRoute::AdaptedAcp
+    } else {
+        acp_route
+    };
     if acp_route == crate::acp::AcpProductionRoute::DirectCliMigration {
         tracing::info!(agent = ?config.agent_type, task_worker,
             "Explicit KRONN_ACP_ADAPTER_* override selects direct CLI compatibility; no automatic prompt replay");
@@ -4646,7 +4588,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 run_progress: config.run_progress.clone(),
                 step_tools: config.step_tools,
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(request, transport).await;
             }
@@ -4701,7 +4643,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 run_progress: config.run_progress.clone(),
                 step_tools: config.step_tools,
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(
                     AcpSessionRequest {
@@ -5056,7 +4998,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 /// (set for Claude Code) records the model and session its stream announces;
 /// `gemini` turns Gemini's stream-json events back into reply lines as they
 /// arrive, keeping its usage in `usage` and its errors in `stderr_capture`.
-async fn pump_stdout<R: tokio::io::AsyncRead + Unpin>(
+pub async fn pump_stdout<R: tokio::io::AsyncRead + Unpin>(
     stdout: R,
     tx: mpsc::Sender<String>,
     claude_provenance: Option<Option<AgentProvenanceCapture>>,
@@ -5178,7 +5120,7 @@ fn mint_launch_bridge_token(
 /// this distinction explicit so sharing spawn policy cannot close ACP stdin
 /// prematurely. Both variants pipe stderr: whoever spawns must drain it.
 #[derive(Clone, Copy)]
-pub(crate) enum SpawnIo<'a> {
+pub enum SpawnIo<'a> {
     Direct(Option<&'a str>),
     /// Stdin left to the adapter, plus environment for this launch only.
     Adapter(&'a [(String, String)]),
@@ -5186,27 +5128,27 @@ pub(crate) enum SpawnIo<'a> {
 
 /// Per-launch secrets remain in process environment, never prompt/argv.
 #[derive(Default)]
-pub(crate) struct AdapterLaunchOptions {
-    pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
-    pub(crate) room_agent_context: Option<RoomAgentBridgeContext>,
-    pub(crate) workflow_step_context: Option<WorkflowStepBridgeContext>,
+pub struct AdapterLaunchOptions {
+    pub worker_context: Option<TaskWorkerBridgeContext>,
+    pub room_agent_context: Option<RoomAgentBridgeContext>,
+    pub workflow_step_context: Option<WorkflowStepBridgeContext>,
     /// The audit run the launch works for (KT-1324): its process is tagged.
-    pub(crate) audit_run_id: Option<String>,
+    pub audit_run_id: Option<String>,
     /// Complete invocation policy for task workers or read-only workflow repos.
-    pub(crate) worker_args: Option<Vec<String>>,
-    pub(crate) api_key: Option<String>,
+    pub worker_args: Option<Vec<String>>,
+    pub api_key: Option<String>,
     /// KT-908 — a workflow step's declared tools; `None` = today's argv.
-    pub(crate) step_tools: Option<crate::models::StepTools>,
+    pub step_tools: Option<crate::models::StepTools>,
     /// `core::github_connection::env_for_launch` for this launch's project.
-    pub(crate) github_env: Vec<(String, String)>,
+    pub github_env: Vec<(String, String)>,
     /// The launch's scoped bridge token (layer B); revoked with the launch.
-    pub(crate) bridge_token: Option<String>,
+    pub bridge_token: Option<String>,
     /// KT-1633 — see [`AgentStartConfig::priority`].
-    pub(crate) priority: Priority,
+    pub priority: Priority,
     /// KT-1587 — the run directories the step was granted: the typed
     /// `ReadOnlyRepos::granted_dirs`, handed to the spawn of every turn (the
     /// adapters spawn the CLI themselves, so the grant cannot be lost here).
-    pub(crate) run_artifacts: Vec<PathBuf>,
+    pub run_artifacts: Vec<PathBuf>,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -5242,26 +5184,26 @@ fn adapter_task_worker_args(
 /// Bundled into one struct so `start_native_acp`/`start_adapted_acp`/
 /// `run_acp_session` stay under clippy's argument-count lint instead of
 /// growing an ever-longer positional parameter list.
-struct AcpSessionRequest<'a> {
-    agent_type: &'a AgentType,
-    work_dir: &'a Path,
-    prompt: &'a str,
-    system_context: &'a str,
-    project_path: &'a str,
-    model_flag: Option<&'a str>,
-    reasoning_effort: Option<&'a str>,
-    parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
-    discussion_id: Option<&'a str>,
-    resume_id: Option<&'a str>,
-    session_store: Option<AcpSessionStore>,
-    fallback_prompt: Option<&'a str>,
-    provenance: Option<AgentProvenanceCapture>,
-    activity: Option<super::activity::AgentActivitySink>,
+pub struct AcpSessionRequest<'a> {
+    pub agent_type: &'a AgentType,
+    pub work_dir: &'a Path,
+    pub prompt: &'a str,
+    pub system_context: &'a str,
+    pub project_path: &'a str,
+    pub model_flag: Option<&'a str>,
+    pub reasoning_effort: Option<&'a str>,
+    pub parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
+    pub discussion_id: Option<&'a str>,
+    pub resume_id: Option<&'a str>,
+    pub session_store: Option<AcpSessionStore>,
+    pub fallback_prompt: Option<&'a str>,
+    pub provenance: Option<AgentProvenanceCapture>,
+    pub activity: Option<super::activity::AgentActivitySink>,
     /// KT-932 — silence after which the turn is cancelled; `None` is the default.
-    idle_timeout: Option<Duration>,
-    run_progress: Option<super::run_progress::RunProgress>,
+    pub idle_timeout: Option<Duration>,
+    pub run_progress: Option<super::run_progress::RunProgress>,
     /// KT-908 — narrows the MCP servers offered to the session.
-    step_tools: Option<&'a crate::models::StepTools>,
+    pub step_tools: Option<&'a crate::models::StepTools>,
 }
 
 async fn start_native_acp(
@@ -5372,7 +5314,7 @@ async fn start_adapted_acp(
 /// applied, without the prompt (the adapter adds it). A new adapter, so new
 /// arguments, is built for every launch: a grant that changed, a `code` grant
 /// that was revoked included, applies from the next turn.
-pub(crate) fn adapter_policy_args(
+pub fn adapter_policy_args(
     agent_type: &AgentType,
     work_dir: &Path,
     policy: &super::read_only_repos::ReadOnlyRepos,
@@ -5388,8 +5330,8 @@ pub(crate) fn adapter_policy_args(
 /// The direct CLI route's command line for a policy-confined launch: the CLI's
 /// own builder, the policy applied, the prompt last. Tests compare it with
 /// [`adapter_policy_args`].
-#[cfg(test)]
-pub(crate) fn direct_policy_args(
+#[cfg(any(test, feature = "test-support"))]
+pub fn direct_policy_args(
     agent_type: &AgentType,
     prompt: &str,
     work_dir: &Path,
@@ -5420,24 +5362,21 @@ impl AcpProbeBounds {
 }
 
 /// The provider key a launch of `agent` would receive, if any.
-pub(crate) fn configured_api_key(agent: &AgentType, tokens: &TokensConfig) -> Option<String> {
+pub fn configured_api_key(agent: &AgentType, tokens: &TokensConfig) -> Option<String> {
     crate::core::child_env::AgentFamily::from_agent_type(agent)
         .provider_key_env()
         .and_then(|env_key| get_api_key(env_key, tokens))
 }
 
 /// The project MCP servers an ACP session of `agent` would declare here.
-pub(crate) fn probe_mcp_servers(
-    agent: &AgentType,
-    project_path: &str,
-) -> Vec<crate::acp::AcpMcpServer> {
+pub fn probe_mcp_servers(agent: &AgentType, project_path: &str) -> Vec<crate::acp::AcpMcpServer> {
     acp_project_mcp_servers(project_path, *agent == AgentType::ClaudeCode)
 }
 
 /// Start `agent`'s native ACP runtime the way a launch does, run `initialize`
 /// and `session/new` without any prompt, then stop it (KT-1107). It takes no
 /// prompt at all, so it cannot reach the model.
-pub(crate) async fn probe_native_acp_session(
+pub async fn probe_native_acp_session(
     agent_type: &AgentType,
     project_path: &str,
     project_id: Option<&str>,
@@ -5458,9 +5397,9 @@ pub(crate) async fn probe_native_acp_session(
         .collect();
     // Held for the whole probe: the bridge the session starts uses it.
     let mut _bridge = None;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let routed = test_acp_routes::transport_at(&work_dir);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let routed: Option<Arc<dyn AcpTransport>> = None;
     let transport: Arc<dyn AcpTransport> = match routed {
         Some(transport) => transport,
@@ -5568,8 +5507,8 @@ pub(crate) async fn probe_native_acp_session(
 /// Test-only routing of every ACP launch in one working directory to a
 /// fixture transport, so tests can drive callers that build their own
 /// `AgentStartConfig` (workflow steps, discussion turns).
-#[cfg(test)]
-pub(crate) mod test_acp_routes {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_acp_routes {
     use super::AgentStartConfig;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -5581,7 +5520,7 @@ pub(crate) mod test_acp_routes {
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
     /// Removes the route when dropped.
-    pub(crate) struct RouteGuard(PathBuf);
+    pub struct RouteGuard(PathBuf);
 
     impl Drop for RouteGuard {
         fn drop(&mut self) {
@@ -5590,7 +5529,7 @@ pub(crate) mod test_acp_routes {
     }
 
     /// `work_dir` must be the directory the runner resolves for the launch.
-    pub(crate) fn route(work_dir: &Path, transport: Transport) -> RouteGuard {
+    pub fn route(work_dir: &Path, transport: Transport) -> RouteGuard {
         ROUTES
             .lock()
             .unwrap()
@@ -5598,11 +5537,11 @@ pub(crate) mod test_acp_routes {
         RouteGuard(work_dir.to_path_buf())
     }
 
-    pub(crate) fn is_routed(work_dir: &Path) -> bool {
+    pub fn is_routed(work_dir: &Path) -> bool {
         ROUTES.lock().unwrap().contains_key(work_dir)
     }
 
-    pub(crate) fn transport_at(work_dir: &Path) -> Option<Transport> {
+    pub fn transport_at(work_dir: &Path) -> Option<Transport> {
         ROUTES.lock().unwrap().get(work_dir).cloned()
     }
 
@@ -5611,7 +5550,7 @@ pub(crate) mod test_acp_routes {
     static AGENT_ROUTES: LazyLock<Mutex<HashMap<(PathBuf, String), Transport>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
-    pub(crate) struct AgentRouteGuard(PathBuf, String);
+    pub struct AgentRouteGuard(PathBuf, String);
 
     impl Drop for AgentRouteGuard {
         fn drop(&mut self) {
@@ -5622,7 +5561,7 @@ pub(crate) mod test_acp_routes {
         }
     }
 
-    pub(crate) fn route_agent(
+    pub fn route_agent(
         work_dir: &Path,
         agent: &crate::models::AgentType,
         transport: Transport,
@@ -5664,7 +5603,7 @@ pub const ACP_TOOL_MARKER: &str = "[acp-tool] ";
 /// process is shut down regardless.
 const ACP_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn run_acp_session(
+pub async fn run_acp_session(
     request: AcpSessionRequest<'_>,
     transport: Arc<dyn crate::acp::AcpTransport>,
 ) -> Result<AgentProcess, String> {
@@ -6272,13 +6211,13 @@ fn mcp_command_missing(command: &str, work_dir: &Path) -> bool {
 /// references it resolves from its own process (Claude, KT-1003), so an entry
 /// is kept unless a credential sits in its `args`.
 /// The command-line flag that narrows the internal bridge to a step's tools.
-pub(crate) fn step_tools_bridge_arg(tools: &crate::models::StepTools) -> String {
+pub fn step_tools_bridge_arg(tools: &crate::models::StepTools) -> String {
     format!("--step-tools={}", tools.kronn_internal.join(","))
 }
 
 /// KT-908 — a step that declares its tools gets only Kronn's bridge, narrowed
 /// to them, or no server at all; an undeclared step keeps `servers` as is.
-pub(crate) fn declared_mcp_servers(
+pub fn declared_mcp_servers(
     servers: Vec<crate::acp::AcpMcpServer>,
     step_tools: Option<&crate::models::StepTools>,
 ) -> Vec<crate::acp::AcpMcpServer> {
@@ -6299,7 +6238,7 @@ pub(crate) fn declared_mcp_servers(
         .collect()
 }
 
-fn acp_project_mcp_servers(
+pub fn acp_project_mcp_servers(
     project_path: &str,
     env_by_reference: bool,
 ) -> Vec<crate::acp::AcpMcpServer> {
@@ -6376,7 +6315,7 @@ fn acp_project_mcp_servers(
 
 /// Ensure kiro-cli is available inside the container.
 /// Uses the official installer if missing.
-pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
+pub async fn ensure_kiro_cli_available() -> Result<(), String> {
     if super::find_binary("kiro-cli").is_some() {
         return Ok(());
     }
@@ -6438,7 +6377,7 @@ fn gemini_kronn_policy_path() -> Option<String> {
     Some(path.to_string_lossy().into_owned())
 }
 
-fn vibe_runner_path() -> String {
+pub fn vibe_runner_path() -> String {
     // 0. Explicit override (allows custom deployments)
     if let Ok(custom) = crate::core::child_env::var("KRONN_VIBE_RUNNER") {
         if std::path::Path::new(&custom).exists() {
@@ -6473,8 +6412,7 @@ fn vibe_runner_path() -> String {
         }
     }
     // 3. Dev mode: relative to cargo manifest
-    let dev_path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/vibe-runner.py");
-    dev_path.to_string()
+    format!("{}/scripts/vibe-runner.py", crate::BACKEND_DIR)
 }
 
 /// Resolve `disc-introspection-mcp.py` using the same lookup chain as
@@ -6489,7 +6427,7 @@ fn vibe_runner_path() -> String {
 /// breaks the host CLI with `Broken pipe (os error 32)` on every
 /// invocation. Use [`disc_introspection_mcp_path_for_shared_config`] in
 /// any code path that writes to a file the host CLI may read.
-pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
+pub fn disc_introspection_mcp_path() -> Option<String> {
     if let Ok(custom) = crate::core::child_env::var("KRONN_DISC_INTROSPECTION_MCP") {
         if std::path::Path::new(&custom).exists() {
             return Some(custom);
@@ -6515,7 +6453,10 @@ const BRIDGE_SOURCE_SEARCH_DEPTH: usize = 6;
 /// directory, then the checkout its binary sits in). Never from a path baked in
 /// at build time: a binary built in one checkout and run from another would
 /// launch the first checkout's script (KT-1316).
-fn disc_introspection_mcp_path_near(exe_dir: Option<&Path>, cwd: Option<&Path>) -> Option<String> {
+pub fn disc_introspection_mcp_path_near(
+    exe_dir: Option<&Path>,
+    cwd: Option<&Path>,
+) -> Option<String> {
     const SCRIPT: &str = "disc-introspection-mcp.py";
     let found = |candidate: PathBuf| {
         candidate
@@ -6549,14 +6490,14 @@ fn disc_introspection_mcp_path_near(exe_dir: Option<&Path>, cwd: Option<&Path>) 
         .or_else(|| exe_dir.and_then(in_source_tree))
 }
 
-pub(crate) struct InternalMcpCommand {
+pub struct InternalMcpCommand {
     pub command: String,
     pub args: Vec<String>,
     pub env: std::collections::HashMap<String, String>,
 }
 
 impl InternalMcpCommand {
-    fn script(path: String) -> Self {
+    pub fn script(path: String) -> Self {
         Self {
             command: "python3".into(),
             args: vec![path],
@@ -6565,7 +6506,7 @@ impl InternalMcpCommand {
     }
 }
 
-fn resolve_internal_mcp_command(
+pub fn resolve_internal_mcp_command(
     bundled: Option<std::ffi::OsString>,
     script: impl FnOnce() -> Option<String>,
 ) -> Option<InternalMcpCommand> {
@@ -6586,14 +6527,14 @@ fn resolve_internal_mcp_command(
     script().map(InternalMcpCommand::script)
 }
 
-pub(crate) fn disc_introspection_mcp_command() -> Option<InternalMcpCommand> {
+pub fn disc_introspection_mcp_command() -> Option<InternalMcpCommand> {
     resolve_internal_mcp_command(
         crate::core::child_env::var_os("KRONN_INTERNAL_MCP_EXECUTABLE"),
         disc_introspection_mcp_path,
     )
 }
 
-pub(crate) fn disc_introspection_mcp_command_for_shared_config() -> Option<InternalMcpCommand> {
+pub fn disc_introspection_mcp_command_for_shared_config() -> Option<InternalMcpCommand> {
     // Container commands must never leak into the host's project configuration.
     let bundled = (!Path::new("/.dockerenv").exists())
         .then(|| crate::core::child_env::var_os("KRONN_INTERNAL_MCP_EXECUTABLE"))
@@ -6624,7 +6565,7 @@ pub(crate) fn disc_introspection_mcp_command_for_shared_config() -> Option<Inter
 /// trade-off keeps host CLIs working cleanly. See user report
 /// 2026-05-10 (`kronn-internal Broken pipe (os error 32)` from
 /// `kiro-cli` on the host).
-pub(crate) fn disc_introspection_mcp_path_for_shared_config() -> Option<String> {
+pub fn disc_introspection_mcp_path_for_shared_config() -> Option<String> {
     if let Ok(public) = crate::core::child_env::var("KRONN_INTROSPECTION_PUBLIC_PATH") {
         if std::path::Path::new(&public).exists() {
             return Some(public);
@@ -6647,18 +6588,18 @@ pub(crate) fn disc_introspection_mcp_path_for_shared_config() -> Option<String> 
 ///
 /// Fallback when Ollama reports no context size. Bound by available memory and
 /// overridable through KRONN_OLLAMA_NUM_CTX_CAP.
-const OLLAMA_NUM_CTX_CAP: u64 = 16_384;
-pub(crate) const OLLAMA_NUM_CTX_FLOOR: u64 = 2048;
+pub const OLLAMA_NUM_CTX_CAP: u64 = 16_384;
+pub const OLLAMA_NUM_CTX_FLOOR: u64 = 2048;
 /// Tenths of a byte per token. Keep estimates below the measured prose and JSON
 /// ratios so the context guard retains headroom; see docs/research/.
 const PROSE_TENTHS_PER_TOKEN: u64 = 45;
 const TOOLS_TENTHS_PER_TOKEN: u64 = 35;
 /// What a reply needs on top of the prompt.
-const REPLY_HEADROOM_TOKENS: u64 = 2048;
+pub const REPLY_HEADROOM_TOKENS: u64 = 2048;
 
 /// Tokens a prompt of `messages_bytes` of text plus `tools_bytes` of declared
 /// catalogue is worth, with the room a reply needs.
-pub(crate) fn estimated_prompt_tokens(messages_bytes: usize, tools_bytes: usize) -> u64 {
+pub fn estimated_prompt_tokens(messages_bytes: usize, tools_bytes: usize) -> u64 {
     (messages_bytes as u64 * 10 / PROSE_TENTHS_PER_TOKEN)
         + (tools_bytes as u64 * 10 / TOOLS_TENTHS_PER_TOKEN)
         + REPLY_HEADROOM_TOKENS
@@ -6666,7 +6607,7 @@ pub(crate) fn estimated_prompt_tokens(messages_bytes: usize, tools_bytes: usize)
 /// Persistent Settings overrides are bounded against accidental values that
 /// would allocate an absurd KV cache. The process-global env override remains
 /// the deliberately unbounded break-glass path.
-pub(crate) const OLLAMA_NUM_CTX_OVERRIDE_MAX: u64 = 1_048_576;
+pub const OLLAMA_NUM_CTX_OVERRIDE_MAX: u64 = 1_048_576;
 /// Default output cap: one quarter of the context window. Override with
 /// KRONN_OLLAMA_NUM_PREDICT; a nonpositive value removes the cap.
 const OLLAMA_NUM_PREDICT_FLOOR: u64 = 1_024;
@@ -6691,7 +6632,7 @@ const OLLAMA_NUM_CTX_BLIND_CEILING: u64 = 32768;
 /// honest about being coarse beats a precise-looking number built on figures we
 /// do not have. Installed memory, never free memory — free memory changes
 /// minute to minute and would make two identical runs differ.
-pub(crate) fn ram_derived_ceiling(total_bytes: Option<u64>) -> u64 {
+pub fn ram_derived_ceiling(total_bytes: Option<u64>) -> u64 {
     const GB: u64 = 1024 * 1024 * 1024;
     match total_bytes {
         None => OLLAMA_NUM_CTX_BLIND_CEILING,
@@ -6704,7 +6645,7 @@ pub(crate) fn ram_derived_ceiling(total_bytes: Option<u64>) -> u64 {
 }
 
 /// Installed physical memory, or `None` when the platform will not say.
-pub(crate) fn total_system_memory_bytes() -> Option<u64> {
+pub fn total_system_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
         let output = crate::core::cmd::sync_tool_cmd("sysctl")
@@ -6732,7 +6673,7 @@ pub(crate) fn total_system_memory_bytes() -> Option<u64> {
 /// Where the effective window came from. The remedy differs for each, and a
 /// throttled model must be able to say so rather than look like its own limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CtxCapOrigin {
+pub enum CtxCapOrigin {
     /// `KRONN_OLLAMA_NUM_CTX_CAP` — the operator chose this number.
     OperatorOverride,
     /// A persistent per-model override, set once through the UI/API and
@@ -6752,7 +6693,7 @@ pub(crate) enum CtxCapOrigin {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CtxCap {
+pub struct CtxCap {
     pub value: u64,
     pub origin: CtxCapOrigin,
 }
@@ -6798,13 +6739,13 @@ impl CtxCap {
 /// KT-382 — how many times to ask Ollama for a model's trained context before
 /// falling back. Two, not more: the failure this covers is a cold load, and a
 /// longer ladder would delay every genuinely-offline run by the same amount.
-const OLLAMA_SHOW_ATTEMPTS: usize = 2;
+pub const OLLAMA_SHOW_ATTEMPTS: usize = 2;
 const OLLAMA_SHOW_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(750);
 
 /// Pure parse of the ctx-cap override (split out so it's unit-testable without
 /// mutating process env): a value below the floor or unparseable → None (the
 /// auto/model-derived path decides).
-pub(crate) fn parse_num_ctx_cap(raw: Option<String>) -> Option<u64> {
+pub fn parse_num_ctx_cap(raw: Option<String>) -> Option<u64> {
     let raw = raw?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -6825,11 +6766,64 @@ pub(crate) fn parse_num_ctx_cap(raw: Option<String>) -> Option<u64> {
     }
 }
 
+/// The context cap one run of `model` gets on the Ollama server at `base`: the
+/// env break-glass, else the per-model override, else the model's own window
+/// bounded by what this machine holds. The prompt-size check asks the same
+/// question through `ollama_ctx_cap_for`, so both read one answer.
+pub async fn ollama_run_ctx_cap(
+    base: &str,
+    model: &str,
+    overrides: Option<&std::collections::HashMap<String, u64>>,
+    profile: Option<&OllamaModelProfile>,
+) -> CtxCap {
+    let model_limit = profile.and_then(|profile| profile.context_length);
+    // Bound this model by resident weights and observed cache cost when available.
+    sample_ollama_memory(base, model).await;
+    let machine_ceiling = ollama_machine_ceiling(
+        &MachineFacts::read(),
+        base,
+        model,
+        profile,
+        ollama_model_size_bytes(base, model).await,
+    )
+    .await;
+    let env_raw = crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
+    match overrides {
+        Some(overrides) => {
+            resolve_ctx_cap_for_model(env_raw, model, overrides, model_limit, machine_ceiling)
+        }
+        None => resolve_ctx_cap_within(env_raw, model_limit, machine_ceiling),
+    }
+}
+
+/// `ollama_run_ctx_cap` for a caller that has not read the model's profile.
+pub async fn ollama_ctx_cap_for(
+    base: &str,
+    model: &str,
+    overrides: Option<&std::collections::HashMap<String, u64>>,
+) -> CtxCap {
+    let profile = ollama_model_profile(base, model).await;
+    ollama_run_ctx_cap(base, model, overrides, profile.as_ref()).await
+}
+
+/// The cost of one response as a gateway states it in `x-litellm-response-cost`
+/// (USD), in micro-USD. `None` when the header is absent or is not an amount.
+pub fn response_cost_header_micros(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let usd = headers
+        .get("x-litellm-response-cost")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    crate::core::pricing::usd_to_micros(usd)
+}
+
 /// `resolve_ctx_cap`, with the persistent per-model override inserted between
 /// the env break-glass and the auto-derived cap — see `CtxCapOrigin` for the
 /// full precedence. `overrides` is the whole config map so ONE call resolves
 /// one model without the caller needing to pre-look-up anything.
-pub(crate) fn resolve_ctx_cap_for_model(
+pub fn resolve_ctx_cap_for_model(
     env_raw: Option<String>,
     model: &str,
     overrides: &std::collections::HashMap<String, u64>,
@@ -6856,7 +6850,7 @@ pub(crate) fn resolve_ctx_cap_for_model(
 
 /// The decision itself, with the machine's ceiling passed in so it is testable
 /// without a machine.
-pub(crate) fn resolve_ctx_cap_within(
+pub fn resolve_ctx_cap_within(
     env_raw: Option<String>,
     model_limit: Option<u64>,
     ceiling: impl Into<ModelCeiling>,
@@ -6898,7 +6892,7 @@ pub(crate) fn resolve_ctx_cap_within(
 
 /// Resident context size and memory from /api/ps. Attention-shape arithmetic
 /// cannot reliably price the cache for sliding-window models.
-async fn sample_ollama_memory(base: &str, model: &str) {
+pub async fn sample_ollama_memory(base: &str, model: &str) {
     let sample = async {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
@@ -6943,7 +6937,7 @@ fn ollama_memory_samples() -> &'static OllamaMemorySamples {
 /// loaded at: what one token of its context actually costs, in bytes. `None`
 /// until two different windows have been observed, because one point gives a
 /// position and not a slope.
-pub(crate) fn kv_bytes_per_token_from_samples(
+pub fn kv_bytes_per_token_from_samples(
     samples: &std::collections::BTreeMap<u64, u64>,
 ) -> Option<u64> {
     let (&narrow, &small) = samples.iter().next()?;
@@ -6953,7 +6947,7 @@ pub(crate) fn kv_bytes_per_token_from_samples(
     (tokens > 0 && bytes > 0).then(|| bytes / tokens)
 }
 
-fn measured_kv_bytes_per_token(base: &str, model: &str) -> Option<u64> {
+pub fn measured_kv_bytes_per_token(base: &str, model: &str) -> Option<u64> {
     ollama_memory_samples()
         .lock()
         .ok()?
@@ -6969,7 +6963,7 @@ const RAM_SHARE_FOR_MODEL: u64 = 70;
 /// left of its memory share once the weights are resident, divided by what a
 /// token of cache costs. `None` when either is unknown, and the coarse band
 /// stands in.
-pub(crate) fn window_the_machine_can_hold(
+pub fn window_the_machine_can_hold(
     total_ram_bytes: Option<u64>,
     model_bytes: Option<u64>,
     kv_bytes_per_token: Option<u64>,
@@ -6981,7 +6975,7 @@ pub(crate) fn window_the_machine_can_hold(
 
 /// Bound the context by the model weights and measured cache cost. Use coarse
 /// memory bands until both are known; fit_ollama_num_ctx sizes each actual run.
-pub(crate) fn ram_ceiling_for_model(
+pub fn ram_ceiling_for_model(
     total_ram_bytes: Option<u64>,
     model_bytes: Option<u64>,
     kv_bytes_per_token: Option<u64>,
@@ -6996,7 +6990,7 @@ pub(crate) fn ram_ceiling_for_model(
 /// the model occupies on disk, from `/api/tags`; `profile` is its `/api/show`.
 /// The model's own `config.json` is read only where it can matter: on Apple
 /// Silicon, and when `/api/show` did not already give the attention shape.
-pub(crate) async fn ollama_machine_ceiling(
+pub async fn ollama_machine_ceiling(
     machine: &MachineFacts,
     base: &str,
     model: &str,
@@ -7025,7 +7019,7 @@ pub(crate) async fn ollama_machine_ceiling(
 /// Extract a model's trained context length from an Ollama `/api/show`
 /// response: `model_info` carries an arch-prefixed key (`qwen3.context_length`,
 /// `llama.context_length`, …) — match on the suffix. Pure + unit-tested.
-pub(crate) fn parse_context_length(show_response: &serde_json::Value) -> Option<u64> {
+pub fn parse_context_length(show_response: &serde_json::Value) -> Option<u64> {
     show_response
         .get("model_info")?
         .as_object()?
@@ -7035,27 +7029,27 @@ pub(crate) fn parse_context_length(show_response: &serde_json::Value) -> Option<
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OllamaModelProfile {
-    context_length: Option<u64>,
-    storage_format: Option<String>,
-    kv_shape: Option<KvShape>,
-    vision: super::vision::ImageSupport,
-    capabilities: Option<Vec<String>>,
+pub struct OllamaModelProfile {
+    pub context_length: Option<u64>,
+    pub storage_format: Option<String>,
+    pub kv_shape: Option<KvShape>,
+    pub vision: super::vision::ImageSupport,
+    pub capabilities: Option<Vec<String>>,
 }
 
 impl OllamaModelProfile {
-    pub(crate) fn context_length(&self) -> Option<u64> {
+    pub fn context_length(&self) -> Option<u64> {
         self.context_length
     }
 
     /// Ollama's own `capabilities` words (`completion`, `vision`, `decision`…),
     /// `None` when the server sent no such list.
-    pub(crate) fn capabilities(&self) -> Option<&[String]> {
+    pub fn capabilities(&self) -> Option<&[String]> {
         self.capabilities.as_deref()
     }
 }
 
-pub(crate) fn parse_ollama_model_profile(show_response: &serde_json::Value) -> OllamaModelProfile {
+pub fn parse_ollama_model_profile(show_response: &serde_json::Value) -> OllamaModelProfile {
     OllamaModelProfile {
         context_length: parse_context_length(show_response),
         storage_format: show_response
@@ -7103,7 +7097,7 @@ async fn provider_image_support(
         },
         AgentType::Nvidia => ImageSupport::Unknown,
         _ => {
-            let base = crate::api::ollama::resolve_base_url_pub(http_base_url);
+            let base = crate::api::ollama_health::resolve_base_url_pub(http_base_url);
             ollama_model_profile(&base, model)
                 .await
                 .map_or(ImageSupport::Unknown, |profile| profile.vision)
@@ -7114,7 +7108,7 @@ async fn provider_image_support(
 /// Ask Ollama for the stable metadata Kronn needs while running `model`, with
 /// a process-lifetime cache (one `/api/show` per model per boot).
 /// `None` means transport failure and is deliberately not cached.
-pub(crate) async fn ollama_model_profile(base: &str, model: &str) -> Option<OllamaModelProfile> {
+pub async fn ollama_model_profile(base: &str, model: &str) -> Option<OllamaModelProfile> {
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, OllamaModelProfile>>,
     > = std::sync::OnceLock::new();
@@ -7184,7 +7178,7 @@ type OllamaVersion = Option<(u64, u64)>;
 
 /// What each pulled model weighs, from `/api/tags`, cached per endpoint. The
 /// window a machine can hold depends on it, and `/api/show` does not carry it.
-pub(crate) async fn ollama_model_size_bytes(base: &str, model: &str) -> Option<u64> {
+pub async fn ollama_model_size_bytes(base: &str, model: &str) -> Option<u64> {
     type SizeCache = std::sync::Mutex<std::collections::HashMap<String, HashMap<String, u64>>>;
     use std::collections::HashMap;
     static CACHE: std::sync::OnceLock<SizeCache> = std::sync::OnceLock::new();
@@ -7237,7 +7231,7 @@ pub(crate) async fn ollama_model_size_bytes(base: &str, model: &str) -> Option<u
 
 /// The Ollama server's own `(major, minor)`, cached per endpoint. Used to scope
 /// the MLX worker mitigations to the versions that still need them.
-pub(crate) async fn ollama_server_version(base: &str) -> Option<(u64, u64)> {
+pub async fn ollama_server_version(base: &str) -> Option<(u64, u64)> {
     type ServerVersionCache = std::sync::Mutex<std::collections::HashMap<String, OllamaVersion>>;
     static CACHE: std::sync::OnceLock<ServerVersionCache> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
@@ -7272,7 +7266,7 @@ pub(crate) async fn ollama_server_version(base: &str) -> Option<(u64, u64)> {
 }
 
 /// `"0.34.2"` → `(0, 34)`. Anything else is no answer rather than a guess.
-pub(crate) fn parse_ollama_version(raw: &str) -> Option<(u64, u64)> {
+pub fn parse_ollama_version(raw: &str) -> Option<(u64, u64)> {
     let mut parts = raw.trim().trim_start_matches('v').split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
@@ -7281,13 +7275,13 @@ pub(crate) fn parse_ollama_version(raw: &str) -> Option<(u64, u64)> {
 
 /// Whether this server reuses the prompt prefix between MLX turns. Measured on
 /// 0.34.2: a second turn reused 9428 of its 9500 tokens.
-pub(crate) fn mlx_prefix_cache_reused(version: Option<(u64, u64)>) -> bool {
+pub fn mlx_prefix_cache_reused(version: Option<(u64, u64)>) -> bool {
     version.is_some_and(|version| version >= (0, 34))
 }
 
 /// Size the context window to the prompt, bounded by [FLOOR, cap]. Text only:
 /// `fit_ollama_num_ctx` is what sizes a request that also carries tools.
-pub(crate) fn ollama_num_ctx(system_context: &str, user_prompt: &str, ctx_cap: u64) -> u64 {
+pub fn ollama_num_ctx(system_context: &str, user_prompt: &str, ctx_cap: u64) -> u64 {
     let est = estimated_prompt_tokens(system_context.len() + user_prompt.len(), 0);
     est.clamp(OLLAMA_NUM_CTX_FLOOR, ctx_cap.max(OLLAMA_NUM_CTX_FLOOR))
 }
@@ -7295,7 +7289,7 @@ pub(crate) fn ollama_num_ctx(system_context: &str, user_prompt: &str, ctx_cap: u
 /// Everything this run could end up declaring: what is on the wire now, plus
 /// the families `tools_load` can still bring in. The window is sized for the
 /// maximum once, never grown later.
-pub(crate) fn reachable_tools_bytes(body: &serde_json::Value) -> usize {
+pub fn reachable_tools_bytes(body: &serde_json::Value) -> usize {
     let declared = body.get("tools").map_or(0, |tools| tools.to_string().len());
     let names: std::collections::HashSet<&str> = body["tools"]
         .as_array()
@@ -7310,9 +7304,10 @@ pub(crate) fn reachable_tools_bytes(body: &serde_json::Value) -> usize {
         return declared;
     }
     declared
-        + crate::api::agent_tools::TOOL_FAMILIES
-            .iter()
-            .flat_map(|(family, _, _)| crate::api::agent_tools::declarations_for_family(family))
+        + crate::core::uplink::linked::<crate::core::uplink::LoadableToolDeclarations>()
+            .map(|hook| (hook.0)())
+            .unwrap_or_default()
+            .into_iter()
             .filter(|tool| {
                 tool["function"]["name"]
                     .as_str()
@@ -7326,7 +7321,7 @@ pub(crate) fn reachable_tools_bytes(body: &serde_json::Value) -> usize {
 
 /// Size once for messages and all reachable tool declarations. Omitting tools
 /// risks silent prompt truncation; changing num_ctx mid-run reloads the model.
-pub(crate) fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
+pub fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
     let messages = super::vision::messages_wire_len(body);
     let tools = reachable_tools_bytes(body);
     let est = estimated_prompt_tokens(messages, tools);
@@ -7347,7 +7342,7 @@ pub(crate) fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
 
 /// How many tokens one turn may generate, or `None` when the operator lifted
 /// the cap. Pure so the rule can be tested without touching the process env.
-pub(crate) fn num_predict_for(num_ctx: u64, raw_override: Option<String>) -> Option<i64> {
+pub fn num_predict_for(num_ctx: u64, raw_override: Option<String>) -> Option<i64> {
     if let Some(raw) = raw_override {
         let raw = raw.trim();
         if !raw.is_empty() {
@@ -7366,7 +7361,7 @@ fn default_num_predict(num_ctx: u64) -> i64 {
     (num_ctx / 4).clamp(OLLAMA_NUM_PREDICT_FLOOR, OLLAMA_NUM_PREDICT_CEIL) as i64
 }
 
-pub(crate) fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
+pub fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
     num_predict_for(
         num_ctx,
         crate::core::child_env::var("KRONN_OLLAMA_NUM_PREDICT").ok(),
@@ -7375,7 +7370,7 @@ pub(crate) fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
 
 /// Most names a shape lists per level. A wider record is cut with a count, and
 /// the whole-element example shows the rest.
-const SHAPE_MAX_KEYS: usize = 40;
+pub const SHAPE_MAX_KEYS: usize = 40;
 /// Names kept per level in the smaller rendering, for a window with no room left.
 const SHAPE_BRIEF_KEYS: usize = 12;
 /// Longest string a shape shows as a value rather than as a type.
@@ -7387,7 +7382,7 @@ const SHAPE_INLINE_CHARS: usize = 40;
 /// response holds and has a way to select a piece of it: this carries both.
 /// Built from the ORIGINAL response, before any shortening, so it stays true
 /// however many times the message is cut.
-struct PartialReadHint {
+pub struct PartialReadHint {
     /// The layout in full: the response's keys and the main collection's item
     /// keys one level deep. `None` when the call was already an extract, whose
     /// layout is not the response's and so cannot be addressed by a new one.
@@ -7688,7 +7683,7 @@ fn partial_read_hint(messages: &[serde_json::Value], index: usize) -> Option<Par
 /// `hint`, when the result is an API response, says what the response holds and
 /// how to ask for a part of it: a model told to "ask for a part you have not
 /// seen" with no way to do so asks for the same thing again.
-fn compact_tool_result(
+pub fn compact_tool_result(
     raw: &str,
     allowance: usize,
     hint: Option<&PartialReadHint>,
@@ -8065,7 +8060,7 @@ fn truncated_json_envelope(
     Some(render(low))
 }
 
-pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u64) {
+pub fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u64) {
     // Trim against the window this request will ACTUALLY get, not the ceiling it
     // could have had. Ollama fixes `n_ctx_slot` when it loads the model and does
     // not grow it mid-conversation, so a later `num_ctx` bump buys nothing —
@@ -8232,7 +8227,7 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
 /// appends results that are often far bigger (a file, a diff). Leaving the window
 /// at its initial size makes Ollama truncate the history until the user message
 /// itself is gone, which it then rejects with `no user query found in messages`.
-pub(crate) fn resize_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
+pub fn resize_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
     let est = estimated_chat_history_tokens(body);
     let sized = est.clamp(OLLAMA_NUM_CTX_FLOOR, ctx_cap.max(OLLAMA_NUM_CTX_FLOOR));
     let num_ctx = body["options"]["num_ctx"]
@@ -8248,13 +8243,13 @@ pub(crate) fn resize_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) 
 }
 
 /// Point file-capable agents at the project document; inline it otherwise.
-pub(crate) fn http_agent_reads_its_own_files(is_http: bool, declares_read_file: bool) -> bool {
+pub fn http_agent_reads_its_own_files(is_http: bool, declares_read_file: bool) -> bool {
     is_http && declares_read_file && !inline_project_doc_forced()
 }
 
 /// The doc's own section headings, so an agent knows what is in the file it is
 /// pointed at instead of exploring the repository to find out.
-pub(crate) fn doc_section_index(doc: &str) -> String {
+pub fn doc_section_index(doc: &str) -> String {
     doc.lines()
         .filter_map(|line| line.strip_prefix("## "))
         .map(|heading| format!("- {}", heading.trim()))
@@ -8265,7 +8260,7 @@ pub(crate) fn doc_section_index(doc: &str) -> String {
 
 /// Put the whole project doc back in every request, for a model that will not
 /// go and open it. `KRONN_INLINE_PROJECT_DOC=1`.
-pub(crate) fn inline_project_doc_forced() -> bool {
+pub fn inline_project_doc_forced() -> bool {
     crate::core::child_env::var("KRONN_INLINE_PROJECT_DOC")
         .as_deref()
         .map(str::trim)
@@ -8275,7 +8270,7 @@ pub(crate) fn inline_project_doc_forced() -> bool {
 /// `think:false` is honoured from Ollama 0.19. Before that the control token in
 /// the prompt was the only way, and a server that will not say its version keeps
 /// it rather than silently paying for reasoning nobody reads.
-pub(crate) fn needs_no_think_token(server_version: Option<(u64, u64)>) -> bool {
+pub fn needs_no_think_token(server_version: Option<(u64, u64)>) -> bool {
     server_version.is_none_or(|version| version < (0, 19))
 }
 
@@ -8283,7 +8278,7 @@ pub(crate) fn needs_no_think_token(server_version: Option<(u64, u64)>) -> bool {
 /// only `message.content` is ever read, so reasoning is switched off two ways:
 /// `think:false` in the body (the effective one, honored since Ollama 0.19) and
 /// the `/no_think` control token, kept for older runtimes that only had that.
-pub(crate) fn ollama_disables_thinking(model: &str) -> bool {
+pub fn ollama_disables_thinking(model: &str) -> bool {
     model.starts_with("qwen3")
 }
 
@@ -8293,14 +8288,14 @@ pub(crate) fn ollama_disables_thinking(model: &str) -> bool {
 /// avoid paying the cold-reload latency each step. Accepts a duration string
 /// (`"30m"`, `"1h"`) or seconds (`"1800"`, `"-1"` = forever, `"0"` = unload
 /// now). Unset/blank ⇒ omit the field ⇒ Ollama uses its own default.
-pub(crate) fn ollama_keep_alive() -> Option<serde_json::Value> {
+pub fn ollama_keep_alive() -> Option<serde_json::Value> {
     parse_keep_alive(crate::core::child_env::var("KRONN_OLLAMA_KEEP_ALIVE").ok())
 }
 
 /// Pure parse of the keep_alive override (split out for unit tests without
 /// mutating process env): blank/unset ⇒ None (omit); a bare integer ⇒ a number
 /// (seconds, per Ollama); anything else ⇒ the raw duration string.
-pub(crate) fn parse_keep_alive(raw: Option<String>) -> Option<serde_json::Value> {
+pub fn parse_keep_alive(raw: Option<String>) -> Option<serde_json::Value> {
     let raw = raw?;
     let raw = raw.trim();
     if raw.is_empty() {
@@ -8326,7 +8321,7 @@ pub(crate) fn parse_keep_alive(raw: Option<String>) -> Option<serde_json::Value>
 /// When present, Ollama constrains decoding to the schema (structurally-valid
 /// JSON guaranteed) and we switch to a non-streaming request: a schema step
 /// wants one validated blob, not progressive chunks.
-pub(crate) fn build_ollama_chat_body(
+pub fn build_ollama_chat_body(
     model: &str,
     system_context: &str,
     user_prompt: &str,
@@ -8377,7 +8372,7 @@ pub(crate) fn build_ollama_chat_body(
 /// Token counts seen so far. OpenAI emits them in a usage frame that arrives
 /// *before* the `[DONE]` sentinel, so they must survive across lines.
 #[derive(Default)]
-pub(crate) struct TokenTally {
+pub struct TokenTally {
     prompt: u64,
     cached_prompt: Option<u64>,
     cache_write_prompt: Option<u64>,
@@ -8389,13 +8384,13 @@ pub(crate) struct TokenTally {
 }
 
 /// Cumulative ceiling telemetry carried in stderr; the last marker wins.
-pub(crate) const CEILING_TRACE_PREFIX: &str = "kronn_ceiling:";
+pub const CEILING_TRACE_PREFIX: &str = "kronn_ceiling:";
 /// Enough refused calls to show what is missing, not a dump of the loop.
 const MAX_REFUSED_CALLS_REPORTED: usize = 5;
 const MAX_REFUSED_CALL_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CeilingReport {
+pub struct CeilingReport {
     pub version: u8,
     #[serde(default)]
     pub tools: Vec<ToolCeilingHit>,
@@ -8405,7 +8400,7 @@ pub(crate) struct CeilingReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ToolCeilingHit {
+pub struct ToolCeilingHit {
     pub tool: String,
     pub limit: usize,
     pub refused: usize,
@@ -8470,7 +8465,7 @@ fn refused_call_summary(arguments: &serde_json::Value) -> String {
     }
 }
 
-pub(crate) fn parse_ceiling_report(stderr_lines: &[String]) -> Option<CeilingReport> {
+pub fn parse_ceiling_report(stderr_lines: &[String]) -> Option<CeilingReport> {
     stderr_lines
         .iter()
         .rev()
@@ -8483,7 +8478,7 @@ pub(crate) fn parse_ceiling_report(stderr_lines: &[String]) -> Option<CeilingRep
 
 /// OpenRouter's usage accounting: its responses then carry `usage.cost`. Other
 /// OpenAI-compatible providers may reject an unknown field, so only there.
-pub(crate) fn request_provider_cost(base: &str, body: &mut serde_json::Value) {
+pub fn request_provider_cost(base: &str, body: &mut serde_json::Value) {
     if base.contains("openrouter.ai") {
         body["usage"] = serde_json::json!({ "include": true });
     }
@@ -8491,30 +8486,30 @@ pub(crate) fn request_provider_cost(base: &str, body: &mut serde_json::Value) {
 
 /// Context budget a hosted step's pressure is measured on, whatever the model's
 /// window: the smaller of the two, overridable by `KRONN_HTTP_STEP_CTX_BUDGET`.
-pub(crate) const HOSTED_STEP_CTX_BUDGET: u64 = 128_000;
+pub const HOSTED_STEP_CTX_BUDGET: u64 = 128_000;
 
 /// Cumulative input tokens after which a hosted audit step must write its
 /// deliverable, overridable by `KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`.
-pub(crate) const HOSTED_AUDIT_STEP_INPUT_BUDGET: u64 = 1_500_000;
+pub const HOSTED_AUDIT_STEP_INPUT_BUDGET: u64 = 1_500_000;
 
 fn positive_u64(raw: Option<String>) -> Option<u64> {
     raw.and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
 }
 
-pub(crate) fn hosted_step_context_budget(window: Option<u64>, raw: Option<String>) -> u64 {
+pub fn hosted_step_context_budget(window: Option<u64>, raw: Option<String>) -> u64 {
     let budget = positive_u64(raw).unwrap_or(HOSTED_STEP_CTX_BUDGET);
     window
         .filter(|window| *window > 0)
         .map_or(budget, |window| window.min(budget))
 }
 
-pub(crate) fn hosted_audit_step_input_budget(raw: Option<String>) -> u64 {
+pub fn hosted_audit_step_input_budget(raw: Option<String>) -> u64 {
     positive_u64(raw).unwrap_or(HOSTED_AUDIT_STEP_INPUT_BUDGET)
 }
 
 /// Scale discussion tool rounds with the context window; keep the default when unknown.
-pub(crate) fn round_cap_for_window(window_tokens: Option<u64>) -> usize {
+pub fn round_cap_for_window(window_tokens: Option<u64>) -> usize {
     match window_tokens {
         Some(0) | None => crate::agents::tools::MAX_TOOL_ITERATIONS,
         Some(tokens) if tokens <= 32_768 => 50,
@@ -8568,7 +8563,7 @@ async fn remote_context_window(base: &str, model: &str, auth_key: Option<&str>) 
     window
 }
 
-fn smallest_endpoint_window(body: &serde_json::Value) -> Option<u64> {
+pub fn smallest_endpoint_window(body: &serde_json::Value) -> Option<u64> {
     body["data"]["endpoints"]
         .as_array()?
         .iter()
@@ -8577,8 +8572,8 @@ fn smallest_endpoint_window(body: &serde_json::Value) -> Option<u64> {
         .min()
 }
 
-const HTTP_TURN_TRACE_PREFIX: &str = "kronn_http_turn:";
-const HTTP_TOOL_EXEC_TRACE_PREFIX: &str = "kronn_http_tool_exec:";
+pub const HTTP_TURN_TRACE_PREFIX: &str = "kronn_http_turn:";
+pub const HTTP_TOOL_EXEC_TRACE_PREFIX: &str = "kronn_http_tool_exec:";
 const MAX_HTTP_TELEMETRY_TURNS_PER_DISPATCH: usize = 64;
 const MAX_HTTP_TELEMETRY_TOOLS_PER_TURN: usize = 8;
 const MAX_HTTP_TELEMETRY_TOOL_NAME_BYTES: usize = 64;
@@ -8656,7 +8651,7 @@ fn logged_refusal(
 /// Whether this is one of Kronn's own anti-loop refusals: the call was never
 /// executed and the model is being told to stop asking. Stage-specific worker
 /// refusals are not included, they have budgets of their own.
-fn is_loop_refusal(outcome: &crate::agents::tools::ToolOutcome) -> bool {
+pub fn is_loop_refusal(outcome: &crate::agents::tools::ToolOutcome) -> bool {
     !outcome.ok
         && [
             "round_ceiling_reached",
@@ -8725,7 +8720,7 @@ fn push_http_tool_exec_trace(stderr: &Arc<Mutex<Vec<String>>>, turn: u32, name: 
 /// Decode the internal, payload-free HTTP trace into the durable task usage
 /// projection. Malformed or future-version lines are ignored independently so
 /// one damaged diagnostic can never erase the rest of a run's accounting.
-pub(crate) fn parse_http_turn_telemetry(
+pub fn parse_http_turn_telemetry(
     stderr_lines: &[String],
 ) -> Vec<crate::models::TaskExecutionHttpTurnUsage> {
     let mut turns =
@@ -8804,7 +8799,7 @@ enum LeadingThinkingState {
 /// the leak. Once real answer text starts, the filter becomes a passthrough so
 /// legitimate code samples mentioning these tags remain visible.
 #[derive(Debug, Default)]
-pub(crate) struct LeadingThinkingFilter {
+pub struct LeadingThinkingFilter {
     state: LeadingThinkingState,
     pending: String,
     /// Second stage, over what the first lets through: tool calls the model
@@ -8814,20 +8809,20 @@ pub(crate) struct LeadingThinkingFilter {
 
 impl LeadingThinkingFilter {
     /// Inside a leading reasoning block the model's text is withheld.
-    pub(crate) fn is_suppressing(&self) -> bool {
+    pub fn is_suppressing(&self) -> bool {
         self.state == LeadingThinkingState::Suppressing
     }
 
     const OPEN_TAGS: [&'static str; 2] = ["<think>", "<thinking>"];
     const CLOSE_TAGS: [&'static str; 2] = ["</think>", "</thinking>"];
 
-    pub(crate) fn push(&mut self, input: &str) -> String {
+    pub fn push(&mut self, input: &str) -> String {
         let visible = self.push_thinking(input);
         self.text_calls.push(&visible)
     }
 
     /// A tool call written as text was stripped from this reply (KT-1543).
-    pub(crate) fn stripped_text_calls(&self) -> bool {
+    pub fn stripped_text_calls(&self) -> bool {
         self.text_calls.stripped
     }
 
@@ -8892,7 +8887,7 @@ impl LeadingThinkingFilter {
         visible
     }
 
-    pub(crate) fn finish(&mut self) -> String {
+    pub fn finish(&mut self) -> String {
         let tail = match self.state {
             LeadingThinkingState::Suppressing => {
                 self.pending.clear();
@@ -9041,7 +9036,7 @@ impl TextToolCallFilter {
     }
 }
 
-pub(crate) fn strip_leading_thinking_blocks(input: &str) -> String {
+pub fn strip_leading_thinking_blocks(input: &str) -> String {
     let mut filter = LeadingThinkingFilter::default();
     let mut visible = filter.push(input);
     visible.push_str(&filter.finish());
@@ -9050,19 +9045,19 @@ pub(crate) fn strip_leading_thinking_blocks(input: &str) -> String {
 
 /// Bytes of an attempt's text held back while a replay may still follow. A
 /// preamble before a tool call fits; a longer text is an answer and streams live.
-pub(crate) const REPLAY_HOLD_MAX_BYTES: usize = 512;
+pub const REPLAY_HOLD_MAX_BYTES: usize = 512;
 
 /// Text of an Ollama attempt that may be replayed after an unreadable tool call
 /// (KT-944). It is held until the attempt ends or outgrows a preamble, so a
 /// replayed attempt's text is dropped instead of shown twice.
 #[derive(Debug, Default)]
-pub(crate) struct ReplayHold {
+pub struct ReplayHold {
     held: String,
     active: bool,
 }
 
 impl ReplayHold {
-    pub(crate) fn new(active: bool) -> Self {
+    pub fn new(active: bool) -> Self {
         Self {
             held: String::new(),
             active,
@@ -9070,7 +9065,7 @@ impl ReplayHold {
     }
 
     /// The part of `visible` that may be sent now.
-    pub(crate) fn push(&mut self, visible: String) -> String {
+    pub fn push(&mut self, visible: String) -> String {
         if !self.active {
             return visible;
         }
@@ -9082,13 +9077,13 @@ impl ReplayHold {
     }
 
     /// The attempt stands: everything held is due, and later text streams live.
-    pub(crate) fn release(&mut self) -> String {
+    pub fn release(&mut self) -> String {
         self.active = false;
         std::mem::take(&mut self.held)
     }
 
     /// The attempt is replayed: what it held was never shown.
-    pub(crate) fn discard(&mut self) {
+    pub fn discard(&mut self) {
         self.held.clear();
     }
 }
@@ -9102,7 +9097,7 @@ impl ReplayHold {
 /// / stream aborted) so the caller can stop draining the response into the
 /// void.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn forward_chat_line(
+pub async fn forward_chat_line(
     codec: &dyn crate::agents::chat_codec::ChatCodec,
     // Which HTTP backend produced this line. Passed in because an in-band error
     // used to be labelled "Ollama error" whatever the provider: a room testing
@@ -9230,13 +9225,13 @@ pub(crate) async fn forward_chat_line(
 // invocation. Once a tool has executed, the caller forces the budget to one:
 // even a read-looking tool can hide a remote side effect, so fail closed until
 // the tool contract carries an explicit idempotency guarantee.
-const HTTP_PROVIDER_MAX_ATTEMPTS: usize = 3;
+pub const HTTP_PROVIDER_MAX_ATTEMPTS: usize = 3;
 
 #[derive(Debug)]
-struct HttpProviderFailure {
-    status: Option<reqwest::StatusCode>,
-    detail: String,
-    attempts: usize,
+pub struct HttpProviderFailure {
+    pub status: Option<reqwest::StatusCode>,
+    pub detail: String,
+    pub attempts: usize,
 }
 
 fn is_permanent_provider_failure(detail: &str) -> bool {
@@ -9260,7 +9255,7 @@ fn is_permanent_provider_failure(detail: &str) -> bool {
     .any(|needle| detail.contains(needle))
 }
 
-fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &str) -> bool {
+pub fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &str) -> bool {
     // 501 declares an unimplemented capability; repeating the same body cannot
     // recover it. This differs from capacity/availability failures (503/504).
     if status == Some(reqwest::StatusCode::NOT_IMPLEMENTED) || is_permanent_provider_failure(detail)
@@ -9304,7 +9299,7 @@ fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &s
 /// </function>`. That text is the one observed in production. The other needles
 /// are neighbouring wordings of the same parser failing, kept so a sibling model
 /// format is replayed the same way; none of them is a capacity or quota signal.
-fn is_unreadable_tool_call_failure(detail: &str) -> bool {
+pub fn is_unreadable_tool_call_failure(detail: &str) -> bool {
     let detail = detail.to_ascii_lowercase();
     [
         "xml syntax error",
@@ -9320,7 +9315,7 @@ fn is_unreadable_tool_call_failure(detail: &str) -> bool {
 /// stderr before the first request and would otherwise lead the failure: it is
 /// not the cause here, and it sends the reader to the wrong setting. It goes,
 /// and the sentence that names the real failure takes the head of the log.
-fn record_unreadable_tool_call_failure(
+pub fn record_unreadable_tool_call_failure(
     stderr: &Arc<Mutex<Vec<String>>>,
     backend: &str,
     model: &str,
@@ -9343,13 +9338,17 @@ fn record_unreadable_tool_call_failure(
 }
 
 fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
-    #[cfg(test)]
-    {
-        let _ = failed_attempt;
-        std::time::Duration::from_millis(1)
-    }
-    #[cfg(not(test))]
-    {
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let _ = failed_attempt;
+            std::time::Duration::from_millis(1)
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         // Long enough for a saturated worker slot to clear, still bounded so
         // the user is never left behind an invisible minute-long retry loop.
         std::time::Duration::from_secs(if failed_attempt == 1 { 2 } else { 5 })
@@ -9359,7 +9358,7 @@ fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
 /// Positive evidence that the provider rejects constrained output itself.
 /// Do not infer this from model names/storage formats, a generic 501, or an
 /// invalid schema: those must retain their original failure and request body.
-fn rejects_structured_output(failure: &HttpProviderFailure) -> bool {
+pub fn rejects_structured_output(failure: &HttpProviderFailure) -> bool {
     if !matches!(
         failure.status,
         Some(
@@ -9410,7 +9409,7 @@ fn push_provider_retry_trace(stderr: &Arc<Mutex<Vec<String>>>, line: String) {
     }
 }
 
-fn provider_failure_label(status: Option<reqwest::StatusCode>, detail: &str) -> String {
+pub fn provider_failure_label(status: Option<reqwest::StatusCode>, detail: &str) -> String {
     if detail
         .to_ascii_lowercase()
         .contains("worker local total request limit reached")
@@ -9588,8 +9587,8 @@ fn format_provider_failure(
 /// The default inactivity delay — what every test that does not care about the
 /// watchdog runs under. Production goes through `start_ollama_http_with_idle`.
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-async fn start_ollama_http(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn start_ollama_http(
     agent_type: &AgentType,
     user_prompt: &str,
     system_context: &str,
@@ -9648,7 +9647,7 @@ async fn start_ollama_http(
 /// them they ride the user message as image parts; otherwise the system context
 /// says, per image, that it is attached and unseen.
 #[allow(clippy::too_many_arguments)]
-async fn start_ollama_http_with_idle(
+pub async fn start_ollama_http_with_idle(
     agent_type: &AgentType,
     user_prompt: &str,
     system_context: &str,
@@ -9729,7 +9728,7 @@ async fn start_ollama_http_with_idle(
             );
             (base, body, 0, None, None, None)
         } else {
-            let base = crate::api::ollama::resolve_base_url_pub(http_base_url);
+            let base = crate::api::ollama_health::resolve_base_url_pub(http_base_url);
             // 0.11.0 — ctx cap auto-derived from THE MODEL (its trained context via
             // /api/show, cached), clamped to a RAM-safe ceiling. Zero configuration:
             // a user who pulled qwen3:32b gets its real window instead of a silent 8K
@@ -9741,30 +9740,13 @@ async fn start_ollama_http_with_idle(
             let model_storage_format = model_profile
                 .as_ref()
                 .and_then(|profile| profile.storage_format.clone());
-            // Bound this model by resident weights and observed cache cost when available.
-            sample_ollama_memory(&base, model).await;
-            let machine_ceiling = ollama_machine_ceiling(
-                &MachineFacts::read(),
+            let cap = ollama_run_ctx_cap(
                 &base,
                 model,
+                ollama_context_overrides,
                 model_profile.as_ref(),
-                ollama_model_size_bytes(&base, model).await,
             )
             .await;
-            let cap = match ollama_context_overrides {
-                Some(overrides) => resolve_ctx_cap_for_model(
-                    crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
-                    model,
-                    overrides,
-                    model_limit,
-                    machine_ceiling,
-                ),
-                None => resolve_ctx_cap_within(
-                    crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
-                    model_limit,
-                    machine_ceiling,
-                ),
-            };
             let ctx_cap = cap.value;
             ctx_notice = cap.throttle_notice(model);
             if let Some(notice) = ctx_notice.as_deref() {
@@ -10366,6 +10348,9 @@ async fn start_ollama_http_with_idle(
             // and still emit its name; declaration removal is not an execution
             // boundary unless Kronn verifies it before calling the executor.
             let declared_tools_for_turn = declared_tool_names(&body);
+            // A gateway (LiteLLM) reports the response's cost in a header, not
+            // in the body; a cost in the body, read below, wins over it.
+            let header_cost = response_cost_header_micros(response.headers());
             let mut stream = response.bytes_stream();
             // KT-932 — each read of a streamed answer is bounded by the idle
             // delay, so every chunk that arrives restarts it. A response that is
@@ -10546,7 +10531,7 @@ async fn start_ollama_http_with_idle(
                             .saturating_add(written),
                     );
                 }
-                match tally.cost_usd_micros {
+                match tally.cost_usd_micros.or(header_cost) {
                     Some(cost) => {
                         usage.cost_usd_micros =
                             Some(usage.cost_usd_micros.unwrap_or(0).saturating_add(cost));
@@ -12999,7 +12984,7 @@ pub fn cli_print_session_is_resumable(work_dir: &Path, conversation_id: &str) ->
 }
 
 /// The folder name `claude` gives a working directory inside its store.
-fn claude_project_slug(work_dir: &Path) -> String {
+pub fn claude_project_slug(work_dir: &Path) -> String {
     work_dir
         .to_string_lossy()
         .chars()
@@ -13018,8 +13003,8 @@ pub fn discussion_scratch_dir(discussion_id: &str) -> Result<PathBuf, String> {
 /// Test guard: the home a discussion folder is created under must be a scratch
 /// directory strictly inside `temp`. Both sides are canonicalised so macOS's
 /// `/var` -> `/private/var` link cannot make a scratch home look foreign.
-#[cfg(test)]
-fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let (home_real, temp_real) = (canonical(home), canonical(temp));
     if home_real != temp_real && home_real.starts_with(&temp_real) {
@@ -13034,27 +13019,27 @@ fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
 
 /// Points `HOME` at a fresh tempdir for one test and puts it back on drop, even
 /// on a panic. `HOME` is process-wide: callers must be `#[serial]`.
-#[cfg(test)]
-pub(crate) struct ScratchHome {
+#[cfg(any(test, feature = "test-support"))]
+pub struct ScratchHome {
     dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ScratchHome {
-    pub(crate) fn enter() -> Self {
+    pub fn enter() -> Self {
         let dir = tempfile::tempdir().expect("scratch home");
         let previous = crate::core::child_env::var_os("HOME");
         crate::core::child_env::set_var("HOME", dir.path());
         Self { dir, previous }
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         self.dir.path()
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ScratchHome {
     fn drop(&mut self) {
         match self.previous.take() {
@@ -13064,7 +13049,7 @@ impl Drop for ScratchHome {
     }
 }
 
-fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
+pub fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
     // The id becomes a path segment: anything but a plain id could escape it.
     if discussion_id.is_empty()
         || !discussion_id
@@ -13075,7 +13060,7 @@ fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<Path
     }
     // A test creating this under the developer's real home would litter (or, in
     // a worker sandbox, fail to create) `~/.kronn/discussions`: fail loudly.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Err(error) = scratch_home_guard(home, &std::env::temp_dir()) {
         panic!("{error}");
     }
@@ -13216,7 +13201,7 @@ printf '%s\n' '__ALLOW__'
 /// The widening is exactly what building and testing needs: loopback binding
 /// (no `allowedDomains`, so no external host), and read access to the host's
 /// dependency caches. Nothing else is added.
-fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
+pub fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     let work_dir = work_dir.canonicalize().map_err(|error| {
         format!(
             "Claude task worker cannot start: unable to canonicalize managed worktree {}: {error}",
@@ -13226,6 +13211,32 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     let lane = crate::core::task_worker_env::WorkerLane::for_worktree(&work_dir)?;
     let caches =
         crate::core::task_worker_env::SharedCaches::discover(lane.main_checkout.as_deref());
+    // KT-1745 — the `.git` pointer of the worktree is the repository Kronn's own
+    // git commands in it trust: the worker reads it, never writes or replaces it
+    // (the shell through `denyWrite`, the file tools through a permission rule).
+    let git_pointer = lane.worktree.join(".git");
+    let mut permission_deny = crate::core::vault_guard::claude_permission_deny();
+    // …and so is the `.git` of every repository that EXISTS in the worktree now (a
+    // submodule: its configuration is read by commands that look inside it). A
+    // repository the worker creates later (`git init vendor/pkg`, terraform git
+    // modules, Composer source installs, Bundler git gems) stays possible: Kronn
+    // refuses to stage or to run git in a new one.
+    let mut nested_git: Vec<String> = Vec::new();
+    for entry in crate::core::task_worker_sandbox::nested_git_entries(&lane.worktree) {
+        let text = entry.to_string_lossy().into_owned();
+        nested_git.push(format!("{text}/**"));
+        nested_git.push(text);
+    }
+    nested_git.sort();
+    nested_git.dedup();
+    for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        permission_deny.push(format!("{tool}(/{})", git_pointer.to_string_lossy()));
+        for pattern in &nested_git {
+            permission_deny.push(format!("{tool}(/{pattern})"));
+        }
+    }
+    let mut deny_write = vec![git_pointer.to_string_lossy().into_owned()];
+    deny_write.extend(nested_git.iter().cloned());
     serde_json::to_string(&serde_json::json!({
         "sandbox": {
             "enabled": true,
@@ -13235,6 +13246,7 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             "excludedCommands": [],
             "filesystem": {
                 "allowWrite": lane.write_roots(),
+                "denyWrite": deny_write,
                 "allowRead": lane.read_roots(&caches),
                 // KT-1495 — the Kronn data directory: `allowRead` is additive, so
                 // without this the worker's shell reads the keys and the database.
@@ -13242,7 +13254,7 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             },
             "network": { "allowLocalBinding": true }
         },
-        "permissions": { "deny": crate::core::vault_guard::claude_permission_deny() },
+        "permissions": { "deny": permission_deny },
         "hooks": claude_project_cargo_hooks(&work_dir)
     }))
     .map_err(|error| format!("Unable to encode the Claude task-worker sandbox policy: {error}"))
@@ -13250,7 +13262,7 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
 
 /// Whether the task-worker sandbox policy Kronn builds allows loopback binding;
 /// the smoke check's port capability is the conjunction with a real bind.
-pub(crate) fn claude_task_worker_allows_loopback_binding(work_dir: &Path) -> bool {
+pub fn claude_task_worker_allows_loopback_binding(work_dir: &Path) -> bool {
     claude_task_worker_settings(work_dir)
         .ok()
         .and_then(|settings| serde_json::from_str::<serde_json::Value>(&settings).ok())
@@ -13278,7 +13290,7 @@ fn parse_claude_task_worker_auth_status(
     }
 }
 
-fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(), String> {
+pub fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(), String> {
     match parse_claude_task_worker_auth_status(stdout, exit_success) {
         ClaudeTaskWorkerAuthStatus::LoggedIn => Ok(()),
         ClaudeTaskWorkerAuthStatus::LoggedOut => Err(
@@ -13301,19 +13313,19 @@ const MAX_CLAUDE_SANDBOX_WORKTREES: usize = 64;
 const MAX_CLAUDE_SANDBOX_WORKTREE_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ClaudeSandboxCatalogueReceipt {
+pub struct ClaudeSandboxCatalogueReceipt {
     pub common_dir_count: usize,
     pub worktree_count: usize,
     pub worktree_bytes: usize,
 }
 
 impl ClaudeSandboxCatalogueReceipt {
-    fn validate(self) -> Result<(), String> {
+    pub fn validate(self) -> Result<(), String> {
         self.validate_listing(&[])
     }
 
     /// Whether the catalogue is within both caps.
-    pub(crate) fn within_caps(self) -> bool {
+    pub fn within_caps(self) -> bool {
         self.worktree_count <= MAX_CLAUDE_SANDBOX_WORKTREES
             && self.worktree_bytes <= MAX_CLAUDE_SANDBOX_WORKTREE_BYTES
     }
@@ -13322,7 +13334,7 @@ impl ClaudeSandboxCatalogueReceipt {
     /// its cap (directory names only, never a path), each with why Kronn did
     /// not reclaim it, and the action that frees them (KT-1646, KT-1676).
     /// `blockers` holds one `name (reason)` entry per worktree.
-    pub(crate) fn validate_listing(self, blockers: &[String]) -> Result<(), String> {
+    pub fn validate_listing(self, blockers: &[String]) -> Result<(), String> {
         if self.within_caps() {
             return Ok(());
         }
@@ -13359,12 +13371,12 @@ impl ClaudeSandboxCatalogueReceipt {
 
 /// One Git root measured by the catalogue preflight; `label` names it in a
 /// refusal without exposing its path.
-pub(crate) struct ClaudeSandboxCatalogueRoot {
+pub struct ClaudeSandboxCatalogueRoot {
     pub label: String,
     pub path: PathBuf,
 }
 
-fn claude_sandbox_catalogue_receipt(
+pub fn claude_sandbox_catalogue_receipt(
     repo_roots: &[ClaudeSandboxCatalogueRoot],
 ) -> Result<ClaudeSandboxCatalogueReceipt, String> {
     let mut common_dirs = std::collections::BTreeSet::new();
@@ -13418,7 +13430,7 @@ fn claude_sandbox_catalogue_unreadable(label: &str) -> String {
 /// Roots whose worktree catalogue the Claude sandbox could enumerate. A linked
 /// location that does not exist has no catalogue to enumerate, so it is skipped;
 /// any other access failure stays in the list and fails closed.
-pub(crate) fn claude_sandbox_catalogue_roots(
+pub fn claude_sandbox_catalogue_roots(
     project: &crate::models::Project,
 ) -> Vec<ClaudeSandboxCatalogueRoot> {
     let mut roots = vec![ClaudeSandboxCatalogueRoot {
@@ -13446,7 +13458,7 @@ pub(crate) fn claude_sandbox_catalogue_roots(
     roots
 }
 
-pub(crate) fn claude_task_worker_catalogue_preflight(
+pub fn claude_task_worker_catalogue_preflight(
     project: &crate::models::Project,
 ) -> Result<(), String> {
     if !super::host_is_macos() {
@@ -13458,7 +13470,7 @@ pub(crate) fn claude_task_worker_catalogue_preflight(
 /// The catalogue measured for `project`; `None` where the sandbox catalogue
 /// does not apply (not macOS). The launch boundary measures, reclaims finished
 /// worktrees when over a cap, then measures again (KT-1646).
-pub(crate) fn claude_task_worker_catalogue_measure(
+pub fn claude_task_worker_catalogue_measure(
     project: &crate::models::Project,
 ) -> Result<Option<ClaudeSandboxCatalogueReceipt>, String> {
     if !super::host_is_macos() {
@@ -13471,9 +13483,7 @@ pub(crate) fn claude_task_worker_catalogue_measure(
 /// each repository left out: what a refusal names so a human knows which ones
 /// keep the catalogue over its cap (KT-1676). Best effort, read-only: a root
 /// Git cannot list contributes nothing, the refusal itself is the measure's.
-pub(crate) fn claude_task_worker_catalogue_worktrees(
-    project: &crate::models::Project,
-) -> Vec<PathBuf> {
+pub fn claude_task_worker_catalogue_worktrees(project: &crate::models::Project) -> Vec<PathBuf> {
     let mut common_dirs = std::collections::BTreeSet::new();
     let mut worktrees = Vec::new();
     for root in claude_sandbox_catalogue_roots(project) {
@@ -13531,7 +13541,7 @@ async fn run_claude_task_worker_auth_probe(
         .await
 }
 
-fn claude_task_worker_platform_check(windows: bool, via_wsl: bool) -> Result<(), String> {
+pub fn claude_task_worker_platform_check(windows: bool, via_wsl: bool) -> Result<(), String> {
     if windows && !via_wsl {
         return Err(
             "Claude task workers require a sandbox, which Claude does not support on native Windows. +             Use a worker on a supported isolated runtime; ordinary Claude discussions remain available."
@@ -13605,7 +13615,7 @@ fn claude_task_worker_probe_spawn_diagnostic(probe: &str, error: &std::io::Error
 /// and by the worker catalogue. `/user show` exercises the CLI's effective
 /// authentication source without asking a model to answer a user prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CopilotTaskWorkerPreflight {
+pub enum CopilotTaskWorkerPreflight {
     Usable,
     AuthInvalid,
     Malformed,
@@ -13616,7 +13626,7 @@ pub(crate) enum CopilotTaskWorkerPreflight {
 }
 
 impl CopilotTaskWorkerPreflight {
-    pub(crate) fn reason_code(self) -> Option<&'static str> {
+    pub fn reason_code(self) -> Option<&'static str> {
         match self {
             Self::Usable => None,
             Self::AuthInvalid => Some("copilot_auth_invalid"),
@@ -13628,7 +13638,7 @@ impl CopilotTaskWorkerPreflight {
     }
 }
 
-fn parse_copilot_task_worker_preflight(
+pub fn parse_copilot_task_worker_preflight(
     stdout: &[u8],
     exit_success: bool,
 ) -> CopilotTaskWorkerPreflight {
@@ -13645,7 +13655,7 @@ fn parse_copilot_task_worker_preflight(
     }
 }
 
-fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
+pub fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
     let failure_kind = status
         .reason_code()
         .expect("unusable Copilot preflight has a stable reason code");
@@ -13673,7 +13683,7 @@ fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> St
     )
 }
 
-const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
+pub const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
 
 async fn run_copilot_task_worker_preflight(
     resolved: (String, Vec<String>, bool),
@@ -13687,7 +13697,7 @@ async fn run_copilot_task_worker_preflight(
     .await
 }
 
-async fn run_copilot_task_worker_preflight_with_timeout(
+pub async fn run_copilot_task_worker_preflight_with_timeout(
     resolved: (String, Vec<String>, bool),
     work_dir: &Path,
     timeout: Duration,
@@ -13720,7 +13730,7 @@ async fn run_copilot_task_worker_preflight_with_timeout(
         .await
 }
 
-async fn wait_copilot_preflight_child_with_timeout(
+pub async fn wait_copilot_preflight_child_with_timeout(
     mut child: tokio::process::Child,
     timeout: Duration,
 ) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
@@ -13771,7 +13781,7 @@ async fn wait_copilot_preflight_child_with_timeout(
     }
 }
 
-pub(crate) async fn probe_copilot_task_worker_preflight(
+pub async fn probe_copilot_task_worker_preflight(
     binary: &str,
     npx_package: Option<&str>,
     work_dir: &Path,
@@ -13830,7 +13840,7 @@ async fn probe_copilot_task_worker_auth(
     }
 }
 
-fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {
+pub fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {
     let source = project_root.join(".mcp.json");
     let raw = std::fs::read_to_string(&source).map_err(|error| {
         format!(
@@ -13882,7 +13892,7 @@ fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> 
     .map_err(|error| format!("Unable to encode the Claude task-worker MCP config: {error}"))
 }
 
-fn insert_claude_mcp_config(args: &mut Vec<String>, config: String, strict: bool) {
+pub fn insert_claude_mcp_config(args: &mut Vec<String>, config: String, strict: bool) {
     // The user prompt is always the last positional argument. MCP config must
     // precede --append-system-prompt when present, otherwise it can be consumed
     // as the system-prompt value. Locate the flag explicitly: inspecting the
@@ -13900,8 +13910,8 @@ fn insert_claude_mcp_config(args: &mut Vec<String>, config: String, strict: bool
     args.insert(mcp_index + 1, config);
 }
 
-#[cfg(test)]
-fn agent_command(
+#[cfg(any(test, feature = "test-support"))]
+pub fn agent_command(
     agent_type: &AgentType,
     prompt: &str,
     full_access: bool,
@@ -13932,7 +13942,7 @@ fn agent_command(
 /// task worker. A worktree is an ownership boundary, not a sandbox by itself:
 /// every CLI that offers a global bypass must ignore it for worker runs.
 #[allow(clippy::too_many_arguments)]
-fn agent_command_with_task_worker_policy(
+pub fn agent_command_with_task_worker_policy(
     agent_type: &AgentType,
     prompt: &str,
     full_access: bool,
@@ -14333,11 +14343,11 @@ fn agent_command_with_task_worker_policy(
 /// `PAGE_SIZE * 32` picks the 128 KiB figure with a conservative margin.
 /// Seen in the wild (EW-7189 analysis): large MCP + skills + prompt combined
 /// pushed past the limit, spawn_failed with `os error 7`.
-pub(crate) const MAX_SINGLE_ARG_BYTES: usize = 100 * 1024;
-const CLAUDE_SYSTEM_PROMPT_TRUNCATION_MARKER: &str =
+pub const MAX_SINGLE_ARG_BYTES: usize = 100 * 1024;
+pub const CLAUDE_SYSTEM_PROMPT_TRUNCATION_MARKER: &str =
     "\n\n[... system prompt truncated by Kronn to fit ARG_MAX ...]";
 
-fn truncate_claude_system_prompt_argument(args: &mut [String]) -> Option<(usize, usize)> {
+pub fn truncate_claude_system_prompt_argument(args: &mut [String]) -> Option<(usize, usize)> {
     let index = args
         .iter()
         .position(|argument| argument == "--append-system-prompt")?;
@@ -14357,21 +14367,21 @@ fn truncate_claude_system_prompt_argument(args: &mut [String]) -> Option<(usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InvocationSizeReceipt {
-    argv_payload_bytes: usize,
-    environment_payload_bytes: usize,
+pub struct InvocationSizeReceipt {
+    pub argv_payload_bytes: usize,
+    pub environment_payload_bytes: usize,
     argument_count: usize,
-    max_argument_bytes: usize,
+    pub max_argument_bytes: usize,
     environment_entry_count: usize,
     max_environment_entry_bytes: usize,
-    settings_bytes: usize,
-    mcp_config_bytes: usize,
-    system_prompt_bytes: usize,
-    stdin_bytes: usize,
+    pub settings_bytes: usize,
+    pub mcp_config_bytes: usize,
+    pub system_prompt_bytes: usize,
+    pub stdin_bytes: usize,
 }
 
 impl InvocationSizeReceipt {
-    fn compact(self) -> String {
+    pub fn compact(self) -> String {
         format!(
             "argv_payload_bytes={}, environment_payload_bytes={}, argument_count={}, \
              max_argument_bytes={}, environment_entry_count={}, \
@@ -14390,7 +14400,7 @@ impl InvocationSizeReceipt {
         )
     }
 
-    fn validate_single_argument_limit(self) -> Result<(), String> {
+    pub fn validate_single_argument_limit(self) -> Result<(), String> {
         if self.max_argument_bytes <= MAX_SINGLE_ARG_BYTES {
             return Ok(());
         }
@@ -14434,7 +14444,7 @@ fn os_str_bytes(value: &std::ffi::OsStr) -> usize {
     value.encode_wide().count() * std::mem::size_of::<u16>()
 }
 
-fn invocation_size_receipt(
+pub fn invocation_size_receipt(
     program: &std::ffi::OsStr,
     args: &[&std::ffi::OsStr],
     environment: &[(&std::ffi::OsStr, &std::ffi::OsStr)],
@@ -14468,7 +14478,7 @@ fn invocation_size_receipt(
     }
 }
 
-fn command_invocation_size_receipt(
+pub fn command_invocation_size_receipt(
     command: &tokio::process::Command,
     stdin_payload: Option<&str>,
 ) -> InvocationSizeReceipt {
@@ -14548,7 +14558,7 @@ fn os_str_bytes_eq(value: &std::ffi::OsStr, expected: &[u8]) -> bool {
 /// tokens. Same rule as `InvocationSizeReceipt` ("No argument content was
 /// logged"). An argument is identified by the flag it follows when there is
 /// one, since positions shift between agents.
-fn nul_byte_offender(command: &tokio::process::Command) -> Option<String> {
+pub fn nul_byte_offender(command: &tokio::process::Command) -> Option<String> {
     let command = command.as_std();
     if os_str_is_nul_bearing(command.get_program()) {
         return Some("the program name".to_string());
@@ -14595,27 +14605,9 @@ fn resolve_agent_invocation(
     }
 }
 
-/// Whether this launch crosses into WSL (Windows-native Kronn, WSL binary).
-fn agent_runs_in_wsl(command: &str, resolved_via_wsl: bool) -> bool {
-    super::wsl::runs_in_wsl(
-        cfg!(target_os = "windows") && !is_wsl(),
-        command,
-        resolved_via_wsl,
-    )
-}
-
-pub(crate) fn platform_agent_invocation(
-    command: String,
-    args: Vec<String>,
-    resolved_via_wsl: bool,
-    work_dir: &Path,
-) -> (String, Vec<String>, PathBuf) {
-    if agent_runs_in_wsl(&command, resolved_via_wsl) {
-        super::wsl::wrap_invocation(command, args, work_dir)
-    } else {
-        (command, args, work_dir.to_path_buf())
-    }
-}
+pub use super::wsl::platform_agent_invocation;
+#[allow(unused_imports)]
+pub use super::wsl::{agent_runs_in_wsl, is_wsl};
 
 /// True iff the agent's `HOME` should NOT be overridden to
 /// `KRONN_HOST_HOME` before spawn. Pure decision so we can test the
@@ -14632,7 +14624,7 @@ pub(crate) fn platform_agent_invocation(
 ///
 /// Unknown binaries keep the override — they may legitimately need
 /// a host-rooted HOME (arbitrary user-installed tools).
-pub(crate) fn should_skip_home_override(binary: &str, npx_package: Option<&str>) -> bool {
+pub fn should_skip_home_override(binary: &str, npx_package: Option<&str>) -> bool {
     matches!(
         binary,
         "claude" | "codex" | "vibe" | "gemini" | "kiro-cli" | "copilot"
@@ -14652,7 +14644,7 @@ const ARGV_LOG_VALUE_MAX_CHARS: usize = 96;
 /// Argv as it may appear in a debug log: flags verbatim, `-c key=value`
 /// overrides reduced to the key when the value is long or secret-shaped, and
 /// prompt-like values replaced by their length. Every kept part is redacted.
-pub(crate) fn loggable_argv(args: &[String]) -> String {
+pub fn loggable_argv(args: &[String]) -> String {
     let elided = |value: &str| format!("<{} chars>", value.chars().count());
     let short_plain = |value: &str| {
         value.chars().count() <= ARGV_LOG_VALUE_MAX_CHARS && !value.chars().any(char::is_whitespace)
@@ -14712,7 +14704,7 @@ fn looks_secret(value: &str) -> bool {
 /// Claude Code loads the workstation's own auto-memory (the user's interactive
 /// notes) into every session, ~8.8k tokens re-read on each call. `=1` keeps it
 /// for a native discussion turn; nothing else Kronn launches ever gets it.
-pub(crate) fn claude_auto_memory_opted_in() -> bool {
+pub fn claude_auto_memory_opted_in() -> bool {
     crate::core::child_env::var("KRONN_CLAUDE_AUTO_MEMORY")
         .as_deref()
         .map(str::trim)
@@ -14722,7 +14714,7 @@ pub(crate) fn claude_auto_memory_opted_in() -> bool {
 /// The priority of one agent launch: a task worker runs in the background
 /// whatever the caller asked, any other launch at the priority its caller asked
 /// for (a workflow Agent step: background; a discussion turn: the backend's own).
-fn agent_launch_priority(
+pub fn agent_launch_priority(
     task_worker_context: Option<&TaskWorkerBridgeContext>,
     requested: Priority,
 ) -> Priority {
@@ -14742,7 +14734,7 @@ fn is_claude_code_launch(binary: &str, npx_package: Option<&str>) -> bool {
 
 /// A native discussion turn carries a discussion and none of the step, room
 /// principal or worker capabilities.
-fn claude_auto_memory_kept(
+pub fn claude_auto_memory_kept(
     opted_in: bool,
     discussion_id: Option<&str>,
     task_worker_context: Option<&TaskWorkerBridgeContext>,
@@ -14756,7 +14748,7 @@ fn claude_auto_memory_kept(
         && workflow_step_context.is_none()
 }
 
-fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> String {
+pub fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> String {
     let mut paths = vec![work_dir.to_path_buf()];
     if let (Ok(relative), Some(host_home)) = (work_dir.strip_prefix("/host-home"), host_home) {
         paths.push(Path::new(host_home).join(relative));
@@ -14801,9 +14793,9 @@ fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> Str
 /// Tests only (KT-1587): a production launch always goes through
 /// [`try_spawn_granted`], so none can drop the run artifacts grant by calling
 /// this no-grant form.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn try_spawn(
+pub fn try_spawn(
     binary: &str,
     npx_package: Option<&str>,
     args: &[String],
@@ -14844,21 +14836,21 @@ pub(crate) fn try_spawn(
 }
 
 /// Tests: the run artifacts grant each spawn was handed, by program.
-#[cfg(test)]
-pub(crate) mod spawn_grants {
+#[cfg(any(test, feature = "test-support"))]
+pub mod spawn_grants {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
     static SEEN: Mutex<Vec<(String, Vec<PathBuf>)>> = Mutex::new(Vec::new());
 
-    pub(crate) fn record(binary: &str, granted: &[PathBuf]) {
+    pub fn record(binary: &str, granted: &[PathBuf]) {
         SEEN.lock()
             .unwrap()
             .push((binary.to_owned(), granted.to_vec()));
     }
 
     /// The grant of the last spawn of `binary`; `None` when it never spawned.
-    pub(crate) fn last_for(binary: &str) -> Option<Vec<PathBuf>> {
+    pub fn last_for(binary: &str) -> Option<Vec<PathBuf>> {
         let seen = SEEN.lock().unwrap();
         let (_, granted) = seen.iter().rev().find(|(name, _)| name == binary)?;
         Some(granted.clone())
@@ -14870,7 +14862,7 @@ pub(crate) mod spawn_grants {
 /// (`ReadOnlyRepos::granted_dirs`), never read back out of `args`, whose prompt
 /// and system prompt carry text no one vetted.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn try_spawn_granted(
+pub fn try_spawn_granted(
     binary: &str,
     npx_package: Option<&str>,
     args: &[String],
@@ -14889,7 +14881,7 @@ pub(crate) fn try_spawn_granted(
     full_access: bool,
     run_artifacts: &[PathBuf],
 ) -> Result<tokio::process::Child, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     spawn_grants::record(binary, run_artifacts);
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -14900,6 +14892,12 @@ pub(crate) fn try_spawn_granted(
     // below — sending a Linux path to a Windows-native spawn would just fail.
     let (cmd_name, mut cmd_args, resolved_via_wsl) =
         resolve_agent_invocation(binary, npx_package, args)?;
+    // KT-1971 — the process gets a settings document too large for an argument
+    // as a file; `args` keeps the document for what reads it below.
+    // Only a document that enables the CLI's own sandbox is handed over (the
+    // same reading as `vault_guard::launch_sandbox`): such a launch is never
+    // wrapped in Kronn's sandbox, which hides the directory the file is in.
+    super::read_only_repos::spill_large_settings(&mut cmd_args);
     let sandbox_required = task_worker_context.is_some()
         || args.windows(2).any(|pair| {
             pair[0] == "--settings"
@@ -14954,8 +14952,8 @@ pub(crate) fn try_spawn_granted(
     // only that) to an OS sandbox: its own shell and file tools could otherwise
     // read the keys and the database whatever Kronn's gates say. A host with no
     // sandbox, or the owner's setting off, leaves the launch exactly as it was.
-    let (final_cmd, final_args) = if runs_in_wsl || resolved_via_wsl {
-        (final_cmd, final_args)
+    let (final_cmd, final_args, browser_env) = if runs_in_wsl || resolved_via_wsl {
+        (final_cmd, final_args, None)
     } else {
         let roots = crate::core::vault_guard::LaunchRoots::discover(
             Path::new(&effective_work_dir),
@@ -14987,7 +14985,9 @@ pub(crate) fn try_spawn_granted(
             }
             crate::core::vault_guard::Confined::Wrapped => {}
         }
-        (program, wrapped_args)
+        let browser_env =
+            crate::core::vault_guard::browser_env_inside(&outcome, cfg!(target_os = "macos"));
+        (program, wrapped_args, browser_env)
     };
 
     let route = crate::core::child_env::ChildRoute::Agent(
@@ -15073,6 +15073,9 @@ pub(crate) fn try_spawn_granted(
         bridge_token,
         api_key: api_key.map(|key| (env_key, key)),
     };
+    if let Some(project_path) = work_dir.to_str() {
+        crate::core::mcp_scanner::ensure_local_exclude(project_path, ".kronn/tmp/");
+    }
     crate::core::child_env::apply_agent_launch(cmd.as_std_mut(), work_dir, &launch, backend_url)?;
     // KT-1645 — no agent moves the owner's main checkout (checkout, switch, reset,
     // stash) without the human's confirmation. Not for an agent in WSL, whose
@@ -15142,6 +15145,11 @@ pub(crate) fn try_spawn_granted(
     // and pretending an outer sandbox exists would undermine that guarantee.
     // Note: use CLAUDE_CODE_BUBBLEWRAP, not IS_SANDBOX — IS_SANDBOX also
     // suppresses 529 overloaded errors causing infinite silent retries.
+    // KT-1977 — a browser started by the agent's MCP servers cannot start its
+    // own sandbox inside Kronn's.
+    if let Some((name, value)) = browser_env {
+        cmd.env(name, value);
+    }
     if !sandbox_required {
         cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
     } else {
@@ -15173,6 +15181,9 @@ pub(crate) fn try_spawn_granted(
     // keep their own sandbox's defaults.
     if task_worker_context.is_some() && is_claude_code_launch(binary, npx_package) {
         crate::core::task_worker_env::apply_launch_env(cmd.as_std_mut(), work_dir);
+        // KT-1718 — Claude Code caps a shell command at 10 minutes unless told
+        // otherwise, and a cold test-profile build outlasts that.
+        crate::core::task_worker_env::apply_bash_timeouts(cmd.as_std_mut());
         // KT-1318 - every launch of a task worker stamps the lane it builds in,
         // resumes and reworks included, not only the first provisioning.
         if let Some(context) = task_worker_context {
@@ -15721,14 +15732,14 @@ fn gemini_stream_usage(stats: &serde_json::Value) -> Option<GeminiUsage> {
 /// capture, where the text output's `[ERROR]` line used to land. Anything that
 /// is not an event (a warning, an older CLI's plain text) passes through.
 #[derive(Default)]
-struct GeminiStreamAdapter {
+pub struct GeminiStreamAdapter {
     /// Reply text received but not yet ended by a newline.
     partial: String,
 }
 
 impl GeminiStreamAdapter {
     /// The lines to emit now (possibly none) for one stdout line.
-    fn push(
+    pub fn push(
         &mut self,
         line: String,
         usage: &Mutex<AgentUsage>,
@@ -15781,7 +15792,7 @@ impl GeminiStreamAdapter {
     }
 
     /// The reply's last line, when the stream ends without a closing newline.
-    fn flush(&mut self) -> Option<String> {
+    pub fn flush(&mut self) -> Option<String> {
         (!self.partial.is_empty()).then(|| std::mem::take(&mut self.partial))
     }
 }
@@ -15820,9 +15831,9 @@ fn codex_token_count(marker: &str, count: &str) -> Option<u64> {
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 #[path = "runner_test.rs"]
-mod runner_test;
+pub mod runner_test;
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_idle_test.rs"]
@@ -15837,7 +15848,7 @@ mod vault_probe_test;
 #[path = "runner_vision_test.rs"]
 mod runner_vision_test;
 
-fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
+pub fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     let provider = match env_key {
         "ANTHROPIC_API_KEY" => "anthropic",
         "OPENAI_API_KEY" => "openai",
@@ -16098,62 +16109,6 @@ mod acp_resume_tests {
             output.push_str(&line);
         }
         output
-    }
-
-    /// KT-1278 — over ACP the context and the task are ONE user message. An
-    /// audit step hands the session a prompt whose last words are its own
-    /// instruction, and the session puts that prompt last, after the context
-    /// (the workflow step and the task worker brief are pinned at their own
-    /// assembly: `build_step_prompt`, `worker_brief_markdown`).
-    #[tokio::test]
-    async fn an_acp_message_with_context_ends_with_the_tasks_own_instruction() {
-        let docs_root = crate::core::docs_location::DocsRoot::default_root();
-        let step = crate::api::audit::ANALYSIS_STEPS[7];
-        let prompt = crate::api::audit::finish_step_prompt(
-            "Step 8 instructions\n\n### Runtime versions pinned in the repository\n\nNone found.\n",
-            None,
-            8,
-            &step,
-            &docs_root,
-        );
-        let context = "=== ANTI-HALLUCINATION (pointer) ===\n\nCite your sources.\n\n=== AVAILABLE TOOLS ===\n\nA table of tools.";
-        let fixture = transport(ResumeOutcome::Ok, PromptOutcome::Complete);
-        let mut process = run_acp_session(
-            AcpSessionRequest {
-                step_tools: None,
-                agent_type: &AgentType::OpenCode,
-                work_dir: Path::new("."),
-                prompt: &prompt,
-                system_context: context,
-                project_path: "",
-                model_flag: None,
-                reasoning_effort: None,
-                parent_cancel: None,
-                discussion_id: None,
-                resume_id: None,
-                session_store: None,
-                fallback_prompt: None,
-                provenance: None,
-                activity: None,
-                idle_timeout: None,
-                run_progress: None,
-            },
-            fixture.clone(),
-        )
-        .await
-        .expect("run ACP fixture");
-        collect_output(&mut process).await;
-        let sent = fixture.prompts.lock().unwrap().clone();
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].starts_with(context), "context first");
-        assert!(sent[0].ends_with(&prompt), "the task's prompt comes last");
-        assert!(
-            sent[0]
-                .trim_end()
-                .ends_with("Stop once the work is written."),
-            "the message must end on the task's instruction, got …{}",
-            &sent[0][sent[0].len().saturating_sub(200)..]
-        );
     }
 
     #[tokio::test]

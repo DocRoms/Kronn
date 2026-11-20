@@ -167,13 +167,14 @@ pub fn set_lane_seeds(conn: &Connection, project_id: &str, seeds: &[String]) -> 
     Ok(changed > 0)
 }
 
+/// The secret-looking files a human has seen and accepted, by declared seed
+/// (repository-relative paths). A file that is not listed here holds its seed.
+pub type ConfirmedSecrets = std::collections::BTreeMap<String, Vec<String>>;
+
 /// The secret-looking files a human confirmed inside each declared lane seed
 /// (KT-1438). An unknown project or an unreadable value reads as nothing
 /// confirmed, which holds every seed that has such a file.
-pub fn lane_seeds_confirmed(
-    conn: &Connection,
-    project_id: &str,
-) -> Result<crate::core::task_worker_lane_seeds::ConfirmedSecrets> {
+pub fn lane_seeds_confirmed(conn: &Connection, project_id: &str) -> Result<ConfirmedSecrets> {
     let value: Option<Option<String>> = conn
         .query_row(
             "SELECT lane_seeds_confirmed_json FROM projects WHERE id = ?1",
@@ -194,7 +195,7 @@ pub fn set_lane_seeds_confirmed(
     conn: &Connection,
     project_id: &str,
     seeds: &[String],
-    confirmed: &crate::core::task_worker_lane_seeds::ConfirmedSecrets,
+    confirmed: &ConfirmedSecrets,
 ) -> Result<bool> {
     let changed = conn.execute(
         "UPDATE projects SET lane_seeds_json = ?2, lane_seeds_confirmed_json = ?3 WHERE id = ?1",
@@ -417,6 +418,25 @@ pub fn update_project_workspace(
         ],
     )?;
     Ok(())
+}
+
+/// Which git hooks Kronn runs for its own commits and merges for a worker of
+/// `project_id` (KT-1745). A project that is unknown, unreadable or never set
+/// gets the safe default: none.
+pub fn worker_commit_hooks(
+    conn: &Connection,
+    project_id: Option<&str>,
+) -> crate::models::WorkerCommitHooks {
+    let Some(project_id) = project_id else {
+        return crate::models::WorkerCommitHooks::default();
+    };
+    match get_project(conn, project_id) {
+        Ok(Some(project)) => project
+            .workspace
+            .map(|workspace| workspace.worker_commit_hooks)
+            .unwrap_or_default(),
+        _ => crate::models::WorkerCommitHooks::default(),
+    }
 }
 
 pub fn update_project_briefing_notes(
@@ -679,7 +699,7 @@ pub fn update_project_default_profile(
 pub fn delete_project_discussions(conn: &Connection, project_id: &str) -> Result<()> {
     // KT-1492: their trust settings are gone (trigger); what those levels
     // approved is taken back in the same transaction.
-    crate::db::trust::delete_and_withdraw(conn, "Kronn (project rooms deleted)", |conn| {
+    crate::core::uplink::delete_and_withdraw(conn, "Kronn (project rooms deleted)", |conn| {
         conn.execute(
             "DELETE FROM discussions WHERE project_id = ?1",
             params![project_id],

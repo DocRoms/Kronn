@@ -88,14 +88,14 @@ static SOURCE_EXTS: &[&str] = &[
 ];
 
 /// Markup extensions scanned for `_blank` / CSP signals.
-pub(crate) static MARKUP_EXTS: &[&str] = &[
+pub static MARKUP_EXTS: &[&str] = &[
     "html", "htm", "twig", "vue", "svelte", "jsx", "tsx", "php", "erb", "blade",
 ];
 
 /// Per-detector cap on emitted signals so a pathological repo can't
 /// flood the Step 8 prompt. When a detector truncates, it appends a
 /// final summary signal so the omission is never silent.
-pub(crate) const MAX_PER_DETECTOR: usize = 15;
+pub const MAX_PER_DETECTOR: usize = 15;
 
 /// Run every Phase-1 detector against `project_path` and return the
 /// flattened, severity-sorted signal list.
@@ -221,7 +221,7 @@ fn detect_zero_tests(root: &Path) -> Vec<DetectedSignal> {
 
 /// Heuristic: is this path a test file? Covers the common per-language
 /// conventions without language-specific config.
-pub(crate) fn is_test_path(path: &Path) -> bool {
+pub fn is_test_path(path: &Path) -> bool {
     // Directory-based conventions: match any path COMPONENT (so a
     // top-level `tests/` with no leading slash is caught too).
     static TEST_DIRS: &[&str] = &["tests", "test", "__tests__", "spec", "specs", "testing"];
@@ -463,7 +463,7 @@ fn root_has_file(root: &Path, rel_lower: &str) -> bool {
 /// outputs are repository hygiene debt. Only `git ls-files` entries are
 /// considered: an untracked local screenshot or cache is a developer-state
 /// concern, not a finding against the project.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn detect_tracked_repo_artifacts(root: &Path) -> Vec<DetectedSignal> {
     match tracked_listing(root) {
         Ok(listing) => {
@@ -476,16 +476,9 @@ fn detect_tracked_repo_artifacts(root: &Path) -> Vec<DetectedSignal> {
 /// `git ls-files -z --cached`, shared by the detectors that judge tracked
 /// paths. A failure is reported once, by the tracked-artifacts signal.
 fn tracked_listing(root: &Path) -> Result<Vec<u8>, String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(["-C"])
-        .arg(root)
-        .args(["ls-files", "-z", "--cached"])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(format!("git ls-files exited with {}", output.status));
-    }
-    Ok(output.stdout)
+    // KT-1595: no program the repository's configuration names runs.
+    crate::core::cmd::agent_git_output(root, &["ls-files", "-z", "--cached"], &[])
+        .ok_or_else(|| "git ls-files failed or did not answer in time".to_string())
 }
 
 fn tracked_artifacts_from_listing(listing: &[u8], yarn_zero_install: bool) -> Vec<DetectedSignal> {
@@ -950,14 +943,14 @@ fn escape_markdown_table_cell(value: &str) -> String {
 /// detector, the Docker/CI inventory and a team's own bans must see them, and
 /// a `.gitattributes` line must never be able to hide one. Hygiene detectors
 /// use [`walk_skipping_generated`].
-pub(crate) fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+pub fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
     walk_with(root, false)
 }
 
 /// [`walk`] without generated, vendored and framework-scaffolding files, for
 /// the hygiene detectors only: a signal there would force a TD nobody can fix
 /// in this repository (KT-1323).
-pub(crate) fn walk_skipping_generated(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+pub fn walk_skipping_generated(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
     walk_with(root, true)
 }
 
@@ -997,6 +990,19 @@ fn walk_with(root: &Path, skip_generated: bool) -> impl Iterator<Item = walkdir:
 mod tests {
     use super::*;
     use std::fs;
+
+    /// KT-1595 round 12: the tracked listing never runs the file-system
+    /// monitor the repository's configuration names.
+    #[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
+    #[test]
+    fn the_tracked_listing_runs_no_program_the_repository_names() {
+        use crate::core::cmd::hostile_git::{git, marker_program, repo};
+        let dir = repo();
+        let (program, marker) = marker_program(dir.path());
+        git(dir.path(), &["config", "core.fsmonitor", &program]);
+        assert_eq!(tracked_listing(dir.path()).unwrap(), b"a.txt\0");
+        assert!(!marker.exists(), "the fsmonitor hook ran");
+    }
 
     fn proj() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -1271,7 +1277,7 @@ mod tests {
         let signals = detect_tracked_repo_artifacts(t.path());
         assert_eq!(signals.len(), 1);
         assert!(signals[0].title.contains("could not be evaluated"));
-        assert!(signals[0].evidence.contains("git ls-files exited"));
+        assert!(signals[0].evidence.contains("git ls-files failed"));
         assert_eq!(
             disposition_anchor(&signals[0]).as_deref(),
             Some("tracked repository artifacts could not be evaluated")

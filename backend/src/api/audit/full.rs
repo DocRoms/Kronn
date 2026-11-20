@@ -223,7 +223,7 @@ async fn wait_for_cancel_ack(
 /// KT-1134 — stop every agent still answering in a validation discussion linked
 /// to one of the project's audit runs: it writes `docs/`, which the audit
 /// starting now owns. Returns the discussions stopped.
-pub(crate) async fn stop_validation_agents(state: &AppState, project_id: &str) -> Vec<String> {
+pub async fn stop_validation_agents(state: &AppState, project_id: &str) -> Vec<String> {
     let pid = project_id.to_string();
     let linked = state
         .db
@@ -777,8 +777,8 @@ pub async fn full_audit(
         // them: only those settle a TD at the end. A resume keeps its
         // predecessor's.
         let adr_baseline = {
-            let docs = docs_root.dir(&project_path);
-            let found = tokio::task::spawn_blocking(move || crate::core::adr::StartOfRun::capture(&docs))
+            let (root, docs) = (project_path.clone(), docs_root.dir(&project_path));
+            let found = tokio::task::spawn_blocking(move || crate::core::adr::StartOfRun::capture(&root, &docs))
                 .await.unwrap_or_default();
             let (run_id, previous_id, fallback) = (audit_run_id.clone(), resume_run_id_req.clone(), found.clone());
             match db.with_conn(move |conn| {
@@ -2840,17 +2840,15 @@ pub async fn full_audit(
                                 // drift.rs: stamping an unproven rewrite would
                                 // mask a no-op step as freshly audited).
                                 if enforce_mode {
-                                    if let Ok(written) = std::fs::read_to_string(&target_path) {
-                                        if let Some(stamped) =
-                                            super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
-                                        {
-                                            if let Err(e) = std::fs::write(&target_path, &stamped) {
-                                                tracing::warn!(
-                                                    "Audit step {} ({}): failed to stamp audit dates: {}",
-                                                    step, file_label, e
-                                                );
-                                            }
-                                        }
+                                    // KT-1595: read + replace through the
+                                    // rooted primitive, a link is refused.
+                                    if let Err(e) = super::anti_hallu_enforce::stamp_target_audit_dates(
+                                        &project_path, &target_path, &today,
+                                    ) {
+                                        tracing::warn!(
+                                            "Audit step {} ({}): failed to stamp audit dates: {}",
+                                            step, file_label, e
+                                        );
                                     }
                                 }
                             }
@@ -3245,60 +3243,19 @@ pub async fn full_audit(
             // step left stale on disk never masquerades as freshly emitted.
             let recon_index_files: Vec<String> = freshly_written_indices.clone();
             let recon_outcome = tokio::task::spawn_blocking(move || {
-                use super::reconciliation::{
-                    check_signature_in_source, classify, compute_delta_with_index,
-                    parse_index_td_ids, render_report, DeltaKind,
-                };
-                // Index-aware delta (fix 2026-06-03): a prior whose id is still
-                // listed in a freshly-written index is `Carried` (re-emitted),
-                // NOT a `Missed` candidate. Without this, Step 8's anti-repetition
-                // (keep correct detail files verbatim) made every re-listed prior
-                // look "missed".
-                let still_listed: std::collections::HashSet<String> = recon_index_files
-                    .iter()
-                    .filter_map(|f| std::fs::read_to_string(project_path_for_recon.join(f)).ok())
-                    .flat_map(|c| parse_index_td_ids(&c))
-                    .collect();
-                // Rejected findings and accepted trade-offs leave the index on
-                // purpose: they are not reconciliation candidates.
-                let snapshot: Vec<_> = snapshot
-                    .into_iter()
-                    .filter(|snap| {
-                        std::fs::read_to_string(&snap.path)
-                            .ok()
-                            .and_then(|c| crate::core::audit_validation::td_decision(&c))
-                            .is_none_or(|decision| !decision.leaves_index())
-                    })
-                    .collect();
-                let deltas = compute_delta_with_index(&snapshot, &still_listed);
-                let project_path_for_check = project_path_for_recon.clone();
-                let entries = classify(
-                    &deltas,
-                    Utc::now(),
-                    90,
-                    |snap| check_signature_in_source(snap, &project_path_for_check),
-                );
-                let today = Utc::now().format("%Y-%m-%d").to_string();
-                let report = render_report(&entries, &today, "Full");
-                let report_path = crate::core::docs_location::DocsRoot::of(&project_path_for_recon)
-                    .file(&project_path_for_recon, "tech-debt")
-                    .join(format!("_reconciliation-{}.md", today));
-                // Re-emitted priors (Updated refreshed OR Carried re-listed) are
-                // healthy, not candidates.
-                let candidates = entries
-                    .iter()
-                    .filter(|e| !matches!(e.delta, DeltaKind::Updated | DeltaKind::Carried))
-                    .count();
-                let updated = entries.len() - candidates;
-                (report_path, report, candidates, updated)
+                build_reconciliation(&project_path_for_recon, &recon_index_files, snapshot)
             })
-            .await;
+            .await
+            .map_err(|e| format!("panicked: {e}"))
+            .and_then(|built| built);
+            if let Err(e) = &recon_outcome {
+                tracing::warn!("Reconciliation skipped: {e} — audit continues");
+            }
 
             if let Ok((report_path, report, candidates, updated)) = recon_outcome {
-                if let Some(parent) = report_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::fs::write(&report_path, &report) {
+                // Through the rooted primitive (KT-1595): the report lands in a
+                // folder an agent's leftover process may have swapped for a link.
+                match write_reconciliation_report(&project_path, &report_path, &report) {
                     Ok(()) => {
                         tracing::info!(
                             "Reconciliation report: {} candidates, {} updated. Written to {}",
@@ -3323,8 +3280,8 @@ pub async fn full_audit(
         // Lists every TD sheet, sub-audits included, in the central index.
         if outcome != RunOutcome::Nothing && should_optimize_documents(kind) {
             let docs = docs_root.dir(&project_path);
-            let baseline = adr_baseline.clone();
-            match tokio::task::spawn_blocking(move || crate::core::td_index::resync(&docs, baseline.trust())).await {
+            let (root, baseline) = (project_path.clone(), adr_baseline.clone());
+            match tokio::task::spawn_blocking(move || crate::core::td_index::resync(&root, &docs, baseline.trust())).await {
                 Ok(Ok(td)) => {
                     yield Event::default().event("td_index").data(serde_json::json!({
                         "changed": td.changed, "listed": td.listed, "settled": td.settled,
@@ -3339,8 +3296,8 @@ pub async fn full_audit(
             }
         } else if outcome != RunOutcome::Nothing {
             // A standalone sub-audit rebuilds no index, but an accepted ADR still settles its sheets.
-            let (docs, baseline) = (docs_root.dir(&project_path), adr_baseline.clone());
-            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::core::adr::settle_covered_sheets(&docs, baseline.trust())).await {
+            let (root, docs, baseline) = (project_path.clone(), docs_root.dir(&project_path), adr_baseline.clone());
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::core::adr::settle_covered_sheets(&root, &docs, baseline.trust())).await {
                 tracing::warn!("ADR check after the sub-audit failed: {e} — audit continues");
             }
         }
@@ -3537,7 +3494,7 @@ pub async fn full_audit(
                     &rewritten,
                 )?;
                 // Best-effort state marker — informational, not contractual.
-                if let Err(e) = crate::core::kronn_state::record_audit(&pp, "full") {
+                if let Err(e) = crate::core::template_manifest::record_audit(&pp, "full") {
                     tracing::warn!("Failed to record audit in .kronn.json: {}", e);
                 }
                 Ok(mappings.len())
@@ -3997,7 +3954,7 @@ pub async fn full_audit(
 }
 
 /// The `outcome` of a Full step's `step_done`, as the partial pipeline names it.
-pub(crate) fn step_outcome_label(success: bool, unchanged: bool) -> &'static str {
+pub fn step_outcome_label(success: bool, unchanged: bool) -> &'static str {
     match (success, unchanged) {
         (false, _) => "failed",
         (true, true) => "unchanged",
@@ -4007,7 +3964,7 @@ pub(crate) fn step_outcome_label(success: bool, unchanged: bool) -> &'static str
 
 /// What the user sees a step as: its target file, or "Final review" for the
 /// synthetic review step.
-pub(crate) fn step_file_label(step: &super::AnalysisStep) -> &'static str {
+pub fn step_file_label(step: &super::AnalysisStep) -> &'static str {
     if step.target_file == "REVIEW" {
         "Final review"
     } else {
@@ -4017,7 +3974,7 @@ pub(crate) fn step_file_label(step: &super::AnalysisStep) -> &'static str {
 
 /// KT-931 — what a finished Full run is worth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunOutcome {
+pub enum RunOutcome {
     /// Every step of the chain succeeded.
     Complete,
     /// Some steps succeeded, the others failed or never ran: the successful
@@ -4030,13 +3987,13 @@ pub(crate) enum RunOutcome {
 /// KT-931 — the target file of the founding step of a Full chain: the entry
 /// point every other document hangs off. Relocated with the chain (KT-1192),
 /// so it is matched by file name under whatever root the chain uses.
-pub(crate) const FOUNDING_STEP_TARGET: &str = "docs/AGENTS.md";
+pub const FOUNDING_STEP_TARGET: &str = "docs/AGENTS.md";
 
 /// KT-931 — the 1-based position in `steps` of the founding step, found by its
 /// target file and never by a hard-coded index (the chain is assembled, its
 /// order is not this function's to know). `None` when no step of the chain
 /// writes the entry point.
-pub(crate) fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> {
+pub fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> {
     steps
         .iter()
         .position(|step| {
@@ -4051,7 +4008,7 @@ pub(crate) fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> 
 /// reduces to "the last step that succeeded" or "did anything warn": a failed
 /// step in the middle of the chain says nothing about the ones after it.
 #[derive(Debug)]
-pub(crate) struct RunProgress {
+pub struct RunProgress {
     total_steps: u32,
     /// Every step that is done: written, or verified `unchanged`.
     succeeded: std::collections::BTreeSet<u32>,
@@ -4069,7 +4026,7 @@ pub(crate) struct RunProgress {
 impl RunProgress {
     /// `carried` is the set of steps a predecessor completed cleanly (empty on
     /// a fresh run); indices outside `1..=total_steps` are ignored.
-    pub(crate) fn new(total_steps: u32, carried: impl IntoIterator<Item = u32>) -> Self {
+    pub fn new(total_steps: u32, carried: impl IntoIterator<Item = u32>) -> Self {
         Self {
             total_steps,
             succeeded: carried
@@ -4084,7 +4041,7 @@ impl RunProgress {
     }
 
     /// Carried steps that the predecessor recorded `unchanged`.
-    pub(crate) fn with_carried_unchanged(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
+    pub fn with_carried_unchanged(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
         let carried: Vec<u32> = carried
             .into_iter()
             .filter(|step| self.succeeded.contains(step))
@@ -4094,7 +4051,7 @@ impl RunProgress {
     }
 
     /// Carried steps a human accepted.
-    pub(crate) fn with_carried_accepted(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
+    pub fn with_carried_accepted(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
         let carried: Vec<u32> = carried
             .into_iter()
             .filter(|step| self.succeeded.contains(step))
@@ -4104,14 +4061,14 @@ impl RunProgress {
     }
 
     /// Name the step producing the entry point (`founding_step_index`).
-    pub(crate) fn with_founding_step(mut self, step: Option<u32>) -> Self {
+    pub fn with_founding_step(mut self, step: Option<u32>) -> Self {
         self.founding_step = step;
         self
     }
 
     /// Record a success and return the exact number of steps that succeeded so
     /// far — the figure the run row persists.
-    pub(crate) fn record_success(&mut self, step: u32) -> u32 {
+    pub fn record_success(&mut self, step: u32) -> u32 {
         self.failed.retain(|failed| *failed != step);
         self.unchanged.remove(&step);
         self.accepted.remove(&step);
@@ -4121,20 +4078,20 @@ impl RunProgress {
 
     /// Record a step whose target was already up to date, every gate green: it
     /// is done like a success and listed apart. Returns the same count.
-    pub(crate) fn record_unchanged(&mut self, step: u32) -> u32 {
+    pub fn record_unchanged(&mut self, step: u32) -> u32 {
         let count = self.record_success(step);
         self.unchanged.insert(step);
         count
     }
 
-    pub(crate) fn record_failure(&mut self, step: u32) {
+    pub fn record_failure(&mut self, step: u32) {
         if !self.succeeded.contains(&step) && !self.failed.contains(&step) {
             self.failed.push(step);
         }
     }
 
     /// A post-generation gate found a blocker in an earlier successful step.
-    pub(crate) fn invalidate_success(&mut self, step: u32) {
+    pub fn invalidate_success(&mut self, step: u32) {
         self.succeeded.remove(&step);
         self.unchanged.remove(&step);
         self.accepted.remove(&step);
@@ -4142,19 +4099,19 @@ impl RunProgress {
     }
 
     /// Steps a human accepted, in step order.
-    pub(crate) fn accepted_steps(&self) -> Vec<u32> {
+    pub fn accepted_steps(&self) -> Vec<u32> {
         self.accepted.iter().copied().collect()
     }
 
     /// Steps that ended `unchanged`, in step order.
-    pub(crate) fn unchanged_steps(&self) -> Vec<u32> {
+    pub fn unchanged_steps(&self) -> Vec<u32> {
         self.unchanged.iter().copied().collect()
     }
 
     /// The run's per-step outcomes as stored in `audit_runs.step_outcomes_json`:
     /// requested = succeeded + unchanged + accepted + failed (failed counts
     /// every step not done, the ones that never ran included).
-    pub(crate) fn outcomes_json(&self) -> String {
+    pub fn outcomes_json(&self) -> String {
         let succeeded: Vec<u32> = self
             .succeeded
             .iter()
@@ -4171,24 +4128,24 @@ impl RunProgress {
         .to_string()
     }
 
-    pub(crate) fn succeeded_count(&self) -> u32 {
+    pub fn succeeded_count(&self) -> u32 {
         self.succeeded.len() as u32
     }
 
     /// Steps that ran this run and failed.
-    pub(crate) fn failed_steps(&self) -> &[u32] {
+    pub fn failed_steps(&self) -> &[u32] {
         &self.failed
     }
 
     /// Every step a resume has to run: the failed ones AND the ones that never
     /// ran (a stream that ended early).
-    pub(crate) fn steps_to_redo(&self) -> Vec<u32> {
+    pub fn steps_to_redo(&self) -> Vec<u32> {
         (1..=self.total_steps)
             .filter(|step| !self.succeeded.contains(step))
             .collect()
     }
 
-    pub(crate) fn outcome(&self) -> RunOutcome {
+    pub fn outcome(&self) -> RunOutcome {
         if self.succeeded.is_empty() {
             RunOutcome::Nothing
         } else if self.succeeded_count() == self.total_steps {
@@ -4202,7 +4159,7 @@ impl RunProgress {
     /// carries over. A chain with no founding step (every sub-audit: each is
     /// one step, so it is never `Partial` anyway) has none to gate on, so
     /// this holds vacuously.
-    pub(crate) fn founding_step_succeeded(&self) -> bool {
+    pub fn founding_step_succeeded(&self) -> bool {
         match self.founding_step {
             Some(step) => self.succeeded.contains(&step),
             None => true,
@@ -4213,7 +4170,7 @@ impl RunProgress {
     /// A partial one does only if its founding step succeeded: without the
     /// entry point the documentation has nowhere to start from, so the run
     /// stays Interrupted with no validation and a resume names what is left.
-    pub(crate) fn is_validatable(&self) -> bool {
+    pub fn is_validatable(&self) -> bool {
         match self.outcome() {
             RunOutcome::Complete => true,
             RunOutcome::Partial => self.founding_step_succeeded(),
@@ -4223,7 +4180,7 @@ impl RunProgress {
 }
 
 /// Why a run ended Interrupted, as stored on its row (`report_path`).
-pub(crate) fn interruption_reason(
+pub fn interruption_reason(
     succeeded: u32,
     total_steps: u32,
     failed: &[u32],
@@ -4241,7 +4198,7 @@ pub(crate) fn interruption_reason(
 }
 
 /// Everything the run's terminal transaction writes.
-pub(crate) struct TerminalWrite {
+pub struct TerminalWrite {
     pub run_id: String,
     pub ended_at: chrono::DateTime<Utc>,
     /// The run ends `Completed` (else `Interrupted`).
@@ -4265,7 +4222,7 @@ pub(crate) struct TerminalWrite {
 /// The run's terminal transaction: status, TD counters, and the validation
 /// discussion with its durable link — all or nothing, so a validation
 /// discussion never exists without the status that goes with it.
-pub(crate) fn write_terminal_state(
+pub fn write_terminal_state(
     conn: &rusqlite::Connection,
     write: &TerminalWrite,
 ) -> anyhow::Result<()> {
@@ -4351,7 +4308,7 @@ pub(crate) fn write_terminal_state(
 /// the step stopped before reaching its gates): `insert_audit_step_start`
 /// defaults `cli_success` to 1, so the flag alone would skip a step that never
 /// completed.
-pub(crate) fn already_succeeded_step_indices(
+pub fn already_succeeded_step_indices(
     steps: &[crate::models::AuditRunStep],
 ) -> std::collections::HashSet<u32> {
     steps
@@ -4363,7 +4320,7 @@ pub(crate) fn already_succeeded_step_indices(
 
 /// KT-1131 — a carried step a human accepted as it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AcceptedStep {
+pub struct AcceptedStep {
     pub step: u32,
     pub by: String,
     pub reason: Option<String>,
@@ -4372,7 +4329,7 @@ pub(crate) struct AcceptedStep {
 }
 
 /// KT-1131 — the predecessor's steps a human accepted.
-pub(crate) fn accepted_steps(steps: &[crate::models::AuditRunStep]) -> Vec<AcceptedStep> {
+pub fn accepted_steps(steps: &[crate::models::AuditRunStep]) -> Vec<AcceptedStep> {
     steps
         .iter()
         .filter(|s| s.accepted_at.is_some())
@@ -4387,7 +4344,7 @@ pub(crate) fn accepted_steps(steps: &[crate::models::AuditRunStep]) -> Vec<Accep
 
 /// KT-1169 — why a launch without `resume_run_id` is refused: the project's
 /// latest run can still be resumed, and only an explicit `fresh` replays it all.
-pub(crate) fn fresh_launch_refusal(
+pub fn fresh_launch_refusal(
     latest_resumable: Option<&crate::models::AuditRun>,
     fresh: bool,
 ) -> Option<String> {
@@ -4405,7 +4362,7 @@ pub(crate) fn fresh_launch_refusal(
 /// KT-1312 — whether a resume of `run` would still run a step. A run whose
 /// failed steps are all accepted has none: it blocks no refresh or
 /// revalidation, though a resume could still finalize it.
-pub(crate) fn resume_has_steps_left(
+pub fn resume_has_steps_left(
     run: &crate::models::AuditRun,
     steps: &[crate::models::AuditRunStep],
 ) -> bool {
@@ -4419,7 +4376,7 @@ pub(crate) fn resume_has_steps_left(
 
 /// KT-1131 — the steps a single-step retry runs: each one must exist and must
 /// not be done already (succeeded, unchanged or accepted).
-pub(crate) fn retry_selection(
+pub fn retry_selection(
     requested: &[u32],
     total_steps: u32,
     done: &std::collections::HashSet<u32>,
@@ -4446,7 +4403,7 @@ pub(crate) fn retry_selection(
 
 /// KT-1130 — the subset of `already_succeeded_step_indices` that ended
 /// `unchanged`: a resume skips them like any done step and still lists them.
-pub(crate) fn already_unchanged_step_indices(
+pub fn already_unchanged_step_indices(
     steps: &[crate::models::AuditRunStep],
 ) -> std::collections::HashSet<u32> {
     steps
@@ -4458,7 +4415,7 @@ pub(crate) fn already_unchanged_step_indices(
 
 /// KT-841 — outcome of the Full pipeline's rewrite-proof gate.
 #[derive(Debug, PartialEq)]
-pub(crate) enum RewriteProofVerdict {
+pub enum RewriteProofVerdict {
     /// The synthetic "REVIEW" pseudo-step (or an empty target) writes no
     /// file — same exemption as `validate_step_output`.
     Skipped,
@@ -4478,7 +4435,7 @@ pub(crate) enum RewriteProofVerdict {
 /// read post-agent snapshot, decide whether the step actually rewrote its
 /// target. Isolated from the SSE stream so it's unit-testable without a
 /// mocked agent process.
-pub(crate) fn rewrite_proof_verdict(
+pub fn rewrite_proof_verdict(
     target_file: &str,
     pre: &super::validation::TargetSnapshot,
     post: Result<super::validation::TargetSnapshot, String>,
@@ -4509,7 +4466,7 @@ pub(crate) fn rewrite_proof_verdict(
 /// had, so a retry of an economy audit never drifts to the costliest tier. The
 /// third value says the connection is the run's own (inherited, or echoed back
 /// by the client), so a deleted one may fall back to the agent's default.
-pub(crate) fn launch_footing(
+pub fn launch_footing(
     req: &crate::models::LaunchAuditRequest,
     resumed: Option<&crate::models::AuditRun>,
 ) -> (crate::models::ModelTier, Option<String>, bool) {
@@ -4535,7 +4492,7 @@ pub(crate) fn launch_footing(
     (tier, inherited, from_run)
 }
 
-pub(crate) fn resolve_resume_row(
+pub fn resolve_resume_row(
     run_id: &str,
     row: Option<&crate::models::AuditRun>,
     project_id: &str,
@@ -4560,11 +4517,11 @@ pub(crate) fn resolve_resume_row(
 /// audit runs a single step and must never rewrite the 9 foundation-doc
 /// checksums, which would mark stale foundation docs "fresh" without ever
 /// re-auditing them against current source.
-pub(crate) fn should_write_full_baseline(kind: crate::models::AuditKind) -> bool {
+pub fn should_write_full_baseline(kind: crate::models::AuditKind) -> bool {
     matches!(kind, crate::models::AuditKind::Full)
 }
 
-pub(crate) fn should_optimize_documents(kind: crate::models::AuditKind) -> bool {
+pub fn should_optimize_documents(kind: crate::models::AuditKind) -> bool {
     matches!(kind, crate::models::AuditKind::Full)
 }
 
@@ -4733,7 +4690,7 @@ pub fn cleanup_audit_files(project_path: &std::path::Path) -> Result<(), String>
 
 /// KT-1134 — delete the validation discussion linked to `run_id`, when it
 /// belongs to the project. Earlier runs' validations are never touched.
-pub(crate) fn delete_run_validation_discussion(
+pub fn delete_run_validation_discussion(
     conn: &rusqlite::Connection,
     project_id: &str,
     run_id: &str,
@@ -4930,7 +4887,7 @@ pub async fn cancel_audit(
 // ─── 0.8.2 helpers for `audit_runs` completion ─────────────────────────
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct SeverityCounts {
+pub struct SeverityCounts {
     pub critical: u32,
     pub high: u32,
     pub medium: u32,
@@ -4939,7 +4896,7 @@ pub(crate) struct SeverityCounts {
 
 /// What changed in the sources between the run a resume continues and now,
 /// `None` when nothing did or when the earlier run recorded nothing to compare.
-pub(crate) fn resume_drift_message(
+pub fn resume_drift_message(
     previous: &AuditRun,
     head: Option<&str>,
     fingerprint: Option<&str>,
@@ -4975,7 +4932,7 @@ pub(crate) fn resume_drift_message(
 /// We accept variations in casing/spacing but only on the canonical
 /// four values — anything else (e.g. an agent-emitted `Severe`) doesn't
 /// count. Better to under-count than mis-categorize.
-pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
+pub fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
     let mut counts = SeverityCounts::default();
     let Ok(entries) = std::fs::read_dir(td_dir) else {
         return counts;
@@ -5027,7 +4984,7 @@ pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
 ///   - `td_new_since_last` = TD files that exist now but weren't in
 ///     the pre-audit snapshot.
 ///   - `td_carried_over` = TDs present in both (Unchanged or Updated).
-pub(crate) fn compute_reconciliation_counts(
+pub fn compute_reconciliation_counts(
     snapshot: &[super::reconciliation::TdSnapshot],
     td_dir: &std::path::Path,
 ) -> (u32, u32, u32) {
@@ -5074,7 +5031,7 @@ pub(crate) fn compute_reconciliation_counts(
 ///
 /// Returns `None` when nothing matches — those TDs don't drive
 /// progressive-disclosure recommendations.
-pub(crate) fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static str> {
+pub fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static str> {
     // 1) Explicit category line wins. Format: `- **Category**: docker`
     let lower_body = body.to_ascii_lowercase();
     for line in lower_body.lines() {
@@ -5172,12 +5129,12 @@ pub(crate) fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static
 /// project dashboard. 3 is the minimum that signals \"pattern\" vs
 /// \"one-off\" (a single docker finding doesn't justify launching a
 /// focused Docker audit; three or more does).
-pub(crate) const CLUSTER_RECOMMENDATION_THRESHOLD: u32 = 3;
+pub const CLUSTER_RECOMMENDATION_THRESHOLD: u32 = 3;
 
 /// Scan the TD directory and return per-kind cluster recommendations
 /// for the audit_runs row. The JSON shape is `[{\"kind\":..., \"reason\":..., \"cluster_size\":N}]`
 /// matching the `AuditRecommendation` struct in `models/projects.rs`.
-pub(crate) fn compute_cluster_recommendations(
+pub fn compute_cluster_recommendations(
     td_dir: &std::path::Path,
 ) -> Vec<crate::models::AuditRecommendation> {
     use std::collections::HashMap;
@@ -5222,6 +5179,218 @@ pub(crate) fn compute_cluster_recommendations(
             .then_with(|| a.kind.cmp(&b.kind))
     });
     recs
+}
+
+/// Writes the reconciliation report of a full audit (KT-1595): through the
+/// rooted primitive under the project, because it lands in `tech-debt/` right
+/// after the agents ran, in a folder a leftover process may have swapped for a
+/// link. A link at the report name or in a parent is replaced or refused,
+/// never written through.
+/// The reconciliation report of a complete full audit: `(report path, text,
+/// candidates, updated)`. Every file it reads — the indices the run wrote, the
+/// pre-audit sheets, the source a pointer names — is read AFTER the agents ran,
+/// through the project's directory fds (KT-1595): a link at one of them, or in
+/// a parent, is an ERROR (no report, the audit carries on), never a read of an
+/// outside file.
+fn build_reconciliation(
+    project_path: &std::path::Path,
+    index_files: &[String],
+    snapshot: Vec<super::reconciliation::TdSnapshot>,
+) -> Result<(std::path::PathBuf, String, usize, usize), String> {
+    use super::reconciliation::{
+        check_signature_in_source, classify, compute_delta_with_index, parse_index_td_ids,
+        read_text_strict, render_report, DeltaKind,
+    };
+    // Index-aware delta (fix 2026-06-03): a prior whose id is still
+    // listed in a freshly-written index is `Carried` (re-emitted),
+    // NOT a `Missed` candidate. Without this, Step 8's anti-repetition
+    // (keep correct detail files verbatim) made every re-listed prior
+    // look "missed".
+    let mut still_listed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for file in index_files {
+        if let Some(content) = read_text_strict(project_path, &project_path.join(file))? {
+            still_listed.extend(parse_index_td_ids(&content));
+        }
+    }
+    // Rejected findings and accepted trade-offs leave the index on
+    // purpose: they are not reconciliation candidates.
+    let mut kept = Vec::with_capacity(snapshot.len());
+    for snap in snapshot {
+        let settled = read_text_strict(project_path, &snap.path)?
+            .and_then(|c| crate::core::audit_validation::td_decision(&c))
+            .is_some_and(|decision| decision.leaves_index());
+        if !settled {
+            kept.push(snap);
+        }
+    }
+    let deltas = compute_delta_with_index(&kept, &still_listed);
+    let entries = classify(&deltas, Utc::now(), 90, |snap| {
+        check_signature_in_source(snap, project_path)
+    });
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let report = render_report(&entries, &today, "Full");
+    let report_path = crate::core::docs_location::DocsRoot::of(project_path)
+        .file(project_path, "tech-debt")
+        .join(format!("_reconciliation-{}.md", today));
+    // Re-emitted priors (Updated refreshed OR Carried re-listed) are
+    // healthy, not candidates.
+    let candidates = entries
+        .iter()
+        .filter(|e| !matches!(e.delta, DeltaKind::Updated | DeltaKind::Carried))
+        .count();
+    let updated = entries.len() - candidates;
+    Ok((report_path, report, candidates, updated))
+}
+
+fn write_reconciliation_report(
+    project_path: &std::path::Path,
+    report_path: &std::path::Path,
+    report: &str,
+) -> Result<(), String> {
+    crate::core::fs_guard::guarded_replace(project_path, report_path, report.as_bytes())
+}
+
+/// The reconciliation report is written by the audit pipeline itself, so these
+/// tests are not behind `full-tests`: they are the caller-level swap guarantee.
+#[cfg(all(test, unix))] // creates symlinks through std::os::unix
+mod reconciliation_report_tests {
+    use super::write_reconciliation_report;
+    use crate::core::fs_guard::swap_probe;
+
+    const REPORT: &str = "# Reconciliation\n";
+
+    fn project() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("docs/tech-debt")).unwrap();
+        (tmp, root)
+    }
+
+    #[test]
+    fn a_tech_debt_folder_swapped_before_the_report_write_never_receives_it() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        let report = root.join("docs/tech-debt/_reconciliation-2026-11-13.md");
+        swap_probe::arm(&root.join("docs/tech-debt"), external.path());
+
+        let outcome = write_reconciliation_report(&root, &report, REPORT);
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+        // The write went to the folder it held (moved, still in the project).
+        let held = root.join("docs/tech-debt.moved/_reconciliation-2026-11-13.md");
+        assert_eq!(std::fs::read_to_string(held).unwrap(), REPORT);
+    }
+
+    #[test]
+    fn a_link_at_the_report_name_is_refused_not_written_through() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        let victim = external.path().join("victim.md");
+        std::fs::write(&victim, "victim").unwrap();
+        let report = root.join("docs/tech-debt/_reconciliation-2026-11-13.md");
+        std::os::unix::fs::symlink(&victim, &report).unwrap();
+
+        let outcome = write_reconciliation_report(&root, &report, REPORT);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "victim");
+    }
+
+    #[test]
+    fn a_tech_debt_folder_that_is_a_link_is_refused() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::remove_dir_all(root.join("docs/tech-debt")).unwrap();
+        std::os::unix::fs::symlink(external.path(), root.join("docs/tech-debt")).unwrap();
+        let report = root.join("docs/tech-debt/_reconciliation-2026-11-13.md");
+
+        assert!(write_reconciliation_report(&root, &report, REPORT).is_err());
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+    }
+
+    // KT-1595 (N4): the reconciliation READS the indices, the pre-audit sheets
+    // and the sources after the agents ran: a link is an error, never a read.
+    use super::super::reconciliation::TdSnapshot;
+    use super::build_reconciliation;
+
+    fn snapshot_of(root: &std::path::Path, id: &str) -> TdSnapshot {
+        TdSnapshot {
+            path: root.join(format!("docs/tech-debt/{id}.md")),
+            id: id.to_string(),
+            content_hash: "h".into(),
+            mtime: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn an_index_that_is_a_link_stops_the_reconciliation() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("index.md"), "| TD-1-x | outside |\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("index.md"),
+            root.join("docs/inconsistencies-security.md"),
+        )
+        .unwrap();
+
+        let built = build_reconciliation(
+            &root,
+            &["docs/inconsistencies-security.md".to_string()],
+            Vec::new(),
+        );
+
+        assert!(built.is_err(), "{built:?}");
+    }
+
+    #[test]
+    fn a_pre_audit_sheet_that_is_a_link_stops_the_reconciliation() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("sheet.md"), "# outside\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("sheet.md"),
+            root.join("docs/tech-debt/TD-1-x.md"),
+        )
+        .unwrap();
+
+        let built = build_reconciliation(&root, &[], vec![snapshot_of(&root, "TD-1-x")]);
+
+        assert!(built.is_err(), "{built:?}");
+    }
+
+    #[test]
+    fn an_index_read_after_a_swap_of_docs_is_the_folder_that_was_held() {
+        use crate::core::fs_guard::swap_probe;
+        let (_tmp, root) = project();
+        std::fs::write(
+            root.join("docs/inconsistencies-security.md"),
+            "| ID | Problem |\n|---|---|\n| TD-1-x | real |\n",
+        )
+        .unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external.path().join("inconsistencies-security.md"),
+            "| TD-9-outside | OUTSIDE |\n",
+        )
+        .unwrap();
+        swap_probe::arm(&root.join("docs"), external.path());
+
+        let built = build_reconciliation(
+            &root,
+            &["docs/inconsistencies-security.md".to_string()],
+            Vec::new(),
+        );
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        // The read held the real folder; the rest of the pass finds `docs` a
+        // link and refuses or reads nothing — never the outside index.
+        if let Ok((_, report, _, _)) = built {
+            assert!(!report.contains("TD-9-outside"), "{report}");
+        }
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -6628,7 +6797,7 @@ mod cluster_tests {
         fs::create_dir_all(&docs).unwrap();
         // Record a finished audit. This is the exact scenario the user
         // hit : a successful audit, then a relaunch + cancel.
-        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        crate::core::template_manifest::record_audit(project, "full").unwrap();
 
         let action = classify_docs_dir_for_cancel(project, &docs);
         assert_eq!(
@@ -6718,7 +6887,7 @@ mod cluster_tests {
         let project = dir.path();
         let docs = project.join("docs");
         fs::create_dir_all(&docs).unwrap();
-        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        crate::core::template_manifest::record_audit(project, "full").unwrap();
         // Remove every file in docs/ except .kronn.json.
         for entry in fs::read_dir(&docs).unwrap().filter_map(|e| e.ok()) {
             let n = entry.file_name();
@@ -6795,7 +6964,7 @@ mod cluster_tests {
         fs::create_dir_all(project.join("docs")).unwrap();
         fs::write(project.join("docs/AGENTS.md"), "# Project context").unwrap();
         fs::write(project.join("docs/architecture.md"), "# Arch overview").unwrap();
-        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        crate::core::template_manifest::record_audit(project, "full").unwrap();
         fs::write(project.join("CLAUDE.md"), "redirector").unwrap();
 
         cleanup_audit_files(project).unwrap();
@@ -6847,7 +7016,7 @@ mod cluster_tests {
         let project = dir.path();
         let docs = project.join("docs");
         fs::create_dir_all(&docs).unwrap();
-        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        crate::core::template_manifest::record_audit(project, "full").unwrap();
         fs::write(docs.join("AGENTS.md"), "...").unwrap();
 
         let action = classify_docs_dir_for_cancel(project, &docs);

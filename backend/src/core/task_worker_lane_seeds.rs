@@ -166,7 +166,7 @@ pub fn set_seed_policy(copy_enabled: bool, adopt_suggested: bool) {
     ADOPT_SUGGESTED.store(adopt_suggested, Ordering::Relaxed);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// The policy a test runs under: the process-wide one is shared by every
     /// test thread (and `config::save` publishes into it), so a test reads this.
@@ -177,17 +177,21 @@ thread_local! {
 /// The policy in force: the published one, or, under `cfg(test)`, the calling
 /// thread's own (the defaults unless [`TestSeedPolicy`] set one).
 pub fn seed_policy() -> SeedPolicy {
-    #[cfg(test)]
-    {
-        TEST_SEED_POLICY
-            .with(std::cell::Cell::get)
-            .unwrap_or(SeedPolicy {
-                copy_enabled: true,
-                adopt_suggested: false,
-            })
-    }
-    #[cfg(not(test))]
-    {
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            TEST_SEED_POLICY
+                .with(std::cell::Cell::get)
+                .unwrap_or(SeedPolicy {
+                    copy_enabled: true,
+                    adopt_suggested: false,
+                })
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         SeedPolicy {
             copy_enabled: COPY_ENABLED.load(Ordering::Relaxed),
             adopt_suggested: ADOPT_SUGGESTED.load(Ordering::Relaxed),
@@ -196,10 +200,10 @@ pub fn seed_policy() -> SeedPolicy {
 }
 
 /// Sets the calling test thread's policy, restoring the previous one on drop.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct TestSeedPolicy(Option<SeedPolicy>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestSeedPolicy {
     pub fn set(copy_enabled: bool, adopt_suggested: bool) -> Self {
         let before = TEST_SEED_POLICY.with(|cell| {
@@ -212,7 +216,7 @@ impl TestSeedPolicy {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestSeedPolicy {
     fn drop(&mut self) {
         TEST_SEED_POLICY.with(|cell| cell.set(self.0));
@@ -271,9 +275,7 @@ pub struct LaneSeedSecretFinding {
     pub held: bool,
 }
 
-/// The secret-looking files a human has seen and accepted, by declared seed
-/// (repository-relative paths). A file that is not listed here holds its seed.
-pub type ConfirmedSecrets = BTreeMap<String, Vec<String>>;
+pub use crate::db::projects::ConfirmedSecrets;
 
 /// How many secret-looking paths one finding lists.
 const MAX_SECRET_FILES_LISTED: usize = 10;
@@ -541,17 +543,15 @@ fn status_under(dir: &Path, rel: &str) -> Result<String, String> {
 
 /// The worktree's own git directory (`<repo>/.git/worktrees/<name>`), where
 /// Kronn remembers what it seeded: outside the tree, gone with the worktree.
-fn worktree_git_dir(worktree: &Path) -> Result<PathBuf, String> {
-    let output = git(worktree, &["rev-parse", "--absolute-git-dir"])?;
-    if !output.status.success() {
-        return Err(format!(
-            "git rev-parse failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
+///
+/// KT-1595: seeding runs after an agent too (the validations re-seed, a resume
+/// seeds again), and the worktree's `.git` pointer is agent-writable. The
+/// directory is the one the REGISTERED checkout recorded for this worktree, and
+/// git's answer must agree with it, or nothing is written
+/// (`worktree::registered_worktree_git_dir`). The marker is then read and
+/// written through the rooted primitive from `main_checkout`.
+fn worktree_git_dir(main_checkout: &Path, worktree: &Path) -> Result<PathBuf, String> {
+    crate::core::worktree::registered_worktree_git_dir(main_checkout, worktree)
 }
 
 // ─── Source fingerprint ───────────────────────────────────────────────────
@@ -780,20 +780,20 @@ struct SeedMarker {
     seeds: BTreeMap<String, String>,
 }
 
-fn read_marker(git_dir: &Path) -> SeedMarker {
-    std::fs::read(git_dir.join(MARKER_FILE))
+/// `root` is the registered checkout `git_dir` lies under (KT-1595): a refused
+/// read (a link) is an empty marker, which only means "seed again".
+fn read_marker(root: &Path, git_dir: &Path) -> SeedMarker {
+    crate::core::fs_guard::guarded_read(root, &git_dir.join(MARKER_FILE))
         .ok()
+        .flatten()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
-fn write_marker(git_dir: &Path, marker: &SeedMarker) -> io::Result<()> {
-    let staging = git_dir.join(format!("{MARKER_FILE}.tmp"));
-    std::fs::write(
-        &staging,
-        serde_json::to_vec(marker).map_err(io::Error::other)?,
-    )?;
-    std::fs::rename(staging, git_dir.join(MARKER_FILE))
+fn write_marker(root: &Path, git_dir: &Path, marker: &SeedMarker) -> io::Result<()> {
+    let bytes = serde_json::to_vec(marker).map_err(io::Error::other)?;
+    crate::core::fs_guard::guarded_replace(root, &git_dir.join(MARKER_FILE), &bytes)
+        .map_err(io::Error::other)
 }
 
 // ─── Seeding ──────────────────────────────────────────────────────────────
@@ -812,7 +812,7 @@ pub fn seed_worktree(
     if seeds.is_empty() {
         return LaneSeedsRecord::default();
     }
-    let git_dir = match worktree_git_dir(worktree) {
+    let git_dir = match worktree_git_dir(main_checkout, worktree) {
         Ok(dir) => dir,
         Err(reason) => {
             return LaneSeedsRecord {
@@ -827,9 +827,14 @@ pub fn seed_worktree(
     // root under a transient name: have git ignore that name before anything is
     // created there, so a worker's `git add -A` can never pick it up.
     for kind in [STAGING_KIND, TRASH_KIND] {
-        if let Err(reason) =
-            crate::core::worktree::ensure_local_git_exclude(worktree, &format!("/.kronn-{kind}-*"))
-        {
+        // KT-1595: judged from the lane, written to the registered checkout's
+        // exclude (the file a linked worktree shares), never to a path git
+        // names from the lane's agent-writable `.git` pointer.
+        if let Err(reason) = crate::core::worktree::ensure_local_git_exclude_pinned_for(
+            worktree,
+            main_checkout,
+            &format!("/.kronn-{kind}-*"),
+        ) {
             let reason = format!("its temporary copy cannot be kept out of git: {reason}");
             return LaneSeedsRecord {
                 seeds: seeds
@@ -840,7 +845,7 @@ pub fn seed_worktree(
         }
     }
     sweep_transients(worktree);
-    let mut marker = read_marker(&git_dir);
+    let mut marker = read_marker(main_checkout, &git_dir);
     let mut outcomes = Vec::with_capacity(seeds.len());
     for declared in seeds {
         let outcome = match normalize_seed_path(declared) {
@@ -862,7 +867,7 @@ pub fn seed_worktree(
         };
         outcomes.push(outcome);
     }
-    if let Err(error) = write_marker(&git_dir, &marker) {
+    if let Err(error) = write_marker(main_checkout, &git_dir, &marker) {
         tracing::warn!(worktree = %worktree.display(), "lane seed marker not written: {error}");
     }
     LaneSeedsRecord { seeds: outcomes }
@@ -1183,6 +1188,14 @@ pub fn suggest_seeds(repo: &Path) -> Result<Vec<LaneSeedCandidate>, String> {
     found.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(found)
 }
+
+fn apply_config(config: &crate::models::AppConfig) {
+    set_seed_policy(
+        config.server.lane_seeds_copy_enabled,
+        config.server.lane_seeds_adopt_suggested,
+    );
+}
+inventory::submit! { crate::core::uplink::ConfigApplied(apply_config) }
 
 #[cfg(test)]
 #[path = "task_worker_lane_seeds_test.rs"]

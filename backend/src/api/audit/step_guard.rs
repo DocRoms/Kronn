@@ -14,20 +14,19 @@ use std::path::{Path, PathBuf};
 use super::validation::{target_snapshot, TargetSnapshot};
 use crate::core::fs_guard::assert_contained_no_symlink;
 
-pub(crate) const PARTIAL_OPEN: &str = "<!-- kronn:partial-step -->";
-pub(crate) const PARTIAL_CLOSE: &str = "<!-- kronn:partial-step:end -->";
+pub use crate::core::audit_run_state::{has_partial_marker, PARTIAL_CLOSE, PARTIAL_OPEN};
 
 /// `target_state` of a step whose target was put back.
-pub(crate) const STATE_RESTORED: &str = "restored";
+pub const STATE_RESTORED: &str = "restored";
 /// `target_state` of a step whose target was kept and marked.
-pub(crate) const STATE_PARTIAL: &str = "partial";
+pub const STATE_PARTIAL: &str = "partial";
 
 /// Longest reason kept inside the marker, in characters.
 const MAX_MARKER_REASON_CHARS: usize = 240;
 
 /// The marker block a failed step's kept target starts with. One line of
 /// reason, never the agent's text.
-pub(crate) fn partial_banner(step: u32, reason: &str) -> String {
+pub fn partial_banner(step: u32, reason: &str) -> String {
     let one_line = reason.split_whitespace().collect::<Vec<_>>().join(" ");
     // Square brackets become round ones: a gate reason that quotes a
     // `[src: …]` marker must neither read as a citation nor, cut at the limit,
@@ -41,13 +40,8 @@ Kronn kept what the agent wrote: retry the step, or accept it as it stands.\n{PA
     )
 }
 
-/// Whether `content` starts with a partial marker.
-pub(crate) fn has_partial_marker(content: &str) -> bool {
-    content.trim_start().starts_with(PARTIAL_OPEN)
-}
-
 /// `content` without its partial marker; `None` when it has none.
-pub(crate) fn strip_partial_marker(content: &str) -> Option<String> {
+pub fn strip_partial_marker(content: &str) -> Option<String> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with(PARTIAL_OPEN) {
         return None;
@@ -76,10 +70,20 @@ fn contained_path(project_path: &Path, target: &str) -> Result<PathBuf, String> 
 }
 
 /// The target as it is now: `None` when the file is absent.
-pub(crate) fn read_target(project_path: &Path, target: &str) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(contained_path(project_path, target)?) {
-        Ok(content) => Ok(Some(content)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+pub fn read_target(project_path: &Path, target: &str) -> Result<Option<String>, String> {
+    // Read through the project's directory fds (KT-1595): the content is
+    // written back (`mark_partial`, `clear_partial_marker`, `save_aside`), so a
+    // parent swapped for a link after the walk must not make Kronn copy an
+    // outside file into the project. A link is an error, never followed.
+    let path = contained_path(project_path, target)?;
+    match crate::core::fs_guard::guarded_read(project_path, &path) {
+        Ok(Some(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| format!("target `{target}` unreadable: {e}")),
+        Ok(None) => Ok(None),
+        Err(e) if crate::core::fs_guard::is_link_refusal(&e) => {
+            Err(format!("target `{target}` refused: {e}"))
+        }
         Err(e) => Err(format!("target `{target}` unreadable: {e}")),
     }
 }
@@ -93,7 +97,7 @@ fn write_atomically(project_path: &Path, path: &Path, content: &str) -> Result<(
 
 /// Put `target` back as it was before the step: `pre` is its content then,
 /// `None` when it was absent. Returns whether anything changed on disk.
-pub(crate) fn restore_target(
+pub fn restore_target(
     project_path: &Path,
     target: &str,
     pre: Option<&str>,
@@ -151,7 +155,7 @@ fn save_aside(project_path: &Path, target: &str, content: &str) -> Result<String
 
 /// Mark the kept target of a failed step as partial. Returns whether a
 /// marker was written (`false`: nothing to mark — the file is absent or empty).
-pub(crate) fn mark_partial(
+pub fn mark_partial(
     project_path: &Path,
     target: &str,
     step: u32,
@@ -175,7 +179,7 @@ pub(crate) fn mark_partial(
 }
 
 /// Remove the partial marker of `target`, when it has one.
-pub(crate) fn clear_partial_marker(project_path: &Path, target: &str) -> Result<bool, String> {
+pub fn clear_partial_marker(project_path: &Path, target: &str) -> Result<bool, String> {
     let Some(content) = read_target(project_path, target)? else {
         return Ok(false);
     };
@@ -191,7 +195,7 @@ pub(crate) fn clear_partial_marker(project_path: &Path, target: &str) -> Result<
 /// differs from what it was before the step, keep it and mark it partial.
 /// `pre` is the snapshot taken before the agent ran. Returns the
 /// `target_state` to record, `None` when the step left its target alone.
-pub(crate) fn settle_failed_target(
+pub fn settle_failed_target(
     project_path: &Path,
     target: &str,
     pre: &TargetSnapshot,
@@ -212,7 +216,7 @@ pub(crate) fn settle_failed_target(
 /// off with its backend). The cases are told apart on purpose: "the step wrote
 /// nothing" must never absorb "the target could not be settled".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KilledOutcome {
+pub enum KilledOutcome {
     /// The half-written target was put back as it was before the step.
     Restored,
     /// The step had written nothing: the target is whole as it stood.
@@ -230,7 +234,7 @@ pub(crate) enum KilledOutcome {
 /// How the step came to be stopped: it decides whether content nobody vouches
 /// for may be replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StopKind {
+pub enum StopKind {
     /// Kronn killed the agent a moment ago (cancel): what is on disk is the
     /// agent's. Unvouched content is still kept aside before it is replaced.
     Cancelled,
@@ -245,7 +249,7 @@ pub(crate) enum StopKind {
 /// content that was displaced was kept, when it was not the agent's known
 /// output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct KilledSettlement {
+pub struct KilledSettlement {
     pub outcome: KilledOutcome,
     /// Project-relative path of the copy kept aside.
     pub displaced: Option<String>,
@@ -262,7 +266,7 @@ impl KilledSettlement {
     /// The `target_state` to record. `None` for [`KilledOutcome::Unsettled`]:
     /// the step is then neither restored nor visibly partial, so acceptance
     /// asks for an override.
-    pub(crate) fn target_state(&self) -> Option<&'static str> {
+    pub fn target_state(&self) -> Option<&'static str> {
         match self.outcome {
             KilledOutcome::Restored | KilledOutcome::Untouched => Some(STATE_RESTORED),
             KilledOutcome::Partial | KilledOutcome::ChangedSinceSeen => Some(STATE_PARTIAL),
@@ -271,7 +275,7 @@ impl KilledSettlement {
     }
 
     /// The target is whole: nothing a human has to look at.
-    pub(crate) fn is_whole(&self) -> bool {
+    pub fn is_whole(&self) -> bool {
         matches!(
             self.outcome,
             KilledOutcome::Restored | KilledOutcome::Untouched
@@ -279,13 +283,13 @@ impl KilledSettlement {
     }
 
     /// A target left unsound keeps its snapshot for the acceptance diff.
-    pub(crate) fn keeps_snapshot(&self) -> bool {
+    pub fn keeps_snapshot(&self) -> bool {
         !self.is_whole()
     }
 }
 
 /// Fingerprint of a target's content as recorded by [`TargetWatch`].
-pub(crate) fn fingerprint(content: Option<&str>) -> String {
+pub fn fingerprint(content: Option<&str>) -> String {
     match content {
         None => "absent".to_string(),
         Some(content) => crate::core::docs_merge::sha256_hex(content.as_bytes()),
@@ -321,7 +325,7 @@ fn mark_instead(
 /// the agent write (see [`TargetWatch`]). Never silent: an error is
 /// [`KilledOutcome::Unsettled`], not "wrote nothing"; and content that is
 /// displaced and was not the agent's known output is kept aside first.
-pub(crate) fn settle_killed(
+pub fn settle_killed(
     project_path: &Path,
     target: &str,
     pre_content: Option<&str>,
@@ -402,7 +406,7 @@ pub(crate) fn settle_killed(
 /// the agent itself had written. [`TargetWatch::moved`] is cheap enough for the
 /// activity tick: one `lstat`, and a read only when the file changed.
 #[derive(Debug)]
-pub(crate) struct TargetWatch {
+pub struct TargetWatch {
     project_path: PathBuf,
     target: String,
     stat: Option<(Option<std::time::SystemTime>, u64)>,
@@ -412,11 +416,7 @@ pub(crate) struct TargetWatch {
 
 impl TargetWatch {
     /// `None` for a step with no file target.
-    pub(crate) fn new(
-        project_path: &Path,
-        target: &str,
-        pre_content: Option<&str>,
-    ) -> Option<Self> {
+    pub fn new(project_path: &Path, target: &str, pre_content: Option<&str>) -> Option<Self> {
         if target == "REVIEW" || target.is_empty() {
             return None;
         }
@@ -431,7 +431,7 @@ impl TargetWatch {
 
     /// The fingerprint of the target's new content, when it changed since the
     /// last call (or since the step started, the first time).
-    pub(crate) fn moved(&mut self) -> Option<String> {
+    pub fn moved(&mut self) -> Option<String> {
         let stat = std::fs::symlink_metadata(self.project_path.join(&self.target))
             .ok()
             .map(|meta| (meta.modified().ok(), meta.len()));
@@ -450,14 +450,14 @@ impl TargetWatch {
     }
 
     /// The last fingerprint seen (the pre-step content's until it moves).
-    pub(crate) fn last_seen(&self) -> &str {
+    pub fn last_seen(&self) -> &str {
         &self.reported
     }
 }
 
 /// A step that never ended and has its pre-step snapshot, settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SettledStep {
+pub struct SettledStep {
     pub step_index: u32,
     pub target_file: String,
     pub outcome: KilledOutcome,
@@ -468,7 +468,7 @@ pub(crate) struct SettledStep {
 /// The steps of `run_id` that never ended and have a snapshot. Database read
 /// only: the file work of [`settle_pending`] must not hold the writer
 /// connection.
-pub(crate) fn pending_steps(
+pub fn pending_steps(
     conn: &rusqlite::Connection,
     run_id: &str,
 ) -> anyhow::Result<Vec<crate::db::audit_runs::StepSnapshot>> {
@@ -480,7 +480,7 @@ pub(crate) fn pending_steps(
 /// touched, and nothing returned, when the project root is not there — a
 /// restore must not recreate an unmounted project; the steps stay open and are
 /// settled at the next boot or launch that finds the root.
-pub(crate) fn settle_pending(
+pub fn settle_pending(
     project_root: &Path,
     pending: &[crate::db::audit_runs::StepSnapshot],
 ) -> Vec<SettledStep> {
@@ -517,7 +517,7 @@ pub(crate) fn settle_pending(
 
 /// Record the verdicts of [`settle_pending`]: each step failed, with what
 /// became of its target.
-pub(crate) fn record_settled(
+pub fn record_settled(
     conn: &rusqlite::Connection,
     run_id: &str,
     settled: &[SettledStep],
@@ -538,7 +538,7 @@ pub(crate) fn record_settled(
 
 /// [`pending_steps`], [`settle_pending`] and [`record_settled`] in one go, for
 /// callers that own their connection (boot).
-pub(crate) fn settle_unfinished_steps(
+pub fn settle_unfinished_steps(
     conn: &rusqlite::Connection,
     run_id: &str,
     project_root: &Path,
@@ -553,8 +553,8 @@ pub(crate) fn settle_unfinished_steps(
 /// previous process is still running, so every step that never ended is
 /// settled now — not at the next launch, which may be days away with the doc
 /// half-written and nothing marking it. Returns how many steps were settled.
-#[cfg(test)]
-pub(crate) fn settle_unfinished_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn settle_unfinished_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
     settle_unfinished_except(conn, &HashSet::new())
 }
 
@@ -633,7 +633,7 @@ fn reap_tagged_agents_with(
 /// that outlived the backend write after the verdict ("it had written nothing")
 /// was recorded. A run something of which may still be alive is not settled.
 /// Returns how many steps were settled.
-pub(crate) fn stop_agents_and_settle_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
+pub fn stop_agents_and_settle_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
     stop_agents_and_settle_with(conn, &crate::core::dispatch_reaper::reap_dispatch)
 }
 
@@ -657,7 +657,7 @@ fn stop_agents_and_settle_with(conn: &rusqlite::Connection, reap: Reaper) -> any
 /// Why a launch cannot settle the open runs of a project: something of one of
 /// them may still be running.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AgentsMayStillRun {
+pub struct AgentsMayStillRun {
     pub run_id: String,
     pub report: crate::core::dispatch_reaper::ReapReport,
 }
@@ -665,7 +665,7 @@ pub(crate) struct AgentsMayStillRun {
 impl AgentsMayStillRun {
     /// What a client branches on: a seen survivor is stopped by hand, a table
     /// nobody could read is the one case a human's word lifts.
-    pub(crate) fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         if self.report.survivors.is_empty() {
             ERR_AGENTS_UNVERIFIED
         } else {
@@ -674,7 +674,7 @@ impl AgentsMayStillRun {
     }
 
     /// What to tell the human, and what they can do about it.
-    pub(crate) fn message(&self) -> String {
+    pub fn message(&self) -> String {
         let run = &self.run_id;
         if self.report.survivors.is_empty() {
             return format!(
@@ -696,15 +696,15 @@ impl AgentsMayStillRun {
 
 /// `error_code` of the launch refusal for an agent of a previous run that was
 /// seen still running after being asked to stop: stop it by hand.
-pub(crate) const ERR_AGENTS_STILL_RUNNING: &str = "agents_still_running";
+pub const ERR_AGENTS_STILL_RUNNING: &str = "agents_still_running";
 /// `error_code` of the launch refusal for a process table that could not be
 /// read (nothing was seen running): the human may vouch that none is.
-pub(crate) const ERR_AGENTS_UNVERIFIED: &str = "agents_unverified";
+pub const ERR_AGENTS_UNVERIFIED: &str = "agents_unverified";
 
 /// A launch the previous runs' agents (or the failure to look for them) stop.
 /// The text is for the human; `code` is what a client branches on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LaunchRefusal {
+pub struct LaunchRefusal {
     pub message: String,
     pub code: Option<&'static str>,
 }
@@ -718,7 +718,7 @@ impl LaunchRefusal {
     }
 
     /// The payload of the SSE `error` event a refused launch emits.
-    pub(crate) fn event_data(&self) -> String {
+    pub fn event_data(&self) -> String {
         match self.code {
             Some(code) => serde_json::json!({ "error": self.message, "error_code": code }),
             None => serde_json::json!({ "error": self.message }),
@@ -734,26 +734,26 @@ type OpenRun = (String, Vec<crate::db::audit_runs::StepSnapshot>);
 /// survivor, a table nobody could read) that a real process cannot be made to
 /// produce.
 fn launch_reaper(tag: &str) -> crate::core::dispatch_reaper::ReapReport {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(report) = planted_reaps().lock().unwrap().get(tag).cloned() {
         return report;
     }
     crate::core::dispatch_reaper::reap_dispatch(tag)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type PlantedReaps =
     std::sync::Mutex<std::collections::HashMap<String, crate::core::dispatch_reaper::ReapReport>>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn planted_reaps() -> &'static PlantedReaps {
     static PLANTED: std::sync::OnceLock<PlantedReaps> = std::sync::OnceLock::new();
     PLANTED.get_or_init(Default::default)
 }
 
 /// Make the launch-time reap of `run_id` report `report`, whatever runs.
-#[cfg(test)]
-pub(crate) fn plant_reap_of_run(run_id: &str, report: crate::core::dispatch_reaper::ReapReport) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn plant_reap_of_run(run_id: &str, report: crate::core::dispatch_reaper::ReapReport) {
     planted_reaps()
         .lock()
         .unwrap()
@@ -761,8 +761,8 @@ pub(crate) fn plant_reap_of_run(run_id: &str, report: crate::core::dispatch_reap
 }
 
 /// Forget what [`plant_reap_of_run`] planted for `run_id`.
-#[cfg(test)]
-pub(crate) fn unplant_reap_of_run(run_id: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn unplant_reap_of_run(run_id: &str) {
     planted_reaps()
         .lock()
         .unwrap()
@@ -823,7 +823,7 @@ fn settle_open_runs_with(
 /// every open run of the project has its agents stopped and its unfinished steps
 /// settled before the launch takes its own snapshots. Returns how many steps
 /// were settled, or what to tell the human when the launch must be refused.
-pub(crate) async fn settle_open_runs_before_launch(
+pub async fn settle_open_runs_before_launch(
     db: &crate::db::Database,
     project_id: &str,
     project_root: &Path,
@@ -887,7 +887,7 @@ pub(crate) async fn settle_open_runs_before_launch(
 /// Why accepting a failed step as it stands is refused unless a human
 /// overrides it: the step's document is known to be unsound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AcceptBlocker {
+pub enum AcceptBlocker {
     /// The agent's output is cut short.
     Truncated,
     /// Citations that do not resolve against the tree (or the documentary
@@ -907,15 +907,15 @@ pub(crate) enum AcceptBlocker {
 /// Fragments of the reasons the audit gates persist on a failed step. Each is
 /// produced by exactly one gate; `blocker_of_reason_matches_the_real_gates`
 /// builds the real reasons and checks they are all recognised.
-pub(crate) const TRUNCATED_FRAGMENT: &str = "looks truncated";
-pub(crate) const FABRICATED_FRAGMENT: &str = "fabricated `[src:]` citation";
-pub(crate) const DOCUMENTARY_FRAGMENT: &str = "Documentary gate";
-pub(crate) const DETECTOR_FRAGMENT: &str = "detector signal(s) injected but never addressed";
-pub(crate) const COVERAGE_FRAGMENT: &str = "dimension coverage incomplete";
-pub(crate) const KILLED_FRAGMENT: &str = "stopped during step";
+pub const TRUNCATED_FRAGMENT: &str = "looks truncated";
+pub const FABRICATED_FRAGMENT: &str = "fabricated `[src:]` citation";
+pub const DOCUMENTARY_FRAGMENT: &str = "Documentary gate";
+pub const DETECTOR_FRAGMENT: &str = "detector signal(s) injected but never addressed";
+pub const COVERAGE_FRAGMENT: &str = "dimension coverage incomplete";
+pub const KILLED_FRAGMENT: &str = "stopped during step";
 
 impl AcceptBlocker {
-    pub(crate) fn of_reason(reason: &str) -> Option<Self> {
+    pub fn of_reason(reason: &str) -> Option<Self> {
         if reason.contains(KILLED_FRAGMENT) {
             Some(Self::Killed)
         } else if reason.contains(TRUNCATED_FRAGMENT) {
@@ -931,7 +931,7 @@ impl AcceptBlocker {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Truncated => "its output is truncated",
             Self::FabricatedCitations => "it holds citations that do not resolve",
@@ -967,7 +967,7 @@ write): it was left in place under a partial marker, not overwritten"
 }
 
 /// The text recorded on a step the user cancelled.
-pub(crate) fn killed_reason(step: u32, settlement: &KilledSettlement) -> String {
+pub fn killed_reason(step: u32, settlement: &KilledSettlement) -> String {
     format!(
         "Audit {KILLED_FRAGMENT} {step} by the user: {}.",
         outcome_text(settlement)
@@ -975,12 +975,24 @@ pub(crate) fn killed_reason(step: u32, settlement: &KilledSettlement) -> String 
 }
 
 /// The text recorded on a step whose agent died with the backend.
-pub(crate) fn interrupted_reason(step: u32, settlement: &KilledSettlement) -> String {
+pub fn interrupted_reason(step: u32, settlement: &KilledSettlement) -> String {
     format!(
         "Audit {KILLED_FRAGMENT} {step} (the backend stopped): {}.",
         outcome_text(settlement)
     )
 }
+
+// An agent the previous backend left running would keep writing the docs a
+// resume rewrites: stopped first, then its unfinished step is put back.
+fn boot_settle(conn: &rusqlite::Connection, _: &mut crate::db::BootReport) -> anyhow::Result<()> {
+    match stop_agents_and_settle_at_boot(conn) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
+        Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),
+    }
+    Ok(())
+}
+inventory::submit! { crate::db::BootStep { order: 20, run: boot_settle } }
 
 #[cfg(test)]
 mod tests {
@@ -2344,5 +2356,100 @@ mod swap_tests {
             std::fs::read_to_string(external.join("stack.md")).unwrap(),
             "KEEP"
         );
+    }
+
+    /// KT-1595 (N1) — the target is read through the project's fds: a parent
+    /// swapped for a link after the walk yields the folder that was held (the
+    /// agent's file), never the outside file the link points at.
+    #[test]
+    fn a_target_is_never_read_through_a_parent_swapped_after_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/stack.md"), "agent content").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let read = read_target(&root, "docs/stack.md");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(read.unwrap().as_deref(), Some("agent content"));
+    }
+
+    /// KT-1595 (N1) — `mark_partial` writes the content it read back into the
+    /// project: with the folder swapped for a link meanwhile, the outside file
+    /// is neither copied into the project nor touched.
+    #[test]
+    fn a_partial_marker_never_copies_an_outside_file_after_a_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/stack.md"), "agent content").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let marked = mark_partial(&root, "docs/stack.md", 3, "agent died");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(marked.is_err(), "{marked:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.join("stack.md")).unwrap(),
+            "OUTSIDE SECRET"
+        );
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        let held = std::fs::read_to_string(root.join("docs.moved/stack.md")).unwrap();
+        assert!(!held.contains("OUTSIDE SECRET"), "{held}");
+    }
+
+    /// KT-1595 (N1) — the same for the marker removal.
+    #[test]
+    fn a_partial_marker_is_never_cleared_with_the_content_of_an_outside_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let marked = format!("{}body", partial_banner(2, "why"));
+        std::fs::write(root.join("docs/stack.md"), &marked).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let cleared = clear_partial_marker(&root, "docs/stack.md");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(cleared.is_err(), "{cleared:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.join("stack.md")).unwrap(),
+            "OUTSIDE SECRET"
+        );
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+    }
+
+    /// KT-1595 (N1) — a displaced target is kept aside from what is read through
+    /// the fds: a swapped parent never makes Kronn keep an outside file's bytes.
+    #[test]
+    fn a_displaced_target_is_never_kept_from_a_swapped_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/stack.md"), "agent content").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let outcome = settle_killed(
+            &root,
+            "docs/stack.md",
+            Some("before"),
+            None,
+            StopKind::Cancelled,
+            4,
+        );
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_ne!(outcome.outcome, KilledOutcome::Restored, "{outcome:?}");
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        let leaked = std::fs::read_dir(root.join("docs.moved"))
+            .unwrap()
+            .flatten()
+            .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|c| c.contains("OUTSIDE SECRET")));
+        assert!(!leaked, "no outside byte was copied into the project");
     }
 }
