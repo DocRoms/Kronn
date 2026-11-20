@@ -244,13 +244,12 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     show();
     const input = await picker();
     fireEvent.focus(input);
-    fireEvent.click(await screen.findByRole('option', { name: 'config.defaultModel (runtime-default)' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'agents.modelAuto:runtime-default' }));
     await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
       ...tiers(), claude_code: { ...tiers().claude_code, economy: null },
     }));
-    expect(screen.getByTestId('agent-tier-preview-ClaudeCode')).toHaveTextContent('runtime-default');
     expect(input).toHaveValue('');
-    expect(input).toHaveAttribute('placeholder', 'config.defaultModel (runtime-default)');
+    expect(input).toHaveAttribute('placeholder', 'agents.modelAuto:runtime-default');
   });
 
   it('saves a discovered effort and clears it when the selected model cannot accept it', async () => {

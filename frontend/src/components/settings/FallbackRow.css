@@ -1,0 +1,589 @@
+/* KT-1757 — one mode row of the « Models and fallbacks » block (proposal A):
+
+     STANDARD  [ model ▾ ]
+               Si indisponible :
+               ① Codex · gpt-5.6 · standard · CLI     ↑ ↓ ✕
+               ② ┄ Ollama · qwen3 · standard · Local  ⚠ …
+               + Ajouter un repli
+
+   The mode label on the left (one width on every row, stacked above under 560 px),
+   ONE vertical axis on the right: the model, the caption, the numbered fallbacks in
+   the order Kronn tries them, the add button. The same on a CLI, a Local and an HTTP
+   card. Tokens only, so every theme (light, dark…) reads it. */
+.fbr {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--kr-sp-3);
+  row-gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3) 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.fbr + .fbr {
+  border-top: 1px solid var(--kr-border-light);
+}
+
+.fbr-mode {
+  padding-top: var(--kr-sp-2);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+}
+
+.fbr-mode-icon {
+  margin-right: var(--kr-sp-2);
+  font-size: var(--kr-fs-sm);
+  letter-spacing: 0;
+}
+
+/* The single column: model, caption, chain, add. */
+.fbr-track {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+
+.fbr-error {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 560px) {
+  .fbr {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fbr-mode {
+    padding-top: 0;
+  }
+}
+
+/* The picker fills the column, so a model id is not cut at a fixed width. The
+   full label stays in the field's tooltip. */
+.fbr-model {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fbr-model > .searchable-select,
+.fbr-model > .flex-row {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* NVIDIA's free-text model field (its catalogue is long and partly uncallable). */
+.fbr-model > .flex-row .set-tier-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fbr-model > .searchable-select .searchable-select-control input {
+  text-overflow: ellipsis;
+}
+
+/* The model and, beside it, a second setting of the mode (the reasoning effort):
+   the picker takes the room, the setting is sized to its value and capped. */
+.fbr-line {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+
+.fbr-line > .fbr-model {
+  flex: 1 1 0;
+}
+
+.fbr-extra {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+}
+
+.fbr-extra > select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 0 var(--kr-sp-2);
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.fbr-extra > select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Native option lists are black on white otherwise, unreadable on a dark theme. */
+.fbr-extra > select option {
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+}
+
+.fbr-caption {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+}
+
+.fbr-anchor {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.fbr-off {
+  font-style: italic;
+}
+
+.fbr-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.fbr-add {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  height: 22px;
+  padding: 0 var(--kr-sp-3);
+  color: var(--kr-accent-text);
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+  border: 1px dashed var(--kr-border-medium);
+  border-radius: var(--kr-r-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbr-add:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+.fbr-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fbr-error {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  color: var(--kr-error);
+}
+
+/* ── The numbered chain ────────────────────────────────────────────────── */
+.fbc-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fbc {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+
+.fbc-n {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+  color: var(--kr-accent-text);
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-surface);
+}
+
+.fbc[data-tone="inherited"] .fbc-n {
+  color: var(--kr-text-muted);
+  border-style: dashed;
+  border-color: var(--kr-border-medium);
+}
+
+/* On a narrow card the entry's tags wrap inside its pill instead of pushing it under its number. */
+.fbc-anchor {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: calc(100% - 26px);
+}
+
+.fbc-main {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  min-width: 0;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 0 var(--kr-sp-3);
+  color: var(--kr-text-primary);
+  font: inherit;
+  text-align: left;
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-surface);
+}
+
+button.fbc-main {
+  cursor: pointer;
+}
+
+button.fbc-main:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+/* Set on another agent's card: dashed, read-only here (it opens that card). */
+.fbc[data-tone="inherited"] .fbc-main {
+  color: var(--kr-text-secondary);
+  border-style: dashed;
+  border-color: var(--kr-border-medium);
+  background: transparent;
+}
+
+/* The controls hug the chip: they are not pushed to the far edge of the row. */
+.fbc-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+}
+
+/* « via Codex »: where an inherited fallback is set, next to its number. */
+.fbc-via {
+  flex: none;
+  padding: 0;
+  color: var(--kr-text-muted);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  border: 0;
+  background: transparent;
+}
+
+.fbc-via-link {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.fbc-via-link:hover {
+  color: var(--kr-accent-text);
+}
+
+.fbc-via-link:focus-visible,
+.fbc-change:focus-visible {
+  outline: 2px solid var(--kr-accent-border);
+  outline-offset: 1px;
+}
+
+/* « Change »: a quiet text action inside the entry's anchor, in place of the add button. */
+.fbc-change {
+  flex: none;
+  margin-left: var(--kr-sp-2);
+  padding: 0;
+  color: var(--kr-accent-text);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbc-change:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.fbc-change:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fbc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--kr-text-muted);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbc-btn:hover:not(:disabled) {
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-hover);
+}
+
+.fbc-btn:focus-visible,
+.fbc-main:focus-visible,
+.fbr-add:focus-visible {
+  outline: 2px solid var(--kr-accent-border);
+  outline-offset: 1px;
+}
+
+.fbc-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.fbc-remove:hover:not(:disabled) {
+  color: var(--kr-error);
+}
+
+/* ── Pills ─────────────────────────────────────────────────────────────── */
+.fbp {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-surface);
+}
+
+.fbp[data-tone="current"] {
+  border-color: var(--kr-border);
+  background: var(--kr-bg-subtle);
+}
+
+.fbp[data-tone="own"] {
+  border-color: var(--kr-accent-border);
+}
+
+/* Set on another agent's card: dashed, and it opens that card. */
+.fbp[data-tone="inherited"] {
+  border-style: dashed;
+  background: transparent;
+  color: var(--kr-text-secondary);
+}
+
+.fbp-main {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  min-width: 0;
+  padding: 0 var(--kr-sp-3);
+  min-height: 20px;
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--kr-r-pill);
+}
+
+button.fbp-main {
+  cursor: pointer;
+}
+
+button.fbp-main:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+.fbp-agent {
+  font-weight: 700;
+}
+
+.fbp-model {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kr-font-mono);
+}
+
+.fbp-mode {
+  padding: 0 var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs);
+  text-transform: uppercase;
+  color: var(--kr-text-muted);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-pill);
+}
+
+.fbp-badge {
+  padding: 0 var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  border-radius: var(--kr-r-pill);
+  border: 1px solid currentColor;
+}
+
+.fbp-badge[data-transport="cli"] {
+  color: var(--kr-info);
+}
+
+.fbp-badge[data-transport="http"] {
+  color: var(--kr-purple);
+}
+
+.fbp-badge[data-transport="local"] {
+  color: var(--kr-success);
+}
+
+/* The warning of one fallback, drawn beside it (never on the model or another item). */
+.fbp-gap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  min-width: 0;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-warning);
+}
+
+.fbp-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: var(--kr-sp-2);
+  color: var(--kr-text-muted);
+  border: 0;
+  border-radius: var(--kr-r-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbp-x:hover:not(:disabled) {
+  color: var(--kr-error);
+  background: var(--kr-bg-hover);
+}
+
+/* ── The « + Add a fallback » menu ─────────────────────────────────────────
+   Drawn in the page body (portal) and placed from its anchor, so the card's
+   overflow never clips it; left/top/max-height are set by placeMenu(). */
+.fbm {
+  position: fixed;
+  z-index: var(--kr-z-popover);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  width: max-content;
+  min-width: 260px;
+  max-width: calc(100vw - 16px);
+  max-height: 320px;
+  padding: var(--kr-sp-3);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+}
+
+.fbm-search {
+  flex: none;
+  width: 100%;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  color: var(--kr-text-primary);
+  font: inherit;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-surface);
+}
+
+.fbm-search:focus {
+  outline: none;
+  border-color: var(--kr-accent-border);
+}
+
+.fbm-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.fbm-empty {
+  padding: var(--kr-sp-3);
+  color: var(--kr-text-muted);
+}
+
+.fbm-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+}
+
+.fbm-agent {
+  padding: var(--kr-sp-1) var(--kr-sp-3);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--kr-text-secondary);
+}
+
+.fbm-item {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  border: 0;
+  border-radius: var(--kr-r-md);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbm-item:hover:not(:disabled),
+.fbm-item[data-active="true"]:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+/* The badges are never the part that gives way: the model name ellipsizes instead. */
+.fbm-item .fbp-mode,
+.fbm-item .fbp-badge {
+  flex: none;
+}
+
+.fbm-item[aria-current="true"] {
+  background: var(--kr-bg-active);
+}
+
+.fbm-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.fbm-model {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kr-font-mono);
+}

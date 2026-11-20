@@ -641,7 +641,17 @@ pub async fn tick(state: &crate::AppState, client: &reqwest::Client) -> Result<(
     // actually overlaps, which is the point.
     let advances = claimed_jobs.into_iter().map(|job| async move {
         let outcome = advance_claimed(state, client, &job, now).await;
-        if let Err(failure) = &outcome {
+        // KT-1706 — a source that refused the generation before accepting it
+        // hands it to the fallback set for its mode, when there is one.
+        let refusal = outcome.as_ref().err().map(AdvanceFailure::message);
+        let handed_over = match fall_back_if_refused(state, &job, refusal, now).await {
+            Ok(handed_over) => handed_over,
+            Err(e) => {
+                tracing::warn!(job = %job.id, error = %e, "media fallback check failed");
+                false
+            }
+        };
+        if let (Err(failure), false) = (&outcome, handed_over) {
             settle_failed_advance(&state.db, &job, failure, now).await?;
         }
         // Published from the STORED job after every durable transition — the
@@ -657,6 +667,154 @@ pub async fn tick(state: &crate::AppState, client: &reqwest::Client) -> Result<(
         result?;
     }
     Ok(())
+}
+
+/// KT-1706 — whether `reason` is a refusal that came BEFORE the source accepted
+/// the generation, so handing it to another source cannot bill it twice: a
+/// provider that said rate limit, quota or not authenticated (an explicit
+/// answer, nothing generated), or a ComfyUI that does not answer (nothing was
+/// submitted). A 5xx, a timeout or a lost connection after the request left may
+/// have been accepted: those never fall back, the job keeps its own rules.
+fn refused_before_acceptance(connection_id: &str, reason: &str) -> bool {
+    use crate::core::agent_fallback::{classify_trigger, Trigger};
+    if connection_id == crate::core::comfyui::CONNECTION_ID {
+        return reason.starts_with("ComfyUI does not answer at")
+            || reason.starts_with("ComfyUI is not reachable at");
+    }
+    matches!(
+        classify_trigger(reason),
+        Some(Trigger::RateLimit | Trigger::QuotaExhausted | Trigger::NotAuthenticated)
+    )
+}
+
+/// The model a fallback target runs for `modality`: its own explicit one, else
+/// the one in its own image / video slot; `None` when the target cannot serve
+/// the generation (unknown or without credential, endpoint or slot).
+async fn usable_model(
+    state: &crate::AppState,
+    target: &crate::models::ConnectionFallbackTarget,
+    modality: MediaModality,
+) -> Option<String> {
+    let explicit = target
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty());
+    if target.connection == crate::core::comfyui::CONNECTION_ID {
+        let config = state.config.read().await;
+        let slot = match modality {
+            MediaModality::Image => config.comfyui.image_model.clone(),
+            MediaModality::Video => config.comfyui.video_model.clone(),
+        };
+        return explicit.or(slot).filter(|model| !model.trim().is_empty());
+    }
+    let id = target.connection.clone();
+    let connection = state
+        .db
+        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &id))
+        .await
+        .ok()??;
+    let has_endpoint = connection
+        .media_endpoint
+        .as_deref()
+        .or(connection.endpoint.as_deref())
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_key = state
+        .config
+        .read()
+        .await
+        .tokens
+        .active_key_for(&connection.credential_slug)
+        .is_some();
+    let codec = crate::agents::media_codec::codec_for(connection.origin_preset);
+    if !has_endpoint || !has_key || !codec.supports(modality) {
+        return None;
+    }
+    let slot = match modality {
+        MediaModality::Image => connection.image_model,
+        MediaModality::Video => connection.video_model,
+    };
+    explicit.or(slot).filter(|model| !model.trim().is_empty())
+}
+
+/// KT-1706 — hands a generation the provider refused before accepting it to the
+/// fallback of its mode (`AgentsConfig::connection_fallbacks`): the next usable target
+/// on the row of the source it was on, then the rows of the fallbacks, never a
+/// source it already left. Only a job with no provider handle and no source
+/// image moves — a generation the provider may be producing is never touched.
+/// `refusal` is the error of this advance; a job the advance itself settled as
+/// failed is read from the store. `true` when the job moved (it is pending again
+/// and nothing else must settle it).
+async fn fall_back_if_refused(
+    state: &crate::AppState,
+    job: &MediaJob,
+    refusal: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    use crate::core::connection_fallback as policy;
+    let id = job.id.clone();
+    let Some(stored) = state
+        .db
+        .with_read_conn(move |conn| media_jobs::get(conn, &id))
+        .await?
+    else {
+        return Ok(false);
+    };
+    let settled_failed = stored.status == MediaJobStatus::Failed;
+    if stored
+        .provider_job_id
+        .as_deref()
+        .is_some_and(|handle| !handle.is_empty())
+        || !stored.params.reference_ids().is_empty()
+        || !(settled_failed || stored.status == MediaJobStatus::Running)
+    {
+        return Ok(false);
+    }
+    let reason = match (refusal, settled_failed) {
+        (Some(reason), _) => reason.to_string(),
+        (None, true) => stored.last_error.clone().unwrap_or_default(),
+        (None, false) => return Ok(false),
+    };
+    if !refused_before_acceptance(&stored.connection_id, &reason) {
+        return Ok(false);
+    }
+    let mode = policy::mode_of(stored.modality);
+    let agents = state.config.read().await.agents.clone();
+    let mut left = stored.params.fallback_from.clone();
+    left.push(stored.connection_id.clone());
+    let mut from = stored.connection_id.clone();
+    while let Some(target) = policy::next_target(&agents, &from, mode, &left) {
+        if let Some(model) = usable_model(state, target, stored.modality).await {
+            let mut params = stored.params.clone();
+            params.fallback_from = left.clone();
+            let note = format!(
+                "{} could not serve this generation ({}); continued on {} · {model}",
+                stored.connection_id,
+                reason.chars().take(160).collect::<String>(),
+                target.connection,
+            );
+            let (id, connection, model_for_db) =
+                (stored.id.clone(), target.connection.clone(), model.clone());
+            let moved = state
+                .db
+                .with_conn(move |conn| {
+                    media_jobs::retarget(conn, &id, &connection, &model_for_db, &params, &note, now)
+                })
+                .await?;
+            if moved {
+                tracing::info!(
+                    job = %stored.id,
+                    from = %stored.connection_id,
+                    to = %target.connection,
+                    "media generation handed to its fallback"
+                );
+            }
+            return Ok(moved);
+        }
+        // Not usable (unknown, no key, no model): the walk goes on past it.
+        left.push(target.connection.clone());
+        from = target.connection.clone();
+    }
+    Ok(false)
 }
 
 /// Applies the failure policy so a claimed job is never left frozen in
@@ -2277,3 +2435,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "media_runner_fallback_test.rs"]
+mod fallback_tests;

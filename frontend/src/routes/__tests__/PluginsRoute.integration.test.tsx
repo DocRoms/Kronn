@@ -24,7 +24,7 @@ const config = (id: string, label: string): McpConfigDisplay => ({
   env_keys: [], env_masked: [], args_override: null, is_global: false, include_general: true,
   config_hash: 'abc123', project_ids: [], project_names: [], secrets_broken: false, host_sync: 'None',
   preferred_interface: 'mcp', interfaces: ['mcp'], effective_kind: 'mcp', effective_preferred_interface: 'mcp',
-  credential_source: 'stored', last_probes: [],
+  credential_source: 'stored', last_probes: [], token_probe: false,
 });
 
 const overview: McpOverview = {

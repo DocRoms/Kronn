@@ -621,3 +621,16 @@ fn the_vault_rules_fold_into_the_policy_settings_document() {
     fold_vault_into_claude_settings(&mut alone, &[]);
     assert_eq!(alone, before);
 }
+
+// KT-1977 — Chrome cannot start its own Seatbelt sandbox inside Kronn's: only
+// a launch that is behind it tells the browser server so.
+#[test]
+fn only_a_launch_behind_the_seatbelt_profile_turns_the_browser_sandbox_off() {
+    let off = Some(("PLAYWRIGHT_MCP_SANDBOX", "false"));
+    assert_eq!(browser_env_inside(&Confined::Wrapped, true), off);
+    assert_eq!(browser_env_inside(&Confined::Replaced, true), off);
+    // Not wrapped: the browser keeps its sandbox.
+    assert_eq!(browser_env_inside(&Confined::Unchanged("off"), true), None);
+    // Bubblewrap is not measured to refuse a nested sandbox.
+    assert_eq!(browser_env_inside(&Confined::Wrapped, false), None);
+}

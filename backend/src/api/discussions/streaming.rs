@@ -96,7 +96,7 @@ fn load_quick_prompt_snapshot(
 /// entry points from drifting into different catalogues. A database error is
 /// deliberately propagated: silently falling back to the broader principal
 /// catalogue would give a worker tools and budgets it must not receive.
-pub(crate) async fn native_http_tools_for_discussion(
+pub async fn native_http_tools_for_discussion(
     state: &AppState,
     discussion_id: &str,
     agent_type: &AgentType,
@@ -305,6 +305,7 @@ mod native_http_tools_scope_tests {
             id: Some("streaming-scope-test".into()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         }
     }
 
@@ -881,7 +882,7 @@ pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
 /// Durable dispatch settlement updates the dispatch job and its parent batch
 /// counters in one transaction. Keeping the broadcast separate lets that path
 /// notify the UI after commit without incrementing the counters a second time.
-pub(crate) fn broadcast_batch_progress(state: &AppState, disc_id: &str, updated_run: &WorkflowRun) {
+pub fn broadcast_batch_progress(state: &AppState, disc_id: &str, updated_run: &WorkflowRun) {
     let is_final = matches!(
         updated_run.status,
         RunStatus::Success | RunStatus::Partial | RunStatus::Failed
@@ -1086,8 +1087,7 @@ mod dispatch_liveness_tests {
                     kind: PlanningActorKind::Backend,
                     id: Some("liveness-test".into()),
                     session_id: None,
-                    source_message_id: None,
-                };
+                    source_message_id: None, token_declared: false, };
                 let now = "2026-01-01T00:00:00Z";
                 conn.execute(
                     "INSERT INTO discussions (id, title, created_at, updated_at) \
@@ -1260,7 +1260,7 @@ mod dispatch_liveness_tests {
 /// the internal channel's senders use `let _ = tx.send(...)` so a
 /// dropped receiver does NOT cancel the agent — the message still
 /// gets persisted to DB.
-pub(crate) async fn make_agent_stream(
+pub async fn make_agent_stream(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
@@ -1269,7 +1269,7 @@ pub(crate) async fn make_agent_stream(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AgentExecutionOutcome {
+pub enum AgentExecutionOutcome {
     Finished { success: bool },
     PreflightFailed { diagnostic: String },
     RuntimeUnavailable { reason: String },
@@ -1289,6 +1289,10 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
         AgentType::LiteLlm | AgentType::Nvidia | AgentType::Ollama | AgentType::Custom
     ) || error.starts_with("Project path not found:")
         || error.starts_with("Copilot task worker cannot start:")
+        // KT-1758 — the launch path refuses this agent as a task worker (a
+        // native ACP agent): waiting never changes that. It was deferred every
+        // 30 s for 1h35 as if the runtime were about to come back.
+        || error.starts_with(crate::agents::runner::TASK_WORKER_REFUSED_PREFIX)
         || error.starts_with(crate::agents::acp_start::ACP_START_FAILED)
         || non_retryable_http_status
         || deterministic_nul_byte
@@ -1517,7 +1521,7 @@ fn agent_start_error_content(
 /// which is how a refusal reached `agent_dispatch_jobs.last_error` carrying
 /// nothing an operator could act on — 76 rows of it in one instance. Each
 /// caller names the condition it just detected instead.
-pub(crate) fn finish_tracked_preflight(
+pub fn finish_tracked_preflight(
     completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
     diagnostic: &str,
 ) {
@@ -2101,7 +2105,7 @@ mod dispatch_prompt_snapshot_tests {
     }
 }
 
-pub(crate) async fn make_agent_stream_tracked(
+pub async fn make_agent_stream_tracked(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
@@ -2125,7 +2129,7 @@ pub(crate) async fn make_agent_stream_tracked(
     (stream, completion_rx)
 }
 
-pub(crate) async fn make_agent_stream_tracked_with_initial_event(
+pub async fn make_agent_stream_tracked_with_initial_event(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
@@ -2166,7 +2170,7 @@ fn prepend_initial_event(stream: SseStream, initial_event: Option<Event>) -> Sse
 /// under the trigger (direct replies and their descendants) so it can
 /// complement it, but never later User turns or unrelated branches. The
 /// durable transcript itself remains untouched.
-pub(crate) fn discussion_at_dispatch_trigger(
+pub fn discussion_at_dispatch_trigger(
     disc: &Discussion,
     trigger_message_id: Option<&str>,
 ) -> Discussion {
@@ -2592,7 +2596,7 @@ fn messages_not_yet_seen(
 /// is never silently replaced by the room's default.
 /// What a connection whose target does not match the agent being started means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConnectionMismatch {
+pub enum ConnectionMismatch {
     /// The job itself named this connection. A job that names a connection
     /// serving another agent is inconsistent, and starting it anyway would run
     /// the turn on something the caller did not ask for.
@@ -2608,7 +2612,7 @@ pub(crate) enum ConnectionMismatch {
     Ignore,
 }
 
-pub(crate) fn connection_mismatch(inherited: bool) -> ConnectionMismatch {
+pub fn connection_mismatch(inherited: bool) -> ConnectionMismatch {
     if inherited {
         ConnectionMismatch::Ignore
     } else {
@@ -2616,7 +2620,7 @@ pub(crate) fn connection_mismatch(inherited: bool) -> ConnectionMismatch {
     }
 }
 
-pub(crate) fn effective_connection_id<'a>(
+pub fn effective_connection_id<'a>(
     dispatch: Option<&'a String>,
     discussion: Option<&'a String>,
 ) -> Option<&'a String> {
@@ -3012,10 +3016,21 @@ pub(super) async fn make_agent_stream_inner(
     let disc_tier = tier_override.unwrap_or(disc.tier);
     // 0.8.10 — explicit per-discussion model (e.g. inherited from a launching
     // Quick Prompt) wins over the tier; None → resolve from tier as before.
-    let disc_model = if tier_override.is_some() {
-        None
-    } else {
-        disc.model.clone()
+    // KT-1518 — a turn continued on a fallback runs on the link's own model, or
+    // on the tier it already had: never on the model of the agent that was refused.
+    let fallback_pin = match dispatch_job_id.clone() {
+        Some(job_id) => state
+            .db
+            .with_read_conn(move |conn| crate::core::agent_fallback::get_pin(conn, &job_id))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let disc_model = match &fallback_pin {
+        Some(pin) => pin.model.clone(),
+        None if tier_override.is_some() => None,
+        None => disc.model.clone(),
     };
     let disc_model = disc_model.or_else(|| {
         external_connection.as_ref().and_then(|connection| {
@@ -4680,7 +4695,8 @@ pub(super) async fn make_agent_stream_inner(
                 // KT-403 — no hidden Ollama multiplier. The effective value is
                 // the explicit local-agent budget shown in Settings (240 min by
                 // default), so the UI and the runtime report the same policy.
-                let global_deadline = tokio::time::Instant::now() + global_timeout;
+                let run_started = tokio::time::Instant::now();
+                let global_deadline = run_started + global_timeout;
 
                 // Periodic checkpoint of full_response → discussions.partial_response
                 // so a backend crash/restart doesn't lose what the agent has thought.
@@ -5139,6 +5155,19 @@ pub(super) async fn make_agent_stream_inner(
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
+                // KT-1408 — the process is dead: a worker the global limit
+                // stopped leaves a WIP checkpoint instead of a dirty worktree.
+                if let (Some(AgentTimeoutReason::Global(_)), Some(job_id)) =
+                    (timeout_reason.as_ref(), dispatch_job_id.as_deref())
+                {
+                    crate::api::worker_time_limit::checkpoint_stopped_worker(
+                        &state,
+                        job_id,
+                        run_started.elapsed(),
+                        global_timeout,
+                    )
+                    .await;
+                }
                 let finished_worker_launch = match served_model {
                     Some(recorder) => Some(recorder.finish().await),
                     None => None,
@@ -5201,6 +5230,7 @@ pub(super) async fn make_agent_stream_inner(
                         crate::api::audit::briefing::complete_reviewed_briefing(
                             &state,
                             pid.clone(),
+                            resolved,
                             file,
                         )
                         .await
@@ -5525,7 +5555,13 @@ pub(super) async fn make_agent_stream_inner(
                         &observed_models,
                     ),
                     tokens_used,
-                    stream_json_cost,
+                    // A structured transport (ACP, HTTP) reports its cost on
+                    // the process, like a workflow step's.
+                    stream_json_cost.or_else(|| {
+                        process
+                            .reported_cost_usd_micros()
+                            .map(|micros| micros as f64 / 1_000_000.0)
+                    }),
                     message_counters,
                 );
                 let cost_usd = priced.cost_usd;
@@ -6373,10 +6409,16 @@ pub(super) async fn make_agent_stream_inner(
                 let content = match start_timeout {
                     Some(_) => e.clone(),
                     None if size_refusal => {
-                        let limit = super::prompt_limit::limit_for(
+                        let local_windows = super::prompt_limit::local_windows(
+                            [(agent_type.clone(), attempted_model.clone())],
+                            &ollama_context_overrides,
+                        )
+                        .await;
+                        let limit = super::prompt_limit::limit_with_local_windows(
                             &agent_type,
                             attempted_model.as_deref(),
                             &ollama_context_overrides,
+                            &local_windows,
                             super::prompt_limit::hard_ceiling(&state).await,
                         );
                         super::start_refusal::prompt_too_large_card(
@@ -9683,6 +9725,30 @@ for line in sys.stdin:
             agent_start_failure_outcome(&AgentType::OpenCode, &refused),
             AgentExecutionOutcome::PreflightFailed { .. }
         ));
+        assert!(matches!(
+            agent_start_failure_outcome(&AgentType::OpenCode, "OpenCode ACP spawn failed: x"),
+            AgentExecutionOutcome::RuntimeUnavailable { .. }
+        ));
+    }
+
+    /// KT-1758 — the launch path's refusal of a native ACP agent as a task
+    /// worker never changes by waiting: it is settled, not deferred (it used to
+    /// be deferred every 30 s for 1h35 on the live run). A runtime that is only
+    /// absent for now still defers.
+    #[test]
+    fn a_task_worker_refusal_is_settled_not_deferred() {
+        let refusal = format!(
+            "{} {}",
+            crate::agents::runner::TASK_WORKER_REFUSED_PREFIX,
+            crate::agents::runner::NATIVE_ACP_TASK_WORKER_REFUSAL
+        );
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::OpenCode, &refusal),
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: refusal.clone()
+            },
+            "the whole sentence reaches the rooms"
+        );
         assert!(matches!(
             agent_start_failure_outcome(&AgentType::OpenCode, "OpenCode ACP spawn failed: x"),
             AgentExecutionOutcome::RuntimeUnavailable { .. }

@@ -3655,17 +3655,9 @@
   outline-offset: 2px;
 }
 
-.set-agent-tools-defaults {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--kr-sp-3);
-  margin-bottom: var(--kr-sp-3);
-}
-
-.set-agent-tools-default {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--kr-sp-2);
+.set-ollama-tools {
+  margin-bottom: var(--kr-sp-4);
+  padding-left: var(--kr-sp-9);
 }
 
 .set-ext-api-conn-tools-off {
@@ -3708,10 +3700,6 @@
   border: 1px solid var(--kr-border-ghost);
   border-radius: var(--kr-r-md);
   background: var(--kr-bg-subtle);
-}
-
-.set-agent-panel-models {
-  grid-column: 1 / -1;
 }
 
 .set-agent-section-title {
@@ -3774,10 +3762,6 @@
 
 .set-agent-panel-auth .set-key-row {
   padding-left: 0;
-}
-
-.set-agent-panel-models > .flex-row:last-child {
-  flex-wrap: wrap;
 }
 
 .set-agent-row-ollama .set-ollama-card {
@@ -3857,10 +3841,6 @@
 
   .set-agent-card-body {
     grid-template-columns: 1fr;
-  }
-
-  .set-agent-panel-models {
-    grid-column: auto;
   }
 
   .set-agent-section-title code {
@@ -6951,8 +6931,23 @@
 }
 
 .set-agent-access-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2) var(--kr-sp-4);
   padding: var(--kr-sp-3) var(--kr-sp-7) var(--kr-sp-4);
 }
+.set-agent-access-what {
+  display: flex;
+  flex: 1 1 16rem;
+  flex-wrap: wrap;
+  gap: 0 var(--kr-sp-2);
+  min-width: 0;
+  margin: 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-sm);
+}
+.set-agent-access-what strong { color: var(--kr-text-primary); }
 
 .set-desktop-port {
   display: grid;

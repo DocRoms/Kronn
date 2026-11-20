@@ -15,8 +15,8 @@ const COLUMNS: &str = "id, display_name, mention_alias, endpoint, credential_slu
     economy_model, default_model, reasoning_model, created_at, updated_at, \
     image_model, video_model, media_endpoint, decision_model, tools_enabled";
 
-const LEGACY_LITELLM_ID: &str = "external-api-litellm";
-const LEGACY_NVIDIA_ID: &str = "external-api-nvidia";
+pub const LEGACY_LITELLM_ID: &str = "external-api-litellm";
+pub const LEGACY_NVIDIA_ID: &str = "external-api-nvidia";
 
 /// Apply the canonical named connection to the legacy runtime slots still
 /// consumed by agent selectors and the runner. Named connections are the UI
@@ -37,12 +37,37 @@ pub fn sync_runtime_config(connection: &ExternalApiConnection, config: &mut AppC
     let changed = agent.base_url != connection.endpoint
         || tiers.economy != connection.economy_model
         || tiers.default != connection.default_model
-        || tiers.reasoning != connection.reasoning_model;
+        || tiers.reasoning != connection.reasoning_model
+        || agent.tools_enabled != connection.tools_enabled;
     agent.base_url.clone_from(&connection.endpoint);
+    // The agent slot has no switch of its own (KT-1687): a run naming no
+    // connection follows the Kronn-tools switch of the provider's default one.
+    agent.tools_enabled = connection.tools_enabled;
     tiers.economy.clone_from(&connection.economy_model);
     tiers.default.clone_from(&connection.default_model);
     tiers.reasoning.clone_from(&connection.reasoning_model);
     changed
+}
+
+/// Carry an agent-level Kronn-tools `off` (the KT-1600 slot switch, gone in
+/// KT-1687) onto the provider's default connection, so no owner choice is lost
+/// when the switch moves into the connection card. Only an unset connection
+/// takes it: a switch the owner already set on the connection wins. Idempotent
+/// — once carried, the connection says `off` and nothing is left to move.
+pub fn carry_agent_tools_off(conn: &Connection, config: &AppConfig) -> Result<()> {
+    for (id, agent) in [
+        (LEGACY_LITELLM_ID, &config.agents.lite_llm),
+        (LEGACY_NVIDIA_ID, &config.agents.nvidia),
+    ] {
+        if agent.tools_enabled == Some(false) {
+            conn.execute(
+                "UPDATE external_api_connections SET tools_enabled = 0
+                 WHERE id = ?1 AND tools_enabled IS NULL",
+                params![id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The connection a legacy agent really runs on when no connection was chosen:
@@ -336,6 +361,45 @@ pub fn update(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
     Ok(())
 }
 
+/// The hosted OpenAI-compatible endpoint. Deliberately without the `/v1` suffix:
+/// the shared codec appends `/v1/chat/completions` and the probes append
+/// `/v1/models`, exactly as they do for a LiteLLM proxy.
+pub const NVIDIA_DEFAULT_BASE_URL: &str = "https://integrate.api.nvidia.com";
+
+/// Public accessor for the runner, which holds the saved endpoint (if any) but
+/// not the fallback chain.
+pub fn nvidia_resolve_base_url_pub(stored: Option<&str>) -> String {
+    nvidia_resolve_base_url(stored)
+}
+
+/// Saved endpoint → `NVIDIA_BASE_URL` → the hosted default. A trailing slash is
+/// dropped and a bare host gains a scheme, so a pasted value behaves.
+pub fn nvidia_resolve_base_url(stored: Option<&str>) -> String {
+    let raw = stored
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            crate::core::child_env::var("NVIDIA_BASE_URL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| NVIDIA_DEFAULT_BASE_URL.to_string());
+    normalize_url(&raw)
+}
+
+fn normalize_url(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        // A hosted endpoint is never plain HTTP; assume TLS rather than
+        // downgrading a pasted host silently.
+        format!("https://{trimmed}")
+    }
+}
+
 /// Backfill the two legacy provider settings exactly once. `DO NOTHING` keeps
 /// a connection created or later edited by the named-connection workflow intact.
 pub fn backfill_legacy_config(conn: &Connection, config: &AppConfig) -> Result<()> {
@@ -348,8 +412,7 @@ pub fn backfill_legacy_config(conn: &Connection, config: &AppConfig) -> Result<(
         ExternalApiConnectionPreset::LiteLlm,
         &config.agents.model_tiers.lite_llm,
     )?;
-    let nvidia_endpoint =
-        crate::api::nvidia::resolve_base_url_pub(config.agents.nvidia.base_url.as_deref());
+    let nvidia_endpoint = nvidia_resolve_base_url_pub(config.agents.nvidia.base_url.as_deref());
     insert_legacy(
         conn,
         LEGACY_NVIDIA_ID,
@@ -372,7 +435,7 @@ pub fn backfill_legacy_config(conn: &Connection, config: &AppConfig) -> Result<(
     Ok(())
 }
 
-fn insert_legacy(
+pub fn insert_legacy(
     conn: &Connection,
     id: &str,
     display_name: &str,
@@ -467,6 +530,70 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[test]
+    fn an_agent_level_tools_off_is_carried_onto_the_default_connection() {
+        // KT-1687 — the slot switch is gone: its `off` moves onto the default
+        // connection, the slot then follows the connection, and a restart
+        // changes nothing more.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let mut config = default_config();
+        config.agents.lite_llm.tools_enabled = Some(false);
+        backfill_legacy_config(&conn, &config).unwrap();
+
+        for _ in 0..2 {
+            carry_agent_tools_off(&conn, &config).unwrap();
+            for connection in runtime_connections(&conn).unwrap() {
+                sync_runtime_config(&connection, &mut config);
+            }
+        }
+        let tools = |agent: &AgentType| {
+            legacy_connection_for_agent(&conn, agent)
+                .unwrap()
+                .unwrap()
+                .tools_enabled
+        };
+        assert_eq!(tools(&AgentType::LiteLlm), Some(false));
+        assert_eq!(
+            tools(&AgentType::Nvidia),
+            None,
+            "only the provider that was off"
+        );
+        assert_eq!(config.agents.lite_llm.tools_enabled, Some(false));
+        assert_eq!(config.agents.nvidia.tools_enabled, None);
+
+        // Switching the connection back on reaches the agent slot, and the
+        // old agent value never resurrects.
+        let mut connection = legacy_connection_for_agent(&conn, &AgentType::LiteLlm)
+            .unwrap()
+            .unwrap();
+        connection.tools_enabled = Some(true);
+        update(&conn, &connection).unwrap();
+        carry_agent_tools_off(&conn, &config).unwrap();
+        assert!(sync_runtime_config(&connection, &mut config));
+        assert_eq!(config.agents.lite_llm.tools_enabled, Some(true));
+        assert_eq!(tools(&AgentType::LiteLlm), Some(true));
+    }
+
+    #[test]
+    fn a_connection_switch_already_set_wins_over_the_agent_level_off() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let mut config = default_config();
+        backfill_legacy_config(&conn, &config).unwrap();
+        let mut connection = legacy_connection_for_agent(&conn, &AgentType::Nvidia)
+            .unwrap()
+            .unwrap();
+        connection.tools_enabled = Some(true);
+        update(&conn, &connection).unwrap();
+        config.agents.nvidia.tools_enabled = Some(false);
+
+        carry_agent_tools_off(&conn, &config).unwrap();
+        sync_runtime_config(&connection, &mut config);
+
+        assert_eq!(config.agents.nvidia.tools_enabled, Some(true));
     }
 
     #[test]
@@ -629,249 +756,6 @@ mod tests {
                 .with_connection("nvidia-primary")
                 .with_tier(crate::models::ModelTier::Reasoning)]
         );
-    }
-
-    #[tokio::test]
-    async fn shared_bootstrap_backfills_legacy_connections_idempotently_without_secrets() {
-        let database = crate::db::Database::open_in_memory().unwrap();
-
-        let mut config = default_config();
-        config.agents.lite_llm.base_url = Some("https://proxy.example.test".into());
-        config.agents.nvidia.base_url = Some("https://nim.example.test".into());
-        config.agents.model_tiers.lite_llm = ModelTierConfig {
-            economy: Some("lite-economy".into()),
-            default: Some("lite-default".into()),
-            reasoning: Some("lite-reasoning".into()),
-            ..Default::default()
-        };
-        config.agents.model_tiers.nvidia = ModelTierConfig {
-            economy: Some("nim-economy".into()),
-            default: Some("nim-default".into()),
-            reasoning: Some("nim-reasoning".into()),
-            ..Default::default()
-        };
-        config.tokens.keys = vec![
-            ApiKey {
-                id: "key-lite".into(),
-                name: "Lite".into(),
-                provider: "litellm".into(),
-                value: "lite-secret".into(),
-                active: true,
-            },
-            ApiKey {
-                id: "key-nvidia".into(),
-                name: "NVIDIA".into(),
-                provider: "nvidia".into(),
-                value: "nvidia-secret".into(),
-                active: true,
-            },
-        ];
-
-        crate::bootstrap_external_api_connections(&database, &mut config)
-            .await
-            .unwrap();
-        crate::bootstrap_external_api_connections(&database, &mut config)
-            .await
-            .unwrap();
-
-        let connections = database.with_conn(list).await.unwrap();
-        assert_eq!(connections.len(), 2);
-        let lite = connections
-            .iter()
-            .find(|item| item.credential_slug == "litellm")
-            .unwrap();
-        assert_eq!(lite.endpoint.as_deref(), Some("https://proxy.example.test"));
-        assert_eq!(lite.origin_preset, ExternalApiConnectionPreset::LiteLlm);
-        assert_eq!(lite.economy_model.as_deref(), Some("lite-economy"));
-        assert_eq!(lite.default_model.as_deref(), Some("lite-default"));
-        assert_eq!(lite.reasoning_model.as_deref(), Some("lite-reasoning"));
-        assert_eq!(
-            config.tokens.active_key_for(&lite.credential_slug),
-            Some("lite-secret")
-        );
-        let nvidia = connections
-            .iter()
-            .find(|item| item.credential_slug == "nvidia")
-            .unwrap();
-        assert_eq!(nvidia.endpoint.as_deref(), Some("https://nim.example.test"));
-        assert_eq!(nvidia.origin_preset, ExternalApiConnectionPreset::Nvidia);
-        assert_eq!(nvidia.economy_model.as_deref(), Some("nim-economy"));
-        assert_eq!(nvidia.default_model.as_deref(), Some("nim-default"));
-        assert_eq!(nvidia.reasoning_model.as_deref(), Some("nim-reasoning"));
-        assert_eq!(
-            config.tokens.active_key_for(&nvidia.credential_slug),
-            Some("nvidia-secret")
-        );
-        let persisted_secret_count = database
-            .with_conn(|conn| {
-                Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM external_api_connections
-                     WHERE display_name IN (?1, ?2)
-                        OR mention_alias IN (?1, ?2)
-                        OR endpoint IN (?1, ?2)
-                        OR credential_slug IN (?1, ?2)
-                        OR economy_model IN (?1, ?2)
-                        OR default_model IN (?1, ?2)
-                        OR reasoning_model IN (?1, ?2)",
-                    params!["lite-secret", "nvidia-secret"],
-                    |row| row.get::<_, i64>(0),
-                )?)
-            })
-            .await
-            .unwrap();
-        assert_eq!(persisted_secret_count, 0);
-    }
-
-    #[tokio::test]
-    async fn bootstrap_repairs_only_a_missing_legacy_nvidia_endpoint() {
-        let database = crate::db::Database::open_in_memory().unwrap();
-        database
-            .with_conn(|conn| {
-                insert_legacy(
-                    conn,
-                    LEGACY_NVIDIA_ID,
-                    "NVIDIA",
-                    "nvidia",
-                    None,
-                    ExternalApiConnectionPreset::Nvidia,
-                    &ModelTierConfig::default(),
-                )
-            })
-            .await
-            .unwrap();
-
-        let mut config = default_config();
-        crate::bootstrap_external_api_connections(&database, &mut config)
-            .await
-            .unwrap();
-        let repaired = database
-            .with_conn(|conn| get(conn, LEGACY_NVIDIA_ID))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            repaired.endpoint.as_deref(),
-            Some("https://integrate.api.nvidia.com")
-        );
-
-        database
-            .with_conn(|conn| {
-                conn.execute(
-                    "UPDATE external_api_connections SET endpoint = ?2 WHERE id = ?1",
-                    params![LEGACY_NVIDIA_ID, "https://nim.example.test"],
-                )?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-        crate::bootstrap_external_api_connections(&database, &mut config)
-            .await
-            .unwrap();
-        let preserved = database
-            .with_conn(|conn| get(conn, LEGACY_NVIDIA_ID))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            preserved.endpoint.as_deref(),
-            Some("https://nim.example.test")
-        );
-    }
-
-    #[tokio::test]
-    async fn bootstrap_projects_saved_nvidia_connection_into_selector_and_runtime_config() {
-        let database = crate::db::Database::open_in_memory().unwrap();
-        let mut config = default_config();
-        crate::bootstrap_external_api_connections(&database, &mut config)
-            .await
-            .unwrap();
-
-        database
-            .with_conn(|conn| {
-                let mut nvidia = get(conn, LEGACY_NVIDIA_ID)?.unwrap();
-                nvidia.endpoint = Some("https://nvidia.example.test".into());
-                nvidia.economy_model = Some("nvidia/new-low".into());
-                nvidia.default_model = Some("nvidia/new-standard".into());
-                nvidia.reasoning_model = Some("nvidia/new-reasoning".into());
-                update(conn, &nvidia)
-            })
-            .await
-            .unwrap();
-
-        assert!(
-            crate::bootstrap_external_api_connections(&database, &mut config)
-                .await
-                .unwrap()
-        );
-        assert_eq!(
-            config.agents.nvidia.base_url.as_deref(),
-            Some("https://nvidia.example.test")
-        );
-        assert_eq!(
-            config.agents.model_tiers.nvidia.economy.as_deref(),
-            Some("nvidia/new-low")
-        );
-        assert_eq!(
-            config.agents.model_tiers.nvidia.default.as_deref(),
-            Some("nvidia/new-standard")
-        );
-        assert_eq!(
-            config.agents.model_tiers.nvidia.reasoning.as_deref(),
-            Some("nvidia/new-reasoning")
-        );
-        assert!(
-            !crate::bootstrap_external_api_connections(&database, &mut config)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn migrated_legacy_connections_coexist_with_unique_live_aliases_end_to_end() {
-        let database = crate::db::Database::open_in_memory().unwrap();
-        let mut config = default_config();
-        config.agents.lite_llm.base_url = Some("https://proxy.example.test".into());
-        config.agents.nvidia.base_url = Some("https://nim.example.test".into());
-        config.agents.model_tiers.lite_llm.default = Some("lite-default".into());
-        config.agents.model_tiers.nvidia.default = Some("nim-default".into());
-
-        // Replay the startup migration exactly as two consecutive boots would.
-        crate::bootstrap_external_api_connections(&database, &mut config)
-            .await
-            .unwrap();
-        crate::bootstrap_external_api_connections(&database, &mut config)
-            .await
-            .unwrap();
-
-        database
-            .with_conn(|conn| {
-                let connections = list(conn)?;
-                assert_eq!(connections.len(), 2);
-
-                let targets = resolve_connection_mentions(
-                    "Compare @litellm with @NVIDIA in the same turn.",
-                    &connections,
-                );
-                assert_eq!(
-                    targets,
-                    vec![
-                        MessageTarget::agent(AgentType::LiteLlm).with_connection(LEGACY_LITELLM_ID),
-                        MessageTarget::agent(AgentType::Nvidia).with_connection(LEGACY_NVIDIA_ID),
-                    ]
-                );
-
-                let duplicate = connection(
-                    "duplicate-litellm",
-                    "LITELLM",
-                    ExternalApiConnectionPreset::Other,
-                );
-                let error = insert(conn, &duplicate).unwrap_err().to_string();
-                assert!(error.contains("already claimed"));
-                assert_eq!(list(conn)?.len(), 2);
-                Ok(())
-            })
-            .await
-            .unwrap();
     }
 
     #[test]

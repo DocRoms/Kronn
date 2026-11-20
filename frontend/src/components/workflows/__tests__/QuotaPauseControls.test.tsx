@@ -6,16 +6,18 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { I18nProvider } from '../../../lib/I18nContext';
 import { QuotaAgentSwitch, QuotaPauseNotice, QuotaResumeButton } from '../QuotaPauseControls';
 
-const { resumeRunMock, switchMock, detectMock } = vi.hoisted(() => ({
+const { resumeRunMock, switchMock, detectMock, fallbackMock } = vi.hoisted(() => ({
   resumeRunMock: vi.fn(),
   switchMock: vi.fn(),
   detectMock: vi.fn(),
+  fallbackMock: vi.fn(),
 }));
 vi.mock('../../../lib/api', async () => {
   const { buildApiMock } = await import('../../../test/apiMock');
   return buildApiMock({
     workflows: { resumeRun: resumeRunMock as never, switchQuotaAgent: switchMock as never },
     agents: { detect: detectMock as never },
+    config: { getAgentFallback: fallbackMock as never },
   });
 });
 
@@ -31,6 +33,7 @@ const wrap = async (ui: React.ReactElement) => {
 beforeEach(() => {
   resumeRunMock.mockReset().mockResolvedValue({ run_id: 'run-1', new_status: 'Running' });
   switchMock.mockReset().mockResolvedValue({ run_id: 'run-1', step_name: 'Agent', agent: 'Codex' });
+  fallbackMock.mockReset().mockResolvedValue({ chains: [], cooldowns: [] });
   detectMock.mockReset().mockResolvedValue([
     detection('ClaudeCode'),
     detection('Codex'),
@@ -110,6 +113,34 @@ describe('QuotaAgentSwitch', () => {
     expect(switchMock).toHaveBeenCalledWith('run-1', { agent: 'Codex' });
     expect(onSwitched).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('status')).toHaveTextContent('L\'étape s\'exécutera sur Codex');
+  });
+
+  // KT-1518 — the agent's own fallback chain is the alternative to waiting.
+  it('offers the configured fallback first and preselects it, so one click moves the step', async () => {
+    detectMock.mockResolvedValue([detection('ClaudeCode'), detection('Codex'), detection('GeminiCli')]);
+    fallbackMock.mockResolvedValue({
+      chains: [{ agent: 'ClaudeCode', mode: 'standard', links: [{ agent: 'GeminiCli', model: null, mode: 'standard', transport: 'cli', gaps: [] }], inherited: [] }],
+      cooldowns: [],
+    });
+    await wrap(<QuotaAgentSwitch runId="run-1" current="ClaudeCode" />);
+
+    const select = screen.getByRole('combobox', { name: 'Changer d\'agent' }) as HTMLSelectElement;
+    const options = Array.from(select.querySelectorAll('option')).filter(o => o.value);
+    expect(options.map(o => o.value)).toEqual(['GeminiCli', 'Codex']);
+    expect(options[0]).toHaveTextContent('repli configuré');
+    expect(options[1]).not.toHaveTextContent('repli configuré');
+    expect(select.value).toBe('GeminiCli');
+
+    await act(async () => { fireEvent.click(screen.getByTestId('quota-switch-apply')); });
+    expect(switchMock).toHaveBeenCalledWith('run-1', { agent: 'GeminiCli' });
+  });
+
+  it('keeps the plain list when the agent has no fallback or the chain cannot be read', async () => {
+    fallbackMock.mockRejectedValue(new Error('offline'));
+    await wrap(<QuotaAgentSwitch runId="run-1" current="ClaudeCode" />);
+    const select = screen.getByRole('combobox') as HTMLSelectElement;
+    expect(select.value).toBe('');
+    expect(screen.getByTestId('quota-switch-apply')).toBeDisabled();
   });
 
   it('shows the refusal when the switch is refused', async () => {

@@ -67,11 +67,7 @@ const RUN_COLS: &str = "id, kind, discussion_id, project_id, target_workspace_id
     default_worker_json, auto_continue, quota_fallback, quota_fallback_agents_json, \
     reviewer_json";
 
-fn parse_dt(value: String) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(&value)
-        .map(|date| date.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
-}
+use super::execution_activity::parse_dt;
 
 fn parse_opt_dt(value: Option<String>) -> Option<DateTime<Utc>> {
     value.map(parse_dt)
@@ -230,7 +226,7 @@ fn parse_target_kind(
 /// and the execution's `worker_agent_type` never diverge. Kept local + exhaustive
 /// (adding an `AgentType` fails to compile) so a new provider can't silently map
 /// to an empty string.
-pub(crate) fn agent_type_to_db(a: &AgentType) -> String {
+pub fn agent_type_to_db(a: &AgentType) -> String {
     match a {
         AgentType::ClaudeCode => "ClaudeCode",
         AgentType::Codex => "Codex",
@@ -247,26 +243,7 @@ pub(crate) fn agent_type_to_db(a: &AgentType) -> String {
     .to_string()
 }
 
-/// Parse a stored `worker_agent_type` back to the typed identity (defense-in-depth
-/// like [`parse_target_kind`]): a value outside the domain is a corrupt row,
-/// surfaced as a hard error rather than silently dropping the worker's provider
-/// when the saga reconstructs the `MessageTarget` on resume.
-pub(crate) fn agent_type_from_db(s: &str) -> Result<AgentType> {
-    Ok(match s {
-        "ClaudeCode" => AgentType::ClaudeCode,
-        "Codex" => AgentType::Codex,
-        "OpenCode" => AgentType::OpenCode,
-        "Vibe" => AgentType::Vibe,
-        "GeminiCli" => AgentType::GeminiCli,
-        "Kiro" => AgentType::Kiro,
-        "CopilotCli" => AgentType::CopilotCli,
-        "Ollama" => AgentType::Ollama,
-        "LiteLlm" => AgentType::LiteLlm,
-        "Nvidia" => AgentType::Nvidia,
-        "Custom" => AgentType::Custom,
-        other => bail!("unknown worker_agent_type: {other}"),
-    })
-}
+pub use super::agent_dispatch::agent_type_from_db;
 
 fn model_tier_to_db(tier: &ModelTier) -> &'static str {
     match tier {
@@ -421,6 +398,7 @@ pub fn record_artifact_reclaim(
             id: Some("disk-maintenance".to_string()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
         changes,
     )
@@ -515,6 +493,17 @@ fn closed_task_blocker(
             status.as_str()
         )));
     }
+    execution_activity_blocker(conn, execution_id, disc_id)
+}
+
+/// Why something is still working for `execution_id`, or `None` when nothing is:
+/// a pending or running worker dispatch, an unsettled commit lease, or a session
+/// attached to the execution's room or bound to it.
+fn execution_activity_blocker(
+    conn: &Connection,
+    execution_id: &str,
+    disc_id: &str,
+) -> Result<Option<String>> {
     let busy = |sql: &str, key: &str| -> Result<bool> {
         Ok(conn.query_row(sql, params![key], |row| row.get::<_, bool>(0))?)
     };
@@ -554,6 +543,99 @@ fn closed_task_blocker(
         )));
     }
     Ok(None)
+}
+
+/// Why the build dir of a Blocked or Interrupted execution must stay, or `None`
+/// when it may be offered for a purge (KT-1691).
+///
+/// The execution must be Blocked or Interrupted (anything else is running or
+/// finished, and judged elsewhere) and nothing may still work for it: no
+/// dispatch, no unsettled commit lease, no attached session, no held worker
+/// lease on its checkout. The idle age is the caller's to check on the lane.
+pub fn stalled_execution_blocker(conn: &Connection, execution_id: &str) -> Result<Option<String>> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM task_executions WHERE id = ?1",
+            params![execution_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(status) = status else {
+        return Ok(Some(format!(
+            "execution {execution_id} is not in the database"
+        )));
+    };
+    match TaskExecutionStatus::from_str(&status) {
+        Ok(TaskExecutionStatus::Blocked | TaskExecutionStatus::Interrupted) => {}
+        Ok(_) => {
+            return Ok(Some(format!(
+                "execution {execution_id} is {status}, not Blocked or Interrupted"
+            )))
+        }
+        Err(error) => {
+            return Ok(Some(format!(
+                "execution {execution_id} has an unreadable status: {error}"
+            )))
+        }
+    }
+    let disc_id: String = conn
+        .query_row(
+            "SELECT disc_id FROM discussion_workspaces WHERE task_execution_id = ?1",
+            params![execution_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    if let Some(reason) = execution_activity_blocker(conn, execution_id, &disc_id)? {
+        return Ok(Some(reason));
+    }
+    let mut statement = conn.prepare(
+        "SELECT canonical_path FROM discussion_workspaces
+          WHERE task_execution_id = ?1 AND canonical_path IS NOT NULL",
+    )?;
+    let paths = statement
+        .query_map(params![execution_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for path in paths {
+        let held: Option<String> = conn
+            .query_row(
+                "SELECT branch FROM discussion_workspace_history_leases
+                  WHERE canonical_path = ?1 AND released_at IS NULL
+                  LIMIT 1",
+                params![path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(branch) = held {
+            return Ok(Some(format!(
+                "an unreleased worker lease holds {path} on branch {branch}"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether a workspace row of any kind still names `path` (KT-1691): by its live
+/// checkout, or by the path a retired row remembers, spelled in full or only by
+/// its directory name (a row may have been written under another spelling of
+/// the same directory). A worktree no row names belongs to nothing durable; a
+/// path with no readable name is treated as named.
+pub fn workspace_row_names_path(conn: &Connection, path: &str) -> Result<bool> {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return Ok(true);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM discussion_workspaces
+                        WHERE canonical_path = ?1 OR workspace_path = ?1
+                           OR substr(canonical_path, -(length(?2) + 1)) = '/' || ?2
+                           OR substr(workspace_path, -(length(?2) + 1)) = '/' || ?2)",
+        params![path, name],
+        |row| row.get(0),
+    )?)
 }
 
 fn workspace_liveness(
@@ -1053,6 +1135,7 @@ pub fn record_lane_target_reclaim_for_execution(
             id: Some("disk-maintenance".to_string()),
             session_id: None,
             source_message_id: None,
+            token_declared: false,
         },
         changes,
     )
@@ -1074,19 +1157,6 @@ pub fn discussion_is_execution_room(conn: &Connection, discussion_id: &str) -> R
         )
         .optional()?;
     Ok(found.is_some())
-}
-
-/// A worker's durable assignment owns its room even when its CLI is absent,
-/// left, or not polling. Only an explicit execution reassignment changes this
-/// authority; presence must never create a second writer in the worktree.
-pub fn discussion_has_cli_worker(conn: &Connection, discussion_id: &str) -> Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM task_executions
-          WHERE sub_discussion_id = ?1 AND worker_target_kind = 'cli')",
-        [discussion_id],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
 }
 
 /// Resolve the durable execution that owns a worker room, including any
@@ -2105,40 +2175,6 @@ fn launch_dod_snapshot(
     ))
 }
 
-/// KT-1291 — the sentence the execution was launched with for DoD item
-/// `dod_id`; `None` for an execution launched before the snapshot recorded
-/// sentences.
-pub fn execution_dod_sentence(
-    conn: &Connection,
-    exec_id: &str,
-    dod_id: &str,
-) -> Result<Option<String>> {
-    let payloads = conn
-        .prepare(
-            "SELECT changes_json FROM task_execution_events
-              WHERE task_execution_id = ?1 AND action = 'created'
-              ORDER BY created_at ASC, rowid ASC",
-        )?
-        .query_map(params![exec_id], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for payload in payloads {
-        let Ok(changes) = serde_json::from_str::<serde_json::Value>(&payload) else {
-            continue;
-        };
-        let found = changes
-            .get("worker_dod")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(dod_id))
-            .and_then(|item| item.get("sentence").and_then(serde_json::Value::as_str));
-        if let Some(sentence) = found {
-            return Ok(Some(sentence.to_string()));
-        }
-    }
-    Ok(None)
-}
-
 /// Atomically add one ordered, policy-compliant task to an existing campaign.
 /// The candidate projection is recomputed inside the same savepoint as the
 /// insert, so two concurrent principals cannot both consume the final slot.
@@ -2608,6 +2644,7 @@ pub fn record_http_turn_telemetry_for_dispatch(
                 id: Some("http-agent-runner".to_string()),
                 session_id: Some(dispatch_job_id.to_string()),
                 source_message_id: None,
+                token_declared: false,
             },
             serde_json::json!({"version": 1, "turns": turns}),
         )?;
@@ -2751,6 +2788,7 @@ pub fn adopt_woken_dispatch_for_interrupted_worker(
                 id: Some("orchestrator".into()),
                 session_id: None,
                 source_message_id: None,
+                token_declared: false,
             },
             serde_json::json!({
                 "recovery": "worker_woken_in_room",
@@ -2795,6 +2833,7 @@ pub fn escalate_execution_for_dispatch_quota(
                 id: Some("provider-quota-guard".into()),
                 session_id: None,
                 source_message_id: None,
+                token_declared: false,
             },
             serde_json::json!({
                 "failure_kind": "quota_exhausted",
@@ -3267,11 +3306,60 @@ pub fn execution_refused_providers(
         .collect())
 }
 
+/// KT-1758 — SQL predicate over `task_executions e`: the execution's current
+/// dispatch is a turn under way, claimed and its agent started. One definition
+/// for the sweep's listing and for the check inside the reassignment.
+const TURN_IN_PROGRESS_SQL: &str = "EXISTS (
+         SELECT 1 FROM agent_dispatch_jobs AS live_turn
+         WHERE live_turn.id = e.dispatch_job_id
+           AND live_turn.status = 'Running'
+           AND live_turn.agent_started_at IS NOT NULL
+     )";
+
+/// KT-1758 — SQL predicate over `task_executions e`: a `Working` execution whose
+/// current dispatch is already terminal. A failed worker is handed to the next
+/// link of its chain in that state (the execution is not parked for the
+/// principal while Kronn is moving it), so it belongs to that hand-over until
+/// the reassignment lands: the quota-return sweep must not move it as well.
+const HANDING_OVER_SQL: &str = "(e.status = 'Working' AND EXISTS (
+         SELECT 1 FROM agent_dispatch_jobs AS settled
+         WHERE settled.id = e.dispatch_job_id
+           AND settled.status IN ('Failed', 'Cancelled', 'Completed')
+     ))";
+
+/// KT-1758 — the worker of `exec_id` is mid-hand-over: `Working`, and its
+/// current dispatch is terminal (see [`HANDING_OVER_SQL`]).
+pub fn execution_handing_over(conn: &Connection, exec_id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!("SELECT {HANDING_OVER_SQL} FROM task_executions e WHERE e.id = ?1"),
+        [exec_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// KT-1758 — the worker of `exec_id` is mid-turn: its current dispatch is
+/// `Running` and its agent has started. A quota return must not replace it.
+pub fn execution_turn_in_progress(conn: &Connection, exec_id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!("SELECT {TURN_IN_PROGRESS_SQL} FROM task_executions e WHERE e.id = ?1"),
+        [exec_id],
+        |row| row.get(0),
+    )?)
+}
+
 /// KT-1564 — executions a quota fallback moved to another provider whose
 /// original provider announced a reset that has now passed. Only a worker that
 /// is running on the alternative (or parked on its own quota refusal) is handed
 /// back; a delivery awaiting review is left alone. Paused, human-gated and
 /// finished runs are never listed.
+///
+/// KT-1758 — nor is a worker whose turn is under way (its dispatch is claimed
+/// and its agent started): the return would cancel that turn and throw its work
+/// away. It is listed again once that turn has ended, or never started.
+///
+/// KT-1758 — nor is a `Working` execution whose current dispatch is already
+/// terminal: a failed worker's hand-over to the next link owns it until the
+/// reassignment lands (see [`HANDING_OVER_SQL`]).
 pub fn fallback_executions_past_origin_reset(
     conn: &Connection,
     now: DateTime<Utc>,
@@ -3283,6 +3371,8 @@ pub fn fallback_executions_past_origin_reset(
          JOIN planning_tasks t ON t.id = e.task_id
          WHERE q.reset_at IS NOT NULL
            AND q.reset_at <= ?1
+           AND NOT {TURN_IN_PROGRESS_SQL}
+           AND NOT {HANDING_OVER_SQL}
            AND COALESCE(e.worker_target_kind, '') <> 'cli'
            AND (e.status = 'Working'
                 OR (e.status = 'Escalated'
@@ -3308,6 +3398,48 @@ pub fn due_quota_origin(
     now: DateTime<Utc>,
 ) -> Result<Option<QuotaOrigin>> {
     Ok(quota_origin(conn, exec_id)?.filter(|origin| origin.is_due(now)))
+}
+
+/// KT-1713 — the worker a quota fallback left, when the window that justified
+/// the fallback has ended and the execution still runs on the alternative.
+/// `None`: no fallback in progress, the window is still open, a CLI session
+/// owns the worker, or the execution is already back on its declared worker.
+pub fn lapsed_fallback_origin(
+    conn: &Connection,
+    exec_id: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<QuotaOrigin>> {
+    let Some(origin) = due_quota_origin(conn, exec_id, now)? else {
+        return Ok(None);
+    };
+    let Some(execution) = get_task_execution(conn, exec_id)? else {
+        return Ok(None);
+    };
+    Ok(
+        (execution.worker_target_kind != Some(MessageTargetKind::Cli)
+            && !origin.is_worker_of(&execution))
+        .then_some(origin),
+    )
+}
+
+/// Re-checked inside the reassignment transaction of a resume that hands an
+/// `Interrupted` execution back to its declared worker (KT-1713): the fallback
+/// window must still be over and the execution still parked on the alternative.
+pub fn ensure_fallback_lapsed_on_resume(
+    conn: &Connection,
+    exec_id: &str,
+    target_provider: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let execution = get_task_execution(conn, exec_id)?
+        .ok_or_else(|| anyhow::anyhow!("execution vanished before its fallback return"))?;
+    if execution.status != TaskExecutionStatus::Interrupted {
+        bail!("fallback return skipped: the execution is no longer interrupted");
+    }
+    match lapsed_fallback_origin(conn, exec_id, now)? {
+        Some(origin) if origin.provider == target_provider => Ok(()),
+        _ => bail!("fallback return skipped: the fallback window is still open or already left"),
+    }
 }
 
 /// Re-checked inside the reassignment transaction, right before the sweep (a
@@ -3344,6 +3476,18 @@ pub fn ensure_quota_return_still_due(
     )?;
     if !still_listed {
         bail!("quota return skipped: the execution is no longer working or parked on its quota");
+    }
+    // KT-1758 — the worker the sweep would replace is mid-turn: its dispatch is
+    // claimed and its agent started. Cancelling it would discard that work
+    // unsaved, so the return waits for the turn to end (the sweep asks again).
+    // A worker that has not started yet is replaced as before: nothing is lost.
+    if execution_turn_in_progress(conn, exec_id)? {
+        bail!("quota return skipped: the worker is mid-turn; the return waits for it to end");
+    }
+    // KT-1758 — a failed worker is being handed to the next link of its chain:
+    // that move owns the execution, and a second one would cancel what it queues.
+    if execution_handing_over(conn, exec_id)? {
+        bail!("quota return skipped: the execution is being handed to the next fallback link");
     }
     if let Some(origin) = quota_origin(conn, exec_id)? {
         let execution = get_task_execution(conn, exec_id)?
@@ -3471,7 +3615,7 @@ pub fn citations_settled(
 
 /// The canonical stored form of a reset instant. One fixed-width UTC shape, so
 /// two stamps compare correctly as plain strings.
-pub(crate) fn quota_reset_stamp(at: DateTime<Utc>) -> String {
+pub fn quota_reset_stamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
@@ -3931,12 +4075,8 @@ pub fn post_docker_elevation_card(conn: &Connection, exec_id: &str) -> Result<()
         &[],
         None,
     )?;
-    let invalid = crate::db::discussion_questions::ingest_message_questions(
-        conn,
-        parent,
-        &message.id,
-        &message.content,
-    )?;
+    let invalid = (crate::core::uplink::required::<crate::core::uplink::MessageQuestionIngest>()?
+        .0)(conn, parent, &message.id, &message.content)?;
     anyhow::ensure!(invalid.is_empty(), "elevation card refused: {invalid:?}");
     Ok(())
 }
@@ -7994,15 +8134,15 @@ fn recovery_row(row: &Row) -> rusqlite::Result<TaskExecutionRecovery> {
     })
 }
 
-/// KT-1247 — a silent worker must be detectable even when the campaign set no
-/// resilience policy (every campaign so far). Twenty minutes without a tool
-/// call, a message, a commit or a delivery is the default; both defaults can be
-/// moved globally through the environment, and per campaign through the
-/// `orchestration_run_resilience_policy` row, which always wins.
-pub const DEFAULT_ACTIVITY_TIMEOUT_SECS: u32 = 20 * 60;
-/// How long a delivery may sit unreviewed before the principal is alerted.
-pub const DEFAULT_REVIEW_TIMEOUT_SECS: u32 = 4 * 60 * 60;
-const ACTIVITY_TIMEOUT_ENV: &str = "KRONN_TASK_ACTIVITY_TIMEOUT_SECS";
+pub use super::execution_activity::{
+    default_activity_timeout_secs, default_review_timeout_secs, discussion_has_cli_worker,
+    execution_dod_sentence, note_dispatch_activity, note_room_activity, touch_execution_activity,
+    DEFAULT_ACTIVITY_TIMEOUT_SECS, DEFAULT_REVIEW_TIMEOUT_SECS,
+};
+use super::execution_activity::{
+    effective_activity_secs, effective_review_secs, timeout_secs_from_env,
+};
+
 /// How long a single tool call (a cold `cargo build`, a full test suite) may
 /// run before the worker counts as silent again.
 const TOOL_IN_FLIGHT_CAP_ENV: &str = "KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS";
@@ -8024,38 +8164,30 @@ fn tool_in_flight(phase: Option<&str>, started: Option<DateTime<Utc>>, now: Date
             started + chrono::Duration::seconds(i64::from(tool_in_flight_cap_secs())) > now
         })
 }
-const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
 
-fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
-    crate::core::child_env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .filter(|seconds| *seconds > 0)
-        .unwrap_or(fallback)
+/// KT-1689 — how long a `Working` execution may wait for its worker's turn (the
+/// task-worker cap, the agent caps) before the principal is told. The wait is not
+/// silence, so it never interrupts: it raises one event per dispatch.
+pub const DEFAULT_QUEUE_TIMEOUT_SECS: u32 = 6 * 60 * 60;
+const QUEUE_TIMEOUT_ENV: &str = "KRONN_TASK_QUEUE_TIMEOUT_SECS";
+
+/// Global queue deadline (`KRONN_TASK_QUEUE_TIMEOUT_SECS`).
+pub fn default_queue_timeout_secs() -> u32 {
+    timeout_secs_from_env(QUEUE_TIMEOUT_ENV, DEFAULT_QUEUE_TIMEOUT_SECS)
 }
 
-/// Global default activity timeout (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`).
-pub fn default_activity_timeout_secs() -> u32 {
-    timeout_secs_from_env(ACTIVITY_TIMEOUT_ENV, DEFAULT_ACTIVITY_TIMEOUT_SECS)
-}
-
-/// Global default review timeout (`KRONN_TASK_REVIEW_TIMEOUT_SECS`).
-pub fn default_review_timeout_secs() -> u32 {
-    timeout_secs_from_env(REVIEW_TIMEOUT_ENV, DEFAULT_REVIEW_TIMEOUT_SECS)
-}
-
-/// The activity clock a status owes. A worker owes activity only while it is
-/// `Working`; the default therefore arms nowhere else, so an `Interrupted`,
-/// `AwaitingReview` or `Escalated` row is never "silent". An explicit campaign
-/// policy keeps the clock it always armed.
-fn effective_activity_secs(policy: Option<i64>, status: TaskExecutionStatus) -> Option<i64> {
-    policy.or_else(|| {
-        (status == TaskExecutionStatus::Working).then(|| i64::from(default_activity_timeout_secs()))
-    })
-}
-
-fn effective_review_secs(policy: Option<i64>) -> i64 {
-    policy.unwrap_or_else(|| i64::from(default_review_timeout_secs()))
+/// Whether the queue deadline already alerted for this dispatch. One event per
+/// dispatch: a resumed execution queues a new dispatch and is told again.
+fn queue_wait_reported(conn: &Connection, exec_id: &str, dispatch_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM orchestration_reconciliation_events \
+         WHERE subject_kind = 'execution' AND subject_id = ?1 \
+           AND action = 'queue_wait_timeout' \
+           AND json_extract(details_json, '$.dispatch_id') = ?2)",
+        params![exec_id, dispatch_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 pub fn get_resilience_policy(
@@ -8216,126 +8348,6 @@ pub fn set_execution_recovery(
         .ok_or_else(|| anyhow::anyhow!("recovery decision vanished after upsert"))
 }
 
-pub fn touch_execution_activity(conn: &Connection, exec_id: &str) -> Result<()> {
-    let now = Utc::now();
-    type RecoveryClocks = (
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        String,
-        String,
-    );
-    let clocks: Option<RecoveryClocks> = conn
-        .query_row(
-            "SELECT p.activity_timeout_secs, p.review_timeout_secs, \
-                    p.human_wait_timeout_secs, r.timeout_secs, e.created_at, e.status \
-             FROM task_executions e \
-             JOIN orchestration_runs r ON r.id = e.orchestration_run_id \
-             LEFT JOIN orchestration_run_resilience_policy p \
-               ON p.orchestration_run_id = e.orchestration_run_id \
-             WHERE e.id = ?1",
-            [exec_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((activity_secs, review_secs, _human_secs, total_secs, created_at, status)) = clocks
-    else {
-        return Ok(());
-    };
-    let current_status = TaskExecutionStatus::from_str(&status)?;
-    let deadline = effective_activity_secs(activity_secs, current_status)
-        .map(|seconds| now + chrono::Duration::seconds(seconds));
-    let review_deadline = if current_status == TaskExecutionStatus::AwaitingReview {
-        Some(now + chrono::Duration::seconds(effective_review_secs(review_secs)))
-    } else {
-        None
-    };
-    let human_started = if status == TaskExecutionStatus::Escalated.as_str() {
-        Some(now)
-    } else {
-        None
-    };
-    let total_deadline =
-        total_secs.map(|seconds| parse_dt(created_at.clone()) + chrono::Duration::seconds(seconds));
-    conn.execute(
-        "INSERT OR IGNORE INTO task_execution_recovery (\
-             task_execution_id, recovery_action, recovery_reason, last_activity_at, \
-             total_deadline_at, activity_deadline_at, review_deadline_at, \
-             human_wait_started_at, assignment_generation, pending, updated_at\
-         ) VALUES (?1, 'resume_worker', 'runtime clocks', ?2, ?3, ?4, ?5, ?6, 0, 0, ?2)",
-        params![
-            exec_id,
-            now.to_rfc3339(),
-            total_deadline.map(|value| value.to_rfc3339()),
-            deadline.map(|value| value.to_rfc3339()),
-            review_deadline.map(|value| value.to_rfc3339()),
-            human_started.map(|value| value.to_rfc3339()),
-        ],
-    )?;
-    conn.execute(
-        "UPDATE task_execution_recovery SET last_activity_at = ?2, \
-                activity_deadline_at = ?3, review_deadline_at = ?4, \
-                human_wait_started_at = ?5, updated_at = ?2 \
-         WHERE task_execution_id = ?1",
-        params![
-            exec_id,
-            now.to_rfc3339(),
-            deadline.map(|value| value.to_rfc3339()),
-            review_deadline.map(|value| value.to_rfc3339()),
-            human_started.map(|value| value.to_rfc3339()),
-        ],
-    )?;
-    Ok(())
-}
-
-/// Push the silent-worker clock of the `Working` execution owning this dispatch.
-/// Best effort by design: failing to move a clock must never fail the progress
-/// write or the message that carries the activity.
-pub fn note_dispatch_activity(conn: &Connection, dispatch_id: &str) -> Result<()> {
-    let exec_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM task_executions \
-             WHERE dispatch_job_id = ?1 AND status = 'Working' LIMIT 1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(exec_id) = exec_id {
-        if let Err(error) = touch_execution_activity(conn, &exec_id) {
-            tracing::warn!(execution_id = %exec_id, "could not push activity clock: {error}");
-        }
-    }
-    Ok(())
-}
-
-/// Same, keyed by the worker room a message was posted in.
-pub fn note_room_activity(conn: &Connection, discussion_id: &str) -> Result<()> {
-    let exec_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM task_executions \
-             WHERE sub_discussion_id = ?1 AND status = 'Working' LIMIT 1",
-            [discussion_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(exec_id) = exec_id {
-        if let Err(error) = touch_execution_activity(conn, &exec_id) {
-            tracing::warn!(execution_id = %exec_id, "could not push activity clock: {error}");
-        }
-    }
-    Ok(())
-}
-
 /// Expired clocks with their precise semantic kind. Human waits are reported,
 /// never auto-cancelled by this query; the watchdog decides policy explicitly.
 pub fn expired_execution_timeouts(
@@ -8345,13 +8357,14 @@ pub fn expired_execution_timeouts(
     let mut stmt = conn.prepare(
         "SELECT r.task_execution_id, e.status, r.total_deadline_at, \
                 r.activity_deadline_at, r.review_deadline_at, r.human_wait_started_at, \
-                p.human_wait_timeout_secs, d.progress_phase, d.last_progress_at \
+                p.human_wait_timeout_secs, d.status, d.progress_phase, d.last_progress_at, \
+                d.id, d.created_at \
          FROM task_execution_recovery r \
          JOIN task_executions e ON e.id = r.task_execution_id \
          LEFT JOIN orchestration_run_resilience_policy p \
            ON p.orchestration_run_id = e.orchestration_run_id \
          LEFT JOIN agent_dispatch_jobs d \
-           ON d.id = e.dispatch_job_id AND d.status = 'Running' \
+           ON d.id = e.dispatch_job_id AND d.status IN ('Running', 'Pending') \
          WHERE e.status NOT IN ('Done', 'Failed', 'Cancelled')",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -8365,12 +8378,37 @@ pub fn expired_execution_timeouts(
             row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<String>>(7)?,
             row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
         ))
     })?;
     let mut expired = Vec::new();
     for row in rows {
-        let (id, status, total, activity, review, human_since, human_secs, phase, phase_at) = row?;
+        let (
+            id,
+            status,
+            total,
+            activity,
+            review,
+            human_since,
+            human_secs,
+            dispatch_status,
+            running_phase,
+            running_phase_at,
+            dispatch_id,
+            queued_since,
+        ) = row?;
         let parse = |value: Option<String>| value.map(parse_dt);
+        // KT-1689 — a `Pending` dispatch is the worker's queue (the task-worker
+        // cap, the agent's or the host's caps): the worker has not started, so
+        // it cannot be silent. Only a `Running` job carries a tool in flight.
+        let queued = dispatch_status.as_deref() == Some("Pending");
+        let (phase, phase_at) = if queued {
+            (None, None)
+        } else {
+            (running_phase, running_phase_at)
+        };
         if parse(total).is_some_and(|deadline| deadline <= now) {
             expired.push((id, ExecutionTimeoutKind::TotalDuration));
         } else if status == TaskExecutionStatus::AwaitingReview.as_str()
@@ -8380,6 +8418,16 @@ pub fn expired_execution_timeouts(
         } else if let (Some(since), Some(seconds)) = (parse(human_since), human_secs) {
             if since + chrono::Duration::seconds(seconds) <= now {
                 expired.push((id, ExecutionTimeoutKind::HumanWait));
+            }
+        } else if status == TaskExecutionStatus::Working.as_str() && queued {
+            // The queue has its own, much longer deadline, and it only alerts.
+            if let (Some(dispatch_id), Some(since)) = (dispatch_id.as_deref(), parse(queued_since))
+            {
+                if since + chrono::Duration::seconds(i64::from(default_queue_timeout_secs())) <= now
+                    && !queue_wait_reported(conn, &id, dispatch_id)?
+                {
+                    expired.push((id, ExecutionTimeoutKind::QueueWait));
+                }
             }
         } else if status == TaskExecutionStatus::Working.as_str()
             && parse(activity).is_some_and(|deadline| deadline <= now)
@@ -8391,6 +8439,24 @@ pub fn expired_execution_timeouts(
         }
     }
     Ok(expired)
+}
+
+/// Why the `Pending` dispatch of `exec_id` waits and where it stands: the
+/// durable `task_worker_limit:<running>/<cap>` reason and the queue position.
+fn queue_wait_state(conn: &Connection, exec_id: &str) -> Result<(Option<String>, Option<u32>)> {
+    let Some(dispatch_id) = get_task_execution(conn, exec_id)?.and_then(|e| e.dispatch_job_id)
+    else {
+        return Ok((None, None));
+    };
+    let Some(job) = crate::db::agent_dispatch::get(conn, &dispatch_id)? else {
+        return Ok((None, None));
+    };
+    let reason = job.progress_detail.filter(|detail| {
+        job.progress_phase.as_deref() == Some("queued")
+            && detail.starts_with(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)
+    });
+    let position = crate::db::agent_dispatch::task_worker_queue_position(conn, &dispatch_id)?;
+    Ok((reason, position))
 }
 
 /// Alert the principal room that an execution needs a decision, without
@@ -8497,6 +8563,36 @@ fn notify_principal_of_timeout(
              `task_exec_reassign` / `task_exec_cancel` if the work must be taken over."
                 .to_string(),
         ),
+        (ExecutionTimeoutKind::QueueWait, lang) => {
+            let (reason, position) = queue_wait_state(conn, exec_id)?;
+            let reason = reason.unwrap_or_else(|| "concurrency_limit_or_scheduler".to_string());
+            let position = position
+                .map(|position| format!("#{position}"))
+                .unwrap_or_else(|| "n/a".to_string());
+            (
+                "queue_wait_timeout",
+                match lang {
+                    RoomLang::Fr => format!(
+                        "L'exécution attend son tour de worker{since} (raison : `{reason}`, \
+                         position : {position}). Ce n'est pas un silence : rien n'est interrompu, \
+                         l'exécution reste `Working` et démarrera dès qu'un créneau se libère. \
+                         Décide :\n\n\
+                         1. **Attendre** — rien à faire ;\n\
+                         2. **Libérer un créneau** — termine ou annule une autre exécution ;\n\
+                         3. **Reprendre la main** — `task_exec_reassign` vers ta propre session CLI."
+                    ),
+                    RoomLang::En => format!(
+                        "The execution has been waiting for its worker's turn{since} (reason: \
+                         `{reason}`, position: {position}). This is not silence: nothing is \
+                         interrupted, the execution stays `Working` and starts as soon as a slot \
+                         frees up. Decide:\n\n\
+                         1. **Keep waiting** — nothing to do;\n\
+                         2. **Free a slot** — finish or cancel another execution;\n\
+                         3. **Take over** — `task_exec_reassign` to your own CLI session."
+                    ),
+                },
+            )
+        }
         _ => return Ok(()),
     };
     let message = DiscussionMessage {
@@ -8564,7 +8660,39 @@ pub fn apply_execution_timeout(
             ExecutionTimeoutKind::TotalDuration => "total_duration_timeout",
             ExecutionTimeoutKind::ReviewWait => "review_wait_timeout",
             ExecutionTimeoutKind::HumanWait => "human_wait_timeout",
+            ExecutionTimeoutKind::QueueWait => "queue_wait_timeout",
         };
+        if kind == ExecutionTimeoutKind::QueueWait {
+            // KT-1689 — the principal is told once per dispatch, and nothing
+            // moves: the execution stays `Working`, its dispatch stays queued.
+            let Some(dispatch_id) = execution.dispatch_job_id.clone() else {
+                return Ok(false);
+            };
+            let still_queued =
+                crate::db::agent_dispatch::get(conn, &dispatch_id)?.is_some_and(|job| {
+                    job.status == crate::db::agent_dispatch::DispatchStatus::Pending
+                });
+            if execution.status != TaskExecutionStatus::Working
+                || !still_queued
+                || queue_wait_reported(conn, exec_id, &dispatch_id)?
+            {
+                return Ok(false);
+            }
+            record_reconciliation_event(
+                conn,
+                "execution",
+                exec_id,
+                label,
+                serde_json::json!({ "dispatch_id": dispatch_id }),
+            )?;
+            notify_principal_of_timeout(
+                conn,
+                exec_id,
+                kind,
+                Some(i64::from(default_queue_timeout_secs())),
+            )?;
+            return Ok(true);
+        }
         if kind == ExecutionTimeoutKind::Activity {
             // KT-1247 — a silent worker is handed back, never discarded. The
             // clock only means something while the attempt is `Working`: a
@@ -8578,6 +8706,17 @@ pub fn apply_execution_timeout(
                     params![exec_id, Utc::now().to_rfc3339()],
                 )?;
                 return Ok(false);
+            }
+            // KT-1689 — a dispatch still waiting for its turn is not silence,
+            // whatever the scan saw: the clock starts when the worker does.
+            if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
+                let queued =
+                    crate::db::agent_dispatch::get(conn, dispatch_id)?.is_some_and(|job| {
+                        job.status == crate::db::agent_dispatch::DispatchStatus::Pending
+                    });
+                if queued {
+                    return Ok(false);
+                }
             }
             // Activity may have landed between the scan and this apply.
             let pushed: Option<String> = conn
@@ -8623,6 +8762,7 @@ pub fn apply_execution_timeout(
                     id: Some("orchestration-watchdog".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 },
                 serde_json::json!({ "timeout_kind": label }),
             )?;
@@ -8702,6 +8842,7 @@ pub fn apply_execution_timeout(
                     id: Some("orchestration-watchdog".into()),
                     session_id: None,
                     source_message_id: None,
+                    token_declared: false,
                 },
                 serde_json::json!({ "timeout_kind": label }),
             )?;
@@ -9376,6 +9517,7 @@ pub fn reconcile_stale_task_executions(conn: &Connection) -> Result<Vec<String>>
         id: Some("boot-reconcile".into()),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     };
 
     let mut moved = Vec::new();
@@ -9426,6 +9568,23 @@ pub fn list_interrupted_execution_ids(conn: &Connection) -> Result<Vec<String>> 
         .collect::<rusqlite::Result<Vec<String>>>()?;
     Ok(rows)
 }
+
+fn boot_recover_commit_leases(conn: &Connection, boot: &mut super::BootReport) -> Result<()> {
+    if !boot.recover_commit_leases {
+        return Ok(());
+    }
+    let recovered = anyhow::Context::context(
+        recover_spawned_commit_leases_after_restart(conn),
+        "Failed to reconcile spawned commit leases after restart",
+    )?;
+    if recovered > 0 {
+        tracing::info!(
+            "Reconciled {recovered} spawned commit lease(s) left by the previous backend"
+        );
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 10, run: boot_recover_commit_leases } }
 
 #[cfg(test)]
 #[path = "orchestration_tests.rs"]

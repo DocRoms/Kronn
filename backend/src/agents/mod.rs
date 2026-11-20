@@ -22,34 +22,22 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     }
 }
 
-pub mod acp_start;
 pub mod activity;
-pub mod chat_codec;
-pub(crate) mod generation_settings;
-pub(crate) mod http_diagnostics;
+pub mod http_diagnostics;
 pub mod idle_watchdog;
 pub mod media_asset_url;
 pub mod media_capabilities;
-pub mod media_codec;
-pub mod media_runner;
 pub mod media_worker;
-pub(crate) mod ollama_memory;
 pub mod provenance;
-pub(crate) mod read_only_repos;
-pub mod readiness;
-pub(crate) mod room_reach;
 pub mod run_progress;
-pub mod runner;
-pub mod tool_trace;
-pub mod tools;
 pub mod vision;
-pub(crate) mod wsl;
+pub mod wsl;
 
 #[derive(Clone, Debug, Default)]
-struct RuntimeProbe {
+pub struct RuntimeProbe {
     available: bool,
-    command: Vec<String>,
-    version: Option<String>,
+    pub command: Vec<String>,
+    pub version: Option<String>,
 }
 
 type RuntimeCache = Mutex<HashMap<(Vec<String>, std::path::PathBuf), (RuntimeProbe, Instant)>>;
@@ -166,7 +154,7 @@ const KNOWN_AGENTS: &[AgentDef] = &[
 /// Keep this list in sync with `entrypoint.sh`. The
 /// `cross_agent_macos_skip_covers_npm_agents` test enforces that every
 /// `npm install`-style agent is present here.
-pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
+pub const MACOS_HOST_BIN_SKIP: &[&str] = &[
     "claude", "codex", "opencode", "gemini", "copilot", "kiro-cli",
 ];
 
@@ -179,13 +167,75 @@ pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
 /// returns the Darwin `claude` and, without this guard, version detection
 /// execs it and surfaces an "Exec format error" instead of falling back to the
 /// npx runtime / the Linux copy installed by `entrypoint.sh`.
-pub(crate) fn should_skip_darwin_host_binary(
+pub fn should_skip_darwin_host_binary(
     name: &str,
     host_managed: bool,
     host_is_macos: bool,
     in_container: bool,
 ) -> bool {
     in_container && host_managed && host_is_macos && MACOS_HOST_BIN_SKIP.contains(&name)
+}
+
+/// Human-readable agent name (used in summaries, attribution lines, etc.).
+pub fn agent_display_name(agent_type: &AgentType) -> String {
+    match agent_type {
+        AgentType::ClaudeCode => "Claude Code".into(),
+        AgentType::Codex => "Codex".into(),
+        AgentType::OpenCode => "OpenCode".into(),
+        AgentType::Vibe => "Vibe".into(),
+        AgentType::GeminiCli => "Gemini CLI".into(),
+        AgentType::Kiro => "Kiro".into(),
+        AgentType::CopilotCli => "GitHub Copilot".into(),
+        AgentType::Ollama => "Ollama".into(),
+        AgentType::LiteLlm => "LiteLLM".into(),
+        AgentType::Nvidia => "NVIDIA".into(),
+        AgentType::Custom => "Custom".into(),
+    }
+}
+
+pub const AGENT_ALIASES: [(&str, AgentType); 10] = [
+    ("@claude", AgentType::ClaudeCode),
+    ("@codex", AgentType::Codex),
+    ("@opencode", AgentType::OpenCode),
+    ("@vibe", AgentType::Vibe),
+    ("@gemini", AgentType::GeminiCli),
+    ("@kiro", AgentType::Kiro),
+    ("@copilot", AgentType::CopilotCli),
+    ("@ollama", AgentType::Ollama),
+    ("@litellm", AgentType::LiteLlm),
+    ("@nvidia", AgentType::Nvidia),
+];
+
+/// Canonical agent aliases found in generated prose. This is useful for
+/// display/introspection only: automatic delegation requires the explicit
+/// marker parsed by `extract_agent_handoff_markers`. Mentions in Markdown
+/// code are ignored and word boundaries reject email-like text.
+pub fn agent_mentions_in_prose(content: &str) -> Vec<AgentType> {
+    let prose = crate::core::anti_halluc::strip_inline_code(
+        &crate::core::anti_halluc::strip_fenced_code(content),
+    );
+    let lower = prose.to_lowercase();
+    let mut found = Vec::new();
+    for (alias, agent) in AGENT_ALIASES {
+        for (index, _) in lower.match_indices(alias) {
+            let before = lower[..index].chars().next_back();
+            let after = lower[index + alias.len()..].chars().next();
+            let valid_before = before.is_none_or(|ch| ch.is_whitespace() || "([{\"'".contains(ch));
+            let valid_after =
+                after.is_none_or(|ch| ch.is_whitespace() || ")]}>,.!?;:\"'".contains(ch));
+            if valid_before && valid_after {
+                found.push((index, agent.clone()));
+            }
+        }
+    }
+    found.sort_by_key(|(index, _)| *index);
+    let mut agents = Vec::new();
+    for (_, agent) in found {
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    agents
 }
 
 /// Public accessor so `/api/health` can stamp the host label into its body
@@ -235,7 +285,7 @@ fn detect_host_label() -> String {
     "Unknown".into()
 }
 
-pub(crate) fn host_is_macos() -> bool {
+pub fn host_is_macos() -> bool {
     if let Ok(os) = crate::core::child_env::var("KRONN_HOST_OS") {
         return os.eq_ignore_ascii_case("macos");
     }
@@ -319,6 +369,10 @@ static DETECT_ALL_REFRESHED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>
 /// Whether the last detection sweep found this agent installed. `true` while
 /// no sweep has completed, so a cold start never drops a CLI's files (KT-971).
 pub fn installed_or_unknown(agent: &AgentType) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if COLD_DETECTION_HOLDS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        return true;
+    }
     let cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     match cache.value.as_ref() {
         Some((detections, _)) => detections
@@ -340,21 +394,34 @@ pub fn cached_version(agent: &AgentType) -> Option<String> {
     })
 }
 
-/// Run `f` as if no detection sweep had completed yet, then restore the cache:
-/// for tests that need every CLI's files regardless of what ran before them.
-#[cfg(test)]
-pub(crate) fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
-    let saved = DETECT_ALL_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .value
-        .take();
-    let result = f();
-    DETECT_ALL_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .value = saved;
-    result
+#[cfg(any(test, feature = "test-support"))]
+static COLD_DETECTION_HOLDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// While held, [`installed_or_unknown`] answers as if no detection sweep had
+/// completed, whatever sweep another test completes meanwhile.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ColdDetection(());
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ColdDetection {
+    fn drop(&mut self) {
+        COLD_DETECTION_HOLDS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn hold_cold_detection() -> ColdDetection {
+    COLD_DETECTION_HOLDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ColdDetection(())
+}
+
+/// Run `f` as if no detection sweep had completed yet: for tests that need
+/// every CLI's files regardless of what ran before or beside them.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
+    let _cold = hold_cold_detection();
+    f()
 }
 
 /// Cached agent-detection sweep. `detect_all` spawns `<binary> --version` for
@@ -364,17 +431,23 @@ pub(crate) fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
 /// it, so an uncached sweep froze the whole app on "Almost ready…" whenever a
 /// batch/WF was spawning agents. Once a result exists it is always returned
 /// immediately; an expired entry starts one background refresh.
-/// `force = true` bypasses + refreshes (right after an install/uninstall).
+/// `force = true` skips the cached list once: the caller waits for the sweep
+/// running now or starts one (right after an install/uninstall). If that
+/// sweep stores nothing while an older list exists, it gets the older list
+/// and leaves a refresh running.
+/// The list returned is always the result of a sweep that ended: a caller
+/// whose sweep was invalidated or died waits for the next one, or starts it
+/// after a growing pause (100 ms doubling to 5 s).
 pub async fn detect_all_cached(force: bool) -> Vec<AgentDetection> {
     if force {
         if let Ok(mut cache) = RUNTIME_CACHE.lock() {
             cache.clear();
         }
     }
-    detect_all_cached_with(force, detect_all()).await
+    detect_all_cached_with(force, detect_all).await
 }
 
-async fn detect_all_cached_with<F>(force: bool, detection: F) -> Vec<AgentDetection>
+async fn detect_all_cached_with<F>(force: bool, detect: impl Fn() -> F) -> Vec<AgentDetection>
 where
     F: std::future::Future<Output = Vec<AgentDetection>> + Send + 'static,
 {
@@ -388,8 +461,9 @@ where
         },
     }
 
-    let mut detection = Some(detection);
     let mut force_refresh = force;
+    // Sweeps this caller saw end without a list for it.
+    let mut empty_rounds = 0u32;
 
     loop {
         // Subscribe before inspecting `refreshing`, otherwise a very fast
@@ -445,29 +519,76 @@ where
                 // was invalidated while running, `value` is still empty and
                 // the next loop starts a cold sweep for the new generation.
                 force_refresh = false;
+                empty_rounds = empty_rounds.saturating_add(1);
             }
             CacheAction::Start {
                 generation,
                 stale_len,
                 return_stale,
             } => {
-                let detection = detection.take().expect("detection future used once");
-                tokio::spawn(run_detect_all_refresh(detection, generation, stale_len));
+                let done = RefreshDone;
+                // A sweep that keeps dying, or a runtime that drops the task
+                // at once, is started again further and further apart. `done`
+                // is held meanwhile: a caller cancelled here frees the others.
+                let pause = restart_backoff(empty_rounds);
+                if !pause.is_zero() {
+                    tokio::time::sleep(pause).await;
+                }
+                tokio::spawn(run_detect_all_refresh(
+                    detect(),
+                    generation,
+                    stale_len,
+                    done,
+                ));
                 if let Some(stale) = return_stale {
                     return stale;
                 }
+                // A sweep that was invalidated, or died, stored nothing: the
+                // next loop waits on the sweep running now or starts one.
                 refreshed
                     .changed()
                     .await
                     .expect("refresh signal remains open");
                 force_refresh = false;
+                empty_rounds = empty_rounds.saturating_add(1);
             }
         }
     }
 }
 
-async fn run_detect_all_refresh<F>(detection: F, generation: u64, stale_len: Option<usize>)
-where
+/// How long a caller waits before it starts a sweep again, after `rounds`
+/// sweeps that stored nothing.
+fn restart_backoff(rounds: u32) -> std::time::Duration {
+    const FIRST: std::time::Duration = std::time::Duration::from_millis(100);
+    const LONGEST: std::time::Duration = std::time::Duration::from_secs(5);
+    match rounds {
+        0 => std::time::Duration::ZERO,
+        rounds => FIRST
+            .checked_mul(1u32.checked_shl(rounds - 1).unwrap_or(u32::MAX))
+            .map_or(LONGEST, |wait| wait.min(LONGEST)),
+    }
+}
+
+/// Ends a sweep on drop, so one cancelled with its runtime does not leave
+/// `refreshing` set and every later caller waiting.
+struct RefreshDone;
+
+impl Drop for RefreshDone {
+    fn drop(&mut self) {
+        DETECT_ALL_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refreshing = false;
+        DETECT_ALL_REFRESHED.send_modify(|completed| *completed = completed.wrapping_add(1));
+    }
+}
+
+async fn run_detect_all_refresh<F>(
+    detection: F,
+    generation: u64,
+    stale_len: Option<usize>,
+    _done: RefreshDone,
+) where
     F: std::future::Future<Output = Vec<AgentDetection>> + Send + 'static,
 {
     // A cold cache must produce a real list. Once stale data exists, keep the
@@ -494,9 +615,7 @@ where
             cache.value = Some((fresh, Instant::now()));
         }
     }
-    cache.refreshing = false;
     drop(cache);
-    DETECT_ALL_REFRESHED.send_modify(|completed| *completed = completed.wrapping_add(1));
 }
 
 /// Drop the cached sweep so the next `detect_all_cached(false)` re-probes.
@@ -1036,7 +1155,7 @@ async fn probe_runtime(def: &AgentDef) -> RuntimeProbe {
     probe_npx_runtime(pkg, false, &std::env::temp_dir()).await
 }
 
-fn npx_invocation(package: &str, args: &[String]) -> (String, Vec<String>, bool) {
+pub fn npx_invocation(package: &str, args: &[String]) -> (String, Vec<String>, bool) {
     let location = find_binary("npx");
     let via_wsl = location.as_ref().is_some_and(|loc| loc.via_wsl);
     let executable = location.map(|loc| loc.path).unwrap_or_else(|| "npx".into());
@@ -1045,7 +1164,7 @@ fn npx_invocation(package: &str, args: &[String]) -> (String, Vec<String>, bool)
     (executable, argv, via_wsl)
 }
 
-async fn probe_npx_runtime(
+pub async fn probe_npx_runtime(
     package: &str,
     refresh: bool,
     work_dir: &std::path::Path,
@@ -1078,7 +1197,7 @@ async fn probe_npx_invocation(
         return RuntimeProbe::default();
     }
     let (executable, args, work_dir) =
-        runner::platform_agent_invocation(executable, args, via_wsl, work_dir);
+        wsl::platform_agent_invocation(executable, args, via_wsl, work_dir);
     let command: Vec<String> = std::iter::once(executable.clone())
         .chain(args.iter().cloned())
         .collect();
@@ -1588,6 +1707,14 @@ mod tests {
             "not found = not installed"
         );
 
+        // A test that needs every CLI's files is not told otherwise by a sweep
+        // another test completes meanwhile.
+        {
+            let _cold = hold_cold_detection();
+            assert!(installed_or_unknown(&AgentType::Kiro));
+        }
+        assert!(!installed_or_unknown(&AgentType::Kiro));
+
         DETECT_ALL_CACHE.lock().unwrap().value = saved;
     }
 
@@ -1871,6 +1998,36 @@ mod tests {
         invalidate_detect_cache(); // leave the static clean for other tests
     }
 
+    #[test]
+    #[serial]
+    fn a_sweep_cancelled_with_its_runtime_does_not_block_the_next_caller() {
+        invalidate_detect_cache();
+        DETECT_ALL_CACHE.lock().unwrap().refreshing = false;
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let first = runtime();
+        let waited = first.block_on(async {
+            let sweep = detect_all_cached_with(false, std::future::pending);
+            tokio::time::timeout(std::time::Duration::from_millis(50), sweep).await
+        });
+        assert!(waited.is_err(), "the sweep never ends");
+        drop(first);
+
+        let next = runtime().block_on(async {
+            let sweep = detect_all_cached_with(false, || async { Vec::new() });
+            tokio::time::timeout(std::time::Duration::from_secs(5), sweep).await
+        });
+        assert!(
+            next.is_ok(),
+            "the next caller waits on a sweep that is gone"
+        );
+        invalidate_detect_cache();
+    }
+
     #[tokio::test]
     #[serial]
     async fn invalidate_detect_cache_drops_the_entry() {
@@ -1926,8 +2083,8 @@ mod tests {
 
         let before = Instant::now();
         let (first, second) = tokio::join!(
-            detect_all_cached_with(false, make_detection()),
-            detect_all_cached_with(false, make_detection()),
+            detect_all_cached_with(false, &make_detection),
+            detect_all_cached_with(false, &make_detection),
         );
         assert!(first.is_empty() && second.is_empty());
         assert!(
@@ -1969,11 +2126,361 @@ mod tests {
         };
 
         let (first, second) = tokio::join!(
-            detect_all_cached_with(false, make_detection()),
-            detect_all_cached_with(false, make_detection()),
+            detect_all_cached_with(false, &make_detection),
+            detect_all_cached_with(false, &make_detection),
         );
         assert!(first.is_empty() && second.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        invalidate_detect_cache();
+    }
+
+    /// One detected agent, to tell a kept list from an empty one.
+    fn one_detection() -> Vec<AgentDetection> {
+        vec![serde_json::from_value(serde_json::json!({
+            "name": "Kiro", "agent_type": AgentType::Kiro, "installed": true,
+            "path": null, "version": null, "latest_version": null, "origin": "test",
+            "install_command": null, "host_managed": false, "host_label": null,
+            "runtime_available": true, "auth_ready": null, "auth_setup_command": null,
+            "rtk_available": false, "rtk_hook_configured": false, "runtime_warning": null,
+        }))
+        .expect("a minimal detection")]
+    }
+
+    fn reset_detect_cache(value: Option<(Vec<AgentDetection>, Instant)>) {
+        let mut cache = DETECT_ALL_CACHE.lock().unwrap();
+        cache.value = value;
+        cache.refreshing = false;
+        cache.generation = cache.generation.wrapping_add(1);
+    }
+
+    /// A sweep factory whose n-th call (from 1) runs `sweep(n)`, and the
+    /// number of sweeps it started.
+    fn counted_sweeps<F>(
+        sweep: impl Fn(usize) -> F + Send + Sync + 'static,
+    ) -> (
+        impl Fn() -> F + Send + Sync + Clone + 'static,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    )
+    where
+        F: std::future::Future<Output = Vec<AgentDetection>> + Send + 'static,
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let sweep = std::sync::Arc::new(sweep);
+        let counter = calls.clone();
+        (
+            move || sweep(counter.fetch_add(1, Ordering::SeqCst) + 1),
+            calls,
+        )
+    }
+
+    /// The caller's answer, or the panic it died of, within five seconds.
+    async fn caller_outcome(
+        caller: tokio::task::JoinHandle<Vec<AgentDetection>>,
+    ) -> Vec<AgentDetection> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), caller)
+            .await
+            .expect("the caller ends")
+            .expect("the caller does not panic")
+    }
+
+    fn two_detections() -> Vec<AgentDetection> {
+        [one_detection(), one_detection()].concat()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_detection_that_panics_once_gives_the_caller_the_next_sweep_s_list() {
+        use std::sync::atomic::Ordering;
+        reset_detect_cache(None);
+        let (detect, sweeps) = counted_sweeps(|call| async move {
+            assert!(call > 1, "the first sweep dies");
+            one_detection()
+        });
+
+        let list = caller_outcome(tokio::spawn(detect_all_cached_with(false, detect))).await;
+
+        assert_eq!(list.len(), 1, "the list of the sweep that ended");
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_caller_invalidated_mid_sweep_gets_the_list_of_the_new_sweep() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        reset_detect_cache(None);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (detect, sweeps) = {
+            let (started, release) = (started.clone(), release.clone());
+            counted_sweeps(move |call| {
+                let (started, release) = (started.clone(), release.clone());
+                async move {
+                    if call > 1 {
+                        return two_detections();
+                    }
+                    started.notify_one();
+                    release.notified().await;
+                    // Read before the invalidation: nobody may be served this.
+                    one_detection()
+                }
+            })
+        };
+        let caller = tokio::spawn(detect_all_cached_with(false, detect));
+        started.notified().await;
+        // An install ended while the sweep ran: twice, as two installs would.
+        invalidate_detect_cache();
+        invalidate_detect_cache();
+        release.notify_one();
+
+        let list = caller_outcome(caller).await;
+
+        assert_eq!(list.len(), 2, "the sweep started after the invalidation");
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
+        let cached = DETECT_ALL_CACHE.lock().unwrap().value.clone();
+        assert_eq!(cached.map(|(list, _)| list.len()), Some(2));
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn callers_of_a_discarded_sweep_share_the_next_one() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        reset_detect_cache(None);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (detect, sweeps) = {
+            let (started, release) = (started.clone(), release.clone());
+            counted_sweeps(move |call| {
+                let (started, release) = (started.clone(), release.clone());
+                async move {
+                    if call > 1 {
+                        tokio::task::yield_now().await;
+                        return two_detections();
+                    }
+                    started.notify_one();
+                    release.notified().await;
+                    one_detection()
+                }
+            })
+        };
+        let starter = tokio::spawn(detect_all_cached_with(false, detect.clone()));
+        started.notified().await;
+        invalidate_detect_cache();
+        // A second caller arrives on the sweep that will be discarded.
+        let waiter = tokio::spawn(detect_all_cached_with(false, detect));
+        tokio::task::yield_now().await;
+        assert_eq!(
+            sweeps.load(Ordering::SeqCst),
+            1,
+            "it waits on the running sweep, it does not start its own"
+        );
+        release.notify_one();
+
+        let (first, second) = (caller_outcome(starter).await, caller_outcome(waiter).await);
+
+        assert_eq!((first.len(), second.len()), (2, 2));
+        assert_eq!(
+            sweeps.load(Ordering::SeqCst),
+            2,
+            "the discarded sweep, then one sweep for both callers"
+        );
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_forced_caller_whose_sweep_dies_gets_the_previous_list_and_a_new_sweep() {
+        use std::sync::atomic::Ordering;
+        let expired = Instant::now() - DETECT_ALL_TTL - std::time::Duration::from_secs(1);
+        reset_detect_cache(Some((one_detection(), expired)));
+        let mut completed = DETECT_ALL_REFRESHED.subscribe();
+        let (detect, sweeps) = counted_sweeps(|call| async move {
+            assert!(call > 1, "the first sweep dies");
+            two_detections()
+        });
+
+        let list = caller_outcome(tokio::spawn(detect_all_cached_with(true, detect))).await;
+
+        assert_eq!(list.len(), 1, "the previous sweep, a real list");
+        // The refresh it left running stores the new list.
+        while DETECT_ALL_CACHE.lock().unwrap().refreshing {
+            completed.changed().await.unwrap();
+        }
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
+        let cached = DETECT_ALL_CACHE.lock().unwrap().value.clone();
+        assert_eq!(cached.map(|(list, _)| list.len()), Some(2));
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_detection_that_keeps_dying_is_restarted_further_and_further_apart() {
+        use std::sync::{Arc, Mutex};
+        reset_detect_cache(None);
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let (detect, _) = {
+            let starts = starts.clone();
+            counted_sweeps(move |call| {
+                starts.lock().unwrap().push(tokio::time::Instant::now());
+                async move {
+                    assert!(call > 5, "five sweeps die in a row");
+                    one_detection()
+                }
+            })
+        };
+
+        let list = caller_outcome(tokio::spawn(detect_all_cached_with(false, detect))).await;
+
+        assert_eq!(list.len(), 1, "still the list of a sweep that ended");
+        let starts = starts.lock().unwrap().clone();
+        let gaps: Vec<u128> = starts
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).as_millis())
+            .collect();
+        assert_eq!(gaps, vec![100, 200, 400, 800, 1600]);
+        invalidate_detect_cache();
+    }
+
+    #[test]
+    fn the_wait_before_a_restart_is_capped() {
+        use std::time::Duration;
+        assert_eq!(restart_backoff(0), Duration::ZERO);
+        assert_eq!(restart_backoff(1), Duration::from_millis(100));
+        assert_eq!(restart_backoff(6), Duration::from_millis(3200));
+        assert_eq!(restart_backoff(7), Duration::from_secs(5));
+        assert_eq!(restart_backoff(u32::MAX), Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_caller_cancelled_while_it_waits_to_restart_leaves_no_sweep_announced() {
+        reset_detect_cache(None);
+        let (detect, sweeps) = counted_sweeps(|_| async { panic!("the sweep dies") });
+        let caller = tokio::spawn(detect_all_cached_with(false, detect));
+        // Past the first sweep, inside the wait before the second.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(sweeps.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        caller.abort();
+        let _ = caller.await;
+
+        assert!(
+            !DETECT_ALL_CACHE.lock().unwrap().refreshing,
+            "no sweep is announced as running"
+        );
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_caller_arriving_while_the_starter_waits_to_restart_starts_no_sweep() {
+        use std::sync::atomic::Ordering;
+        reset_detect_cache(None);
+        let (detect, sweeps) = counted_sweeps(|call| async move {
+            assert!(call > 1, "the first sweep dies");
+            two_detections()
+        });
+        let starter = tokio::spawn(detect_all_cached_with(false, detect.clone()));
+        // Past the first sweep, inside the wait before the second.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let arriving = tokio::spawn(detect_all_cached_with(false, detect));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(
+            sweeps.load(Ordering::SeqCst),
+            1,
+            "it waits with the starter"
+        );
+
+        let (first, second) = (
+            caller_outcome(starter).await,
+            caller_outcome(arriving).await,
+        );
+
+        assert_eq!((first.len(), second.len()), (2, 2));
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_first_sweep_starts_at_once() {
+        use std::future::Future;
+        use std::sync::atomic::Ordering;
+        reset_detect_cache(None);
+        let (detect, sweeps) = counted_sweeps(|_| async { one_detection() });
+        let mut caller = Box::pin(detect_all_cached_with(false, detect));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+
+        // One poll, no timer in between: the sweep is already handed over.
+        assert!(caller.as_mut().poll(&mut context).is_pending());
+        assert_eq!(sweeps.load(Ordering::SeqCst), 1);
+
+        assert_eq!(caller.await.len(), 1);
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_refresh_over_budget_keeps_the_previous_list_and_ends() {
+        let expired = Instant::now() - DETECT_ALL_TTL - std::time::Duration::from_secs(1);
+        reset_detect_cache(Some((one_detection(), expired)));
+        let mut completed = DETECT_ALL_REFRESHED.subscribe();
+        let began = tokio::time::Instant::now();
+
+        let list = detect_all_cached_with(false, std::future::pending).await;
+
+        assert_eq!(list.len(), 1, "served at once");
+        assert!(DETECT_ALL_CACHE.lock().unwrap().refreshing);
+        tokio::time::timeout(std::time::Duration::from_secs(120), completed.changed())
+            .await
+            .expect("the refresh gives up")
+            .unwrap();
+        assert!(began.elapsed() >= DETECT_ALL_BUDGET);
+        let cache = DETECT_ALL_CACHE.lock().unwrap();
+        assert!(!cache.refreshing);
+        assert_eq!(cache.value.as_ref().map(|(list, _)| list.len()), Some(1));
+        drop(cache);
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_waiter_whose_sweep_dies_gets_the_list_of_the_next_sweep() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        reset_detect_cache(None);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (detect, sweeps) = {
+            let (started, release) = (started.clone(), release.clone());
+            counted_sweeps(move |call| {
+                let (started, release) = (started.clone(), release.clone());
+                async move {
+                    if call > 1 {
+                        return two_detections();
+                    }
+                    started.notify_one();
+                    release.notified().await;
+                    panic!("the sweep dies");
+                }
+            })
+        };
+        let starter = tokio::spawn(detect_all_cached_with(false, detect.clone()));
+        started.notified().await;
+        let waiter = tokio::spawn(detect_all_cached_with(false, detect));
+        tokio::task::yield_now().await;
+        assert_eq!(sweeps.load(Ordering::SeqCst), 1, "it waits on that sweep");
+        release.notify_one();
+
+        let (first, second) = (caller_outcome(starter).await, caller_outcome(waiter).await);
+
+        assert_eq!((first.len(), second.len()), (2, 2));
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
         invalidate_detect_cache();
     }
 

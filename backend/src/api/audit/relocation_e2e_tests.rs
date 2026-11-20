@@ -508,7 +508,7 @@ fn template_reinstall_on_a_dot_ai_project_writes_relocated_templates_there() {
     let project = tmp.path().join("repo");
     std::fs::create_dir_all(project.join(".ai")).unwrap();
     let _relocated = relocate(&project, ".ai");
-    let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    let templates = Path::new(crate::BACKEND_DIR).join("../templates/docs");
     let plan =
         crate::api::projects::template_reinstall::plan_reinstall(&project, &templates, false)
             .unwrap();
@@ -532,7 +532,7 @@ fn a_template_merge_preview_on_a_dot_ai_project_targets_its_root() {
     std::fs::create_dir_all(project.join(".ai")).unwrap();
     std::fs::write(project.join("README.md"), "# Repo\n").unwrap();
     let _relocated = relocate(&project, ".ai");
-    let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    let templates = Path::new(crate::BACKEND_DIR).join("../templates/docs");
     let view = crate::api::projects::template_merge::preview_plan(&project, &templates).unwrap();
     assert_eq!(view.docs_dir, ".ai");
     assert!(
@@ -756,6 +756,9 @@ async fn launch_route_fresh(h: &Harness, bridge: bool, fresh: Option<bool>) -> S
             own_discussions: vec![],
             own_run: None,
             agent: None,
+            room_agent_of: Vec::new(),
+            own_execution: None,
+            own_sessions: Vec::new(),
         })
     });
     let response = crate::api::audit::briefing_cards::full_audit_route(
@@ -1146,7 +1149,7 @@ fn an_applied_template_merge_on_a_dot_ai_project_writes_and_commits_under_its_ro
     git_in(&project, &["add", "-A"]);
     git_in(&project, &["commit", "-q", "-m", "init"]);
     let _relocated = relocate(&project, ".ai");
-    let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    let templates = Path::new(crate::BACKEND_DIR).join("../templates/docs");
 
     let view = run_merge_in_worktree(&project, "Relocated", MergeBase::Local, &templates).unwrap();
     assert_eq!(view.docs_dir, ".ai");
@@ -1293,6 +1296,9 @@ fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
 async fn a_default_docs_root_audit_is_byte_identical_to_its_golden() {
+    // The golden lists every CLI's MCP file: a sweep completed by a test
+    // running beside this one must not drop some.
+    let _cold = crate::agents::hold_cold_detection();
     let h = harness().await;
     let prompts = audited(&h, &DocsRoot::default_root()).await;
     let actual = default_root_snapshot(h.project.path(), &prompts);
@@ -1480,7 +1486,7 @@ async fn installing_never_turns_a_human_folder_with_an_earlier_audit_into_kronns
     let project = h.project.path();
     human_docs(project);
     // An earlier audit is recorded, yet no file carries a Kronn marker.
-    crate::core::kronn_state::record_audit(project, "full").unwrap();
+    crate::core::template_manifest::record_audit(project, "full").unwrap();
     let is_human = |project: &Path| {
         matches!(
             crate::core::docs_folder::folder_state(project, "docs"),
@@ -1518,7 +1524,7 @@ async fn template_files_the_human_overwrote_are_theirs_again_and_asked_about() {
     let h = harness().await;
     let project = h.project.path();
     install_template_route(&h).await;
-    crate::core::kronn_state::record_audit(project, "full").unwrap();
+    crate::core::template_manifest::record_audit(project, "full").unwrap();
     assert_eq!(
         crate::core::docs_folder::folder_state(project, "docs"),
         crate::core::docs_folder::DocsFolderState::KronnManaged

@@ -86,6 +86,20 @@ pub enum Confined {
     Unchanged(&'static str),
 }
 
+/// KT-1977 — what a launch behind Kronn's Seatbelt profile tells the browser
+/// servers its agent starts. Chrome isolates its helper processes with a
+/// Seatbelt profile of its own, which macOS refuses from inside another one
+/// (`sandbox initialization failed: Operation not permitted`, then the page
+/// crashes): `@playwright/mcp` reads this variable as its `--no-sandbox`. Only
+/// such a launch gets it; a browser started anywhere else keeps its sandbox.
+pub fn browser_env_inside(
+    outcome: &Confined,
+    seatbelt: bool,
+) -> Option<(&'static str, &'static str)> {
+    let inside = matches!(outcome, Confined::Wrapped | Confined::Replaced);
+    (inside && seatbelt).then_some(("PLAYWRIGHT_MCP_SANDBOX", "false"))
+}
+
 /// The directories a replaced Codex sandbox lets the process write.
 #[derive(Debug, Clone, Default)]
 pub struct LaunchRoots {
@@ -426,7 +440,7 @@ pub fn launch_confinement() -> Option<LevelConfinement> {
     // Unit tests spawn throwaway programs (`sh`, `python`) through the real
     // spawn point, from inside whatever sandbox the machine runs them in; the
     // ones about the wrap choose with `set_test_wrap`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if !test_wrap() {
             return None;
@@ -437,7 +451,7 @@ pub fn launch_confinement() -> Option<LevelConfinement> {
 
 /// The data directory as Claude's rules name it: `Read(//abs/path/**)`, the
 /// double slash being Claude's spelling of a path from the filesystem root.
-pub(crate) fn claude_rule(tool: &str, dir: &Path) -> String {
+pub fn claude_rule(tool: &str, dir: &Path) -> String {
     format!(
         "{tool}(/{}/**)",
         dir.to_string_lossy().trim_end_matches('/')
@@ -662,7 +676,7 @@ pub fn launch_confinement_for(
     sandbox: LaunchSandbox,
     full_access: bool,
 ) -> Option<LevelConfinement> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if !test_wrap() {
             return None;
@@ -683,16 +697,16 @@ fn confinement_hiding(stores: Vec<PathBuf>) -> Option<LevelConfinement> {
     trust_sandbox::credential_confinement().map(|confinement| confinement.hiding_also(stores))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_WRAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Tests opt into the real wrap of `try_spawn`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_test_wrap(on: bool) {
     TEST_WRAP.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_wrap() -> bool {
     TEST_WRAP.load(std::sync::atomic::Ordering::Relaxed)
 }
