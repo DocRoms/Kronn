@@ -579,7 +579,7 @@ fn bridge_refusal<T: Serialize>() -> Json<ApiResponse<T>> {
     ))
 }
 
-pub(crate) async fn plan_for(
+pub async fn plan_for(
     state: &AppState,
     id: String,
     template_docs: PathBuf,
@@ -603,7 +603,7 @@ pub(crate) async fn plan_for(
     }
 }
 
-pub(crate) async fn reinstall_for(
+pub async fn reinstall_for(
     state: &AppState,
     id: String,
     template_docs: PathBuf,
@@ -747,8 +747,10 @@ mod swap_tests {
         std::fs::write(external.join("AGENTS.md"), "KEEP").unwrap();
         // The folder is swapped for a link the moment the first file is
         // written through it (held as an fd): that write stays inside the
-        // root, the second file and the rollback are refused.
-        swap_probe::arm(&project.join("docs"), &external);
+        // root, the second file and the rollback are refused. The provenance
+        // report and snapshot hold `docs` six times before that write (guarded
+        // reads since KT-1595): the swap waits for it.
+        swap_probe::arm_after(&project.join("docs"), &external, 6);
         let error = reinstall(&project, &template, "swap", None).unwrap_err();
         assert!(swap_probe::fired(), "the swap really happened");
         assert!(

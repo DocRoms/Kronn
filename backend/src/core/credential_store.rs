@@ -35,13 +35,13 @@ use crate::models::{ApiKey, AppConfig};
 pub const BACKUP_FILENAME: &str = "config.toml.pre-credential-store.enc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PlainCredential {
-    kind: String,
-    id: String,
-    name: String,
-    provider: String,
-    active: bool,
-    value: String,
+pub struct PlainCredential {
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub active: bool,
+    pub value: String,
 }
 
 impl PlainCredential {
@@ -122,7 +122,7 @@ pub async fn stored_auth_token_exists(db: &Database) -> Result<bool> {
 
 /// Table rows first, then config.toml entries; the file wins on the same id
 /// because it is only written while the store is not armed, so it is newer.
-fn merge(table: &[PlainCredential], file: &[PlainCredential]) -> Vec<PlainCredential> {
+pub fn merge(table: &[PlainCredential], file: &[PlainCredential]) -> Vec<PlainCredential> {
     let mut merged: Vec<PlainCredential> = table.to_vec();
     for cred in file {
         match merged.iter_mut().find(|c| c.row_key() == cred.row_key()) {
@@ -152,7 +152,7 @@ fn encrypt_rows(creds: &[PlainCredential], key_hex: &str) -> Result<Vec<StoredCr
         .collect()
 }
 
-fn decrypt_value(encrypted: &str, key_hex: &str) -> Result<String> {
+pub fn decrypt_value(encrypted: &str, key_hex: &str) -> Result<String> {
     let key = crypto::parse_secret(key_hex).map_err(anyhow::Error::msg)?;
     crypto::decrypt(encrypted, &key).map_err(anyhow::Error::msg)
 }
@@ -324,8 +324,8 @@ pub fn preserve_rows(dir: &Path, rows: &[(String, String)]) {
 }
 
 /// Test seam: data directories whose next credential boot fails.
-#[cfg(test)]
-pub(crate) static FAIL_BOOT: LazyLock<std::sync::Mutex<HashSet<PathBuf>>> =
+#[cfg(any(test, feature = "test-support"))]
+pub static FAIL_BOOT: LazyLock<std::sync::Mutex<HashSet<PathBuf>>> =
     LazyLock::new(Default::default);
 
 /// Whether credentials of `dir` live in the encrypted store.
@@ -345,7 +345,7 @@ pub fn disarm(dir: &Path) {
 /// Called by `config::save` before it writes `config.toml`. Returns `true`
 /// when the credentials are stored (encrypted, read back), so the file must
 /// leave them out; `false` when the store is not armed for `dir`.
-pub(crate) async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool> {
+pub async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool> {
     let Some(armed) = armed_for(dir) else {
         // Not armed after a boot: config.toml may keep only what it already
         // held; a credential it did not hold is refused, never written in clear.
@@ -473,7 +473,7 @@ pub async fn boot(
     env_auth_token: Option<&str>,
     mode: BootMode,
 ) -> Result<Option<CredentialBoot>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if FAIL_BOOT
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -617,7 +617,7 @@ pub async fn boot(
 
 /// Whether a config.toml text carries a token or credential value (the key
 /// itself aside: a backup encrypted under that key would protect nothing).
-pub(crate) fn toml_holds_credentials(text: &str) -> bool {
+pub fn toml_holds_credentials(text: &str) -> bool {
     let Ok(table) = text.parse::<toml::Table>() else {
         // Unparseable: treat as sensitive rather than skip the backup.
         return true;
@@ -650,10 +650,7 @@ pub(crate) fn toml_holds_credentials(text: &str) -> bool {
 
 /// Encrypt the current config.toml to [`BACKUP_FILENAME`] (0600) when it still
 /// holds secrets. An existing backup is kept: it is the oldest original.
-pub(crate) fn back_up_config_if_it_holds_secrets(
-    dir: &Path,
-    key_hex: &str,
-) -> Result<Option<PathBuf>> {
+pub fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Option<PathBuf>> {
     let backup = dir.join(BACKUP_FILENAME);
     if backup.exists() {
         return Ok(Some(backup));
@@ -772,6 +769,12 @@ fn protect_copies_without_key(dir: &Path) {
             report.failures.join("; ")
         );
     }
+    if report.deferred > 0 {
+        tracing::warn!(
+            "credentials: {} copy(ies) of config.toml stay in clear until a key can encrypt them",
+            report.deferred
+        );
+    }
 }
 
 /// Encrypt (or cut down to their key line) the clear copies of config.toml in
@@ -787,7 +790,3 @@ fn protect_config_copies(dir: &Path, key_hex: &str) -> Result<()> {
         report.failures.join("; ")
     )
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "credential_store_tests.rs"]
-mod tests;

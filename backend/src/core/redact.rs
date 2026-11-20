@@ -451,6 +451,62 @@ pub fn looks_like_secret(input: &str) -> bool {
             .any(|pat| pat.gate.admits(input) && pat.re.is_match(input))
 }
 
+/// The four catch-all-line patterns that open [`RAW_PATTERNS`]; every pattern
+/// after them is a vendor token shape.
+const CATCH_ALL_PATTERNS: usize = 4;
+
+/// The vendor token shapes of [`RAW_PATTERNS`] as they are looked for in a KEY NAME
+/// (KT-1528), DERIVED from it mechanically: the same body and the same minimum
+/// lengths, only the `\b` on either side dropped (a label glued to a token,
+/// `old_sk-…`, `myAKIA…`, `AKIA…_old`, hides it from an anchored pattern: `_` is a
+/// word character), and the vendors' own case kept. A name is a few words, so a
+/// token shape inside it is a secret pasted as a key. A new vendor pattern in
+/// [`RAW_PATTERNS`] is therefore covered by name without a second list to update.
+fn name_token_shapes() -> impl Iterator<Item = &'static str> {
+    RAW_PATTERNS
+        .iter()
+        .skip(CATCH_ALL_PATTERNS)
+        .map(|(src, _, _)| {
+            let src = src.strip_prefix(r"\b").unwrap_or(src);
+            src.strip_suffix(r"\b").unwrap_or(src)
+        })
+}
+
+static NAME_TOKEN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    name_token_shapes()
+        .filter_map(|s| Regex::new(s).ok())
+        .collect()
+});
+
+/// Whether a vendor token shape ([`name_token_shapes`]) appears in `name`,
+/// anywhere, glued to a label or not. One exception: `sk-` inside an ordinary
+/// word (`di|sk-cache-max-size-bytes`, `ta|sk-runner-…`) counts only when the
+/// match holds a decimal digit or a capital, as every real `sk-` key does; a
+/// kebab-case setting name holds neither. Every start is tried, so a rejected
+/// match never hides a later one. The caller bounds the length of `name` (see
+/// `config_salvage`).
+pub fn name_embeds_vendor_token(name: &str) -> bool {
+    NAME_TOKEN_REGEXES.iter().any(|re| {
+        let word_prefix = re.as_str().starts_with("sk-");
+        let mut from = 0;
+        while let Some(m) = re.find_at(name, from) {
+            let glued = name[..m.start()]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphabetic());
+            let token_like = m
+                .as_str()
+                .bytes()
+                .any(|b| b.is_ascii_digit() || b.is_ascii_uppercase());
+            if !(word_prefix && glued) || token_like {
+                return true;
+            }
+            from = m.start() + name[m.start()..].chars().next().map_or(1, char::len_utf8);
+        }
+        false
+    })
+}
+
 // ── Secret-ASSIGNMENT patterns for audit artifacts (0.9.0 blocker) ─────
 //
 // `redact_secrets` above only catches vendor-prefixed (`sk-`, `AIza`…) or
@@ -1140,6 +1196,35 @@ fn redact_json_aware_with(
 
 fn encode_json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"***REDACTED***\"".to_string())
+}
+
+/// What a TOML parse error says, fit for a log, a notice or an API response:
+/// the kind of problem and its line and column, never the source excerpt that
+/// `toml::de::Error`'s `Display` prints (the whole offending line, which may be
+/// a key or a credential), nor a key name or a value (a serde message such as
+/// `invalid type: string "sk-…"` carries one). `text` is the source the error
+/// was raised on, used only to turn the byte span into a line and column.
+pub fn toml_error_summary(text: &str, error: &toml::de::Error) -> String {
+    let message = error.message();
+    let kind = if message.starts_with("invalid type") || message.starts_with("invalid value") {
+        "a value of the wrong type"
+    } else if message.starts_with("missing field") {
+        "a missing required setting"
+    } else if message.starts_with("unknown field") || message.starts_with("unknown variant") {
+        "an unknown setting or value"
+    } else {
+        "invalid TOML"
+    };
+    match error.span() {
+        Some(span) => {
+            let at = span.start.min(text.len());
+            let before = &text.as_bytes()[..at];
+            let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+            let column = before.iter().rev().take_while(|b| **b != b'\n').count() + 1;
+            format!("{kind} at line {line}, column {column}")
+        }
+        None => kind.to_string(),
+    }
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -2592,6 +2677,143 @@ mod tests {
         assert!(!looks_like_secret("use the bearer-token-name convention"));
         assert!(!looks_like_secret("AIza prefix without a real key"));
         assert!(!looks_like_secret(""));
+    }
+
+    /// KT-1528 — the name shapes are DERIVED from the vendor part of `RAW_PATTERNS`
+    /// (same body, same minimum lengths, only the `\b` anchors dropped): one shape per
+    /// vendor pattern, and a sample of each vendor is found inside a longer name,
+    /// before and after a label.
+    #[test]
+    fn name_token_shapes_cover_every_vendor_pattern() {
+        assert_eq!(
+            RAW_PATTERNS.len() - CATCH_ALL_PATTERNS,
+            name_token_shapes().count(),
+            "a vendor pattern of RAW_PATTERNS has no shape for key names"
+        );
+        assert_eq!(NAME_TOKEN_REGEXES.len(), name_token_shapes().count());
+        // Mechanical: no anchor is left, and every body is the vendor's own.
+        for (shape, (src, _, _)) in name_token_shapes().zip(RAW_PATTERNS.iter().skip(4)) {
+            assert!(
+                !shape.starts_with(r"\b") && !shape.ends_with(r"\b"),
+                "{shape}"
+            );
+            assert!(src.contains(shape), "{shape} is not a body of {src}");
+        }
+        let samples = [
+            "sk-clear-abcdefghijklmnopqrstuvwxyz0123456789",
+            "p8e-abcdefghijklmnop",
+            "AIzaSyA1234567890abcdefghijklmnopqrstuvw",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "github_pat_11ABCDEFG0abcdefghijklmnopqr_abcdefghijklmnopqrstuvwxyz0123456789",
+            "ya29.a0AfH6SMBabcdefghijklmnopqrstuvwxyz",
+            "1//0abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP",
+            "xoxb-123456789012-123456789012",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ASIAIOSFODNN7EXAMPLE",
+            "rk_live_abcdefghij1234567890",
+            "sk_live_abcdefghij1234567890",
+            "glpat-abcdefghijklmnopqrstuvwxyz",
+            "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+            "hf_abcdefghijklmnopqrstuvwxyz0123456789",
+            "kbt_abcdefghijklmnopqrstuvwx",
+        ];
+        assert_eq!(samples.len(), name_token_shapes().count());
+        for sample in samples {
+            assert!(looks_like_secret(sample), "{sample}");
+            for name in [
+                sample.to_string(),
+                format!("old_{sample}"),
+                format!("old{sample}"),
+                format!("{sample}_old"),
+                format!("my_{sample}_old"),
+            ] {
+                assert!(name_embeds_vendor_token(&name), "{name}");
+            }
+        }
+        for plain in [
+            "port",
+            "max_tokens",
+            "model_id",
+            "skip_tls",
+            "sk_rate",
+            "task_basic_info",
+        ] {
+            assert!(!name_embeds_vendor_token(plain), "{plain}");
+        }
+    }
+
+    /// KT-1528 round 17 — a name holds a vendor token at the VENDOR's own minimum
+    /// length, label glued or not (the name shapes used to be stricter than
+    /// `RAW_PATTERNS`: `p8e-` 10 against 8, `glpat-` 20 against 16).
+    #[test]
+    fn a_name_holds_a_vendor_token_at_the_vendors_own_minimum() {
+        for name in [
+            "old_p8e-12345678",
+            "oldp8e-12345678",
+            "old_glpat-abcdefghijklmnop",
+            "myglpat-abcdefghijklmnop",
+            "glpat-abcdefghijklmnop_old",
+            "kbt_abcdefghijklmnop_old",
+            "sk_live_abcdefghijklmnop_old",
+            "old_ghp_abcdefghijklmnopqrstuvwxyz0123_x",
+            "hf_abcdefghijklmnopqrstuvwxyz0123_x",
+        ] {
+            assert!(name_embeds_vendor_token(name), "{name}");
+        }
+        // One character under the minimum: not a token (the vendor pattern says so).
+        for name in [
+            "old_p8e-1234567",
+            "old_glpat-abcdefghijklmno",
+            "old_kbt_abcdefghijklmno",
+            "old_sk_live_abcdefghijklmno",
+        ] {
+            assert!(!name_embeds_vendor_token(name), "{name}");
+        }
+    }
+
+    /// KT-1528 rounds 19-20 — `sk-` inside an ordinary word (`di|sk-`, `ta|sk-`)
+    /// is not a token unless the match holds a digit or a capital; every other
+    /// vendor shape, and `sk-` after a separator or at the start, is found glued
+    /// or not, and a rejected glued match never hides a later one.
+    #[test]
+    fn a_vendor_prefix_inside_a_word_is_not_a_token() {
+        for name in [
+            "disk-cache-max-size-bytes",
+            "task-runner-max-concurrency",
+            "mask-sensitive-headers-in-logs",
+            "risk-assessment-threshold-ms",
+            "kiosk-mode-refresh-interval-seconds",
+            "desk-booking-calendar-sync",
+            "ask-before-running-shell-commands",
+        ] {
+            assert!(!name_embeds_vendor_token(name), "{name}");
+        }
+        for name in [
+            "sk-550e8400-e29b-41d4-a716-446655440000",
+            "old_sk-550e8400-e29b-41d4-a716-446655440000",
+            "1sk-abcdefghijklmnopqrst1",
+            "my_AKIAIOSFODNN7EXAMPLE",
+            "myAKIAIOSFODNN7EXAMPLE",
+            "botxoxb-123456789012-123456789012",
+            "disk-cache-max-size-bytes_sk-abcdefghijklmnopqrstuvwxyz",
+            "oldsk-abcdefghij0123456789",
+            "oldsk-abcdefghijKlmnopqrstuv",
+            // Round 20: every other vendor shape counts glued to a label even
+            // without a digit (a real token may hold none).
+            "myAKIAIOSFODNNXEXAMPLE",
+            "oldASIAIOSFODNNXEXAMPLE",
+            "myhf_aBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgH",
+            "myglpat-abcdefghijklmnop",
+            "myghp_abcdefghijklmnopqrstuvwxyzABCDEF",
+            "mysk_live_abcdefghijklmnopqrst",
+            "botxoxb-abcdefghijklmnop",
+            "mynpm_abcdefghijklmnopqrstuvwxyzABCD",
+            "mykbt_abcdefghijklmnop",
+            "oldAKIAIOSFODNNXEXAMPLE_550e8400-e29b-41d4-a716-446655440000",
+        ] {
+            assert!(name_embeds_vendor_token(name), "{name}");
+        }
     }
 
     // ── Gates: the fast path may never change what gets redacted ───────

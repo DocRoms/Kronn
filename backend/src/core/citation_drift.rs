@@ -299,7 +299,7 @@ struct DocCitation {
     anchor: Option<String>,
 }
 
-pub(crate) fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
+pub fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
     match lines {
         None => file.to_string(),
         Some((s, e)) if s == e => format!("{file}:{s}"),
@@ -329,9 +329,7 @@ fn citations_of(content: &str, per_anchor: bool) -> Vec<DocCitation> {
         };
         // `[src: …]` in a template's own text, `<path>` and `src/*.rs` show the
         // syntax: they name no file, so no file can be missing (KT-1489).
-        if !is_plain_relative(Path::new(&file))
-            || crate::core::docs_citations::is_placeholder(&file)
-        {
+        if !is_plain_relative(Path::new(&file)) || crate::core::anti_halluc::is_placeholder(&file) {
             continue;
         }
         let cite = cite_label(&file, lines);
@@ -481,11 +479,17 @@ fn write(project_path: &Path, file: &mut CitationsFile) -> Result<(), String> {
     drop_secret_fingerprints(project_path, file);
     file.readme = CITATIONS_README.to_string();
     let json = serde_json::to_string_pretty(file).map_err(|e| format!("JSON error: {e}"))?;
-    crate::core::mcp_scanner::atomic_write(&citations_path(project_path), &json)
+    // Through the rooted primitive (KT-1595): the docs folder may have been
+    // swapped for a link since the agent ran.
+    crate::core::fs_guard::guarded_replace(
+        project_path,
+        &citations_path(project_path),
+        json.as_bytes(),
+    )
 }
 
 /// Markdown docs under the docs dir, as paths relative to the project root.
-pub(crate) fn doc_files(project_path: &Path) -> Vec<String> {
+pub fn doc_files(project_path: &Path) -> Vec<String> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     let mut out = Vec::new();
     let mut stack = vec![docs_dir.clone()];
@@ -519,7 +523,7 @@ pub(crate) fn doc_files(project_path: &Path) -> Vec<String> {
 }
 
 /// Whether a project-relative file (or folder) a doc names still exists.
-pub(crate) fn cited_file_exists(project_path: &Path, file: &str) -> bool {
+pub fn cited_file_exists(project_path: &Path, file: &str) -> bool {
     resolve_cited(project_path, file).is_some_and(|path| path.exists())
 }
 
@@ -530,7 +534,7 @@ pub fn partial_docs(project_path: &Path) -> Vec<String> {
         .into_iter()
         .filter(|doc| {
             read_doc(project_path, doc)
-                .is_some_and(|content| crate::api::audit::step_guard::has_partial_marker(&content))
+                .is_some_and(|content| crate::core::audit_run_state::has_partial_marker(&content))
         })
         .collect()
 }
@@ -688,7 +692,7 @@ pub fn acknowledge_docs(
 }
 
 /// The distinct citation labels a text carries, as the store names them.
-pub(crate) fn cite_labels(content: &str) -> BTreeSet<String> {
+pub fn cite_labels(content: &str) -> BTreeSet<String> {
     doc_citations(content).into_iter().map(|c| c.cite).collect()
 }
 
@@ -1079,7 +1083,7 @@ fn probe_unrecorded(project_path: &Path, citation: &DocCitation) -> CitationStat
 /// checked, also a second one on lines already cited, and on the new lines of a
 /// block that only moved. A recorded citation that
 /// drifted is `check`'s to report. Deterministic, reads the code only (KT-1489).
-pub(crate) fn unrecorded_problems(project_path: &Path) -> Vec<(String, CitationStatus)> {
+pub fn unrecorded_problems(project_path: &Path) -> Vec<(String, CitationStatus)> {
     let recorded = read_strict(project_path).ok().flatten().unwrap_or_default();
     let mut out = Vec::new();
     for doc in doc_files(project_path) {
@@ -1257,38 +1261,15 @@ pub fn reverify_projects(project_paths: &[PathBuf]) -> Vec<(PathBuf, ScheduledCh
     out
 }
 
-/// One scheduler tick, called by the workflow engine loop.
-pub async fn scheduled_tick(state: &crate::AppState) {
+/// Whether the re-verification cron fired since the previous call; the first
+/// call only arms the clock.
+pub fn tick_is_due(cron: Option<&str>) -> bool {
     let now = chrono::Utc::now();
     let since = {
         let mut last = LAST_TICK.lock().unwrap_or_else(|p| p.into_inner());
         last.replace(now).unwrap_or(now)
     };
-    let cron = state.config.read().await.audit_reverify_cron.clone();
-    if !reverify_due(
-        cron.as_deref(),
-        crate::core::timezone::current(),
-        since,
-        now,
-    ) {
-        return;
-    }
-    let projects = match state
-        .db
-        .with_read_conn(crate::db::projects::list_projects)
-        .await
-    {
-        Ok(projects) => projects,
-        Err(e) => {
-            tracing::warn!("Citation re-verification skipped: {e}");
-            return;
-        }
-    };
-    let paths: Vec<PathBuf> = projects
-        .iter()
-        .map(|p| crate::core::scanner::resolve_host_path(&p.path))
-        .collect();
-    let _ = tokio::task::spawn_blocking(move || reverify_projects(&paths)).await;
+    reverify_due(cron, crate::core::timezone::current(), since, now)
 }
 
 #[cfg(test)]

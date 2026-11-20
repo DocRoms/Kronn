@@ -24,7 +24,7 @@ use crate::AppState;
 use super::SseStream;
 
 /// The builtin skill the agent pass receives.
-pub(crate) const SKILL_ID: &str = "audit-revalidation";
+pub const SKILL_ID: &str = "audit-revalidation";
 
 /// Each `owner="human"` section's citation labels, listed for its owner.
 fn human_parts(content: &str) -> Vec<(String, BTreeSet<String>)> {
@@ -47,7 +47,7 @@ fn owning_step(
 }
 
 /// The digest of what the step owning a doc reads, as a review stamp holds it.
-pub(crate) fn step_sources_fingerprint(
+pub fn step_sources_fingerprint(
     project_path: &FsPath,
     chain: &[super::AnalysisStep],
     step: usize,
@@ -57,7 +57,7 @@ pub(crate) fn step_sources_fingerprint(
 
 /// Stamp the docs a pass re-read, each with the sources digest of the step
 /// that owns it (computed once per step).
-pub(crate) fn stamp_rereads(
+pub fn stamp_rereads(
     project_path: &FsPath,
     chain: &[super::AnalysisStep],
     rereads: &[(usize, String)],
@@ -80,7 +80,7 @@ pub(crate) fn stamp_rereads(
 /// no citation or path anchors count as re-read at the sources as they stand:
 /// without this stamp the plan sent them back to their steps right after the
 /// project was validated, with no change to the code or the docs (KT-1319).
-pub(crate) fn stamp_validated_rereads(project_path: &FsPath) -> Result<(), String> {
+pub fn stamp_validated_rereads(project_path: &FsPath) -> Result<(), String> {
     let planned = plan(project_path);
     let rereads = RevalidationRun::of(&planned).rereads;
     let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
@@ -356,7 +356,7 @@ fn plan_with_documents(
 
 /// One doc whose moved citations were re-anchored.
 #[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct Reanchored {
+pub struct Reanchored {
     pub doc: String,
     pub count: usize,
 }
@@ -364,15 +364,22 @@ pub(crate) struct Reanchored {
 /// Rewrite every moved citation to its new line and move its fingerprint with
 /// it. A human-validated doc it rewrites is marked to reconfirm. Callers hold
 /// the project's audit lease.
-pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, String> {
+pub fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, String> {
     let mut done = Vec::new();
     for section in plan(project_path).sections {
         if section.reanchor.is_empty() || section.doc_missing {
             continue;
         }
         let path = project_path.join(&section.doc);
-        let before = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Cannot read {}: {e}", section.doc))?;
+        // Read and written through the rooted primitive (KT-1595): the docs
+        // folder may have been swapped for a link since the agent ran.
+        let before = crate::core::fs_guard::guarded_read(project_path, &path)
+            .map_err(|e| format!("Cannot read {}: {e}", section.doc))?
+            .ok_or_else(|| format!("Cannot read {}: no such file", section.doc))
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| format!("Cannot read {}: not valid UTF-8 text", section.doc))
+            })?;
         let moves = reanchors_to_apply(project_path, &before, &section.doc, &section.reanchor);
         if moves.is_empty() {
             continue;
@@ -381,7 +388,7 @@ pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, 
         if count == 0 {
             continue;
         }
-        crate::core::mcp_scanner::atomic_write(&path, &after)?;
+        crate::core::fs_guard::guarded_replace(project_path, &path, after.as_bytes())?;
         citation_drift::record_reanchored(project_path, &section.doc, &before, &after, &moves)?;
         if let Err(e) = crate::core::doc_provenance::note_write(
             project_path,
@@ -403,7 +410,7 @@ pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, 
     Ok(done)
 }
 
-pub(crate) fn reanchor_statuses(
+pub fn reanchor_statuses(
     project_path: &FsPath,
     content: &str,
     section: &citation_drift::SectionCitations,
@@ -510,7 +517,7 @@ fn unanchored_block(sections: &[&doc_relevance::SectionRelevance]) -> String {
 
 /// The block an agent step receives: the skill, then Kronn's findings for
 /// that step's doc.
-pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
+pub fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
     let skill = crate::core::skills::get_skill(SKILL_ID)
         .map(|s| s.content)
         .unwrap_or_default();
@@ -593,7 +600,7 @@ pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
 }
 
 /// The agent pass's extras, handed to the partial-audit pipeline.
-pub(crate) struct RevalidationRun {
+pub struct RevalidationRun {
     pub blocks: HashMap<usize, String>,
     /// `(step, doc)` of each doc sent only to be re-read: stamped once its
     /// step has run, whether or not the agent added an anchor (KT-1292).
@@ -601,7 +608,7 @@ pub(crate) struct RevalidationRun {
 }
 
 impl RevalidationRun {
-    pub(crate) fn of(plan: &RevalidationPlan) -> Self {
+    pub fn of(plan: &RevalidationPlan) -> Self {
         Self {
             blocks: prompt_blocks(plan),
             rereads: plan
@@ -619,7 +626,7 @@ impl RevalidationRun {
 /// or stopped before writing — the validation it revoked at launch comes
 /// back: the docs are byte-identical to what the human validated. Only a
 /// `provenance` reason re-dates each doc's own validation.
-pub(crate) fn restore_validation_if_untouched(
+pub fn restore_validation_if_untouched(
     project_path: &FsPath,
     validated_at: Option<&str>,
     snapshots: &[(String, super::validation::TargetSnapshot)],

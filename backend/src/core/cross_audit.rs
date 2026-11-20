@@ -44,10 +44,41 @@ const TEXT_MAX: usize = 600;
 
 // ── Option ──────────────────────────────────────────────────────────────────
 
+/// Agents eligible to RUN an audit: the pipeline's only deliverable is
+/// files written into `docs/`, so an agent that cannot write there can only
+/// produce a silent no-op that the validator then flags step by step.
+///
+/// Two kinds of agent can: a CLI with its own filesystem, and an HTTP agent
+/// whose file tools Kronn executes on its behalf (KT-338), scoped to the
+/// project by `agent_launch` (KT-924). Every HTTP agent is admitted (KT-980):
+/// sending the repository to a hosted provider is the user's choice, warned
+/// about in the UI. A `Custom` agent is only launched with a validated named
+/// connection (`AuditAgentLauncher::for_request`).
+///
+/// ALLOWLIST, not denylist (Codex A4 v2): a new/unknown variant must force
+/// a compiler decision here instead of being audit-capable by default.
+/// Mirrored by the UI's `canRunAudit`, enforced here because MCP/bridge
+/// callers bypass the UI entirely.
+pub fn agent_can_audit(agent: &AgentType) -> bool {
+    match agent {
+        AgentType::ClaudeCode
+        | AgentType::Codex
+        | AgentType::OpenCode
+        | AgentType::GeminiCli
+        | AgentType::Kiro
+        | AgentType::CopilotCli
+        | AgentType::Ollama
+        | AgentType::LiteLlm
+        | AgentType::Nvidia
+        | AgentType::Custom => true,
+        AgentType::Vibe => false,
+    }
+}
+
 /// Agents a cross-agent audit may use: audit-capable and launchable without a
 /// named connection.
 pub fn eligible_agent(agent: &AgentType) -> bool {
-    crate::api::audit::agent_can_audit(agent) && *agent != AgentType::Custom
+    agent_can_audit(agent) && *agent != AgentType::Custom
 }
 
 /// The briefing line for `agents`.
@@ -262,8 +293,15 @@ pub fn verify_citation(root: &Path, citation: &Citation) -> Result<(), String> {
             citation.line
         ));
     }
-    let text = std::fs::read_to_string(root.join(&file))
-        .map_err(|e| format!("`{file}` is not readable as text: {e}"))?;
+    // KT-1595: rooted read, a linked file or parent is refused (the quote check
+    // would otherwise be an oracle on an outside file).
+    let text = crate::core::fs_guard::guarded_read(root, &root.join(&file))
+        .map_err(|e| format!("`{file}` is not readable as text: {e}"))?
+        .ok_or_else(|| format!("`{file}` is not readable as text: not found"))
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|_| format!("`{file}` is not readable as text: not valid UTF-8"))
+        })?;
     let lines: Vec<&str> = text.lines().collect();
     let from = (citation.line as usize).saturating_sub(1 + LINE_TOLERANCE);
     let to = (end as usize + LINE_TOLERANCE).min(lines.len());

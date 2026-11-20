@@ -19,9 +19,11 @@
 //!    a large architecture document is not evidence of a leak.
 //! 2. **Regex denylist** : well-known secret prefixes (sk-, ghp_, AKIA,
 //!    xox[bapr]-, …) and structural markers (PEM headers, JWT shapes).
-//! 3. **High-entropy detector** : a 32+ char run of base64/hex with
-//!    little semantic punctuation = likely a token. Mostly a backstop
-//!    for vendor-specific tokens not yet in the denylist.
+//! 3. **High-entropy detector** : a 32+ char run of base64/hex mixing
+//!    letters and digits. Its form cannot tell a token from an identifier
+//!    (a dated id, a hash a document cites), so the workflow audit rejects
+//!    nothing on it: it reports the lines as possible secrets and the step
+//!    stands (KT-1796). `check_docs_write` still rejects on it.
 //! 4. **Substring match against sensitive worktree files** : on entry
 //!    the runner Bloom-prefixes the content of `.env*`, `*.pem`, `*.key`,
 //!    `id_rsa*`, `credentials*`, `.aws/`, `.ssh/`. A write that contains
@@ -50,14 +52,14 @@ const HIGH_ENTROPY_MIN_LEN: usize = 32;
 pub enum SecretRejection {
     /// Write exceeds `MAX_ENTRY_BYTES`. Field is the actual size.
     TooLarge { bytes: usize },
-    /// Regex denylist matched. Field is the pattern that triggered.
-    DenylistPattern { pattern: &'static str },
-    /// 32+ char high-entropy run detected. Field is a short snippet of
-    /// the offending content for the operator to identify the source.
-    HighEntropyRun { snippet: String },
+    /// Regex denylist matched. Field is the pattern that triggered; `line`
+    /// is 1-based, like every `line` below.
+    DenylistPattern { pattern: &'static str, line: usize },
+    /// 32+ char high-entropy run detected. The run itself is never kept.
+    HighEntropyRun { line: usize },
     /// Content matches a substring of a known sensitive worktree file.
     /// Field is the relative path of the source file.
-    SensitiveFileSubstring { source: String },
+    SensitiveFileSubstring { source: String, line: usize },
 }
 
 impl SecretRejection {
@@ -70,25 +72,21 @@ impl SecretRejection {
                     bytes, MAX_ENTRY_BYTES
                 )
             }
-            SecretRejection::DenylistPattern { pattern } => {
-                format!(
-                    "write rejected: content matches secret pattern {:?}",
-                    pattern
-                )
+            SecretRejection::DenylistPattern { pattern, line } => {
+                format!("write rejected: line {line} matches secret pattern {pattern:?}")
             }
-            SecretRejection::HighEntropyRun { .. } =>
-                "write rejected: content has a 32+ char high-entropy run (possible credential; content withheld)".into(),
-            SecretRejection::SensitiveFileSubstring { source } => {
-                format!(
-                    "write rejected: content overlaps with substring from sensitive file {:?}",
-                    source
-                )
-            }
+            SecretRejection::HighEntropyRun { line } => format!(
+                "write rejected: line {line} has a 32+ char high-entropy run (possible credential; content withheld)"
+            ),
+            SecretRejection::SensitiveFileSubstring { source, line } => format!(
+                "write rejected: line {line} overlaps with a substring from sensitive file {source:?}"
+            ),
         }
     }
 }
 
-/// Run all detectors in order of cheapness. Returns on first reject.
+/// Every detector, the size cap first. Returns on first reject. A memory
+/// entry has no reader to warn: a possible secret is rejected too.
 pub fn check_docs_write(
     content: &str,
     sensitive_substrings: &SensitiveSubstrings,
@@ -98,29 +96,64 @@ pub fn check_docs_write(
             bytes: content.len(),
         });
     }
-    check_docs_content(content, sensitive_substrings)
+    check_docs_content(content, sensitive_substrings)?;
+    match possible_secret_lines(content).first() {
+        Some(&line) => Err(SecretRejection::HighEntropyRun { line }),
+        None => Ok(()),
+    }
 }
 
-/// A project document is not a small memory entry. Its length alone is not
-/// evidence of a credential leak; retain the actual content detectors.
+/// A project document is not a small memory entry. Neither its length nor
+/// the form of a long run is evidence of a leak: only a known secret format
+/// or a value of a sensitive file rejects it. `possible_secret_lines` reports
+/// the rest (KT-1796).
 fn check_docs_content(
     content: &str,
     sensitive_substrings: &SensitiveSubstrings,
 ) -> Result<(), SecretRejection> {
-    if let Some(pattern) = match_denylist(content) {
-        return Err(SecretRejection::DenylistPattern { pattern });
+    if let Some((pattern, offset)) = match_denylist(content) {
+        let line = line_of(content, offset);
+        return Err(SecretRejection::DenylistPattern { pattern, line });
     }
-    if let Some(snippet) = find_high_entropy_run(content) {
-        return Err(SecretRejection::HighEntropyRun { snippet });
+    if let Some((source, offset)) = sensitive_substrings.find(content) {
+        let line = line_of(content, offset);
+        return Err(SecretRejection::SensitiveFileSubstring { source, line });
     }
-    if let Some(source) = sensitive_substrings.matches(content) {
-        return Err(SecretRejection::SensitiveFileSubstring { source });
+    if let Some((source, offset)) = sensitive_substrings.shared(content) {
+        let line = line_of(content, offset);
+        return Err(SecretRejection::SensitiveFileSubstring { source, line });
     }
     Ok(())
 }
 
-/// Regex denylist match. Returns the matched pattern name on hit.
-pub(crate) fn match_denylist(content: &str) -> Option<&'static str> {
+/// The 1-based lines holding a high-entropy run, each once, in order.
+fn possible_secret_lines(content: &str) -> Vec<usize> {
+    // One pass: the offsets come in order.
+    let bytes = content.as_bytes();
+    let (mut line, mut at) = (1, 0);
+    let mut lines: Vec<usize> = Vec::new();
+    for offset in high_entropy_runs(content) {
+        line += bytes[at..offset].iter().filter(|b| **b == b'\n').count();
+        at = offset;
+        if lines.last() != Some(&line) {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// 1-based line of a byte offset.
+fn line_of(content: &str, offset: usize) -> usize {
+    content.as_bytes()[..offset]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1
+}
+
+/// Regex denylist match. Returns the matched pattern name and the byte
+/// offset of the match on hit.
+pub fn match_denylist(content: &str) -> Option<(&'static str, usize)> {
     static PATTERNS: &[(&str, &str)] = &[
         // Well-known token prefixes (vendor-attributable).
         ("sk-...", r"\bsk-[A-Za-z0-9_\-]{20,}"),
@@ -155,53 +188,106 @@ pub(crate) fn match_denylist(content: &str) -> Option<&'static str> {
         ("PEM private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
         ("OpenSSH private", r"-----BEGIN OPENSSH PRIVATE KEY-----"),
     ];
-    for (name, regex) in PATTERNS {
-        if let Ok(re) = regex_lite::Regex::new(regex) {
-            if re.is_match(content) {
-                return Some(*name);
-            }
-        }
-    }
-    None
+    static COMPILED: std::sync::OnceLock<Vec<(&str, regex_lite::Regex)>> =
+        std::sync::OnceLock::new();
+    let compiled = COMPILED.get_or_init(|| {
+        PATTERNS
+            .iter()
+            .filter_map(|(name, regex)| Some((*name, regex_lite::Regex::new(regex).ok()?)))
+            .collect()
+    });
+    compiled
+        .iter()
+        .find_map(|(name, re)| Some((*name, re.find(content)?.start())))
 }
 
-/// Detect a contiguous run of ≥ 32 chars of base64-or-hex characters
-/// without semantic punctuation. Returns a 64-char snippet of the first
-/// match for the operator to identify the source.
-pub(crate) fn find_high_entropy_run(content: &str) -> Option<String> {
-    let bytes = content.as_bytes();
+/// The byte offset of every contiguous run of ≥ 32 base64-or-hex characters
+/// that mixes letters and digits.
+fn high_entropy_runs(content: &str) -> Vec<usize> {
+    let mut runs = Vec::new();
     let mut start: Option<usize> = None;
-    for (i, &b) in bytes.iter().enumerate() {
-        let is_token_char = b.is_ascii_alphanumeric()
-            || b == b'_'
-            || b == b'-'
-            || b == b'/'
-            || b == b'+'
-            || b == b'=';
-        if is_token_char {
-            if start.is_none() {
-                start = Some(i);
-            }
+    let bytes = content.as_bytes();
+    for i in 0..=bytes.len() {
+        if bytes.get(i).is_some_and(|&b| is_token_char(b as char)) {
+            start.get_or_insert(i);
         } else if let Some(s) = start.take() {
-            let len = i - s;
-            if len >= HIGH_ENTROPY_MIN_LEN && looks_like_token(&content[s..i]) {
-                return Some(content[s..i].chars().take(64).collect());
+            let run = &content[s..i];
+            if is_long_mixed_run(run) {
+                runs.push(s);
             }
         }
     }
-    if let Some(s) = start {
-        let len = bytes.len() - s;
-        if len >= HIGH_ENTROPY_MIN_LEN && looks_like_token(&content[s..]) {
-            return Some(content[s..].chars().take(64).collect());
-        }
-    }
-    None
+    runs
 }
 
-/// Heuristic: a "looks-like-token" run has a healthy mix of letters
-/// AND digits AND no obvious English-word patterns. We require both
-/// classes present and at least 30% of each.
-fn looks_like_token(s: &str) -> bool {
+/// A file yields the same substring twice in a row (a line, then the run
+/// it is made of): looked for among the last entries only.
+const DEDUP_WINDOW: usize = 8;
+
+/// A sensitive file beyond this size is not a credential file.
+const MAX_SENSITIVE_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+/// The readings of a sensitive file a document can quote from: its text,
+/// the same without NUL bytes (UTF-16), and each with the escapes of a JSON
+/// string undone (a key stored on one line).
+fn sensitive_texts(bytes: &[u8]) -> Vec<String> {
+    let mut texts = vec![String::from_utf8_lossy(bytes).into_owned()];
+    if bytes.contains(&0) {
+        let narrow: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+        texts.push(String::from_utf8_lossy(&narrow).into_owned());
+    }
+    let unescaped: Vec<String> = texts
+        .iter()
+        .filter(|text| text.contains('\\'))
+        .map(|text| undo_json_escapes(text))
+        .collect();
+    texts.extend(unescaped);
+    texts
+}
+
+/// `\n`, `\r`, `\/` and the `\uXXXX` of an ASCII character, as a JSON
+/// serialiser writes them inside a string.
+fn undo_json_escapes(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('\\') {
+        plain.push_str(&rest[..at]);
+        let escape = &rest[at..];
+        let ascii = escape
+            .get(2..6)
+            .filter(|_| escape.as_bytes().get(1) == Some(&b'u'))
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            .filter(u8::is_ascii);
+        let (undone, length) = match (escape.as_bytes().get(1), ascii) {
+            (_, Some(ascii)) => (ascii as char, 6),
+            (Some(b'n'), _) => ('\n', 2),
+            (Some(b'r'), _) => ('\r', 2),
+            (Some(b'/'), _) => ('/', 2),
+            _ => ('\\', 1),
+        };
+        plain.push(undone);
+        rest = &escape[length..];
+    }
+    plain.push_str(rest);
+    plain
+}
+
+/// A run long and mixed enough to be a token, as a whole or in a part
+/// between `=` or `/`: a name glued to a value (`API_KEY=…`) does not
+/// dilute it.
+fn is_long_mixed_run(run: &str) -> bool {
+    let long_mixed =
+        |part: &str| part.len() >= HIGH_ENTROPY_MIN_LEN && mixes_digits_and_letters(part);
+    long_mixed(run) || run.split('=').any(long_mixed) || run.split(['=', '/']).any(long_mixed)
+}
+
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '+' | '=')
+}
+
+/// Both classes present, and digits ≥ 15% to rule out plain English /
+/// kebab-case identifiers.
+fn mixes_digits_and_letters(s: &str) -> bool {
     let bytes = s.as_bytes();
     let mut digits = 0;
     let mut alphas = 0;
@@ -216,8 +302,6 @@ fn looks_like_token(s: &str) -> bool {
     if total == 0 {
         return false;
     }
-    // Both classes must be present, and digits should be ≥ 15% to rule
-    // out plain English / kebab-case identifiers.
     let digit_ratio = (digits as f32) / (total as f32);
     digits > 0 && alphas > 0 && digit_ratio >= 0.15
 }
@@ -234,13 +318,135 @@ pub struct SensitiveSubstrings {
     /// part of an `KEY=VALUE` line, the body of a PEM block, etc.
     /// Caller pre-extracts these on run start.
     entries: Vec<(String, String)>,
+    /// The text of each sensitive file, with the file it came from: a long
+    /// run of a document found in one is a known secret.
+    texts: Vec<(String, String)>,
+    /// Every 32-character window of the long runs of `texts`, hashed: what
+    /// a document shares with one, whatever it is glued to.
+    windows: HashSet<u64>,
+}
+
+/// What a document and a sensitive file share reads as a value, not as a
+/// rule, a name or a path: six different characters, and either a digit
+/// with a letter or letters whose case keeps changing.
+fn reads_as_a_value(shared: &[u8]) -> bool {
+    let mut seen = [false; 256];
+    shared.iter().for_each(|&b| seen[b as usize] = true);
+    let case_changes = shared
+        .windows(2)
+        .filter(|pair| {
+            pair[0].is_ascii_alphabetic()
+                && pair[1].is_ascii_alphabetic()
+                && pair[0].is_ascii_uppercase() != pair[1].is_ascii_uppercase()
+        })
+        .count();
+    let mixed = shared.iter().any(u8::is_ascii_digit) && shared.iter().any(u8::is_ascii_alphabetic);
+    seen.iter().filter(|seen| **seen).count() >= 6 && (mixed || case_changes >= 8)
+}
+
+fn window_hash(window: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    window.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl SensitiveSubstrings {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            texts: Vec::new(),
+            windows: HashSet::new(),
         }
+    }
+
+    /// Track the text of a sensitive file.
+    fn add_text(&mut self, text: String, source: &str) {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+        for end in 0..=bytes.len() {
+            if bytes.get(end).is_some_and(|&b| is_token_char(b as char)) {
+                continue;
+            }
+            if end - start >= HIGH_ENTROPY_MIN_LEN {
+                for window in bytes[start..end].windows(HIGH_ENTROPY_MIN_LEN) {
+                    self.windows.insert(window_hash(window));
+                }
+            }
+            start = end + 1;
+        }
+        self.texts.push((text, source.to_string()));
+    }
+
+    /// The sensitive file sharing with `content` a stretch that reads as a
+    /// value (`reads_as_a_value`), and where. A stretch is every character
+    /// covered by 32 in a row that a sensitive file holds, one after the
+    /// other: a value whole, glued to a name, cut short or extended, held
+    /// in one place of a file or across several.
+    fn shared(&self, content: &str) -> Option<(String, usize)> {
+        if self.windows.is_empty() {
+            return None;
+        }
+        let bytes = content.as_bytes();
+        let mut start = 0;
+        for end in 0..=bytes.len() {
+            if bytes.get(end).is_some_and(|&b| is_token_char(b as char)) {
+                continue;
+            }
+            // Windows of this run; one turn more closes a stretch at its end.
+            let windows = (end + 1 - start).saturating_sub(HIGH_ENTROPY_MIN_LEN);
+            // First window of the stretch being followed.
+            let mut first: Option<usize> = None;
+            for at in start..=start + windows {
+                let held = at < start + windows
+                    && self
+                        .windows
+                        .contains(&window_hash(&bytes[at..at + HIGH_ENTROPY_MIN_LEN]));
+                match (first, held) {
+                    (None, true) => first = Some(at),
+                    (Some(from), false) => {
+                        first = None;
+                        let stretch = from..at - 1 + HIGH_ENTROPY_MIN_LEN;
+                        if !reads_as_a_value(&bytes[stretch.clone()]) {
+                            continue;
+                        }
+                        // The hash only sorts: a text names the file.
+                        let source = (from..at).find_map(|window| {
+                            let window = &content[window..window + HIGH_ENTROPY_MIN_LEN];
+                            let held = self.texts.iter().find(|(text, _)| text.contains(window));
+                            held.map(|(_, source)| source.clone())
+                        });
+                        if let Some(source) = source {
+                            return Some((source, from));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            start = end + 1;
+        }
+        None
+    }
+
+    /// Everything `other` tracks, added to this.
+    pub fn extend_from(&mut self, other: &SensitiveSubstrings) {
+        let known: HashSet<&str> = self.entries.iter().map(|(sub, _)| sub.as_str()).collect();
+        let new: Vec<(String, String)> = other
+            .entries
+            .iter()
+            .filter(|(sub, _)| !known.contains(sub.as_str()))
+            .cloned()
+            .collect();
+        self.entries.extend(new);
+        let known: HashSet<&str> = self.texts.iter().map(|(text, _)| text.as_str()).collect();
+        let new: Vec<(String, String)> = other
+            .texts
+            .iter()
+            .filter(|(text, _)| !known.contains(text.as_str()))
+            .cloned()
+            .collect();
+        self.texts.extend(new);
+        self.windows.extend(&other.windows);
     }
 
     /// Add a substring associated with a source path.
@@ -249,18 +455,31 @@ impl SensitiveSubstrings {
         if s.len() < BLOOM_MIN_SUBSTRING_LEN {
             return; // ignore short tokens — too false-positive-prone
         }
+        if self
+            .entries
+            .iter()
+            .rev()
+            .take(DEDUP_WINDOW)
+            .any(|(known, _)| *known == s)
+        {
+            return;
+        }
         self.entries.push((s, source.into()));
     }
 
     /// Check if `content` contains any tracked sensitive substring.
     /// Returns the source path of the first match.
     pub fn matches(&self, content: &str) -> Option<String> {
-        for (sub, src) in &self.entries {
-            if content.contains(sub.as_str()) {
-                return Some(src.clone());
-            }
-        }
-        None
+        self.find(content).map(|(source, _)| source)
+    }
+
+    /// `matches`, with the byte offset of the match.
+    fn find(&self, content: &str) -> Option<(String, usize)> {
+        self.entries.iter().find_map(|(sub, src)| {
+            content
+                .find(sub.as_str())
+                .map(|offset| (src.clone(), offset))
+        })
     }
 
     /// Number of tracked substrings (mostly for telemetry / tests).
@@ -309,6 +528,16 @@ pub fn scan_sensitive_files(worktree: &Path) -> SensitiveSubstrings {
             || rel.contains(".ssh/");
         if !is_sensitive {
             return;
+        }
+        // Whatever the syntax or the encoding around it, a long run of a
+        // sensitive file is a known secret: the audit only warns of the
+        // runs it finds in none of them.
+        if let Ok(bytes) = std::fs::read(path) {
+            if bytes.len() <= MAX_SENSITIVE_FILE_BYTES {
+                for text in sensitive_texts(&bytes) {
+                    subs.add_text(text, &rel);
+                }
+            }
         }
         if let Ok(content) = std::fs::read_to_string(path) {
             for line in content.lines() {
@@ -432,7 +661,7 @@ fn document_paths(worktree: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let docs_rel = docs_dir
         .strip_prefix(worktree)
         .map_err(|_| "Document directory is outside its workspace".to_string())?;
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(worktree)?
         .args([
             "ls-files",
             "-z",
@@ -443,7 +672,6 @@ fn document_paths(worktree: &Path) -> Result<Vec<std::path::PathBuf>, String> {
         ])
         .arg(docs_rel)
         .env("LC_ALL", "C")
-        .current_dir(worktree)
         .output()
         .map_err(|e| format!("Cannot enumerate versioned documents: {e}"))?;
     if !output.status.success() {
@@ -528,15 +756,34 @@ pub async fn snapshot_docs(worktree: &Path) -> Result<DocsSnapshot, String> {
     .map_err(|e| format!("Document snapshot interrupted: {e}"))?
 }
 
+/// What an audit found in the documents a step changed.
+#[derive(Debug, Default)]
+pub struct DocsAudit {
+    /// Known secrets: the caller must fail the step.
+    pub rejections: Vec<(String, SecretRejection)>,
+    /// Per document, the lines holding a possible secret. They fail nothing:
+    /// the caller tells the reader, who decides (KT-1796). The line a
+    /// rejection names is not listed again.
+    pub possible_secrets: Vec<(String, Vec<usize>)>,
+    /// Every document the step changed or removed: what the caller knew of
+    /// them before is replaced, what it knew of the others still holds.
+    pub inspected: Vec<String>,
+    /// Why some changed documents could not be read whole: the caller must
+    /// fail the step, after telling what the others hold.
+    pub incomplete: Vec<String>,
+}
+
 /// Inspect only content changed since the pre-step snapshot. Never mutate the
 /// worktree or index: another process may have authored any observed change.
-/// The caller must fail the step on rejection or an incomplete audit.
+/// The caller must fail the step on rejection or an incomplete audit, and
+/// show the possible secrets.
 pub async fn audit_docs_writes(
     worktree: &Path,
     sensitive: &SensitiveSubstrings,
     before: &DocsSnapshot,
-) -> Result<Vec<(String, SecretRejection)>, String> {
-    let mut rejections = Vec::new();
+) -> Result<DocsAudit, String> {
+    let mut audit = DocsAudit::default();
+    let mut present = HashSet::new();
     let root = worktree.to_path_buf();
     let paths = tokio::task::spawn_blocking(move || document_paths(&root))
         .await
@@ -545,31 +792,68 @@ pub async fn audit_docs_writes(
         let absolute = worktree.join(&path);
         let document = tokio::task::spawn_blocking(move || read_document(&absolute, true))
             .await
-            .map_err(|e| format!("Document read interrupted: {e}"))?
-            .map_err(|e| {
-                format!(
+            .map_err(|e| format!("Document read interrupted: {e}"))?;
+        // One document that cannot be read never hides what the others hold.
+        let document = match document {
+            Ok(Some(document)) => document,
+            Ok(None) => continue,
+            Err(e) => {
+                audit.incomplete.push(format!(
                     "Cannot audit changed document {}: {e}",
                     document_path_label(&path)
-                )
-            })?;
-        let Some(document) = document else {
-            continue;
+                ));
+                present.insert(path);
+                continue;
+            }
         };
+        present.insert(path.clone());
         if before.files.get(&path) == Some(&document.fingerprint) {
             continue;
         }
-        let bytes = document.content.ok_or_else(|| format!(
-            "Changed document {} exceeds the 16 MiB audit buffer; content was not inspected and the file was preserved", document_path_label(&path)
-        ))?;
-        // Binary assets are not textual memory/documentation.
-        let Ok(content) = std::str::from_utf8(&bytes) else {
+        let Some(bytes) = document.content else {
+            audit.incomplete.push(format!(
+                "Changed document {} exceeds the 16 MiB audit buffer; content was not inspected and the file was preserved",
+                document_path_label(&path)
+            ));
             continue;
         };
+        let content = document_text(&bytes);
+        let content = content.as_ref();
+        audit.inspected.push(document_path_label(&path));
+        // Only the first known secret is named: every line worth a look is
+        // told, the rejected one too (it can hold another run).
+        let lines = possible_secret_lines(content);
         if let Err(reason) = check_docs_content(content, sensitive) {
-            rejections.push((document_path_label(&path), reason));
+            audit.rejections.push((document_path_label(&path), reason));
+        }
+        if !lines.is_empty() {
+            audit
+                .possible_secrets
+                .push((document_path_label(&path), lines));
         }
     }
-    Ok(rejections)
+    // Gone since the snapshot: what was known of them no longer holds.
+    let removed = before.files.keys().filter(|path| !present.contains(*path));
+    audit
+        .inspected
+        .extend(removed.map(|path| document_path_label(path)));
+    Ok(audit)
+}
+
+/// The text of a document as its reader sees it: a byte-order mark and NUL
+/// bytes dropped (UTF-16), bytes that are no UTF-8 replaced. Lines keep
+/// their numbers. No document is set aside as binary: what tells text from
+/// an image also hides text in another script or a pasted terminal capture.
+fn document_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    let bytes = match bytes {
+        [0xff, 0xfe, rest @ ..] | [0xfe, 0xff, rest @ ..] => rest,
+        _ => bytes,
+    };
+    let text = String::from_utf8_lossy(bytes);
+    if text.contains('\0') {
+        return text.replace('\0', "").into();
+    }
+    text
 }
 
 /// Recursively walk a directory, calling `cb` on each FILE. Skips
@@ -641,7 +925,7 @@ mod tests {
         let index_before = fixture_git(root, &["show", ":docs/architecture.md"]);
         let status_before = fixture_git(root, &["status", "--porcelain=v1", "-uall"]);
         let before = snapshot_docs(root).await.unwrap();
-        let rejected = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+        let rejected = audit_rejections(root, &SensitiveSubstrings::new(), &before)
             .await
             .unwrap();
         assert!(
@@ -727,12 +1011,10 @@ mod tests {
 
         let before = snapshot_docs(root).await.unwrap();
         assert!(before.files.contains_key(relative));
-        assert!(
-            audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(audit_rejections(root, &SensitiveSubstrings::new(), &before)
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), working.as_bytes());
         assert_eq!(
             fixture_git(root, &["ls-files", "--stage", "-z"]),
@@ -743,7 +1025,7 @@ mod tests {
         std::fs::write(&path, fake_secret).unwrap();
         let fresh = root.join(std::ffi::OsStr::from_bytes(b"docs/notes-\xfe.md"));
         std::fs::write(&fresh, fake_secret).unwrap();
-        let rejected = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+        let rejected = audit_rejections(root, &SensitiveSubstrings::new(), &before)
             .await
             .unwrap();
         assert_eq!(rejected.len(), 2);
@@ -775,11 +1057,20 @@ mod tests {
             .unwrap()
             .set_len((MAX_AUDIT_BUFFER_BYTES + 1) as u64)
             .unwrap();
-        let error = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+        // The document that cannot be read whole is told apart, and never
+        // hides the known secret of the other one.
+        let audit = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
             .await
-            .unwrap_err();
+            .unwrap();
+        let [error] = audit.incomplete.as_slice() else {
+            panic!("{:?}", audit.incomplete);
+        };
         assert!(error.contains(r"[escaped path bytes] docs/notes-\xff.md"));
         assert!(error.contains("content was not inspected and the file was preserved"));
+        let [(rejected, _)] = audit.rejections.as_slice() else {
+            panic!("{:?}", audit.rejections);
+        };
+        assert_eq!(rejected, r"[escaped path bytes] docs/notes-\xfe.md");
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
             (MAX_AUDIT_BUFFER_BYTES + 1) as u64
@@ -806,7 +1097,7 @@ mod tests {
         let large = root.join("docs/architecture.md");
         let large_content = "ordinary architecture documentation, no credentials\n".repeat(1000);
         std::fs::write(&large, &large_content).unwrap();
-        let rejected = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+        let rejected = audit_rejections(root, &SensitiveSubstrings::new(), &before)
             .await
             .unwrap();
         assert_eq!(rejected.len(), 2, "large legitimate documents are accepted");
@@ -832,7 +1123,7 @@ mod tests {
             "sk-1234567890abcdefghijklmnopqrstuvwxyz",
         )
         .unwrap();
-        let rejected = audit_docs_writes(dir.path(), &SensitiveSubstrings::new(), &before)
+        let rejected = audit_rejections(dir.path(), &SensitiveSubstrings::new(), &before)
             .await
             .unwrap();
         assert_eq!(rejected.len(), 1);
@@ -847,7 +1138,7 @@ mod tests {
     fn entropy_diagnostic_is_secret_free_and_unicode_safe() {
         let candidate = format!("{}x", "abcd1234".repeat(4));
         let content = format!("{candidate}éééééééééééééééééééé");
-        let rejection = check_docs_content(&content, &SensitiveSubstrings::new()).unwrap_err();
+        let rejection = check_docs_write(&content, &SensitiveSubstrings::new()).unwrap_err();
         assert!(!rejection.explain().contains(&candidate));
     }
 
@@ -877,7 +1168,7 @@ mod tests {
             ],
         );
         fixture_git(root, &["commit", "-q", "-m", "change during step"]);
-        let rejected = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+        let rejected = audit_rejections(root, &SensitiveSubstrings::new(), &before)
             .await
             .unwrap();
         assert_eq!(
@@ -922,9 +1213,12 @@ mod tests {
         let before = snapshot_docs(root).await.unwrap();
         let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.set_len((MAX_AUDIT_BUFFER_BYTES + 1) as u64).unwrap();
-        let error = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+        let audit = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
             .await
-            .unwrap_err();
+            .unwrap();
+        let [error] = audit.incomplete.as_slice() else {
+            panic!("{:?}", audit.incomplete);
+        };
         assert!(error.contains("16 MiB audit buffer"));
         assert!(error.contains("file was preserved"));
         assert_eq!(
@@ -938,7 +1232,7 @@ mod tests {
             .is_none());
         let unchanged = snapshot_docs(root).await.unwrap();
         assert!(
-            audit_docs_writes(root, &SensitiveSubstrings::new(), &unchanged)
+            audit_rejections(root, &SensitiveSubstrings::new(), &unchanged)
                 .await
                 .unwrap()
                 .is_empty()
@@ -954,7 +1248,7 @@ mod tests {
         let fake_secret = "sk-1234567890abcdefghijklmnopqrstuvwxyz";
         std::fs::write(&path, fake_secret).unwrap();
         assert!(
-            audit_docs_writes(dir.path(), &SensitiveSubstrings::new(), &before)
+            audit_rejections(dir.path(), &SensitiveSubstrings::new(), &before)
                 .await
                 .unwrap()
                 .is_empty()
@@ -976,7 +1270,7 @@ mod tests {
             "a listed file can vanish before open"
         );
         assert!(
-            audit_docs_writes(dir.path(), &SensitiveSubstrings::new(), &before)
+            audit_rejections(dir.path(), &SensitiveSubstrings::new(), &before)
                 .await
                 .unwrap()
                 .is_empty()
@@ -997,12 +1291,23 @@ mod tests {
         let before = snapshot_docs(dir.path()).await.unwrap();
         std::os::unix::fs::symlink(&path, dir.path().join("docs/link.md")).unwrap();
         assert!(
-            audit_docs_writes(dir.path(), &SensitiveSubstrings::new(), &before)
+            audit_rejections(dir.path(), &SensitiveSubstrings::new(), &before)
                 .await
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    /// The rejections of an audit alone.
+    async fn audit_rejections(
+        worktree: &Path,
+        sensitive: &SensitiveSubstrings,
+        before: &DocsSnapshot,
+    ) -> Result<Vec<(String, SecretRejection)>, String> {
+        audit_docs_writes(worktree, sensitive, before)
+            .await
+            .map(|audit| audit.rejections)
     }
 
     fn empty_subs() -> SensitiveSubstrings {
@@ -1155,7 +1460,7 @@ mod tests {
         let content = "DB connection uses supersecretdbpassword123 as the password.";
         let result = check_docs_write(content, &subs);
         match result {
-            Err(SecretRejection::SensitiveFileSubstring { source }) => {
+            Err(SecretRejection::SensitiveFileSubstring { source, .. }) => {
                 assert_eq!(source, ".env");
             }
             other => panic!("expected SensitiveFileSubstring, got {:?}", other),
@@ -1189,6 +1494,7 @@ mod tests {
     fn explain_returns_human_message() {
         let r = SecretRejection::DenylistPattern {
             pattern: "AKIA (AWS)",
+            line: 1,
         };
         assert!(r.explain().contains("AKIA"));
         let r = SecretRejection::TooLarge { bytes: 9999 };
@@ -1244,5 +1550,706 @@ mod tests {
             !subs.is_empty(),
             "expected to capture at least one pem line"
         );
+    }
+
+    // ─── KT-1796 — identifiers, runs already there, line numbers ─────
+
+    /// 40 base64 characters, 14 of them digits.
+    const BASE64_TOKEN: &str = "q8Z3vL0xT5mR2nB7kW9cY4hJ1pF6dS3gA8eU0iO2";
+    /// 43 base64 characters with a `/`, as `openssl rand -base64 32` gives
+    /// before its padding.
+    const SLASH_TOKEN: &str = "Zk3xT9qLm2Vw8rYpB1nC/4hJ7dF0sG5aE6uKoI2tXbQ";
+    /// 40 hexadecimal characters (a SHA-1).
+    const HEX_TOKEN: &str = "3f786850e387550fdab836ed7e6dc881de23001b";
+
+    #[test]
+    fn a_rejection_names_its_line_without_the_content() {
+        let content = format!("# Title\n\nIntro.\n\nValue {BASE64_TOKEN}\n");
+        let explained = check_docs_write(&content, &SensitiveSubstrings::new())
+            .unwrap_err()
+            .explain();
+        assert!(explained.contains("line 5"), "{explained}");
+        assert!(!explained.contains(BASE64_TOKEN), "{explained}");
+
+        let content = "one\ntwo\nkey sk-1234567890abcdefghijklmnopqrstuvwxyz\n";
+        let explained = check_docs_content(content, &SensitiveSubstrings::new())
+            .unwrap_err()
+            .explain();
+        assert!(explained.contains("line 3"), "{explained}");
+
+        let mut subs = SensitiveSubstrings::new();
+        subs.add("supersecretdbpassword123", ".env");
+        let explained = check_docs_content("a\nuses supersecretdbpassword123\n", &subs)
+            .unwrap_err()
+            .explain();
+        assert!(explained.contains("line 2"), "{explained}");
+        assert!(
+            !explained.contains("supersecretdbpassword123"),
+            "{explained}"
+        );
+    }
+
+    /// A document with one line of prose, then `lines`, changed by a step.
+    async fn audit_of(lines: &[&str], sensitive: &SensitiveSubstrings) -> DocsAudit {
+        let content = format!("# Notes\n{}\n", lines.join("\n"));
+        audit_of_bytes(content.as_bytes(), sensitive).await
+    }
+
+    /// `audit_of`, for a document that is not plain UTF-8 text.
+    async fn audit_of_bytes(content: &[u8], sensitive: &SensitiveSubstrings) -> DocsAudit {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fixture_git(root, &["init", "-q"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/notes.md"), "# Notes\n").unwrap();
+        let before = snapshot_docs(root).await.unwrap();
+        std::fs::write(root.join("docs/notes.md"), content).unwrap();
+        audit_docs_writes(root, sensitive, &before).await.unwrap()
+    }
+
+    /// KT-1796 — form cannot tell a token from an identifier: neither fails
+    /// the step, both are reported with their line.
+    #[tokio::test]
+    async fn a_high_entropy_run_is_reported_and_fails_nothing() {
+        let token = format!("Value {BASE64_TOKEN} here.");
+        let lines = [
+            "Debt TD-20260218-contexts-vs-serverdata-features is open.",
+            "Prose only.",
+            token.as_str(),
+            "Commit 3f786850e387550fdab836ed7e6dc881de23001b fixed it.",
+        ];
+        let audit = audit_of(&lines, &SensitiveSubstrings::new()).await;
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![2, 4, 5])]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_with_two_runs_is_reported_once() {
+        let line = format!("{BASE64_TOKEN} then {HEX_TOKEN}");
+        let audit = audit_of(&[line.as_str()], &SensitiveSubstrings::new()).await;
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![2])]
+        );
+    }
+
+    /// A possible secret earlier in the document never hides a known one.
+    #[tokio::test]
+    async fn a_known_secret_after_a_possible_one_still_fails_the_step() {
+        let possible = format!("Value {BASE64_TOKEN} here.");
+        let lines = [
+            possible.as_str(),
+            "key sk-1234567890abcdefghijklmnopqrstuvwxyz",
+        ];
+        let audit = audit_of(&lines, &SensitiveSubstrings::new()).await;
+        assert!(
+            matches!(
+                audit.rejections.as_slice(),
+                [(path, SecretRejection::DenylistPattern { line: 3, .. })] if path == "docs/notes.md"
+            ),
+            "{:?}",
+            audit.rejections
+        );
+
+        let mut subs = SensitiveSubstrings::new();
+        subs.add("supersecretdbpassword123", ".env");
+        let lines = [possible.as_str(), "uses supersecretdbpassword123"];
+        let audit = audit_of(&lines, &subs).await;
+        assert!(
+            matches!(
+                audit.rejections.as_slice(),
+                [(_, SecretRejection::SensitiveFileSubstring { line: 3, .. })]
+            ),
+            "{:?}",
+            audit.rejections
+        );
+        // The possible one is still told; the rejected line is not told twice.
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![2])]
+        );
+        assert_eq!(audit.inspected, vec!["docs/notes.md".to_string()]);
+
+        // A rejected line can hold another run: it is told too.
+        let known = format!("key sk-1234567890abcdefghijklmnopqrstuvwxyz and {BASE64_TOKEN}");
+        let audit = audit_of(&[known.as_str()], &SensitiveSubstrings::new()).await;
+        assert_eq!(audit.rejections.len(), 1);
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![2])]
+        );
+    }
+
+    /// What a document quotes from a sensitive file is rarely the whole
+    /// value as the file spells it: a key cut out of a URL, one line of a
+    /// key stored as a JSON string, a fragment, a value on a commented line
+    /// or in a UTF-16 file.
+    #[tokio::test]
+    async fn a_part_of_a_sensitive_value_fails_the_step() {
+        let long = format!("{BASE64_TOKEN}{HEX_TOKEN}{BASE64_TOKEN}");
+        let utf16: Vec<u8> = format!("KEY={HEX_TOKEN}\n")
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let cases: Vec<(&str, Vec<u8>, String)> = vec![
+            (
+                ".env",
+                format!("SENTRY_DSN=https://{HEX_TOKEN}@sentry.example.com/42\n").into_bytes(),
+                format!("Key {HEX_TOKEN} here."),
+            ),
+            (
+                ".env",
+                format!("HOOK_URL=https://ci.example.com/hooks/{BASE64_TOKEN}\n").into_bytes(),
+                format!("Call https://other.example.org/x/{BASE64_TOKEN} now."),
+            ),
+            (
+                "credentials.json",
+                format!("{{\"private_key\": \"-----BEGIN X-----\\n{BASE64_TOKEN}\\n{HEX_TOKEN}\\n\"}}\n")
+                    .into_bytes(),
+                format!("Line {HEX_TOKEN} of the key."),
+            ),
+            (
+                ".env",
+                format!("TOKEN={long}\n").into_bytes(),
+                format!("Starts with {} then stops.", &long[..45]),
+            ),
+            (
+                ".env",
+                format!("# LEGACY_API_SECRET_FOR_THE_OLD_GATEWAY={HEX_TOKEN}\n").into_bytes(),
+                format!("Value {HEX_TOKEN} here."),
+            ),
+            (".env", utf16, format!("Value {HEX_TOKEN} here.")),
+            // A base64 value with `/`, after a comment hid it from the
+            // `KEY=VALUE` reading, glued to a name in the document.
+            (
+                ".env",
+                format!("SESSION_SECRET={SLASH_TOKEN}= # rotate monthly\n").into_bytes(),
+                format!("SESSION_SECRET_PRODUCTION_GATEWAY={SLASH_TOKEN}="),
+            ),
+            (
+                "credentials.json",
+                format!("{{\"id\":\"svc\",\"session_secret\":\"{SLASH_TOKEN}=\"}}\n").into_bytes(),
+                format!("SECRET={SLASH_TOKEN}="),
+            ),
+            (
+                ".env",
+                format!("export K=\"{SLASH_TOKEN}\";\n").into_bytes(),
+                format!("prefix_{SLASH_TOKEN}"),
+            ),
+        ];
+        for (index, (name, body, line)) in cases.into_iter().enumerate() {
+            let secrets = tempfile::tempdir().unwrap();
+            std::fs::write(secrets.path().join(name), &body).unwrap();
+            let subs = scan_sensitive_files(secrets.path());
+            let audit = audit_of(&[line.as_str()], &subs).await;
+            assert!(
+                matches!(
+                    audit.rejections.as_slice(),
+                    [(_, SecretRejection::SensitiveFileSubstring { line: 2, .. })]
+                ),
+                "case {index} ({name}): {:?}",
+                audit.rejections
+            );
+        }
+    }
+
+    /// A document glues what it quotes to a name (`hook_…`, `…-prod`,
+    /// Markdown italics) where the file had a `/` or a quote: the run is
+    /// no longer the file's, the 32 characters they share still are.
+    #[tokio::test]
+    async fn a_sensitive_value_glued_to_other_characters_fails_the_step() {
+        let long = format!("{BASE64_TOKEN}{HEX_TOKEN}{BASE64_TOKEN}");
+        let hook = format!("HOOK_URL=https://ci.example.com/hooks/{HEX_TOKEN}\n");
+        let split = "aaaa1111bbbb2222=cccc3333dddd4444eeee";
+        let cases: Vec<(&str, String, String)> = vec![
+            (".env", hook.clone(), format!("hook_{HEX_TOKEN}")),
+            (".env", hook.clone(), format!("In _{HEX_TOKEN}_ italics.")),
+            (".env", hook.clone(), format!("id-{HEX_TOKEN}")),
+            (".env", hook.clone(), format!("{HEX_TOKEN}-prod")),
+            (".env", hook.clone(), format!("x{HEX_TOKEN}")),
+            (".env", hook, format!("KEY={HEX_TOKEN}_v2")),
+            (
+                ".env",
+                format!("GIT_URL=https://{HEX_TOKEN}@github.com/org/repo.git\n"),
+                format!("tok-{HEX_TOKEN}"),
+            ),
+            (
+                "credentials.json",
+                format!("{{\n  \"conn\": \"{split}\",\n  \"id\": \"svc\"\n}}\n"),
+                format!("conn_{split}"),
+            ),
+            (
+                ".env",
+                format!("T={long}\n"),
+                format!("tok_{}", &long[..45]),
+            ),
+        ];
+        for (index, (name, body, line)) in cases.into_iter().enumerate() {
+            let secrets = tempfile::tempdir().unwrap();
+            std::fs::write(secrets.path().join(name), &body).unwrap();
+            let subs = scan_sensitive_files(secrets.path());
+            let audit = audit_of(&[line.as_str()], &subs).await;
+            assert!(
+                matches!(
+                    audit.rejections.as_slice(),
+                    [(_, SecretRejection::SensitiveFileSubstring { line: 2, .. })]
+                ),
+                "case {index} ({name}): {:?}",
+                audit.rejections
+            );
+        }
+    }
+
+    /// What a sensitive file holds is known, whatever its share of digits
+    /// and whatever the document glues it to or cuts from it.
+    #[tokio::test]
+    async fn a_run_shared_with_a_sensitive_file_fails_the_step_whatever_its_digits() {
+        // 42 characters, 4 digits: under the share a possible secret needs.
+        let low = "kQwErTyUiOpAsDfGhJkLzXcVbNmQwErTyU1p2A3s4D";
+        // 74 characters, 10 digits.
+        let long = "mNbVcXzLkJhGfDsApOiUyTrEwQmNbVcXzLkJhGfDsApOiUyTrEwQmN0b1V2c3X4z5L6k7J8h9G";
+        // 36 characters, 5 digits.
+        let short = "hGfDsApOiUyTrEwQzXcVbNmLkJh1G2f3D4s5";
+        let cases: Vec<(&str, String, String)> = vec![
+            (
+                "credentials.json",
+                format!("{{\n  \"client_secret\": \"{low}\",\n  \"id\": \"svc\"\n}}\n"),
+                format!("Secret {low} here."),
+            ),
+            (
+                ".env",
+                format!("APP_SIGNING={low} # rotate yearly\n"),
+                format!("Secret {low} here."),
+            ),
+            (
+                ".env",
+                format!("APP_SIGNING={low}aBc==\n"),
+                format!("Secret {low} here."),
+            ),
+            (
+                ".env",
+                format!("API_VALUE={long}\n"),
+                format!("configurationprefixletters_{}", &long[..40]),
+            ),
+            (
+                ".env",
+                format!("API_VALUE={short}-production-environment-eu\n"),
+                format!("id_9912345_{short}-production-env"),
+            ),
+            // Its digits at the end, past the first 32 characters.
+            (
+                ".env",
+                format!("K={}12345678\n", &low[..32]),
+                format!("x_{}1234", &low[..32]),
+            ),
+            // `+` as a JSON serialiser escapes it.
+            (
+                "credentials.json",
+                format!("{{\"key\":\"{}\\u002b{}\"}}\n", &low[..20], &low[20..]),
+                format!("key: {}+{}", &low[..20], &low[20..]),
+            ),
+        ];
+        for (index, (name, body, line)) in cases.into_iter().enumerate() {
+            let secrets = tempfile::tempdir().unwrap();
+            std::fs::write(secrets.path().join(name), &body).unwrap();
+            let subs = scan_sensitive_files(secrets.path());
+            let audit = audit_of(&[line.as_str()], &subs).await;
+            assert!(
+                matches!(
+                    audit.rejections.as_slice(),
+                    [(_, SecretRejection::SensitiveFileSubstring { line: 2, .. })]
+                ),
+                "case {index} ({name}): {:?}",
+                audit.rejections
+            );
+        }
+    }
+
+    /// What a sensitive file and a document share by convention is no
+    /// secret: a rule, a variable name, a path without a digit.
+    #[tokio::test]
+    async fn the_ordinary_text_of_a_sensitive_file_fails_nothing() {
+        let rule = "-".repeat(40);
+        let bar = "=".repeat(40);
+        let name = "REACT_APP_FIREBASE_MESSAGING_SENDER_ID";
+        let path = "/srv/app/config/production/secrets/README";
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secrets.path().join(".env"),
+            format!("# {rule}\n#{bar}\n{name}=42\n# see {path}\n"),
+        )
+        .unwrap();
+        let subs = scan_sensitive_files(secrets.path());
+        let table = format!("|{rule}|{rule}|");
+        let named = format!("Set `{name}` first.");
+        let cited = format!("Read {path} before.");
+        let lines = [
+            "Title",
+            bar.as_str(),
+            table.as_str(),
+            named.as_str(),
+            cited.as_str(),
+        ];
+        let audit = audit_of(&lines, &subs).await;
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+    }
+
+    /// A document that cannot be read whole leaves the audit incomplete,
+    /// not blind: what the others hold is still told.
+    #[tokio::test]
+    async fn a_document_too_large_leaves_the_others_audited() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fixture_git(root, &["init", "-q"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        let before = snapshot_docs(root).await.unwrap();
+        std::fs::write(
+            root.join("docs/a.md"),
+            format!("Value {BASE64_TOKEN} here.\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join("docs/dump.md"), vec![b'a'; 17 * 1024 * 1024]).unwrap();
+        std::fs::write(
+            root.join("docs/z.md"),
+            "key sk-1234567890abcdefghijklmnopqrstuvwxyz\n",
+        )
+        .unwrap();
+        let audit = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+            .await
+            .unwrap();
+        assert_eq!(audit.incomplete.len(), 1, "{:?}", audit.incomplete);
+        assert!(
+            audit.incomplete[0].contains("docs/dump.md"),
+            "{:?}",
+            audit.incomplete
+        );
+        assert_eq!(
+            audit.possible_secrets,
+            vec![
+                ("docs/a.md".to_string(), vec![1]),
+                ("docs/z.md".to_string(), vec![1])
+            ]
+        );
+        assert_eq!(audit.rejections.len(), 1);
+    }
+
+    /// Nothing is set aside as binary: a file full of control bytes, a
+    /// UTF-16 document in another script or a pasted terminal capture is
+    /// read like any other, for known secrets and for possible ones.
+    #[tokio::test]
+    async fn no_document_is_set_aside_as_binary() {
+        let noise: Vec<u8> = (0..4096u32).map(|i| (i * 131 % 251) as u8).collect();
+        let mut bytes = noise.clone();
+        bytes.extend_from_slice(b"\nkey sk-1234567890abcdefghijklmnopqrstuvwxyz\n");
+        let audit = audit_of_bytes(&bytes, &SensitiveSubstrings::new()).await;
+        assert_eq!(audit.rejections.len(), 1);
+
+        let mut blob = noise;
+        blob.extend_from_slice(format!("\n/ID <{HEX_TOKEN}>\n").as_bytes());
+        let russian: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain(
+                format!("\u{414}\u{43e}\u{43a}\u{443}\u{43c}\u{435}\u{43d}\u{442}.\n\u{43a}\u{43b}\u{44e}\u{447}: {BASE64_TOKEN}\n")
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes),
+            )
+            .collect();
+        let capture = format!("id\u{8}: {BASE64_TOKEN}\nrotate soon\n").into_bytes();
+        for (index, bytes) in [blob, russian, capture].iter().enumerate() {
+            let audit = audit_of_bytes(bytes, &SensitiveSubstrings::new()).await;
+            assert!(audit.rejections.is_empty(), "case {index}");
+            assert_eq!(audit.possible_secrets.len(), 1, "case {index}");
+        }
+    }
+
+    /// The pattern list stays fast on the largest document the audit reads.
+    #[test]
+    fn a_large_binary_document_is_searched_in_seconds() {
+        // A quarter of the audit buffer: 5 s for the whole of it, measured
+        // on a debug build.
+        let bytes: Vec<u8> = (0..(MAX_AUDIT_BUFFER_BYTES / 4) as u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let started = std::time::Instant::now();
+        let text = document_text(&bytes);
+        let _ = check_docs_content(&text, &SensitiveSubstrings::new());
+        let _ = possible_secret_lines(&text);
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
+    }
+
+    /// Prose in an 8-bit encoding is text: accents are no reason to skip it.
+    #[tokio::test]
+    async fn a_document_in_a_legacy_encoding_is_read_as_text() {
+        // Latin-1: one byte per accented letter, no UTF-8.
+        let prose = "Pr\u{e9}sentation g\u{e9}n\u{e9}rale de la cl\u{e9} d\u{e9}ploy\u{e9}e \u{e0} l'\u{e9}t\u{e9}.\n";
+        let latin1 = |text: &str| -> Vec<u8> { text.chars().map(|c| c as u8).collect() };
+        let known = latin1(&format!(
+            "{prose}cl\u{e9} : sk-1234567890abcdefghijklmnopqrstuvwxyz\n"
+        ));
+        let audit = audit_of_bytes(&known, &SensitiveSubstrings::new()).await;
+        assert_eq!(audit.rejections.len(), 1);
+
+        let possible = latin1(&format!("{prose}valeur {BASE64_TOKEN}\n"));
+        let audit = audit_of_bytes(&possible, &SensitiveSubstrings::new()).await;
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![2])]
+        );
+    }
+
+    /// Two places of a sensitive file can each hold a part of what the
+    /// document quotes: what they hold together is judged, not each alone.
+    #[tokio::test]
+    async fn a_value_held_in_two_places_of_a_sensitive_file_fails_the_step() {
+        let head = format!("aBcDeFg{}", "h".repeat(33));
+        let secret = format!("{head}iJkLmN");
+        let decoys: String = (0..70)
+            .map(|index| format!("  \"k{index}\": \"x_{head}iJ\",\n"))
+            .collect();
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secrets.path().join("credentials.json"),
+            format!("{{\n{decoys}  \"client_secret\": \"{secret}\"\n}}\n"),
+        )
+        .unwrap();
+        let subs = scan_sensitive_files(secrets.path());
+        for line in [
+            format!("rotation note: x_{secret}"),
+            format!("secret {secret}"),
+        ] {
+            let audit = audit_of(&[line.as_str()], &subs).await;
+            assert_eq!(audit.rejections.len(), 1, "{line}");
+        }
+
+        let serial = format!("0123456789{}", "0".repeat(31));
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secrets.path().join(".env"),
+            format!("# serial: {serial}\n# api_secret: {}ab\n", &serial[1..]),
+        )
+        .unwrap();
+        let subs = scan_sensitive_files(secrets.path());
+        let line = format!("value {serial}ab");
+        let audit = audit_of(&[line.as_str()], &subs).await;
+        assert_eq!(audit.rejections.len(), 1);
+    }
+
+    /// A document that is not plain UTF-8 is still read: UTF-16 text, or
+    /// text with a stray byte, hides nothing.
+    #[tokio::test]
+    async fn a_document_in_another_encoding_is_still_audited() {
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(secrets.path().join(".env"), format!("KEY={HEX_TOKEN}\n")).unwrap();
+        let subs = scan_sensitive_files(secrets.path());
+        let text = format!("# Notes\nValue {HEX_TOKEN} here.\n");
+        let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let with_bom: Vec<u8> = [0xff, 0xfe].into_iter().chain(utf16.clone()).collect();
+        let mut stray = text.clone().into_bytes();
+        stray.insert(3, 0xff);
+        let denied: Vec<u8> = "# Notes\nkey sk-1234567890abcdefghijklmnopqrstuvwxyz\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        for (index, bytes) in [utf16, with_bom, stray, denied].iter().enumerate() {
+            let audit = audit_of_bytes(bytes, &subs).await;
+            assert_eq!(audit.rejections.len(), 1, "case {index}");
+            assert_eq!(
+                audit.inspected,
+                vec!["docs/notes.md".to_string()],
+                "case {index}"
+            );
+        }
+        let possible: Vec<u8> = format!("# Notes\nValue {BASE64_TOKEN} here.\n")
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let audit = audit_of_bytes(&possible, &subs).await;
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![2])]
+        );
+    }
+
+    /// One pass over a document made of runs, however many it holds.
+    #[test]
+    fn the_lines_of_many_runs_are_counted_in_one_pass() {
+        let content = format!("{HEX_TOKEN}\n").repeat(60_000);
+        let started = std::time::Instant::now();
+        let lines = possible_secret_lines(&content);
+        assert_eq!(lines.len(), 60_000);
+        assert_eq!(lines.last(), Some(&60_000));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// The public metadata of a credential file is not a secret.
+    #[tokio::test]
+    async fn the_public_fields_of_a_credential_file_fail_nothing() {
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secrets.path().join("credentials.json"),
+            "{\n  \"type\": \"service_account\",\n  \"project_id\": \"my-proj-123456\",\n  \"token_uri\": \"https://oauth2.googleapis.com/token\"\n}\n",
+        )
+        .unwrap();
+        let subs = scan_sensitive_files(secrets.path());
+        let lines = [
+            "We call storage.googleapis.com from the worker of my-proj-123456.",
+            "It is a service_account, see https://oauth2.googleapis.com/token.",
+        ];
+        let audit = audit_of(&lines, &subs).await;
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+    }
+
+    /// A name glued to a token does not hide it from the reader.
+    #[tokio::test]
+    async fn a_token_after_its_name_is_still_reported() {
+        let lines = [
+            "GATEWAY_API_SECRET_KEY=q8ZvL0xTmR2nBkW9cYhJ1pFdS3gAeU0iOabc",
+            "https://hooks.example.com/services/q8ZvL0xTmR2nBkW9cYhJ1pFdS3gAeU0iOabc",
+            "PLAIN_NAME_WITHOUT_ANY_VALUE=see-the-vault-for-this-one",
+        ];
+        let audit = audit_of(&lines, &SensitiveSubstrings::new()).await;
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![2, 3])]
+        );
+    }
+
+    #[test]
+    fn a_rescan_adds_nothing_it_already_holds() {
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(secrets.path().join(".env"), format!("KEY={HEX_TOKEN}\n")).unwrap();
+        let first = scan_sensitive_files(secrets.path());
+        let mut again = scan_sensitive_files(secrets.path());
+        let (entries, texts) = (again.entries.len(), again.texts.len());
+        assert_eq!(entries, 1, "{:?}", again.entries);
+        again.extend_from(&first);
+        assert_eq!((again.entries.len(), again.texts.len()), (entries, texts));
+    }
+
+    /// A run no sensitive file holds only warns, sensitive files or not.
+    #[tokio::test]
+    async fn a_run_no_sensitive_file_holds_still_fails_nothing() {
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(secrets.path().join(".env"), format!("KEY={HEX_TOKEN}\n")).unwrap();
+        let subs = scan_sensitive_files(secrets.path());
+        let line = format!("Value {BASE64_TOKEN} here.");
+        let audit = audit_of(&[line.as_str()], &subs).await;
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+        assert_eq!(audit.possible_secrets.len(), 1);
+    }
+
+    /// A value the scanner does not extract verbatim (JSON, YAML, a trailing
+    /// comment, a file that is not UTF-8) is still a known secret.
+    #[tokio::test]
+    async fn a_run_of_a_sensitive_file_fails_the_step_whatever_its_syntax() {
+        for (name, body) in [
+            (
+                ".env",
+                format!("SESSION_SECRET={BASE64_TOKEN} # rotate monthly\n").into_bytes(),
+            ),
+            (
+                "credentials.json",
+                format!("{{\n  \"private_key_id\": \"{HEX_TOKEN}\",\n}}\n").into_bytes(),
+            ),
+            (
+                "credentials.yml",
+                format!("token: {BASE64_TOKEN}\n").into_bytes(),
+            ),
+            (
+                ".env.local",
+                [
+                    b"\xff\xfe name\n".as_slice(),
+                    format!("KEY={HEX_TOKEN}\n").as_bytes(),
+                ]
+                .concat(),
+            ),
+        ] {
+            let secrets = tempfile::tempdir().unwrap();
+            std::fs::write(secrets.path().join(name), &body).unwrap();
+            let subs = scan_sensitive_files(secrets.path());
+            let token = if body
+                .windows(BASE64_TOKEN.len())
+                .any(|w| w == BASE64_TOKEN.as_bytes())
+            {
+                BASE64_TOKEN
+            } else {
+                HEX_TOKEN
+            };
+            let line = format!("Value {token} here.");
+            let audit = audit_of(&[line.as_str()], &subs).await;
+            assert!(
+                matches!(
+                    audit.rejections.as_slice(),
+                    [(_, SecretRejection::SensitiveFileSubstring { line: 2, .. })]
+                ),
+                "{name}: {:?}",
+                audit.rejections
+            );
+        }
+    }
+
+    /// What a step removed or changed is named, so that what was known of
+    /// it is replaced; an untouched document is not.
+    #[tokio::test]
+    async fn the_audit_names_every_document_the_step_changed_or_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fixture_git(root, &["init", "-q"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        for name in ["kept.md", "changed.md", "removed.md"] {
+            std::fs::write(root.join("docs").join(name), format!("{BASE64_TOKEN}\n")).unwrap();
+        }
+        fixture_git(root, &["add", "docs"]);
+        let before = snapshot_docs(root).await.unwrap();
+        std::fs::write(root.join("docs/changed.md"), "Clean now.\n").unwrap();
+        std::fs::remove_file(root.join("docs/removed.md")).unwrap();
+
+        let audit = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+            .await
+            .unwrap();
+        assert_eq!(audit.inspected, vec!["docs/changed.md", "docs/removed.md"]);
+        assert_eq!(audit.possible_secrets, vec![]);
+    }
+
+    /// A value of a sensitive file is rejected whatever its form: the
+    /// detector that only warns never takes it over.
+    #[tokio::test]
+    async fn a_sensitive_file_value_shaped_like_a_token_still_fails_the_step() {
+        let mut subs = SensitiveSubstrings::new();
+        subs.add(BASE64_TOKEN, ".env");
+        let line = format!("Value {BASE64_TOKEN} here.");
+        let audit = audit_of(&[line.as_str()], &subs).await;
+        assert!(
+            matches!(
+                audit.rejections.as_slice(),
+                [(_, SecretRejection::SensitiveFileSubstring { line: 2, .. })]
+            ),
+            "{:?}",
+            audit.rejections
+        );
+    }
+
+    /// A memory entry has no reader to warn.
+    #[test]
+    fn a_memory_entry_with_a_possible_secret_is_rejected() {
+        for content in [
+            format!("Value {BASE64_TOKEN} here."),
+            "Debt TD-20260218-contexts-vs-serverdata-features is open.".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    check_docs_write(&content, &empty_subs()),
+                    Err(SecretRejection::HighEntropyRun { line: 1 })
+                ),
+                "{content}"
+            );
+        }
     }
 }

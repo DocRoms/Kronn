@@ -102,9 +102,9 @@ fn required_identity(
 }
 
 fn git_value(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = crate::core::cmd::git_cmd()
+    // `cwd` may be a Kronn-managed worktree a worker writes: pinned there.
+    let output = crate::core::lane_git::git_keeping_owner_hooks(cwd)?
         .args(args)
-        .current_dir(cwd)
         .output()
         .map_err(|error| format!("git is unavailable: {error}"))?;
     if !output.status.success() {

@@ -14,9 +14,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use ts_rs::TS;
 
-use crate::api::audit::anti_hallu_enforce::{named_sections, NamedSection};
+use crate::core::anti_halluc::{named_sections, NamedSection};
 
-pub const PROVENANCE_FILENAME: &str = "provenance.json";
+pub use crate::core::kronn_state::PROVENANCE_FILENAME;
 
 const README: &str = "Managed by Kronn. Which docs a human validated, as digests of the \
 validated text. A doc whose text no longer matches is to reconfirm. Commit it with the docs.";
@@ -194,11 +194,16 @@ pub fn provenance_path(project: &Path) -> PathBuf {
 /// record from nothing and silently drops the other docs' validations.
 pub fn read_strict(project: &Path) -> Result<ProvenanceFile, String> {
     let path = provenance_path(project);
-    match std::fs::read_to_string(&path) {
-        Ok(data) => {
+    // Through the project's fds (KT-1595): a link planted at the record (or at
+    // `docs`) is an error, so another project's record is never imported and
+    // rewritten as this one's.
+    match crate::core::fs_guard::guarded_read(project, &path) {
+        Ok(Some(bytes)) => {
+            let data = String::from_utf8(bytes)
+                .map_err(|e| format!("{} is malformed: {e}", path.display()))?;
             serde_json::from_str(&data).map_err(|e| format!("{} is malformed: {e}", path.display()))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ProvenanceFile::default()),
+        Ok(None) => Ok(ProvenanceFile::default()),
         Err(e) => Err(format!("Cannot read {}: {e}", path.display())),
     }
 }
@@ -235,8 +240,22 @@ fn is_doc(project: &Path, doc: &str) -> bool {
             .is_ok_and(|p| !p.as_os_str().is_empty())
 }
 
+/// The text of a doc, read through the project's fds (KT-1595). A link at the
+/// doc or in a parent is refused and reads as ABSENT: nothing is read, hashed or
+/// stored (`preserve_validated_original` copies what it is given into
+/// `.kronn/audit/validated-originals`) from outside the project, and a doc that
+/// cannot be read is never recorded as validated.
 fn read_doc(project: &Path, doc: &str) -> Option<String> {
-    std::fs::read_to_string(project.join(doc)).ok()
+    match crate::core::fs_guard::guarded_read(project, &project.join(doc)) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).ok(),
+        Ok(None) => None,
+        Err(e) => {
+            if crate::core::fs_guard::is_link_refusal(&e) {
+                tracing::warn!("Provenance: {doc} is a link or sits behind one — not read: {e}");
+            }
+            None
+        }
+    }
 }
 
 fn digests(sections: &[NamedSection], human_only: bool) -> BTreeMap<String, String> {
@@ -496,37 +515,66 @@ fn note_write_in(
 pub fn snapshot_tracked(project: &Path) -> Result<Vec<(String, String)>, String> {
     read_strict(project)?;
     let docs = crate::core::scanner::detect_docs_dir(project);
-    if !docs.exists() {
-        return Ok(Vec::new());
-    }
     let mut out = Vec::new();
-    let entries = walkdir::WalkDir::new(&docs)
-        .into_iter()
-        .filter_entry(|entry| {
-            !(entry.depth() == 1 && matches!(entry.file_name().to_str(), Some("legacy" | "var")))
-        });
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Cannot snapshot docs: {e}"))?;
-        if entry.file_type().is_symlink() {
-            return Err(format!(
-                "Cannot snapshot symbolic link {}",
-                entry.path().display()
-            ));
-        }
-        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "md") {
-            let doc = entry
-                .path()
-                .strip_prefix(project)
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .replace('\\', "/");
-            let content = std::fs::read_to_string(entry.path())
-                .map_err(|e| format!("Cannot snapshot {doc}: {e}"))?;
-            out.push((doc, content));
-        }
-    }
+    // Listed and read through the project's fds (KT-1595): a linked `docs`
+    // folder, folder or file — planted, or swapped in after a listing — is an
+    // error, never followed, so no outside file is hashed into the record.
+    snapshot_dir(project, &docs, true, &mut out)?;
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+fn snapshot_dir(
+    project: &Path,
+    dir: &Path,
+    top: bool,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    use crate::core::fs_guard::{guarded_list, guarded_read, is_link_refusal};
+    let linked = |path: &Path| format!("Cannot snapshot symbolic link {}", path.display());
+    let names = match guarded_list(project, dir) {
+        Ok(Some(names)) => names,
+        Ok(None) => return Ok(()),
+        Err(e) if is_link_refusal(&e) => return Err(linked(dir)),
+        Err(e) => return Err(format!("Cannot snapshot docs: {}: {e}", dir.display())),
+    };
+    for name in names {
+        if top && matches!(name.to_str(), Some("legacy" | "var")) {
+            continue;
+        }
+        let path = dir.join(&name);
+        // A folder is walked; a link is an error; anything else is a file.
+        match guarded_list(project, &path) {
+            Ok(Some(_)) => {
+                snapshot_dir(project, &path, false, out)?;
+                continue;
+            }
+            Ok(None) => continue,
+            Err(e) if is_link_refusal(&e) => return Err(linked(&path)),
+            Err(_) => {}
+        }
+        if path.extension().is_none_or(|ext| ext != "md") {
+            continue;
+        }
+        let doc = path
+            .strip_prefix(project)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        match guarded_read(project, &path) {
+            Ok(Some(bytes)) => {
+                let content =
+                    String::from_utf8(bytes).map_err(|e| format!("Cannot snapshot {doc}: {e}"))?;
+                out.push((doc, content));
+            }
+            Ok(None) => {}
+            Err(e) if is_link_refusal(&e) => return Err(linked(&path)),
+            // Not a regular file (a socket, a device): not a doc.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+            Err(e) => return Err(format!("Cannot snapshot {doc}: {e}")),
+        }
+    }
+    Ok(())
 }
 
 /// After a writer ran: mark every tracked doc it changed. Returns how many.
@@ -768,9 +816,9 @@ pub fn confirm(project: &Path, docs: &[String]) -> Result<Vec<String>, String> {
     // Preflight the entire selection before advancing any provenance. Deleted
     // documents keep the established behavior of removing their old record.
     for doc in &targets {
-        if read_doc(project, doc).is_some_and(|content| {
-            crate::core::document_optimization::contains_placeholder(&content)
-        }) {
+        if read_doc(project, doc)
+            .is_some_and(|content| crate::core::anti_halluc::contains_placeholder(&content))
+        {
             return Err(format!(
                 "Cannot confirm `{doc}`: unresolved template or TODO placeholders remain."
             ));
@@ -840,7 +888,7 @@ pub fn source_provenance(project: &Path, reference: &str) -> Option<SourceProven
 }
 
 /// A learning batch can share one citation report across its evidence rows.
-pub(crate) fn source_provenance_with_citations(
+pub fn source_provenance_with_citations(
     project: &Path,
     reference: &str,
     citations: Option<&crate::core::citation_drift::CitationDriftReport>,
@@ -906,5 +954,111 @@ mod swap_tests {
         let _ = write(&root, &mut ProvenanceFile::default());
         assert!(swap_probe::fired(), "the swap really happened");
         assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    const SECRET: &str = "OUTSIDE SECRET KEY MATERIAL";
+
+    /// Files under `dir` (recursively) whose text holds [`SECRET`].
+    fn leaks(dir: &Path) -> Vec<PathBuf> {
+        walkdir::WalkDir::new(dir)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| std::fs::read_to_string(e.path()).is_ok_and(|c| c.contains(SECRET)))
+            .map(|e| e.path().to_path_buf())
+            .collect()
+    }
+
+    fn project_with_a_link() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("id_ed25519"), SECRET).unwrap();
+        std::os::unix::fs::symlink(external.path().join("id_ed25519"), root.join("docs/x.md"))
+            .unwrap();
+        (tmp, root, external)
+    }
+
+    /// KT-1595 (N2): an agent plants `docs/x.md -> <a secret>`; the human
+    /// clicks Confirm. The secret is neither hashed into the record nor stored
+    /// as `validated-originals/<sha>.bak`.
+    #[test]
+    fn a_doc_that_is_a_link_is_never_read_into_the_validated_originals() {
+        let (_tmp, root, _external) = project_with_a_link();
+        record_validation(
+            &root,
+            &["docs/x.md".to_string(), "docs/AGENTS.md".to_string()],
+            ValidationReason::AuditValidation,
+        )
+        .unwrap();
+        record_all(&root, ValidationReason::AuditValidation).unwrap();
+        accept_current(&root, ValidationReason::AuditValidation).unwrap();
+        assert!(leaks(&root).is_empty(), "{:?}", leaks(&root));
+        let file = read_strict(&root).unwrap();
+        assert!(!file.docs.contains_key("docs/x.md"), "no record for a link");
+        assert!(file.docs.contains_key("docs/AGENTS.md"));
+    }
+
+    /// KT-1595 (N2): the parent of a doc swapped for a link right after the
+    /// walk yields the folder that was held, never the outside file.
+    #[test]
+    fn a_doc_read_after_a_swap_of_its_folder_is_never_the_outside_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs/sub")).unwrap();
+        std::fs::write(root.join("docs/sub/a.md"), "# real\n").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("a.md"), SECRET).unwrap();
+        swap_probe::arm(&root.join("docs/sub"), &external);
+        let read = read_doc(&root, "docs/sub/a.md");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(read.as_deref(), Some("# real\n"));
+        // A swap that already happened reads as absent.
+        assert_eq!(read_doc(&root, "docs/sub/a.md"), None);
+    }
+
+    /// KT-1595 (N2, variant): the tracked-doc snapshot feeds digests into the
+    /// provenance record; a linked `docs` folder (or a linked doc) is an error,
+    /// never a walk of what it points at.
+    #[test]
+    fn the_snapshot_never_follows_a_linked_docs_folder_or_doc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("a.md"), SECRET).unwrap();
+        std::os::unix::fs::symlink(external.path(), root.join("docs")).unwrap();
+        let linked_root = snapshot_tracked(&root);
+        assert!(linked_root.is_err(), "{linked_root:?}");
+
+        std::fs::remove_file(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/b.md"), "# b\n").unwrap();
+        std::os::unix::fs::symlink(external.path().join("a.md"), root.join("docs/a.md")).unwrap();
+        let linked_doc = snapshot_tracked(&root);
+        assert!(linked_doc.is_err(), "{linked_doc:?}");
+    }
+
+    /// KT-1595 (N2, variant): a folder swapped for a link right after the
+    /// listing is held is read as the folder that was held, never the outside one.
+    #[test]
+    fn the_snapshot_reads_a_swapped_subfolder_as_the_folder_it_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs/sub")).unwrap();
+        std::fs::write(root.join("docs/sub/a.md"), "# real\n").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("a.md"), SECRET).unwrap();
+        swap_probe::arm(&root.join("docs/sub"), &external);
+        let snapshot = snapshot_tracked(&root);
+        assert!(swap_probe::fired(), "the swap really happened");
+        match snapshot {
+            Ok(docs) => assert!(docs.iter().all(|(_, c)| !c.contains(SECRET)), "{docs:?}"),
+            Err(e) => assert!(!e.contains(SECRET)),
+        }
     }
 }

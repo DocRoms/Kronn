@@ -863,7 +863,7 @@ fn a_path_said_missing_right_where_it_is_cited_is_not_a_claim() {
 #[test]
 #[ignore = "report over this repository's docs, not a regression test"]
 fn kronn_own_docs_report() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let root = Path::new(crate::BACKEND_DIR).join("..");
     let report = analyze(&root, &citation_drift::check(&root));
     let mut hits: Vec<String> = Vec::new();
     for s in report.sections.iter() {
@@ -880,4 +880,18 @@ fn kronn_own_docs_report() {
     for hit in &hits {
         eprintln!("  {hit}");
     }
+}
+
+/// KT-1595 round 12: listing a project's files and asking what git ignores
+/// never run the file-system monitor its configuration names.
+#[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
+#[test]
+fn listing_the_files_runs_no_program_the_repository_names() {
+    use crate::core::cmd::hostile_git::{git, marker_program, repo};
+    let dir = repo();
+    let (program, marker) = marker_program(dir.path());
+    git(dir.path(), &["config", "core.fsmonitor", &program]);
+    assert_eq!(git_files(dir.path()), Some(vec!["a.txt".to_string()]));
+    assert!(!is_git_ignored(dir.path(), "a.txt"));
+    assert!(!marker.exists(), "the fsmonitor hook ran");
 }

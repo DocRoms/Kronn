@@ -9,7 +9,7 @@ verdict, deterministically and without a model.
 ## What the revalidation already did (reused, not rewritten)
 
 - Per-citation fingerprints, `changed` / `removed` / `file missing` / `moved`,
-  recorded at validation. [src: file: backend/src/core/citation_drift.rs:1144#check]
+  recorded at validation. [src: file: backend/src/core/citation_drift.rs:1148#check]
 - The plan that re-anchors moved lines for free and sends the owning audit
   steps only the sections that need a model.
   [src: file: backend/src/api/audit/revalidate.rs:92#plan]
@@ -21,7 +21,7 @@ Every section (heading to next heading, fenced code excluded, a heading with
 nothing under it skipped) is judged from its anchors: its `[src: file: …]`
 citations, read through the fingerprint report, and the repository paths its
 prose names in backticks.
-[src: file: backend/src/core/doc_relevance.rs:1352#judge]
+[src: file: backend/src/core/doc_relevance.rs:1343-1344#judge]
 
 | Verdict | Meaning |
 |---|---|
@@ -62,7 +62,7 @@ back depends on that step (`AnalysisStep.sources`):
   of the doc queues it again.
 
 [src: file: backend/src/core/citation_drift.rs:86#DocReview]
-[src: file: backend/src/core/citation_drift.rs:923#current_review]
+[src: file: backend/src/core/citation_drift.rs:927#current_review]
 [src: file: backend/src/api/audit/revalidate.rs:60#stamp_rereads]
 
 ### When a prose path counts as gone
@@ -120,7 +120,7 @@ and only then. `citations.json` stores, per section key, the gone paths the
 human was shown (`known_missing`). A validation or a revalidation **carries
 over** what was accepted and never adds to it; a path accepted under one
 section is still flagged when another section names it.
-[src: file: backend/src/core/citation_drift.rs:386#accepted_missing]
+[src: file: backend/src/core/citation_drift.rs:384#accepted_missing]
 
 From the project card, the stale block lists each stale doc's gone prose paths
 with their section (`DriftSection.missing_paths`), and the acknowledgement
@@ -128,7 +128,7 @@ sends exactly those (`shown_paths`): a path that is not in the request is not
 accepted, whatever is gone at the click, and an older client that sends none
 accepts none. The per-doc panel, which lists every gone path of its doc, still
 accepts them all.
-[src: file: backend/src/core/citation_drift.rs:623#acknowledge_accepting]
+[src: file: backend/src/core/citation_drift.rs:627#acknowledge_accepting]
 
 ## The measure
 
@@ -152,7 +152,7 @@ accepts them all.
   when a section is outdated or gone. The paths no fingerprint covers are
   counted apart in `missing_paths`, so `broken_citations` stays a count of
   citations.
-  [src: file: backend/src/core/checksums.rs:886#check_drift]
+  [src: file: backend/src/core/checksums.rs:934-935#check_drift]
   [src: file: backend/src/core/doc_relevance.rs:173#escalate]
 - **Validation state**: a human-validated doc whose prose names a vanished path
   stops counting as human-validated for learning sources, like one with a
@@ -161,8 +161,8 @@ accepts them all.
   proposals the human launches through « Revalider l'audit », then reviews
   and validates; « Vérifié, inchangé » acknowledges a doc, recorded or not,
   that was judged stale but is fine.
-  [src: file: backend/src/core/checksums.rs:855#acknowledge_stale]
+  [src: file: backend/src/core/checksums.rs:898-904#acknowledge_stale]
 
 A citation the git diff maps to a new line past the fingerprint window is
 treated as moved, exactly as the plan re-anchors it.
-[src: file: backend/src/core/doc_relevance.rs:1489#analyze_with_moves]
+[src: file: backend/src/core/doc_relevance.rs:1478-1480#analyze_with_moves]

@@ -17,7 +17,7 @@ use crate::AppState;
 
 /// Loads the sheets off the async runtime, then converts them in one
 /// transaction.
-pub(crate) async fn convert_project_tds(
+pub async fn convert_project_tds(
     db: &Arc<crate::db::Database>,
     project_id: String,
     project_path: PathBuf,
@@ -33,7 +33,7 @@ pub(crate) async fn convert_project_tds(
 }
 
 /// The file is authoritative; DB notes only cover a file not installed yet.
-pub(crate) fn briefing_option_set(file_notes: Option<&str>, db_notes: Option<&str>) -> bool {
+pub fn briefing_option_set(file_notes: Option<&str>, db_notes: Option<&str>) -> bool {
     file_notes
         .or(db_notes)
         .is_some_and(td_tasks::briefing_wants_td_tasks)
@@ -41,7 +41,7 @@ pub(crate) fn briefing_option_set(file_notes: Option<&str>, db_notes: Option<&st
 
 /// The conversion that closes a successful Full audit, when the briefing
 /// asked for it. `None` when it does not apply.
-pub(crate) async fn convert_after_audit(
+pub async fn convert_after_audit(
     db: &Arc<crate::db::Database>,
     kind: AuditKind,
     fully_succeeded: bool,
@@ -58,6 +58,7 @@ pub(crate) async fn convert_after_audit(
         id: Some(format!("audit:{audit_run_id}")),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     };
     Some(
         convert_project_tds(
@@ -72,7 +73,7 @@ pub(crate) async fn convert_after_audit(
 
 /// Puts back the human TD decisions a run undid and flags new sheets that
 /// repeat a settled one (KT-1208); the SSE event reports what it did.
-pub(crate) async fn guard_decisions(
+pub async fn guard_decisions(
     project_path: &FsPath,
     before: crate::core::td_decisions::DecisionSnapshot,
 ) -> Option<axum::response::sse::Event> {
@@ -80,17 +81,23 @@ pub(crate) async fn guard_decisions(
         return None;
     }
     let docs = crate::core::docs_location::DocsRoot::of(project_path).dir(project_path);
-    let outcome =
-        tokio::task::spawn_blocking(move || crate::core::td_decisions::restore(&docs, &before))
-            .await;
+    let root = project_path.to_path_buf();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::core::td_decisions::restore(&root, &docs, &before)
+    })
+    .await;
     match outcome {
         Ok(Ok(outcome)) if !outcome.is_empty() => {
             tracing::info!(
-                "Tech-debt decisions guarded: {} restored, {} reverted, {} new sheet(s) repeat a settled one",
+                "Tech-debt decisions guarded: {} restored, {} reverted, {} new sheet(s) repeat a settled one, {} left alone (link or foreign entry)",
                 outcome.restored.len(),
                 outcome.reverted.len(),
-                outcome.settled_duplicates.len()
+                outcome.settled_duplicates.len(),
+                outcome.refused.len()
             );
+            for (id, why) in &outcome.refused {
+                tracing::warn!("Tech-debt decision of {id} not restored: {why}");
+            }
             Some(
                 axum::response::sse::Event::default()
                     .event("td_decisions")
@@ -99,6 +106,7 @@ pub(crate) async fn guard_decisions(
                             "restored": outcome.restored,
                             "reverted": outcome.reverted,
                             "settled_duplicates": outcome.settled_duplicates,
+                            "refused": outcome.refused,
                         })
                         .to_string(),
                     ),
@@ -117,7 +125,7 @@ pub(crate) async fn guard_decisions(
 }
 
 /// After any audit: the tasks of sheets that left the active list are closed.
-pub(crate) async fn close_after_audit(
+pub async fn close_after_audit(
     db: &Arc<crate::db::Database>,
     project_id: &str,
     project_path: &FsPath,

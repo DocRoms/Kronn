@@ -17,6 +17,9 @@ Three Docker services behind nginx gateway:
 
 ## Key patterns (facts)
 
+### Backend crates
+- The backend is a workspace of five layered crates sharing `backend/src/`; a module belongs to the crate whose root declares it, and paths (`crate::core::…`) are the same in every crate. Rules, hooks between layers and size limits: `docs/architecture/backend-crates.md`.
+
 ### API pattern
 - All endpoints return `ApiResponse<T>` wrapper: `{ success: bool, data: T|null, error: string|null }`.
 - Routes registered in `backend/src/lib.rs` (`build_router()`), handlers in `backend/src/api/<domain>.rs`.
@@ -64,14 +67,14 @@ Three Docker services behind nginx gateway:
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
 - **macOS Docker agent bootstrap (0.3.5)**: on macOS hosts, host-mounted binaries are Darwin (macOS) executables that cannot run in the Linux container. `entrypoint.sh` detects `KRONN_HOST_OS=macOS` and installs Linux versions of Claude Code (npm), Codex (npm), and Kiro (curl) inside the container. `find_binary()` skips host-mounted Darwin binaries for `claude`, `codex`, `copilot`, `kiro-cli` when `host_is_macos()`. `~/.npm/bin` is mounted at `/host-bin/npm` via `KRONN_NPM_BIN` env var (auto-detected by Makefile `npm bin -g`).
 
-- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:3621-3636#http_agent_identity_context] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
+- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:3542-3557#http_agent_identity_context] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
 - **LiteLLM private reasoning (0.9.5)**: OpenAI-compatible streams pass
   through a stateful leading-block filter. Initial `<think>` and `<thinking>`
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8799-8909#LeadingThinkingFilter]
-  [src: file: backend/src/api/discussions/streaming.rs:5470-5471#strip_leading_thinking_blocks]
+  [src: file: backend/src/agents/runner.rs:8794-8904#LeadingThinkingFilter]
+  [src: file: backend/src/api/discussions/streaming.rs:5499-5500#strip_leading_thinking_blocks]
 
 ### Discussions
 - `Discussion.project_id` is `Option<String>` (Rust) / `string | null` (TS).
@@ -88,7 +91,7 @@ Three Docker services behind nginx gateway:
   [src: file: backend/src/api/disc_portability.rs:527-562#import_bundle]
   [src: file: backend/src/api/disc_portability.rs:849-866#discussion_imports]
   [src: file: backend/src/db/sql/093_discussion_imports.sql:1-15#discussion_imports]
-- Agent runs in its own folder, `~/.kronn/discussions/<id>`, for global discussions (no project context). Native final messages can attach linked files from the run/project folder: at most eight new files and 64 MiB read per message, excluding known credential paths and the Kronn data directory. Link destinations are rewritten to exact asset IDs before initial message persistence; failed insertion cleans up staged files. This is an attachment filter, not a filesystem sandbox. [src: file: backend/src/api/discussions/context.rs:281-286#attach_files_linked_in_message] [src: file: backend/src/api/discussions/context.rs:364-367#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:11-12#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:65-99#resolve_attachable] [src: file: backend/src/core/message_file_links.rs:249-276#is_sensitive] [src: file: backend/src/api/discussions/streaming.rs:5707-5721#attach_files_linked_in_message] [src: file: backend/src/api/discussions/streaming.rs:5824-5831#discard_uncommitted_message_files]
+- Agent runs in its own folder, `~/.kronn/discussions/<id>`, for global discussions (no project context). Native final messages can attach linked files from the run/project folder: at most eight new files and 64 MiB read per message, excluding known credential paths and the Kronn data directory. Link destinations are rewritten to exact asset IDs before initial message persistence; failed insertion cleans up staged files. This is an attachment filter, not a filesystem sandbox. [src: file: backend/src/api/discussions/context.rs:281-286#attach_files_linked_in_message] [src: file: backend/src/api/discussions/context.rs:364-367#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:11-12#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:65-99#resolve_attachable] [src: file: backend/src/core/message_file_links.rs:249-276#is_sensitive] [src: file: backend/src/api/discussions/streaming.rs:5746-5760#attach_files_linked_in_message] [src: file: backend/src/api/discussions/streaming.rs:5862-5869#discard_uncommitted_message_files]
 - **Room project scope reaches the native agent (KT-1406)**: a project a human granted to a discussion (read or write, `discussion_project_grants`, [room scope design](../design/discussion-project-scope.md)) is, from the next turn, a read-only directory (`--add-dir`) of a Claude Code agent that is not in full access, through a room read policy derived from `read_only_repos`; a write grant stays read-only on disk. Revoking, the last grant included, removes it at the next turn. A Codex agent keeps its default sandbox (it reads the disk as it is, granted projects included, and writes only in its working directory): nothing is opened for it and no read isolation is claimed (KT-1409). The directory is always the registered checkout of a granted project, validated once and checked again at the launch (a symbolic-link path is never opened, a swapped checkout is refused), and one the validation refuses is not opened. The agent's context names the granted projects (path, access) and the registered ones it can ask for (name only), with `room_scope({project, access, reason})` as the way to ask. `[src: file: backend/src/agents/room_reach.rs:48]` `[src: file: backend/src/db/discussion_scope.rs:195]`
 - `CreateDiscussionRequest.project_id` is also optional; frontend offers "Aucun projet" option.
 - **Discussion search/filter**: sidebar includes a search input (`discSearchFilter` state) that filters discussions by title (case-insensitive substring match). When a search term is active, collapsed groups are auto-expanded and only matching discussions are shown. A clear button resets the filter.
@@ -114,8 +117,8 @@ Three Docker services behind nginx gateway:
   8. Agents block on `disc_wait_for_peer({timeout_secs: 60})` for new peer messages — long-poll endpoint that filters out the caller's own `agent_type`. Default 60 s, clamped 1–90 s server-side.
   9. Agents leave via `disc_leave()` — marks `status='left'`, idempotent. The bridge clears its local `_CURRENT_DISC_ID`. `(agent_type, session_id)` pair is stable per bridge lifetime (`_BRIDGE_SESSION_ID` module-level, 2026-05-21 fix — was regenerated per call, broke disc_leave).
   10. UI header shows live participant chips per agent_type (🤖 Claude, 💠 Codex, ✨ Gemini, 🐙 Kiro, 💻 Copilot, 🐱 Vibe, 🦙 Ollama, ⚙️ Custom, 👤 Unknown), polled every 5 s. Messages auto-refresh every 5 s on the active disc. A multi-model turn renders one placeholder per active dispatch, keyed by `(trigger_message_id, agent_type)` rather than agent type alone; overlapping turns can therefore each wait for Ollama without collapsing their indicators. The detailed discussion response exposes Pending/Running dispatches and their source turns. [src: file: backend/src/models/discussions.rs:48-61#ActiveAgentDispatch] [src: file: backend/src/api/discussions/crud.rs:101-102#active_agent_dispatches] When the foreground SSE model settles, only its dispatch placeholder is removed and background responders remain visible. Tracked dispatch completion owns the final `awaiting_agent` transition, preventing a false-idle gap between sequential jobs. [src: file: frontend/src/lib/messageTargets.ts:262-276#pendingAgentReplies] [src: file: backend/src/api/discussions/streaming.rs:1530-1543#clear_awaiting_after_terminal]
-  11. Native replies keep immutable append-only `sort_order`, but also persist `reply_to_message_id` from their durable dispatch trigger. The UI projects Agent/System replies into that source conversational turn, so a slow answer to turn N renders before a later User question N+1 even when it completed afterward; human threaded replies remain chronological. Migration 109 backfills existing native replies through `agent_dispatch_job_id`, without renumbering the message ledger. [src: file: backend/src/api/discussions/streaming.rs:2845-2847#dispatch_trigger_message_id] [src: file: backend/src/api/discussions/streaming.rs:5658-5685#agent_msg] [src: file: backend/src/db/sql/109_agent_reply_turn_links.sql:1-18#reply_to_message_id] [src: file: frontend/src/lib/messageTargets.ts:316-367#messagesInConversationOrder]
-  12. **Generated agent collaboration is explicit, configurable and opt-in.** When the global `agent_handoffs_enabled` setting is on, a successful native reply can ask another agent already attached to the room for help through a hidden `<!-- kronn:handoff @alias -->` marker; a plain alias in prose or code stays inert. Self-mentions, unattached or operator-blocked targets, and failed/partial runs do not dispatch. The reply, typed targets and child dispatch jobs commit atomically. Every chain rooted at one User message shares a paid-or-unknown allowance of 0–5 starts, or no financial limit when the operator explicitly selects unlimited; LiteLLM remains cost-unknown because the proxy can hide its provider. The prompt tells each running agent which allowed aliases are available and how much paid allowance remains, while database admission remains authoritative under concurrent replies. Ollama uses a separate fixed ceiling of eight local starts, and generated chains stop after two hops even in unlimited mode. The feature defaults off globally. A discussion can inherit the global allowance, block collaboration locally, or exceptionally remove its financial limit; none of those discussion choices bypasses the global master switch, per-agent blocks or structural loop guards. Joined CLI agents that append through MCP do not pass through this native-reply detector: they are neither counted nor blocked by this setting, and an alias in their appended message does not automatically launch another agent. Both configuration surfaces state this distinction. System/native-tool rows retain their parent link for deterministic turn ordering but are excluded from user-visible reply headers and backlinks. [src: file: backend/src/api/disc_helpers.rs:177-216#extract_agent_handoff_markers] [src: file: backend/src/db/discussions.rs:1702-1703#MAX_LOCAL_AGENT_HANDOFFS_PER_TURN] [src: file: backend/src/api/discussions/streaming.rs:5666-5676#candidate_handoffs] [src: file: backend/src/models/setup.rs:496-513#agent_handoffs_enabled] [src: file: backend/src/api/discussions/crud.rs:255-291#agent_handoff_mode] [src: file: frontend/src/components/settings/AgentsSection.tsx:1650-1651#config.agentHandoffCliTitle] [src: file: frontend/src/components/DiscussionSettingsPanel.tsx:218-268#disc.agentHandoffCliUnaffected] [src: file: frontend/src/components/MessageBubble.tsx:1003-1009#reply_to_message_id]
+  11. Native replies keep immutable append-only `sort_order`, but also persist `reply_to_message_id` from their durable dispatch trigger. The UI projects Agent/System replies into that source conversational turn, so a slow answer to turn N renders before a later User question N+1 even when it completed afterward; human threaded replies remain chronological. Migration 109 backfills existing native replies through `agent_dispatch_job_id`, without renumbering the message ledger. [src: file: backend/src/api/discussions/streaming.rs:2849-2851#dispatch_trigger_message_id] [src: file: backend/src/api/discussions/streaming.rs:5694-5721#agent_msg] [src: file: backend/src/db/sql/109_agent_reply_turn_links.sql:1-18#reply_to_message_id] [src: file: frontend/src/lib/messageTargets.ts:316-367#messagesInConversationOrder]
+  12. **Generated agent collaboration is explicit, configurable and opt-in.** When the global `agent_handoffs_enabled` setting is on, a successful native reply can ask another agent already attached to the room for help through a hidden `<!-- kronn:handoff @alias -->` marker; a plain alias in prose or code stays inert. Self-mentions, unattached or operator-blocked targets, and failed/partial runs do not dispatch. The reply, typed targets and child dispatch jobs commit atomically. Every chain rooted at one User message shares a paid-or-unknown allowance of 0–5 starts, or no financial limit when the operator explicitly selects unlimited; LiteLLM remains cost-unknown because the proxy can hide its provider. The prompt tells each running agent which allowed aliases are available and how much paid allowance remains, while database admission remains authoritative under concurrent replies. Ollama uses a separate fixed ceiling of eight local starts, and generated chains stop after two hops even in unlimited mode. The feature defaults off globally. A discussion can inherit the global allowance, block collaboration locally, or exceptionally remove its financial limit; none of those discussion choices bypasses the global master switch, per-agent blocks or structural loop guards. Joined CLI agents that append through MCP do not pass through this native-reply detector: they are neither counted nor blocked by this setting, and an alias in their appended message does not automatically launch another agent. Both configuration surfaces state this distinction. System/native-tool rows retain their parent link for deterministic turn ordering but are excluded from user-visible reply headers and backlinks. [src: file: backend/src/api/disc_helpers.rs:120-159#extract_agent_handoff_markers] [src: file: backend/src/db/discussions.rs:1702-1703#MAX_LOCAL_AGENT_HANDOFFS_PER_TURN] [src: file: backend/src/api/discussions/streaming.rs:5701-5711#candidate_handoffs] [src: file: backend/src/models/setup.rs:1067-1084#agent_handoffs_enabled] [src: file: backend/src/api/discussions/crud.rs:255-291#agent_handoff_mode] [src: file: frontend/src/components/settings/AgentsSection.tsx:1787-1788#config.agentHandoffCliTitle] [src: file: frontend/src/components/DiscussionSettingsPanel.tsx:218-268#disc.agentHandoffCliUnaffected] [src: file: frontend/src/components/MessageBubble.tsx:1007-1013#reply_to_message_id]
   - Validated live 2026-05-21 on a tennis-roleplay smoke test (3 agents, 14 min, 59 messages, 1 point played over a 20-stroke rally). Pattern marketing-friendly : *"le cerveau partagé de tes CLI IA"*. Foundation for future delegation pattern (`agent_delegate({to, task, context})`, cf. `project_multi_agent_orchestrator`).
   - Routes: `POST /api/discussions/:id/invite-peer`, `GET /api/discussions/:id/participants`, `POST /api/discussions/peer-join`, `POST /api/discussions/peer-leave`, `GET /api/discussions/:id/wait`.
   - New MCP tools: `disc_join`, `disc_wait_for_peer`, `disc_leave`. `disc_append` extended with simple-mode `{content: "..."}` ; bulk-mode `{disc_id, messages: […]}` still works for cross-agent-memory transcript replay.
@@ -168,7 +171,7 @@ Three Docker services behind nginx gateway:
   authenticate.
 - **Multi-line input**: `<textarea>` with auto-resize (Shift+Enter for newlines, Enter to send).
 - **Full access badge**: "Full access" indicator on agent messages when `full_access: true`.
-- **Multi-user (Phase 1 — contacts + Phase 2 — WebSocket sync)**: `contacts` table (migration 022) with CRUD API (`/api/contacts`). Invite code format `kronn:pseudo@host:port`. Sidebar section shows contacts with online/offline status via real-time WebSocket. Settings > Identity displays the invite code.
+- **Multi-user (Phase 1 — contacts + Phase 2 — WebSocket sync)**: `contacts` table (migration 022) with CRUD API (`/api/contacts`). Invite code format `kronn:pseudo@host:port`. Sidebar section shows contacts with online/offline status via real-time WebSocket. Settings > Identity displays the invite code (an address) and generates pairing codes: a contact is authenticated by a per-contact secret exchanged at pairing, never by the public invite code ([P2P contact pairing](p2p-contact-pairing.md)).
   - **WebSocket server**: `GET /api/ws` — accepts connections from local frontend and remote Kronn peers. Auth via `?token=` query param. Messages dispatched through `AppState.ws_broadcast` (tokio broadcast channel).
   - **WebSocket client manager**: background task (`core/ws_client.rs`) maintains outbound WS connections to all contacts. Reconnects with exponential backoff (1s → 60s). Emits presence online/offline events.
   - **Frontend hook**: `useWebSocket.ts` — single WS connection to own backend,
@@ -219,11 +222,11 @@ regular discussion replies, orchestration rounds and silent orchestration
 summaries; changing them requires no backend restart. The agent process is also
 killed on client-requested cancellation. Partial responses retain an explicit
 timeout notice.
-[src: file: backend/src/models/setup.rs:396-403#agent_global_timeout_min]
-[src: file: backend/src/models/setup.rs:600-613#MAX_AGENT_GLOBAL_TIMEOUT_MIN]
-[src: file: backend/src/api/setup.rs:1747-1749#clamp_stall_timeout_min]
-[src: file: backend/src/api/discussions/streaming.rs:4502-4526#agent_stall_timeout_min]
-[src: file: backend/src/api/discussions/orchestration.rs:389-403#configured_agent_global_timeout]
+[src: file: backend/src/models/setup.rs:967-974#agent_global_timeout_min]
+[src: file: backend/src/models/setup.rs:1184-1197#MAX_AGENT_GLOBAL_TIMEOUT_MIN]
+[src: file: backend/src/api/setup.rs:1769-1776#clamp_stall_timeout_min]
+[src: file: backend/src/api/discussions/streaming.rs:4517-4541#agent_stall_timeout_min]
+[src: file: backend/src/api/discussions/orchestration.rs:323-337#configured_agent_global_timeout]
 
 **Model inactivity watchdog (KT-932)**: the stall timeout above watches what the
 consumer reads; it cannot see a model whose connection is open and mute, nor
@@ -257,9 +260,9 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5938-5946#IdleWatchdog] [src: file: backend/src/agents/runner.rs:6044-6059#begin_tool]
+[src: file: backend/src/agents/runner.rs:5877-5885#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5983-5998#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
-[src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
+[src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:523-528#Activity]
 
 **Input validation**: title ≤ 500 chars, content ≤ 100KB, workflow ≤ 20 steps, workflow name ≤ 200 chars.
 
@@ -410,7 +413,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
   CLI's own sandbox and permission rules
   ([Workflow Agent read-only repositories](../operations/workflow-read-only-repos.md)).
 - Steps can use `mode: debate` for multi-agent discussion at any point.
-- Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`, `{{run.id}}`. It is not Liquid; its only filters are the run-anchored `time.now` grammar and `|sh`, which renders a value as one POSIX single-quoted shell word. Runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible. `{{path ?? "text"}}` (or `'text'`) is the one explicit fallback: it renders the literal when the path is absent or JSON null, such as a step a `Goto` skipped. An `Exec` step's `---STATE:` and `---ARTIFACT:` markers are read from its raw stdout, where a `STATE` value may span lines. `[src: file: backend/src/workflows/template.rs:374-392#render]`
+- Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`, `{{run.id}}`. It is not Liquid; its only filters are the run-anchored `time.now` grammar and `|sh`, which renders a value as one POSIX single-quoted shell word. Runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible. `{{path ?? "text"}}` (or `'text'`) is the one explicit fallback: it renders the literal when the path is absent or JSON null, such as a step a `Goto` skipped. An `Exec` step's `---STATE:` and `---ARTIFACT:` markers are read from its raw stdout, where a `STATE` value may span lines. `[src: file: backend/src/workflows/template.rs:360-378#render]`
 - Deterministic Page pipelines can fan out over saved Quick APIs and
   shell-free, allowlisted CLI collectors with `CollectApiData`, reshape typed JSON with a bounded JSONPath recipe in
   `TransformData`, then atomically publish datasets with `PublishPageData`.
@@ -440,8 +443,8 @@ pass (a frequent schedule adds no fire during the repeated hour).
   Neither worktree nor lock: `main_tree_read_only: true` without
   `require_isolation`, hooks or `base_ref`, for workflows that never write the
   checkout (KT-787); no separate mode exists for it.
-  [src: file: backend/src/workflows/runner.rs:308-317#workflow_requests_workspace]
-  [src: file: backend/src/workflows/runner.rs:1573-1582#writes_main_tree]
+  [src: file: backend/src/workflows/runner.rs:469-478#workflow_requests_workspace]
+  [src: file: backend/src/workflows/runner.rs:1731-1740#writes_main_tree]
 - **Starting point (`workspace_config.base_ref`, KT-798).** Without it a
   worktree starts from the main checkout's HEAD, which may lag its remote.
   With it (`origin/main`, a tag, a SHA), a value naming a configured remote's
@@ -458,37 +461,67 @@ pass (a frequent schedule adds no fire during the repeated hour).
   remote-tracking ref, even without `require_isolation`, because the author
   asked for that tip. The API refuses a value shaped like an option or a
   revision expression (`-x`, `~`, `^`, `..`, `@{`, whitespace).
-  [src: file: backend/src/workflows/workspace.rs:440-462#validate_base_ref]
-  [src: file: backend/src/workflows/workspace.rs:480-560#repo_fetch_lock]
-  [src: file: backend/src/workflows/workspace.rs:562-598#resolve_base_ref]
+  [src: file: backend/src/workflows/workspace.rs:806-828#validate_base_ref]
+  [src: file: backend/src/workflows/workspace.rs:846-926#repo_fetch_lock]
+  [src: file: backend/src/workflows/workspace.rs:928-964#resolve_base_ref]
 - **Interrupted worktrees have a lifetime (KT-798).** A run left
   `Interrupted` by a restart keeps its worktree so it can be resumed. At boot,
   once it has been interrupted longer than `server.interrupted_worktree_ttl_days`
   (config file, default 7, `0` = never), its worktree is reclaimed unless that
   could lose work: a checkout with uncommitted or untracked (non-ignored) files
-  is kept, a detached HEAD is kept, a path shared with a run that is live,
+  is kept, a detached HEAD is kept (even on a commit a ref holds), a path shared with a run that is live,
   paused or interrupted more recently is kept, and a branch holding commits no
   known base has is kept and recorded in the run's `produced_branches` before
   the checkout goes. Git-ignored files (build output) go with the checkout.
-- **A stopped run never destroys uncommitted work (KT-1096).** At the end of
-  every run except a fully successful one (Partial, Failed, Cancelled,
-  StoppedByGuard, an engine error, a Gate rejection), and in the boot purge of
+  Worktrees registered inside it and its submodules follow the rules of the
+  next entry: work in a nested worktree keeps the set, and a checkout with
+  submodules is forced away only under the KT-1809 conditions.
+- **No run destroys uncommitted work (KT-1096, KT-1806).** At the end of
+  every run (Success, Partial, Failed, Cancelled, StoppedByGuard, an engine
+  error, a Gate rejection), and in the boot purge of
   terminal runs, a worktree with uncommitted or untracked (non-ignored) files,
-  a detached HEAD or a state git cannot read, in itself or in a worktree
-  registered inside it (`<run>/.kronn/pr-N`), is kept with its branch and its
-  nested worktrees, without running `before_remove`
-  (`Workspace::cleanup_keeping_work`, `workspace::work_to_keep`, the same
-  check as the Interrupted reclaim). The run keeps its `workspace_path`; its
+  a detached HEAD on a commit no ref holds or a state git cannot read, in
+  itself or in a worktree registered inside it (`<run>/.kronn/pr-N`; a PR
+  checkout of a commit a ref holds strands nothing), is kept with its branch and its
+  nested worktrees (clean nested ones may already be gone when git refuses
+  the parent at removal) (`Workspace::cleanup_keeping_work`,
+  `workspace::work_to_keep`, which the Interrupted reclaim runs too).
+  `before_remove` does not run for work found by that inspection; it has
+  run when the work is found only at removal (late files, a lock, a
+  submodule). The run keeps its `workspace_path`; its
   last step says where the work is (the log does, after an engine error, a
   Gate rejection or at boot), and a later boot removes the checkout
   once it is clean. A clean set is removed without `--force`, nested
-  worktrees first, and never forced: whenever git refuses (work written after
-  the inspection, a submodule, a lock) the set is kept and the run says why,
-  since no fresh look can exclude a write landing before a forced removal.
+  worktrees first. Whenever git refuses (work written after the inspection,
+  a lock) the set is kept and the run says why; the one forced removal is the
+  submodule case below.
   Kronn's own `.kronn/` files are not work: `.kronn/` is added to the
-  repository's local `info/exclude`. The one exception is a Success run: its
-  cleanup is unchanged and forced, because what it left uncommitted is its
-  own scratch once every step finished, and is discarded.
+  repository's local `info/exclude`. Nor are the agent configs Kronn copied
+  into the worktree (`.mcp.json` and the like) while they still equal the
+  main checkout's, are plain files at their own path and have nothing
+  staged: the inspection, read-only, leaves them out; the removal takes them
+  back first (tracked ones restored, the others removed) and puts those same
+  files back if git then refuses, so a kept worktree can still be resumed. Untracked files are read whatever `status.showUntrackedFiles`
+  says, and a nested worktree whose directory is gone holds nothing. A Success run follows the same rule: a
+  step's output can be files that no later step committed, so a successful
+  end is no reason to delete them. A kept set still records its branch in
+  `produced_branches` when it holds commits no known base has. The branch is
+  judged on its own commits, read from the repository: a HEAD an agent left
+  detached on a known commit, or a worktree directory already gone, never
+  deletes a branch that is ahead, and a synced branch checked out in another
+  checkout is left alone. Git refuses to remove, without force, a
+  worktree with a populated submodule or a submodule clone left under its git
+  directory: after that refusal the checkout and
+  its submodules are inspected again, and the removal is forced only when all
+  are clean, every submodule repository lives under the worktree's git
+  directory, no `.git` directory sits anywhere inside the tree, and no
+  submodule clone, deinitialised or removed ones included, has a worktree of
+  its own or holds a commit (HEAD, branch, tag, stash) that
+  no remote branch of it has (KT-1809). Otherwise the set is kept and the
+  reason names what holds it, the submodule when git could read it. A commit
+  only a remote tag holds, or whose remote branch was deleted, counts as
+  held work: such a checkout is kept until removed by hand. A detached commit counts as held only by
+  a branch, a tag or a remote ref, never by a ref that goes with the worktree.
 - **A provider quota pauses the run, it does not fail it (KT-811, KT-1562,
   KT-1563).** When an
   Agent step of a top-level run is refused for a quota or session limit
@@ -540,15 +573,15 @@ pass (a frequent schedule adds no fire during the repeated hour).
   batch with one success keeps its partial verdict, and its refused items stay
   failed. `on_failure` compensations are not resumed; such a step ends `Failed`
   with the quota classification.
-  [src: file: backend/src/workflows/quota_wait.rs:255-285#plan_wait]
+  [src: file: backend/src/workflows/quota_wait.rs:103-133#plan_wait]
   [src: file: backend/src/workflows/quota_wait.rs:306-340#park]
-  [src: file: backend/src/workflows/quota_wait.rs:342-382#wake_due_runs]
-  [src: file: backend/src/workflows/quota_wait.rs:356-399#wake_one]
-  [src: file: backend/src/workflows/runner.rs:4683-4733#check_resume_preconditions]
-  [src: file: backend/src/workflows/runner.rs:216-261#WorkflowTimeoutClock]
-  [src: file: backend/src/workflows/runner.rs:267-283#checkpoint]
-  [src: file: backend/src/workflows/quota_wait.rs:392-435#reschedule_after_deadline]
-  [src: file: backend/src/workflows/runner.rs:3143-3168#plan_wait]
+  [src: file: backend/src/workflows/quota_wait.rs:183-223#wake_due_runs]
+  [src: file: backend/src/workflows/quota_wait.rs:197-240#wake_one]
+  [src: file: backend/src/workflows/runner.rs:5083-5133#check_resume_preconditions]
+  [src: file: backend/src/workflows/runner.rs:377-422#WorkflowTimeoutClock]
+  [src: file: backend/src/workflows/runner.rs:428-444#checkpoint]
+  [src: file: backend/src/workflows/quota_wait.rs:233-276#reschedule_after_deadline]
+  [src: file: backend/src/workflows/runner.rs:3461-3486#plan_wait]
 - **A quota-paused run is visible, re-checked and movable (KT-1657).**
   `WaitingQuota` counts toward a workflow's concurrency limit, so a paused run
   can refuse a launch: the refusal names the blocking runs (workflow, state,
@@ -596,9 +629,9 @@ pass (a frequent schedule adds no fire during the repeated hour).
   prunable entries under `<repo>/.kronn/`. Boot repeats that prune for every
   project. It never runs a blanket `git worktree prune`: that would also drop
   a user's own worktree on an unmounted drive.
-  [src: file: backend/src/core/worktree.rs:1832-1840#remove_nested_worktrees]
-  [src: file: backend/src/core/worktree.rs:1853-1863#prune_kronn_worktrees]
-  [src: file: backend/src/workflows/workspace.rs:710-728#prune_orphan_worktrees]
+  [src: file: backend/src/core/worktree.rs:2320-2328#remove_nested_worktrees]
+  [src: file: backend/src/core/worktree.rs:2341-2351#prune_kronn_worktrees]
+  [src: file: backend/src/workflows/workspace.rs:1148-1166#prune_orphan_worktrees]
   Removal uses `git worktree remove` without `--force`; the run's own
   `kronn/…` branch is deleted only when fully integrated, by compare-and-swap
   on the commit that was checked. No workspace hook runs. The run keeps its
@@ -608,7 +641,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
   live, paused or Interrupted run (a finished sub-workflow child shares its
   parent's).
   [src: file: backend/src/workflows/interrupted_worktrees.rs:24-169#reclaim_stale_interrupted_worktrees]
-  [src: file: backend/src/workflows/workspace.rs:653-692#remove_clean_checkout]
+  [src: file: backend/src/workflows/workspace.rs:1075-1130#remove_clean_checkout]
   [src: file: backend/src/db/workflows.rs:1350-1391#terminal_workspace_cleanup_candidates]
 - **The hooks belong to the project (KT-687).** `Project.workspace.hooks` is
   inherited by every workflow of the project that asks for isolation, and a
@@ -638,7 +671,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
 
   Isolation itself stays the workflow's decision: inheriting a recipe never
   turns a read-only fan-out into an isolated run.
-  [src: file: backend/src/workflows/runner.rs:293-317#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5246-5258#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
+  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5603-5615#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
 
 **MCP injection:**
 - `read_all_mcp_contexts()` reads `.mcp.json` and per-project MCP context files (`docs/operations/mcp-servers/*.md`).
@@ -822,10 +855,10 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - **Detection**: `scanner::detect_audit_status()` checks `docs/AGENTS.md` existence, `KRONN:BOOTSTRAP`/`{{` markers, and `KRONN:VALIDATED` marker.
 - **TODO counting**: `scanner::count_ai_todos()` walks `docs/*.md` files and counts `<!-- TODO` occurrences. Exposed as `Project.ai_todo_count` (computed on-the-fly by `enrich_audit_status()`).
 - **Template install** (`POST /api/projects/:id/install-template`): copies `docs/` skeleton + redirectors (CLAUDE.md, .cursorrules, etc.) non-destructively, injects bootstrap prompt block (`KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
-- **AI audit** (`POST /api/projects/:id/full-audit`): SSE-streamed chained analysis — 9 foundation steps (`ANALYSIS_STEPS`) then the 7 focused sub-audits, 16 steps total under a single per-project lease. Each step runs an agent call with `full_access: true` and default profiles (Architect + Tech Lead + Mentor) for multi-perspective analysis. Bootstrap block removed before audit starts. Resume is by `resume_run_id` (server-derived kind + contiguous checkpoint). The legacy `/ai-audit` route was removed in 0.9.0. **Detached runs**: full, specialized and partial audit producers run independently of their SSE subscribers, so closing the interface or MCP bridge does not stop them. A backend restart still interrupts a running audit; boot reconciliation preserves its persisted checkpoint, and `audit_status` reports whether a `resume_run_id` is available. `[src: file: backend/src/api/audit/mod.rs:76-83#detach_sse_stream]` `[src: file: backend/src/api/audit/full.rs:3996#detach_sse_stream]` `[src: file: backend/src/api/audit/drift.rs:2368#detach_sse_stream]` `[src: file: backend/src/db/audit_runs.rs:910-941#reconcile_stale_runs]` `[src: file: backend/scripts/disc-introspection-mcp.py:10741-10755#audit_launch]`
-- **What an agent prompt names about other repos (KT-926)**: a prompt goes to the model provider, which may be a remote service, so the only repo besides the project at hand that a Kronn prompt names is one the user explicitly linked to it (`Project.linked_repos`, a voluntary declaration). No prompt carries the list of the machine's other Kronn projects (name + absolute path): not a Full or partial audit step, not the audit's validation and briefing discussions, not any other discussion, orchestration round or workflow Agent step. The candidate-pool block (`format_kronn_projects_universe_for_prompt`), its wiring (`compute_companion_context`, the `extra_context` argument of `execute_step` and `build_step_prompt`) and its instructions — read another repo's `docs/AGENTS.md`, write a `## Suggested companion repos` section into the audited repo's own `docs/AGENTS.md` — are gone; what an audit records about neighbouring repos comes from what the audited repo says (manifests, compose files, `.gitmodules`, imports). A linked repo is named inline in every Full / partial audit step (`format_linked_repos_for_prompt`) and, for discussions and workflow Agent steps, read from `docs/linked-repos.md` (pull, not inlined — 0.8.4 #295). Pinned by running the real entry points on a scripted `claude` with three other projects registered and reading the prompt it was handed: both audit pipelines `[src: file: backend/src/api/audit/agent_launch_tests.rs:1236-1316#step_prompts_of]`, discussions including the audit briefing and validation `[src: file: backend/src/api/discussions/companion_privacy_tests.rs:220-229#no_discussion_names_an_unlinked_kronn_project]`, a workflow Agent step `[src: file: backend/src/workflows/runner.rs:8033-8092#an_agent_step_prompt_names_no_unlinked_kronn_project]`, over the shared fixture `[src: file: backend/src/api/other_projects_fixture.rs:1-24#KT-926]`. An earlier audit's `## Suggested companion repos` section in a `docs/AGENTS.md` is left as it is.
+- **AI audit** (`POST /api/projects/:id/full-audit`): SSE-streamed chained analysis — 9 foundation steps (`ANALYSIS_STEPS`) then the 7 focused sub-audits, 16 steps total under a single per-project lease. Each step runs an agent call with `full_access: true` and default profiles (Architect + Tech Lead + Mentor) for multi-perspective analysis. Bootstrap block removed before audit starts. Resume is by `resume_run_id` (server-derived kind + contiguous checkpoint). The legacy `/ai-audit` route was removed in 0.9.0. **Detached runs**: full, specialized and partial audit producers run independently of their SSE subscribers, so closing the interface or MCP bridge does not stop them. A backend restart still interrupts a running audit; boot reconciliation preserves its persisted checkpoint, and `audit_status` reports whether a `resume_run_id` is available. `[src: file: backend/src/api/audit/mod.rs:76-83#detach_sse_stream]` `[src: file: backend/src/api/audit/full.rs:3953#detach_sse_stream]` `[src: file: backend/src/api/audit/drift.rs:2355#detach_sse_stream]` `[src: file: backend/src/db/audit_runs.rs:910-941#reconcile_stale_runs]` `[src: file: backend/scripts/disc-introspection-mcp.py:10768-10782#audit_launch]`
+- **What an agent prompt names about other repos (KT-926)**: a prompt goes to the model provider, which may be a remote service, so the only repo besides the project at hand that a Kronn prompt names is one the user explicitly linked to it (`Project.linked_repos`, a voluntary declaration). No prompt carries the list of the machine's other Kronn projects (name + absolute path): not a Full or partial audit step, not the audit's validation and briefing discussions, not any other discussion, orchestration round or workflow Agent step. The candidate-pool block (`format_kronn_projects_universe_for_prompt`), its wiring (`compute_companion_context`, the `extra_context` argument of `execute_step` and `build_step_prompt`) and its instructions — read another repo's `docs/AGENTS.md`, write a `## Suggested companion repos` section into the audited repo's own `docs/AGENTS.md` — are gone; what an audit records about neighbouring repos comes from what the audited repo says (manifests, compose files, `.gitmodules`, imports). A linked repo is named inline in every Full / partial audit step (`format_linked_repos_for_prompt`) and, for discussions and workflow Agent steps, read from `docs/linked-repos.md` (pull, not inlined — 0.8.4 #295). Pinned by running the real entry points on a scripted `claude` with three other projects registered and reading the prompt it was handed: both audit pipelines `[src: file: backend/src/api/audit/agent_launch_tests.rs:1236-1316#step_prompts_of]`, discussions including the audit briefing and validation `[src: file: backend/src/api/discussions/companion_privacy_tests.rs:220-229#no_discussion_names_an_unlinked_kronn_project]`, a workflow Agent step `[src: file: backend/src/workflows/runner_tests_up.rs:1505-1564#an_agent_step_prompt_names_no_unlinked_kronn_project]`, over the shared fixture `[src: file: backend/src/api/other_projects_fixture.rs:1-24#KT-926]`. An earlier audit's `## Suggested companion repos` section in a `docs/AGENTS.md` is left as it is.
 - **Validation**: creates a Discussion with title "Validation audit AI" and a locked prompt — inserted in the SAME transaction as the run's terminal status, with the agent spawned only after that commit. The AI asks questions about ambiguities/TODOs, updates `docs/` files after each answer. Frontend detects validation-in-progress by matching discussion title + project_id. Project page only shows "validation en cours" + link (no validate button).
-- **Partial validation (KT-931)**: a Full run some of whose steps failed still gets this validation discussion, for the steps that succeeded — it just stays `Interrupted` (only a run where every step succeeded can earn the Validated badge), and the prompt's leading block names the steps a resume will redo. The one gate: the founding step (`docs/AGENTS.md`'s own step, step 1 of the chain, found by its `target_file` rather than a hard-coded index) must itself have succeeded — without the entry point the documentation has nowhere to start from, so that case gets no validation discussion at all, only the usual resumable-run checkpoint. A run where nothing succeeded, or whose documentary-optimization pass found an invented link, also gets none. `[src: file: backend/src/api/audit/full.rs:3456-3470#validation_wanted]` `[src: file: backend/src/api/audit/full.rs:4030-4042#founding_step_index]`
+- **Partial validation (KT-931)**: a Full run some of whose steps failed still gets this validation discussion, for the steps that succeeded — it just stays `Interrupted` (only a run where every step succeeded can earn the Validated badge), and the prompt's leading block names the steps a resume will redo. The one gate: the founding step (`docs/AGENTS.md`'s own step, step 1 of the chain, found by its `target_file` rather than a hard-coded index) must itself have succeeded — without the entry point the documentation has nowhere to start from, so that case gets no validation discussion at all, only the usual resumable-run checkpoint. A run where nothing succeeded, or whose documentary-optimization pass found an invented link, also gets none. `[src: file: backend/src/api/audit/full.rs:3413-3427#validation_wanted]` `[src: file: backend/src/api/audit/full.rs:3992-4004#founding_step_index]`
 - **Completion detection**: the prompt instructs the AI to include `KRONN:VALIDATION_COMPLETE` in its final message. The backend parses it once and stamps it durably on the audit run (KT-1122); the frontend reads that verdict (`GET /api/projects/:id/validation-state`) and shows a green banner with "Marquer l'audit comme valide" button — only in the discussion view, and only when the server would accept it (otherwise it shows the reason). See [audit-run-states](audit-run-states.md).
 - **Mark validated** (`POST /api/projects/:id/validate-audit`): injects `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` at end of `docs/AGENTS.md`.
 
@@ -967,5 +1000,5 @@ approval check, so a Gate approval or an interrupted resume — which reload the
 definition from the database — keep it, and the step provenance names the agent
 actually used. Only agent, model and effort are replaced; tier, budget, tools
 stay, and a named connection stays only while the agent does.
-`[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:181-238#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1150-1170#apply_from_run]`
-`[src: file: backend/src/api/workflows.rs:5144-5202#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5302-5307#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5216-5221#TRIGGER_CONTEXT_KEY]`
+`[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:181-238#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1306-1326#apply_from_run]`
+`[src: file: backend/src/api/workflows.rs:5484#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5629-5685#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5538#TRIGGER_CONTEXT_KEY]`

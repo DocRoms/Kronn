@@ -15,7 +15,7 @@ only judgement in that loop is reading a delivery against its DoD.
 
 At 0.14.3 no workflow step could delegate: `StepType` had no variant that
 drives a task execution (0.15.0 adds `DelegateSubtasks`).
-`[src: file: backend/src/models/workflows.rs:1378-1381#DelegateSubtasks]`
+`[src: file: backend/src/models/workflows.rs:1568-1571#DelegateSubtasks]`
 
 ## 2. What already exists (and is reused as is)
 
@@ -27,35 +27,35 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   within the concurrency, budget and escalation limits, and, with
   `auto_continue`, launches the next launchable task after each integration
   under the idempotency key `campaign-auto:<run>:<task>`.
-  `[src: file: backend/src/db/orchestration.rs:1637-1777#campaign_task_candidates]`
-  `[src: file: backend/src/api/orchestration.rs:4431-4531#advance_campaign_after_integration]`
+  `[src: file: backend/src/db/orchestration.rs:1741-1881#campaign_task_candidates]`
+  `[src: file: backend/src/api/orchestration.rs:4906-5006#advance_campaign_after_integration]`
 - **Worker resolution.** Explicit override, then the campaign default worker,
   then the principal discussion's identity.
-  `[src: file: backend/src/db/orchestration.rs:1447-1475#resolve_campaign_worker]`
+  `[src: file: backend/src/db/orchestration.rs:1515-1543#resolve_campaign_worker]`
 - **Review contract.** `ReviewDecisionV1` with a verdict `approve |
   request_changes`, the reviewed HEAD, findings and DoD verifications.
   `decide_review` bumps the round on `request_changes`, sends the findings to
   the worker, and escalates (`Escalated`, principal solicited) when the budget
-  is spent. `[src: file: backend/src/models/orchestration.rs:2004-2010#ReviewVerdict]`
-  `[src: file: backend/src/models/orchestration.rs:2047-2070#ReviewDecisionV1]`
-  `[src: file: backend/src/api/orchestration.rs:8677-8684#decide_review]`
-  `[src: file: backend/src/db/orchestration.rs:4696-4705#ReviewCheckpoint]`
-  `[src: file: backend/src/db/orchestration.rs:4727-4739#ReviewCheckpointOutcome]`
+  is spent. `[src: file: backend/src/models/orchestration.rs:2038-2044#ReviewVerdict]`
+  `[src: file: backend/src/models/orchestration.rs:2081-2104#ReviewDecisionV1]`
+  `[src: file: backend/src/api/orchestration.rs:9368-9375#decide_review]`
+  `[src: file: backend/src/db/orchestration.rs:4827-4836#ReviewCheckpoint]`
+  `[src: file: backend/src/db/orchestration.rs:4861-4873#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:14612-14624#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:18270-18279#human_review]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:15938-15950#reassign_execution]`
+  `[src: file: backend/src/api/orchestration.rs:20042-20051#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
   checkout, and sends a conflict back to the worker.
-  `[src: file: backend/src/api/orchestration.rs:3275-3533#run_integration]`
-  `[src: file: backend/src/core/worktree.rs:2624-2646#IntegrationTarget]`
+  `[src: file: backend/src/api/orchestration.rs:3666-3924#run_integration]`
+  `[src: file: backend/src/core/worktree.rs:3202-3224#IntegrationTarget]`
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
-  `[src: file: backend/src/workflows/steps.rs:2083-2117#evaluate_conditions]`
-  `[src: file: backend/src/models/workflows.rs:1045-1049#room_id]`
-  `[src: file: backend/src/workflows/sub_workflow_step.rs:982-999#record_foreach_done]`
+  `[src: file: backend/src/workflows/steps.rs:2099-2133#evaluate_conditions]`
+  `[src: file: backend/src/models/workflows.rs:1238-1242#room_id]`
+  `[src: file: backend/src/workflows/sub_workflow_step.rs:1047-1064#record_foreach_done]`
 
 So the step does not need a new orchestration engine: it needs a **mechanical
 principal** for a campaign, plus a **reviewer** that is not a long-lived room
@@ -72,18 +72,18 @@ branch. Checked against the code:
   `[src: file: backend/src/models/orchestration.rs:721-728#OrchestrationRun]`
 - Integration targets `run.target_branch`: through the unique worktree that has
   it checked out, or by moving the ref when no worktree has it; the run needs a
-  `project_id`. `[src: file: backend/src/api/orchestration.rs:3177-3233#integration_target]`
+  `project_id`. `[src: file: backend/src/core/worktree.rs:3216-3222#integration_target]`
 - Every principal `task_exec_*` route requires the caller to be that
   discussion's principal (`principal_is_authorized`): an active CLI session of
   the discussion, or the room's native agent during its own running turn. The
   review obligation and the escalation are messages posted to the principal of
   that discussion.
-  `[src: file: backend/src/api/orchestration.rs:15097-15110#principal_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:15072-15114#room_agent_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:7614-7621#deliver_worker_manifest]`
-  `[src: file: backend/src/db/orchestration.rs:4643-4650#EscalationDelivery]`
+  `[src: file: backend/src/api/orchestration.rs:16439-16452#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:16583-16625#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:8256-8263#deliver_worker_manifest]`
+  `[src: file: backend/src/db/orchestration.rs:4779-4786#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
-  `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
+  `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:1168-1171#build_branch_name]`
 
 So the real constraints are: a discussion that owns the campaign, a pinned
 target branch with at most one checkout, clean, and an authorized principal.
@@ -102,9 +102,14 @@ The "target workspace" part of the finding is inaccurate today.
    `integration_target_worktree` already finds it and approved deliveries land
    on the run's branch, which later steps (tests, PR) consume. The step
    commits or refuses before starting if the run worktree is dirty (the saga
-   would hold every integration otherwise). A step that targets another
-   branch must name it explicitly (`target_branch`), with the same
-   one-checkout rule.
+   would hold every integration otherwise). The step's own integrations do
+   not count its run, nor a parent run sharing its worktree (a sub-workflow),
+   as a busy holder of the target: they wait on the step and write nothing
+   meanwhile. Any other live run or execution on it still is, and every other
+   integration path (a human approval, a resume) keeps the strict check
+   (KT-1795). A step that targets another branch must name it explicitly
+   (`target_branch`): checked out in one worktree, which must be clean, or in
+   none, and then the integration moves its ref.
 3. **Mechanical principal.** The step acts as a backend principal: it calls
    the provisioning, review and integration functions directly, not the HTTP
    routes, with an actor that is recorded in the journal (`workflow-step:<run>:
@@ -141,8 +146,8 @@ Behaviour:
    `timeout_secs` (`task_exec_status`'s `wait_for` also re-reads the state, every
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
-   `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
-   `[src: file: backend/src/api/orchestration.rs:16399-16437#wait_for_execution_status]`
+   `[src: file: backend/src/workflows/delegate_subtasks_step.rs:285-295#idle]`
+   `[src: file: backend/src/api/orchestration.rs:17853-17891#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP
@@ -161,7 +166,7 @@ The step output ends with one signal, so `on_result` can route it:
 
 | Signal | When |
 | --- | --- |
-| `[SIGNAL: OK]` | every subtask integrated |
+| `[SIGNAL: OK]` | every subtask integrated: its task is done, or stays open only awaiting the merge of its integration into the step's target (KT-1519, KT-1802) |
 | `[SIGNAL: ESCALATED]` | a reviewer chose `escalate`, or `request_changes` past `max_review_rounds` (`Escalated`) |
 | `[SIGNAL: CONFLICT]` | an integration conflict came back more than once for one subtask |
 | `[SIGNAL: BLOCKED]` | no launchable subtask left while some are not done (blockers, Later, scope) |
@@ -178,7 +183,10 @@ never cancelled implicitly. Structured data (`data.subtasks`):
 
 `cost_usd` and `tokens` sum the messages of the execution's sub-discussion and
 of its reviewer sessions (`DiscussionMessage.cost_usd`); `TaskExecution` has no
-cost field today. `[src: file: backend/src/models/discussions.rs:369-371#cost_usd]`
+cost field today. `cost_usd` is set only when every agent reply carries a
+cost; otherwise it is `null` and `cost_unknown_reason` says why (a partial
+sum, or the worker session's own reason when no reply is priced), so a
+missing or partial cost never reads as the whole (KT-1802). `[src: file: backend/src/models/discussions.rs:369-371#cost_usd]`
 
 ## 6. Resume and cleanup
 

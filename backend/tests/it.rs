@@ -3,12 +3,11 @@
 //! per file. Add a new file to this list; Cargo does not discover it.
 
 /// No test of this binary may start an agent CLI installed on the machine
-/// (KT-1189). The library arms its guard from `KRONN_TEST_NO_REAL_AGENTS`, a
-/// variable it reads only in a build with the `test-support` feature (this
-/// package's own dev-dependency turns it on for this binary and no other
-/// build). It is set here, before `main`, so every test of every module has it whatever
-/// helper it builds its state with — a flag each module had to remember to set
-/// would be missing the day a module forgets it.
+/// (KT-1189). The guard is armed here by one call, before `main`, so every test
+/// of every module has it whatever helper it builds its state with — a call each
+/// module had to remember to make would be missing the day a module forgets it.
+/// No cargo feature and no environment variable arms it (KT-1744): the package
+/// is not its own dev-dependency, so `cargo test --lib` compiles the library once.
 #[used]
 #[cfg_attr(
     any(target_os = "linux", target_os = "android"),
@@ -18,10 +17,53 @@
 #[cfg_attr(windows, link_section = ".CRT$XCU")]
 static ARM_THE_REAL_AGENT_GUARD: extern "C" fn() = {
     extern "C" fn arm() {
-        kronn::core::child_env::set_var(kronn::core::cmd::NO_REAL_AGENTS_ENV, "1");
+        kronn::core::cmd::arm_real_agent_guard_for_tests();
     }
     arm
 };
+
+/// No test of this binary may write the user's real Kronn data: the library
+/// refuses it without `KRONN_DATA_DIR` once the binary is marked, whatever
+/// directory Cargo built it in. Same constructor mechanism as above.
+#[used]
+#[cfg_attr(
+    any(target_os = "linux", target_os = "android"),
+    link_section = ".init_array"
+)]
+#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
+#[cfg_attr(windows, link_section = ".CRT$XCU")]
+static MARK_THE_TEST_BINARY: extern "C" fn() = {
+    extern "C" fn mark() {
+        kronn::core::config::mark_test_binary();
+    }
+    mark
+};
+
+/// No test of this binary may read or write the user's global git config
+/// (KT-1746: the suite once added 29 864 temp-dir `safe.directory` entries to
+/// the real `~/.gitconfig`). Same constructor mechanism as above.
+#[used]
+#[cfg_attr(
+    any(target_os = "linux", target_os = "android"),
+    link_section = ".init_array"
+)]
+#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
+#[cfg_attr(windows, link_section = ".CRT$XCU")]
+static ISOLATE_THE_GIT_CONFIG: extern "C" fn() = {
+    extern "C" fn isolate() {
+        kronn::core::git_global_config::isolate_global_git_config_for_tests();
+    }
+    isolate
+};
+
+/// Guard on the harness env: every test starts with scratch git config files.
+#[test]
+fn no_test_can_reach_the_real_global_git_config() {
+    assert!(
+        kronn::core::git_global_config::global_git_config_is_isolated(),
+        "GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM must point at scratch files"
+    );
+}
 
 /// Shared by the KT-619 router modules.
 #[path = "support/publication_fixture.rs"]
@@ -135,10 +177,7 @@ fn every_test_file_is_a_module_of_this_binary() {
 fn the_real_agent_guard_is_armed_for_every_integration_test() {
     assert!(
         kronn::core::cmd::real_agents_forbidden(),
-        "KRONN_TEST_NO_REAL_AGENTS is not set in the integration test binary"
+        "the real-agent guard is not armed in the integration test binary"
     );
-    assert_eq!(
-        kronn::core::child_env::var(kronn::core::cmd::NO_REAL_AGENTS_ENV).as_deref(),
-        Ok("1")
-    );
+    assert!(kronn::core::cmd::real_agent_guard_armed());
 }

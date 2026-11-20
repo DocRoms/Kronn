@@ -31,23 +31,23 @@ for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
 pre-edit file or a repetition refusal (KT-948).
-[src: file: backend/src/agents/runner.rs:12073-12116#observation_readers_to_restore]
+[src: file: backend/src/agents/runner.rs:801-844#observation_readers_to_restore]
 
 The HTTP runner also publishes structured input/output and reported cache-token
 counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:9180-9191#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:2178-2185#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10499-10529#task_usage]
+[src: file: backend/src/agents/runner.rs:9175-9186#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:2128-2135#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10484-10514#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
-[src: file: backend/src/agents/runner.rs:8480-8486#request_provider_cost]
-[src: file: backend/src/agents/runner.rs:2171-2176#cost_incomplete]
+[src: file: backend/src/agents/runner.rs:8479-8485#request_provider_cost]
+[src: file: backend/src/agents/runner.rs:2121-2126#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2239#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1295#reported_cost_usd_micros]
 
@@ -60,7 +60,7 @@ alongside the missing-output reason. Reaching a search ceiling alone does not
 fail an otherwise valid artifact (KT-951).
 [src: file: backend/src/agents/runner.rs:26-27#MAX_AUDIT_SEARCH_CALLS]
 [src: file: backend/src/agents/runner.rs:685-710#max_calls_for_tool]
-[src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
+[src: file: backend/src/api/audit/validation.rs:194-234#with_http_diagnostics]
 
 Hosted OpenAI-wire models (LiteLLM, NVIDIA, Custom, OpenRouter) send no
 `num_ctx`, so their context pressure is measured on a bounded step budget:
@@ -71,9 +71,9 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8494-8496#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8498-8500#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:12766-12781#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:8487-8489#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8491-8493#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:12751-12766#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
@@ -85,12 +85,12 @@ rewritten. Originals are saved by content hash under
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
-[src: file: backend/src/api/audit/document_repair.rs:785-859#split_verified_citations]
-[src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
+[src: file: backend/src/api/audit/document_repair.rs:815-889#split_verified_citations]
+[src: file: backend/src/core/audit_state.rs:11#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2559-2589#check_attempt]
 [src: file: backend/src/api/audit/full.rs:1893-1897#max_attempts]
-[src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
-[src: file: backend/src/api/audit/document_repair.rs:421-428#feedback]
+[src: file: backend/src/api/audit/anti_hallu_enforce.rs:28#MAX_ATTEMPTS]
+[src: file: backend/src/api/audit/document_repair.rs:439-446#feedback]
 
 An incomplete dimension-coverage matrix also receives targeted feedback in a
 Full audit after the agent exits successfully. This shares the same three-attempt
@@ -98,7 +98,7 @@ budget as documentary correction; it does not add another retry budget. Resume
 recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
-[src: file: backend/src/api/audit/validation.rs:96-117#coverage_repair_feedback]
+[src: file: backend/src/api/audit/validation.rs:107-128#coverage_repair_feedback]
 [src: file: backend/src/api/audit/full.rs:2450-2469#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
@@ -112,9 +112,9 @@ evidence that tool calling is unsupported. Only typed status metadata enters
 this diagnostic; provider response bodies and endpoint URLs are excluded.
 Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
-[src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
-[src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:9229-9233#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/http_diagnostics.rs:36-50#failure_summary]
+[src: file: backend/src/api/audit/validation.rs:194-234#with_http_diagnostics]
+[src: file: backend/src/agents/runner.rs:9224-9228#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
@@ -128,14 +128,14 @@ step (the baseline is taken before any write of the step, the cross-agent
 path's included); and a step is blocked only by diagnostics absent before it ran
 (`documentary_preexisting` reports the others) unless the recovery plan hands
 them to it (KT-1306).
-[src: file: backend/src/api/audit/document_repair.rs:282-318#recovery_plan]
+[src: file: backend/src/api/audit/document_repair.rs:303-339#recovery_plan]
 [src: file: backend/src/db/audit_runs.rs:1509-1527#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with
 `strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's
 strict subset, and Kronn validates the extracted data itself. See
 [TypedSchema on the OpenAI wire](../gotchas/typed-schema-openai-strict-mode.md).
-[src: file: backend/src/agents/chat_codec.rs:205-212#response_format]
+[src: file: backend/src/agents/chat_codec.rs:201-208#response_format]
 
 ## Pre-dispatch capability check
 
@@ -221,11 +221,11 @@ behaviour is the same as for a joined CLI; see
   is available for that refactor.
   [src: file: backend/src/core/model_catalog/mod.rs:1380-1387#preflight_resolve]
   [src: file: backend/src/api/discussions/orchestration.rs:66-132#checked_launch_connection]
-  [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection]
-  [src: file: backend/src/api/discussions/orchestration.rs:710-718#checked_launch_connection]
-  [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection]
-  [src: file: backend/src/workflows/steps.rs:1171-1211#resolve_step_connection]
-  [src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
+  [src: file: backend/src/api/discussions/orchestration.rs:748-756#checked_launch_connection]
+  [src: file: backend/src/api/discussions/orchestration.rs:644-652#checked_launch_connection]
+  [src: file: backend/src/api/discussions/orchestration.rs:983-991#checked_launch_connection]
+  [src: file: backend/src/workflows/steps.rs:1180-1220#resolve_step_connection]
+  [src: file: backend/src/workflows/steps.rs:1222-1275#preflight_workflow_launch]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the
@@ -267,8 +267,8 @@ behaviour is the same as for a joined CLI; see
   [src: file: backend/src/api/external_api_connections.rs:677-679#ChatProbe]
   [src: file: backend/src/api/external_api_connections.rs:708-728#failure_response]
   [src: file: backend/src/api/external_api_connections.rs:822-833#assemble_tier_report]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:387-388#billing_error]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1086#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:391-392#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1173#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.
@@ -313,12 +313,12 @@ without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3605-3637#read_attached_file]
-[src: file: backend/src/api/agent_workspace_tools.rs:1297-1341#read_attachment_payload]
+[src: file: backend/src/api/agent_tools.rs:3615-3647#read_attached_file]
+[src: file: backend/src/api/agent_workspace_tools.rs:1493-1537#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an
 instruction to inspect it with their own image/file tools before describing it.
 Kronn does not claim that every CLI/model can decode every format. The HTTP
 image parts described here apply to ordinary discussion turns; workflow Agent
 steps do not implicitly import attachments from an unrelated discussion.
-[src: file: backend/src/core/context_files.rs:767-790#build_context_prompt]
+[src: file: backend/src/core/context_files.rs:763-786#build_context_prompt]

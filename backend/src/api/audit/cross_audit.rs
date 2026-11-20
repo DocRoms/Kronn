@@ -19,7 +19,7 @@ use crate::models::*;
 use crate::AppState;
 
 /// The chosen agents, read from `docs/briefing.md` first, then the DB notes.
-pub(crate) fn briefing_cross_agents(
+pub fn briefing_cross_agents(
     file_notes: Option<&str>,
     db_notes: Option<&str>,
 ) -> Option<Vec<AgentType>> {
@@ -30,7 +30,7 @@ pub(crate) fn briefing_cross_agents(
 
 /// What one model call returned.
 #[derive(Debug, Clone)]
-pub(crate) struct AgentReply {
+pub struct AgentReply {
     pub text: String,
     pub usage: StepTokens,
     pub cost_usd_micros: Option<u64>,
@@ -38,7 +38,7 @@ pub(crate) struct AgentReply {
 
 /// Runs one prompt on one agent. The production runner launches the audit's
 /// agents; tests script it.
-pub(crate) trait CrossAgentRunner: Send + Sync {
+pub trait CrossAgentRunner: Send + Sync {
     fn run<'a>(
         &'a self,
         agent: &'a AgentType,
@@ -50,7 +50,7 @@ pub(crate) trait CrossAgentRunner: Send + Sync {
 const CALL_STALL: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Launches each agent the way an audit step does, collecting its answer.
-pub(crate) struct LauncherRunner {
+pub struct LauncherRunner {
     pub state: AppState,
     pub tier: ModelTier,
     pub project_path: PathBuf,
@@ -120,14 +120,14 @@ impl CrossAgentRunner for LauncherRunner {
 
 /// What the cross-checked step produced, before it is written.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct CrossStepReport {
+pub struct CrossStepReport {
     pub records: Vec<CrossFindingRecord>,
     pub dropped: Vec<DroppedFinding>,
     pub checklists: Vec<(AgentType, Vec<ChecklistLine>)>,
     pub failed_agents: Vec<(AgentType, String)>,
     pub calls: u32,
-    usage: Option<StepTokens>,
-    cost: CallCost,
+    pub usage: Option<StepTokens>,
+    pub cost: CallCost,
 }
 
 impl CrossStepReport {
@@ -166,7 +166,7 @@ impl CrossStepReport {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-enum CallCost {
+pub enum CallCost {
     #[default]
     None,
     Known(u64),
@@ -176,7 +176,7 @@ enum CallCost {
 /// Steps 1 to 7: independent detection, citation filter, matching,
 /// cross-check, right of reply, arbitration. Model calls only for detection,
 /// refutation and reply.
-pub(crate) async fn run_cross_step(
+pub async fn run_cross_step(
     runner: &dyn CrossAgentRunner,
     root: &Path,
     agents: &[AgentType],
@@ -342,7 +342,7 @@ pub(crate) async fn run_cross_step(
     Ok(report)
 }
 
-pub(crate) fn heading_for(
+pub fn heading_for(
     target_file: &str,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> &'static str {
@@ -353,15 +353,23 @@ pub(crate) fn heading_for(
 }
 
 /// Writes `content` unless the file already holds it; true when it wrote.
-fn write_if_changed(root: &Path, path: &Path, content: &str) -> Result<bool, String> {
-    match std::fs::read_to_string(path) {
-        Ok(existing) if existing == content => Ok(false),
-        Ok(_) => {
-            crate::core::fs_guard::guarded_replace(root, path, content.as_bytes()).map(|()| true)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            crate::core::fs_guard::guarded_replace(root, path, content.as_bytes()).map(|()| true)
-        }
+pub fn write_if_changed(root: &Path, path: &Path, content: &str) -> Result<bool, String> {
+    match read_guarded(root, path)? {
+        Some(existing) if existing == content => Ok(false),
+        _ => crate::core::fs_guard::guarded_replace(root, path, content.as_bytes()).map(|()| true),
+    }
+}
+
+/// The text at `path` read through the project's directory fds (KT-1595): a
+/// link at the name or in a parent — planted, or swapped in after the caller's
+/// walk — is an error, never followed, so what an outside file holds is never
+/// copied into a doc Kronn writes. `None` when the file is missing.
+pub fn read_guarded(root: &Path, path: &Path) -> Result<Option<String>, String> {
+    match crate::core::fs_guard::guarded_read(root, path) {
+        Ok(Some(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| format!("read {}: {e}", path.display())),
+        Ok(None) => Ok(None),
         Err(e) => Err(format!("read {}: {e}", path.display())),
     }
 }
@@ -393,13 +401,29 @@ fn previous_finding_rows(previous: &str) -> Vec<(String, String)> {
 /// wrote), and settled sheets it named.
 type Carried = (Vec<String>, Vec<(String, String, String)>);
 
-fn carried_from_previous(previous: &str, td_dir: &Path, records: &[CrossFindingRecord]) -> Carried {
+pub fn carried_from_previous(
+    root: &Path,
+    previous: &str,
+    td_dir: &Path,
+    records: &[CrossFindingRecord],
+) -> Result<Carried, String> {
     let redetected: std::collections::BTreeSet<&str> =
         records.iter().filter_map(|r| r.td_id.as_deref()).collect();
-    let sheet = |id: &str| {
-        std::fs::read_to_string(td_dir.join(format!("{id}.md")))
-            .ok()
-            .map(|c| crate::core::td_index::parse_sheet(id, &c))
+    // A sheet is read through the project's fds: a link planted at its name or
+    // swapped in for the folder is an ERROR (the index is not rewritten from an
+    // outside file), a sheet that is missing or not text is simply no sheet.
+    let sheet = |id: &str| -> Result<Option<crate::core::td_index::TdSheet>, String> {
+        let path = td_dir.join(format!("{id}.md"));
+        match crate::core::fs_guard::guarded_read(root, &path) {
+            Ok(Some(bytes)) => Ok(String::from_utf8(bytes)
+                .ok()
+                .map(|c| crate::core::td_index::parse_sheet(id, &c))),
+            Ok(None) => Ok(None),
+            Err(e) if crate::core::fs_guard::is_link_refusal(&e) => {
+                Err(format!("read {}: {e}", path.display()))
+            }
+            Err(_) => Ok(None),
+        }
     };
     let mut rows: Vec<String> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -407,7 +431,7 @@ fn carried_from_previous(previous: &str, td_dir: &Path, records: &[CrossFindingR
         if redetected.contains(id.as_str()) || !seen.insert(id.clone()) {
             continue;
         }
-        if sheet(&id).is_none_or(|s| s.is_active()) {
+        if sheet(&id)?.is_none_or(|s| s.is_active()) {
             rows.push(row);
         }
     }
@@ -416,7 +440,7 @@ fn carried_from_previous(previous: &str, td_dir: &Path, records: &[CrossFindingR
         if redetected.contains(id.as_str()) {
             continue;
         }
-        if let Some(s) = sheet(&id).filter(|s| !s.is_active()) {
+        if let Some(s) = sheet(&id)?.filter(|s| !s.is_active()) {
             let label = match s.decision {
                 Some(crate::core::audit_validation::TdDecision::Rejected) => "rejected",
                 _ => "accepted as a decision",
@@ -424,14 +448,14 @@ fn carried_from_previous(previous: &str, td_dir: &Path, records: &[CrossFindingR
             settled.push((id, s.title, label.to_string()));
         }
     }
-    (rows, settled)
+    Ok((rows, settled))
 }
 
 /// Step 8, on disk: TD ids, human-card keys, the index and the sheets. An
 /// existing sheet keeps its body; only its Kronn provenance block changes.
 /// The previous index's undetected rows, settled sheets and human-owned
 /// sections are kept. Returns whether any file changed.
-pub(crate) fn write_outputs(
+pub fn write_outputs(
     root: &Path,
     target_file: &str,
     agents: &[AgentType],
@@ -448,12 +472,8 @@ pub(crate) fn write_outputs(
     }
     let target = root.join(target_file);
     crate::core::fs_guard::assert_contained_no_symlink(root, &target)?;
-    let previous = match std::fs::read_to_string(&target) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("read {}: {e}", target.display())),
-    };
-    let (carried_rows, settled) = carried_from_previous(&previous, &td_dir, &report.records);
+    let previous = read_guarded(root, &target)?.unwrap_or_default();
+    let (carried_rows, settled) = carried_from_previous(root, &previous, &td_dir, &report.records)?;
     let mut changed = false;
     for record in report.records.iter().filter(|r| r.has_sheet()) {
         let Some(id) = record.td_id.as_deref() else {
@@ -461,10 +481,9 @@ pub(crate) fn write_outputs(
         };
         let path = td_dir.join(format!("{id}.md"));
         crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
-        let content = match std::fs::read_to_string(&path) {
-            Ok(existing) => engine::merge_provenance(&existing, record),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => engine::render_td_sheet(record),
-            Err(e) => return Err(format!("read {}: {e}", path.display())),
+        let content = match read_guarded(root, &path)? {
+            Some(existing) => engine::merge_provenance(&existing, record),
+            None => engine::render_td_sheet(record),
         };
         changed |= write_if_changed(root, &path, &content)?;
     }
@@ -486,7 +505,7 @@ pub(crate) fn write_outputs(
 
 /// The human cards of the serious disagreements, in their own discussion:
 /// one `kronn-question` per dispute, both arguments side by side.
-pub(crate) fn dispute_discussion(
+pub fn dispute_discussion(
     project_id: &str,
     agent: &AgentType,
     language: &str,
@@ -576,7 +595,7 @@ pub(crate) fn dispute_discussion(
 
 /// Persists the dispute discussion (its cards are ingested with the message)
 /// and the step's provenance, in one transaction.
-pub(crate) fn persist(
+pub fn persist(
     conn: &rusqlite::Connection,
     run_id: &str,
     step_index: u32,
@@ -617,7 +636,7 @@ pub(crate) fn persist(
 }
 
 /// One line per verdict for the SSE `cross_audit` event.
-pub(crate) fn summary_json(
+pub fn summary_json(
     report: &CrossStepReport,
     step: usize,
     dispute_discussion: Option<&str>,
@@ -645,7 +664,7 @@ pub(crate) fn summary_json(
 /// Detection runs the step once per agent; the cross-check and the reply add
 /// at most one call per agent each, every one reading code again. Hence a
 /// range from N to 2N times the step's single-agent cost.
-pub(crate) fn estimate(
+pub fn estimate(
     agents: u32,
     base: Option<(String, Option<u64>, Option<u64>)>,
     measured: Option<crate::db::audit_cross::MeasuredStep>,
@@ -733,7 +752,3 @@ pub async fn cross_audit_estimate(
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
     }
 }
-
-#[cfg(test)]
-#[path = "cross_audit_tests.rs"]
-mod tests;

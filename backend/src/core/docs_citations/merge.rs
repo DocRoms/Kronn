@@ -15,18 +15,18 @@
 
 use super::diff_map::DiffMap;
 use super::{
-    check_doc, file_citation_anchored, is_checked_doc, markers_at, reanchor_doc, suggested_span,
+    check_doc, file_citation_anchored, is_checked_doc, markers_at, placed_span, reanchor_doc,
     DocCitationFailure, ReanchorOutcome,
 };
 use crate::core::anti_halluc::{anchor_miss, anchor_miss_in};
-use crate::core::cmd::git_cmd;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// How far, in lines, the nearest occurrence of a symbol may lie from where a
-/// changed hunk maps the cited range. Beyond it the symbol is another place
-/// that merely shares its name, and a human picks.
+/// How far, in lines, the nearest of several occurrences of a symbol may lie
+/// from where a changed hunk maps the cited range. Beyond it the symbol is
+/// another place that merely shares its name, and a human picks. A symbol the
+/// merged file defines exactly once is placed whatever the distance.
 pub const NEAREST_OCCURRENCE_LIMIT: usize = 20;
 
 /// What settling the docs of a merge did.
@@ -44,8 +44,9 @@ pub enum SettleError {
     /// Settling would rewrite a file that carries changes the merge did not
     /// bring.
     Refused { paths: Vec<String>, message: String },
-    /// The merge broke citations the evidence cannot place: the symbol moved
-    /// too far, or two occurrences are equally near. A human points them.
+    /// The merge broke citations the evidence cannot place: the symbol is
+    /// defined or held on several lines, none provably the cited one. A human
+    /// points them.
     Unplaced { docs: Vec<String>, message: String },
     /// git or the filesystem failed.
     Failed(String),
@@ -128,10 +129,23 @@ impl MergeDocs {
     }
 }
 
-fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = git_cmd()
-        .args(args)
-        .current_dir(root)
+/// `git` on `root` through the lane builder (KT-1745): the repository is the
+/// registered one, no hook or filter of the worktree runs (`git checkout` fires
+/// `post-checkout`, `git add` the clean filters), and a diff runs no program.
+fn lane_command(root: &Path, args: &[&str]) -> Result<std::process::Command, String> {
+    let mut command = crate::core::lane_git::git(root)?;
+    if let Some((subcommand, rest)) = args.split_first() {
+        command
+            .arg(subcommand)
+            .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(crate::core::lane_git::ignore_submodules(root, subcommand))
+            .args(rest);
+    }
+    Ok(command)
+}
+
+pub(super) fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = lane_command(root, args)?
         .output()
         .map_err(|error| format!("cannot run git {}: {error}", args.join(" ")))?;
     if !output.status.success() {
@@ -161,13 +175,14 @@ pub fn merge_in_progress(root: &Path) -> bool {
 /// The merged (staged) text of every doc of the citation corpus that holds at
 /// least one `[src:` marker, sorted by path. The working tree is never read.
 fn citation_docs(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
-    let output = git_cmd()
-        .args([
+    let output = lane_command(
+        root,
+        &[
             "grep", "--cached", "-l", "-z", "-i", "-F", "[src:", "--", "*.md",
-        ])
-        .current_dir(root)
-        .output()
-        .map_err(|error| format!("cannot run git grep: {error}"))?;
+        ],
+    )?
+    .output()
+    .map_err(|error| format!("cannot run git grep: {error}"))?;
     // Exit 1 is "no match", not a failure.
     if !output.status.success() && output.status.code() != Some(1) {
         return Err(format!(
@@ -350,8 +365,9 @@ struct MergeMapper<'a> {
     dirty: BTreeSet<String>,
     /// Dirty files a citation to be moved points into.
     blocked: BTreeSet<String>,
-    /// `(doc line, citation)` of the current doc the evidence could not place.
-    unplaced: Vec<(usize, String)>,
+    /// `(doc line, citation, candidate lines)` of the current doc the evidence
+    /// could not place.
+    unplaced: Vec<(usize, String, Vec<usize>)>,
 }
 
 impl<'a> MergeMapper<'a> {
@@ -376,7 +392,9 @@ impl<'a> MergeMapper<'a> {
     }
 
     /// Where the moved citation belongs in the merged tree. Only a file the
-    /// merge changed is considered. A unique symbol needs no history. Otherwise
+    /// merge changed is considered. A symbol the merged file defines exactly
+    /// once (or, with no definition, holds on one line only) needs no history,
+    /// whatever the distance: the anchor is the source of truth. Otherwise
     /// the revisions the citation was written against map it line by line, and
     /// the symbol must lie in the mapped range. When a hunk changed the cited
     /// lines themselves, the occurrence of the symbol nearest the mapped
@@ -398,8 +416,8 @@ impl<'a> MergeMapper<'a> {
             self.blocked.insert(path);
             return Ok(None);
         }
-        if moved.occurrences.len() == 1 {
-            return Ok(suggested_span(moved.span, &moved.occurrences, moved.total));
+        if let Some(span) = moved.placement() {
+            return Ok(Some(span));
         }
         let (Some(old), Some(anchor)) = (lines, anchor) else {
             return Ok(None);
@@ -426,10 +444,11 @@ impl<'a> MergeMapper<'a> {
             let nearest = moved
                 .occurrences
                 .iter()
-                .map(|&line| (line.abs_diff(start), line))
-                .filter(|&(distance, _)| distance <= NEAREST_OCCURRENCE_LIMIT)
+                .zip(&moved.lines)
+                .map(|(&line, &at)| (line.abs_diff(start), line, at))
+                .filter(|&(distance, ..)| distance <= NEAREST_OCCURRENCE_LIMIT)
                 .min();
-            let Some((distance, line)) = nearest else {
+            let Some((distance, line, at)) = nearest else {
                 continue;
             };
             let tied = moved
@@ -440,13 +459,14 @@ impl<'a> MergeMapper<'a> {
             if tied > 1 {
                 continue;
             }
-            let span = (line, (line + (old.1 - old.0)).min(moved.total.max(line)));
+            let span = placed_span(old, at, line, moved.total);
             if anchor_miss(&merged, span, &anchor).is_none() {
                 return Ok(Some(span));
             }
         }
         // It held on a side and the merge broke it, and nothing safe remains.
-        self.unplaced.push((failure.line, failure.citation.clone()));
+        self.unplaced
+            .push((failure.line, failure.citation.clone(), moved.lines.clone()));
         Ok(None)
     }
 }
@@ -456,7 +476,7 @@ struct Plan {
     /// `(doc, merged text re-anchored)` for each doc that changes.
     writes: Vec<(PathBuf, String)>,
     outcome: ReanchorOutcome,
-    unplaced: Vec<(PathBuf, usize, String)>,
+    unplaced: Vec<(PathBuf, usize, String, Vec<usize>)>,
     blocked: BTreeSet<String>,
     /// Docs among `writes` whose working tree is not what the index holds.
     dirty_docs: Vec<String>,
@@ -471,13 +491,16 @@ fn path_set(root: &Path, args: &[&str]) -> Result<BTreeSet<String>, String> {
 /// target's, or a merge base) to the merged file, and only a citation whose
 /// cited file the merge changed is considered.
 fn plan_reanchor(root: &Path) -> Result<Plan, String> {
-    plan_reanchor_against(root, "MERGE_HEAD")
+    plan_reanchor_against(root, "MERGE_HEAD", false)
 }
 
 /// [`plan_reanchor`] with `theirs` the revision the branch is compared with: the
 /// merge in progress's `MERGE_HEAD`, or the target tip a branch already
 /// descends from (no merge, and the branch's own code shift is the evidence).
-fn plan_reanchor_against(root: &Path, theirs: &str) -> Result<Plan, String> {
+/// With `with_parent`, the parent of `HEAD` is one more revision a citation may
+/// have been written against: the docs a worker's previous commit re-anchored
+/// hold there, and at neither the base nor `HEAD` itself (KT-1721).
+fn plan_reanchor_against(root: &Path, theirs: &str, with_parent: bool) -> Result<Plan, String> {
     let theirs = git_lines(root, &["rev-parse", &format!("{theirs}^{{commit}}")])?
         .into_iter()
         .next()
@@ -490,6 +513,16 @@ fn plan_reanchor_against(root: &Path, theirs: &str) -> Result<Plan, String> {
     for base in git_lines(root, &["merge-base", "--all", "HEAD", &theirs]).unwrap_or_default() {
         if !revs.contains(&base) {
             revs.push(base);
+        }
+    }
+    if with_parent {
+        if let Some(parent) = git_lines(root, &["rev-parse", "-q", "--verify", "HEAD^"])
+            .ok()
+            .and_then(|lines| lines.into_iter().next())
+        {
+            if !revs.contains(&parent) {
+                revs.push(parent);
+            }
         }
     }
     let unmerged = path_set(root, &["diff", "--name-only", "-z", "--diff-filter=U"])?;
@@ -532,7 +565,7 @@ fn plan_reanchor_against(root: &Path, theirs: &str) -> Result<Plan, String> {
             mapper
                 .unplaced
                 .drain(..)
-                .map(|(line, citation)| (doc.clone(), line, citation)),
+                .map(|(line, citation, lines)| (doc.clone(), line, citation, lines)),
         );
         if new != text {
             if dirty.contains(&name) {
@@ -608,7 +641,25 @@ pub fn reanchor_and_stage(root: &Path, resolved: Vec<PathBuf>) -> Result<MergeDo
 /// there is no merge to finish: the citations its own code shift moved are
 /// re-anchored and staged, the caller commits them.
 pub fn reanchor_branch_and_stage(root: &Path, target: &str) -> Result<MergeDocs, SettleError> {
-    stage_plan(root, plan_reanchor_against(root, target)?, Vec::new())
+    stage_plan(
+        root,
+        plan_reanchor_against(root, target, false)?,
+        Vec::new(),
+    )
+}
+
+/// [`reanchor_branch_and_stage`] for the commit a worker just made (KT-1721):
+/// every citation the evidence places is re-anchored and staged, in any doc, and
+/// a citation it cannot place is left as it is instead of failing the step (the
+/// caller lists what [`newly_unresolved`] still reports). Still refuses, writing
+/// nothing, when a doc to rewrite or a file it cites has unstaged changes.
+pub fn reanchor_branch_leaving_unplaced(
+    root: &Path,
+    target: &str,
+) -> Result<MergeDocs, SettleError> {
+    let plan = plan_reanchor_against(root, target, true)?;
+    refuse_unclean(&plan)?;
+    write_and_stage(root, plan, Vec::new())
 }
 
 fn stage_plan(root: &Path, plan: Plan, resolved: Vec<PathBuf>) -> Result<MergeDocs, SettleError> {
@@ -622,18 +673,34 @@ fn stage_plan(root: &Path, plan: Plan, resolved: Vec<PathBuf>) -> Result<MergeDo
         let cites: Vec<String> = plan
             .unplaced
             .iter()
-            .map(|(doc, line, citation)| format!("{}:{line} [src: {citation}]", doc.display()))
+            .map(|(doc, line, citation, candidates)| {
+                let candidates: Vec<String> = candidates.iter().map(usize::to_string).collect();
+                format!(
+                    "{}:{line} [src: {citation}] (candidate lines {})",
+                    doc.display(),
+                    candidates.join(", ")
+                )
+            })
             .collect();
         return Err(SettleError::Unplaced {
             docs: docs.into_iter().collect(),
             message: format!(
-                "the merge broke doc citations that cannot be re-anchored safely (the symbol moved \
-                 more than {NEAREST_OCCURRENCE_LIMIT} lines, or two occurrences are equally near): \
+                "the merge broke doc citations that cannot be re-anchored safely (the symbol is \
+                 defined or held on several lines and none is within {NEAREST_OCCURRENCE_LIMIT} \
+                 lines of where the change maps it, or two are equally near): \
                  {}. Point each at its new lines by hand.",
                 cites.join("; ")
             ),
         });
     }
+    write_and_stage(root, plan, resolved)
+}
+
+fn write_and_stage(
+    root: &Path,
+    plan: Plan,
+    resolved: Vec<PathBuf>,
+) -> Result<MergeDocs, SettleError> {
     write_plan(root, &plan)?;
     let docs = MergeDocs {
         resolved,

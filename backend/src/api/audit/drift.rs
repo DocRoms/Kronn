@@ -438,7 +438,7 @@ pub async fn partial_audit(
 /// validation, per-step gates, cancel, terminal write. A revalidation
 /// (KT-1168) runs through it with its findings and its own restore rules.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_partial_pipeline(
+pub async fn run_partial_pipeline(
     state: AppState,
     project: Project,
     requested_steps: Vec<usize>,
@@ -789,7 +789,7 @@ pub(crate) async fn run_partial_pipeline(
             .any(|&n| chain[n - 1].target_file.ends_with("inconsistencies-tech-debt.md"));
         // KT-1174 — only the ADRs in force and the TD record lines present
         // before this refresh settle a TD.
-        let adr_baseline = crate::core::adr::StartOfRun::capture(&docs_root.dir(&project_path));
+        let adr_baseline = crate::core::adr::StartOfRun::capture(&project_path, &docs_root.dir(&project_path));
         let (detector_signals, ecosystems, prior_td_digests) = if step8_selected {
             let p = project_path.clone();
             let rules = project_rules.clone().unwrap_or_default().rules;
@@ -1780,32 +1780,19 @@ pub(crate) async fn run_partial_pipeline(
                                 // — the partial dispatcher shows it, never
                                 // swallows it.
                                 if enforce_mode {
-                                    match std::fs::read_to_string(&target_path) {
-                                        Ok(written) => {
-                                            let today = Utc::now().format("%Y-%m-%d").to_string();
-                                            if let Some(stamped) =
-                                                super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
-                                            {
-                                                if let Err(e) = std::fs::write(&target_path, &stamped) {
-                                                    yield Event::default().event("warning").data(
-                                                        serde_json::json!({
-                                                            "message": format!(
-                                                                "Step {step} ({file_label}): audit-date stamp failed: {e}"
-                                                            ),
-                                                        }).to_string()
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            yield Event::default().event("warning").data(
-                                                serde_json::json!({
-                                                    "message": format!(
-                                                        "Step {step} ({file_label}): audit-date stamp skipped, target unreadable: {e}"
-                                                    ),
-                                                }).to_string()
-                                            );
-                                        }
+                                    // KT-1595: read + replace through the
+                                    // rooted primitive, a link is refused.
+                                    let today = Utc::now().format("%Y-%m-%d").to_string();
+                                    if let Err(e) = super::anti_hallu_enforce::stamp_target_audit_dates(
+                                        &project_path, &target_path, &today,
+                                    ) {
+                                        yield Event::default().event("warning").data(
+                                            serde_json::json!({
+                                                "message": format!(
+                                                    "Step {step} ({file_label}): audit-date stamp failed: {e}"
+                                                ),
+                                            }).to_string()
+                                        );
                                     }
                                 }
                                 "succeeded"
@@ -2091,7 +2078,7 @@ pub(crate) async fn run_partial_pipeline(
                 // A trusted ADR settles its sheets before the scope is read.
                 let trust = baseline.trust();
                 let docs = crate::core::docs_location::DocsRoot::of(&pp).dir(&pp);
-                if let Err(e) = crate::core::adr::settle_covered_sheets(&docs, trust) {
+                if let Err(e) = crate::core::adr::settle_covered_sheets(&pp, &docs, trust) {
                     tracing::warn!("ADR check after the refresh failed: {e}");
                 }
                 super::reconciliation::td_validation_scope(&pp, &idx).undecided
@@ -2235,7 +2222,7 @@ pub(crate) async fn run_partial_pipeline(
             let write_res = tokio::task::spawn_blocking(move || -> Result<(), String> {
                 crate::core::checksums::write_checksums_file(&pp, &merged, &rewritten)?;
                 if completed {
-                    if let Err(e) = crate::core::kronn_state::record_audit(&pp, "partial") {
+                    if let Err(e) = crate::core::template_manifest::record_audit(&pp, "partial") {
                         tracing::warn!("Failed to record partial audit in .kronn.json: {e}");
                     }
                 }
@@ -2376,7 +2363,7 @@ fn detached_partial_audit_response(stream: SseStream) -> Sse<SseStream> {
 /// `Err` (the caller refuses the run), never an empty baseline that would
 /// silently drop the non-selected scope. A missing file stays legitimate
 /// (fresh project, foundation-only baseline).
-pub(crate) fn compute_merged_baseline(
+pub fn compute_merged_baseline(
     project_path: &std::path::Path,
     succeeded_steps: &[usize],
     chain: &[super::AnalysisStep],
@@ -2415,7 +2402,7 @@ pub(crate) fn compute_merged_baseline(
 
 /// SSE `done.status` for a terminal branch — the ONLY mapping from the
 /// persisted terminal to the wire status, so DB and SSE cannot diverge.
-pub(crate) fn done_status_of(terminal: &PartialTerminal) -> &'static str {
+pub fn done_status_of(terminal: &PartialTerminal) -> &'static str {
     match terminal {
         PartialTerminal::Success(_) => "complete",
         PartialTerminal::Interrupted { .. } => "interrupted",
@@ -2427,7 +2414,7 @@ type PendingValidation = (Discussion, DiscussionMessage);
 
 /// The terminal branch for a run's partition. `validation` is the scoped
 /// discussion of the done steps, absent when their validation came back.
-pub(crate) fn partial_terminal(
+pub fn partial_terminal(
     failed_steps: Vec<usize>,
     rewrote: bool,
     validation: Option<PendingValidation>,
@@ -2446,7 +2433,7 @@ pub(crate) fn partial_terminal(
 }
 
 /// Terminal branch of a partial run (Codex lot-3 matrix v2, KT-1207).
-pub(crate) enum PartialTerminal {
+pub enum PartialTerminal {
     /// failed == 0 && succeeded >= 1 — validation discussion SCOPED to the
     /// done sections, Completed + link, all in one commit.
     Success(Box<PendingValidation>),
@@ -2470,7 +2457,7 @@ pub(crate) enum PartialTerminal {
 /// have moved — a 0-row update aborts the tx so the server never reports
 /// a terminal status the DB does not carry). The caller disarms the
 /// drop-guard only after this returns Ok.
-pub(crate) async fn finalize_partial_run(
+pub async fn finalize_partial_run(
     db: &std::sync::Arc<crate::db::Database>,
     run_id: String,
     project_path: std::path::PathBuf,

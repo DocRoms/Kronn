@@ -1258,7 +1258,9 @@ async fn a_tech_debt_folder_swapped_after_the_walk_never_receives_a_sheet_or_the
         .unwrap();
     let external = tempfile::tempdir().unwrap();
     // The folder is swapped for a link once `write_outputs` holds it as an fd.
-    swap_probe::arm(&dir.path().join("docs/tech-debt"), external.path());
+    // The sheet is read twice (the merge, then the unchanged check); the swap
+    // lands on its write.
+    swap_probe::arm_after(&dir.path().join("docs/tech-debt"), external.path(), 2);
     let _ = write_outputs(
         dir.path(),
         "docs/inconsistencies-security.md",
@@ -1278,4 +1280,88 @@ async fn a_tech_debt_folder_swapped_after_the_walk_never_receives_a_sheet_or_the
             .is_file(),
         "the sheet went to the folder held as an fd, inside the root"
     );
+}
+
+/// KT-1595 (N1) — the previous index and the sheets are read AFTER the agents
+/// ran, then written back into the project: they are read through the project's
+/// directory fds, so a folder swapped for a link never feeds an outside file
+/// into the index.
+#[cfg(unix)] // creates symlinks through std::os::unix
+mod read_after_the_agents {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    const ID: &str = "TD-20260101-sql";
+    const PREVIOUS: &str = "| ID | Problem |\n|---|---|\n| TD-20260101-sql | SQL |\n";
+
+    fn project_with_sheet() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let td_dir = dir.path().join("docs/tech-debt");
+        std::fs::create_dir_all(&td_dir).unwrap();
+        std::fs::write(
+            td_dir.join(format!("{ID}.md")),
+            "# SQL\n\n- **Status**: Verified in source\n",
+        )
+        .unwrap();
+        (dir, td_dir)
+    }
+
+    #[test]
+    fn a_sheet_behind_a_folder_swapped_before_the_read_is_never_used_for_the_index() {
+        let (dir, td_dir) = project_with_sheet();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external.path().join(format!("{ID}.md")),
+            "# OUTSIDE SECRET\n\n- **Status**: Rejected\n",
+        )
+        .unwrap();
+        // The first read holds the folder; it is a link by the second.
+        swap_probe::arm(&td_dir, external.path());
+
+        let carried = carried_from_previous(dir.path(), PREVIOUS, &td_dir, &[]);
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(carried.is_err(), "{carried:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join(format!("{ID}.md"))).unwrap(),
+            "# OUTSIDE SECRET\n\n- **Status**: Rejected\n"
+        );
+    }
+
+    #[test]
+    fn a_sheet_that_is_a_link_is_an_error_for_the_carried_rows() {
+        let (dir, td_dir) = project_with_sheet();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("victim.md"), "# OUTSIDE SECRET\n").unwrap();
+        std::fs::remove_file(td_dir.join(format!("{ID}.md"))).unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("victim.md"),
+            td_dir.join(format!("{ID}.md")),
+        )
+        .unwrap();
+
+        let carried = carried_from_previous(dir.path(), PREVIOUS, &td_dir, &[]);
+
+        assert!(carried.is_err(), "{carried:?}");
+    }
+
+    #[test]
+    fn the_previous_index_is_never_read_through_a_link() {
+        let (dir, _td_dir) = project_with_sheet();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("index.md"), "# OUTSIDE SECRET\n").unwrap();
+        let index = dir.path().join("docs/inconsistencies-security.md");
+        std::os::unix::fs::symlink(external.path().join("index.md"), &index).unwrap();
+
+        let read = read_guarded(dir.path(), &index);
+        let written = write_if_changed(dir.path(), &index, "new index\n");
+
+        assert!(read.is_err(), "{read:?}");
+        // Nor does the writer go past it: a link at the name fails closed.
+        assert!(written.is_err(), "{written:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("index.md")).unwrap(),
+            "# OUTSIDE SECRET\n"
+        );
+    }
 }

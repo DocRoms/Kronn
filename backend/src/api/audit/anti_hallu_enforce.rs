@@ -13,9 +13,13 @@
 //! testable; the streaming generator in [`super::full`] owns the IO and the
 //! retry loop, and only calls into these helpers.
 
-use crate::core::anti_halluc::{self, scan_fences, FenceScan, SourceCheck};
+use crate::core::anti_halluc::{self, SourceCheck};
 use crate::core::version_sources::{verify_dep_marker, DependencySnapshot};
 use std::path::Path;
+
+pub use crate::core::anti_halluc::{code_line_mask, parse_named_sections};
+pub(super) use crate::core::anti_halluc::{extract_attr, is_human_owned_marker};
+pub use crate::core::anti_halluc::{named_sections, NamedSection};
 
 /// Total attempts (1 initial + retries) allowed per step in enforce mode.
 /// Design caps the corrective loop at 2-3 attempts: the agent already carries
@@ -176,6 +180,33 @@ pub fn stamp_curated_audit_dates(content: &str, today: &str) -> Option<String> {
     Some(out)
 }
 
+/// [`stamp_curated_audit_dates`] applied to the file `target_path` under
+/// `project_path`, run right after an agent (KT-1595): the read and the
+/// replace go through the rooted primitive, so a link at the name or in a
+/// parent (swapped in after the agent, or pre-planted) is refused, never read
+/// nor written through. The replace is optimistic on the bytes read. `Ok(true)`
+/// when dates were stamped, `Ok(false)` when there was nothing to stamp.
+pub fn stamp_target_audit_dates(
+    project_path: &Path,
+    target_path: &Path,
+    today: &str,
+) -> Result<bool, String> {
+    let bytes = crate::core::fs_guard::guarded_read(project_path, target_path)
+        .map_err(|e| format!("target unreadable: {e}"))?
+        .ok_or_else(|| "target missing".to_string())?;
+    let written = String::from_utf8(bytes).map_err(|_| "target is not UTF-8".to_string())?;
+    let Some(stamped) = stamp_curated_audit_dates(&written, today) else {
+        return Ok(false);
+    };
+    crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+        project_path,
+        target_path,
+        &stamped,
+        written.as_bytes(),
+    )?;
+    Ok(true)
+}
+
 /// One human-owned section whose content an audit step changed (or deleted)
 /// between the pre- and post-agent snapshot of the same file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,75 +216,6 @@ pub struct HumanSectionDiff {
     /// `None` when the agent deleted the section entirely (restored by
     /// appending it back).
     pub post_block: Option<String>,
-}
-
-struct SectionSpan {
-    name: String,
-    is_human: bool,
-    start: usize,
-    end: usize,
-}
-
-/// Fence characters that hide a `kronn:section` marker from the ownership
-/// parser. A `~~~` block is code to a renderer exactly like a ``` one.
-const OWNERSHIP_FENCE_CHARS: [char; 2] = ['`', '~'];
-
-/// Which lines of `text` sit inside a fenced code block. A marker on such a
-/// line is documentation (an example, a quoted report), never a live section
-/// boundary: it neither opens nor closes a protected section.
-///
-/// An unclosed fence is read leniently (its lines stay visible, so a stray
-/// fence in a human's own document does not strip protection) — except when
-/// `strict_unclosed` is set, where it is CommonMark's block-to-end-of-file.
-pub(crate) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
-    scan_fences(text, &OWNERSHIP_FENCE_CHARS, strict_unclosed)
-}
-
-/// Scan `lines` for `<!-- kronn:section name="X" ... -->` … `<!-- kronn:section:end -->`
-/// pairs. `in_code` flags the lines inside fenced code (index-aligned with
-/// `lines`, shorter is fine): their markers are ignored on both ends. An
-/// opener with no matching closer is skipped — there is nothing well-formed to
-/// protect there.
-fn parse_named_sections(lines: &[&str], in_code: &[bool]) -> Vec<SectionSpan> {
-    let is_code = |idx: usize| in_code.get(idx).copied().unwrap_or(false);
-    let mut spans = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let trimmed = lines[i].trim_start();
-        if !is_code(i)
-            && trimmed.starts_with("<!-- kronn:section")
-            && !trimmed.starts_with("<!-- kronn:section:end")
-        {
-            if let Some(name) = extract_attr(lines[i], "name") {
-                let is_human = is_human_owned_marker(lines[i]);
-                if let Some(end) = ((i + 1)..lines.len()).find(|&j| {
-                    !is_code(j) && lines[j].trim_start().starts_with("<!-- kronn:section:end")
-                }) {
-                    spans.push(SectionSpan {
-                        name,
-                        is_human,
-                        start: i,
-                        end,
-                    });
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-        i += 1;
-    }
-    spans
-}
-
-pub(super) fn extract_attr(line: &str, attr: &str) -> Option<String> {
-    let needle = format!("{attr}=\"");
-    let start = line.find(&needle)? + needle.len();
-    let end = line[start..].find('"')?;
-    Some(line[start..start + end].to_string())
-}
-
-pub(super) fn is_human_owned_marker(line: &str) -> bool {
-    line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
 }
 
 /// `content` with every human-owned section blanked (line count kept), and
@@ -271,32 +233,6 @@ pub fn split_human_owned_sections(content: &str) -> (String, Vec<(String, String
         }
     }
     (lines.join("\n"), human)
-}
-
-/// One live named section: its text (markers included) and 0-based line span.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamedSection {
-    pub name: String,
-    pub block: String,
-    pub human: bool,
-    pub start: usize,
-    pub end: usize,
-}
-
-/// Every live named section of `content`; fenced examples are not sections.
-pub fn named_sections(content: &str) -> Vec<NamedSection> {
-    let lines: Vec<&str> = content.split('\n').collect();
-    let scan = code_line_mask(content, false);
-    parse_named_sections(&lines, &scan.in_fence)
-        .into_iter()
-        .map(|span| NamedSection {
-            block: lines[span.start..=span.end].join("\n"),
-            name: span.name,
-            human: span.is_human,
-            start: span.start,
-            end: span.end,
-        })
-        .collect()
 }
 
 pub fn contains_human_owned_section(content: &str) -> bool {
@@ -1228,7 +1164,7 @@ pub fn evaluate_enforce_gate(
 
 /// The reason of a step that still holds fabricated citations once its
 /// attempts are spent.
-pub(crate) fn enforce_failure_reason(count: usize, max_attempts: usize) -> String {
+pub fn enforce_failure_reason(count: usize, max_attempts: usize) -> String {
     format!(
         "{} {}(s) still present after {} attempts (enforce mode)",
         count,
@@ -1378,5 +1314,72 @@ mod enforce_gate_tests {
             }
             _ => panic!("an absent deps row must be retried"),
         }
+    }
+}
+
+/// KT-1595 — the audit-date stamp runs right after the agent; these tests are
+/// not behind `full-tests` because they are the swap guarantee.
+#[cfg(all(test, unix))] // creates symlinks and sets chmod mode bits through std::os::unix
+mod stamp_target_tests {
+    use super::*;
+
+    const SECTION: &str = "<!-- kronn:section id=\"a\" owner=\"audit\" -->\nbody\n";
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_read_never_receives_the_stamp() {
+        use crate::core::fs_guard::swap_probe;
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), SECTION).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), SECTION).unwrap();
+        swap_probe::arm_after(&docs, external.path(), 1);
+        let _ = stamp_target_audit_dates(project.path(), &docs.join("a.md"), "2026-11-13");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("a.md")).unwrap(),
+            SECTION,
+            "the file behind the link is untouched"
+        );
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_link_at_the_target_name_is_refused_not_stamped_through() {
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), SECTION).unwrap();
+        std::os::unix::fs::symlink(external.path().join("a.md"), docs.join("a.md")).unwrap();
+        let outcome = stamp_target_audit_dates(project.path(), &docs.join("a.md"), "2026-11-13");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("a.md")).unwrap(),
+            SECTION
+        );
+    }
+
+    #[test]
+    fn a_regular_target_is_stamped_and_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), SECTION).unwrap();
+        std::fs::set_permissions(docs.join("a.md"), std::fs::Permissions::from_mode(0o640))
+            .unwrap();
+        assert_eq!(
+            stamp_target_audit_dates(project.path(), &docs.join("a.md"), "2026-11-13"),
+            Ok(true)
+        );
+        let after = std::fs::read_to_string(docs.join("a.md")).unwrap();
+        assert!(after.contains("audit=\"2026-11-13\""), "{after}");
+        let mode = std::fs::metadata(docs.join("a.md"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o640);
     }
 }

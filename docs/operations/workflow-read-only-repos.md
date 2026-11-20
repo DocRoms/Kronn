@@ -5,8 +5,8 @@ repository paths. The wizard exposes one path per line in the step's advanced
 settings. An empty or absent list retains the existing launch policy. This is
 an explicit per-step declaration; listing a companion project in documentation
 does not automatically grant access.
-[src: file: backend/src/models/workflows.rs:1050-1054#read_only_repos]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4577-4591#read_only_repos]
+[src: file: backend/src/models/workflows.rs:1243-1247#read_only_repos]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4677-4691#read_only_repos]
 
 ```json
 {
@@ -23,9 +23,9 @@ includes external Git metadata for linked worktrees. Missing/non-Git paths,
 permission-pattern characters, overlap with the working directory, unsupported
 agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
-[src: file: backend/src/agents/read_only_repos.rs:672-776#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:1029-1269#resolve_with_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:701-731#canonical_directory]
-[src: file: backend/src/api/workflow_step_schema.json:16#read_only_repos]
+[src: file: backend/src/api/workflow_step_schema.json:18#read_only_repos]
 
 Claude receives `--add-dir` together with `Edit` deny rules and sandbox
 `denyWrite` entries. Its read block remains enabled, the OS sandbox is
@@ -35,7 +35,7 @@ extending `:workspace`, with explicit `read` entries and approval policy `never`
 It keeps the standard broad filesystem read access; the declared directories
 are never added as writable roots, including when they live under a temporary
 directory. `--strict-config` rejects unsupported Codex settings.
-[src: file: backend/src/agents/read_only_repos.rs:1025-1142#args]
+[src: file: backend/src/agents/read_only_repos.rs:1043-1160#args]
 [Claude permission rules](https://code.claude.com/docs/en/permissions)
 [Claude sandbox](https://code.claude.com/docs/en/sandboxing)
 [Codex permissions](https://learn.chatgpt.com/docs/permissions)
@@ -48,11 +48,11 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4756-4761#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4782-4784#read_only_repos]
-[src: file: backend/src/agents/read_only_repos.rs:1001-1010#apply]
-[src: file: backend/src/agents/runner.rs:14903-14908#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15138-15149#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:4676-4681#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4724-4726#read_only_repos]
+[src: file: backend/src/agents/read_only_repos.rs:1511-1521#apply]
+[src: file: backend/src/agents/runner.rs:14890-14901#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15135-15146#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14759-14778#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14916-14930#is_codex]
+[src: file: backend/src/agents/runner.rs:14751-14770#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:14903-14917#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -103,7 +103,7 @@ two launch routes (the direct CLI and the ACP adapter) build their arguments fro
 the same policy at every launch, so a revoke applies from the next turn; revoking
 a `code` grant (or lowering the trust level that gave it) also stops the room's
 running turn, which still holds the checkout open.
-[src: file: backend/src/agents/read_only_repos.rs:806-862#resolve_room]
+[src: file: backend/src/agents/read_only_repos.rs:1160-1231#resolve_room]
 [src: file: backend/src/api/discussions/messaging.rs:1556-1585#stop_running_turn]
 
 A writable root never opens what a later program runs or what is secret, whether
@@ -137,16 +137,57 @@ or not the path exists when the turn starts:
   `denyRead` and `denyWrite`: the fixed credential paths literally, whether or not
   they exist (Seatbelt takes a path that is not there yet), the names as patterns
   (honoured where the sandbox supports patterns), and what a bounded scan finds now
-  (depth 8, 20 000 entries, no link followed) as literal paths. The complete inline
-  `--settings` document has one 96 KiB budget shared by every root and already
-  includes the vault rules. Required tool rules and sandbox patterns come first.
+  (depth 8, 20 000 entries, no link followed) as literal paths. The complete
+  `--settings` document, vault rules included, is shared by every root. Each
+  granted project adds a fixed block of rules whatever the room's history (about
+  5 KB read-only, 30 to 70 KB for `code`, with the length of its path). Up to
+  96 KiB the document is a command-line argument (Linux refuses one argument
+  above 128 KiB). Beyond, it is written with absolute paths to a private file of
+  `<data dir>/launch-settings/`, named after its content, and the spawn hands
+  `--settings` that path (KT-1971): a room with a few projects open for editing
+  used to be refused at 96 KiB. The document closes that directory to the agent's
+  `Edit` and `Write` tools and to its sandbox; a file no launch rewrote for 30 days
+  is removed. What bounds a room is the CLI's own sandbox: its `denyRead` and
+  `denyWrite` paths become one profile handed to every shell the agent starts, and
+  on macOS (Claude Code 2.1.329) a shell starts with 1 397 paths and no longer with
+  1 669. Kronn keeps the profile under 1 200 paths and 100 KiB, which is about
+  thirty read-only projects or eight open for editing (a project costs about 33
+  paths read-only, 125 for editing). A room granted more still starts: the plan
+  opens the projects that fit, those granted for editing first and then the
+  others in the order of the list, and the agent's context says which ones are
+  not opened in this run (without their path: the launch holds no rule on them)
+  and what the human can do (remove projects from the room, or grant them
+  read-only). A project left out has no rule of its own, so its whole
+  directory is denied to the agent's shell, for reading and for writing (two
+  sandbox paths a project; measured with Claude Code 2.1.329 on macOS: `cat`,
+  `ls` and `touch` answer `Operation not permitted`). The same holds for a
+  granted path that is no openable checkout (a link, a plain directory, a
+  folder with parentheses in its name): it is closed where it leads, unless
+  that is, or holds, a project the room opens by its own path. Closed wins:
+  a project inside one that is left out is closed with it, and one left out
+  inside an opened project is denied there.
+  **Known limit.** Denying a directory denies all it holds, so a project is
+  never closed when it is, or holds, something the launch needs: the working
+  directory and the Git directory behind it, the home directory, the Kronn
+  data directory, the temporary directory, the directories of `PATH`, the
+  system directories, or the main checkout of an opened linked worktree. Such
+  a project is opened first; if it is still left out, or is no openable
+  checkout, it stays as a folder nobody granted (the agent's shell reads it)
+  and the backend logs a warning. So does a folder whose name a sandbox would
+  read as a pattern (`*`, `?`, `[`, `{`). A granted folder that is no
+  checkout is only closed in a launch that opens at least one checkout (the
+  sandboxed policy exists then): a room of plain folders alone starts as
+  before, with no policy. A plain folder that holds an opened project is not
+  closed either. A room whose closed projects alone
+  exceed the sandbox (about five hundred) is refused, with the message that
+  says to grant fewer. Compacting the rules and
+  showing the ceiling in the scope UI is KT-1974. Required tool rules and sandbox patterns come first.
   Existing secrets no pattern can name (`is_secret_file` ignores letter case:
   `PROD.PEM`, `Deploy.Key`) come next and are never dropped: their directories,
-  then parents, are denied until they fit. Pattern-covered literal paths use only
-  the remaining bytes. When absolute mandatory rules exceed the budget, Kronn uses
-  the shorter working-directory-relative form Claude documents for permission and
-  sandbox paths; if the mandatory compact form still cannot fit, the launch is
-  refused before the OS can fail it with `E2BIG`. A secret with an unpatterned name
+  then parents, are denied until they fit. Pattern-covered literal paths are added
+  only while the document stays an argument. The shorter
+  working-directory-relative form Claude documents for permission and sandbox
+  paths is used only where it keeps the document an argument. A secret with an unpatterned name
   created after the launch is not covered. The scan
   runs once at the launch, off the async executor (`spawn_blocking`). A versioned
   template such as `.env.example` is refused with them: a deny rule has no
@@ -173,7 +214,7 @@ requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
 [src: file: backend/src/workflows/run_artifacts.rs:202-211#ensure]
 [src: file: backend/src/workflows/steps.rs:126-147#artifacts_read_only_dirs]
-[src: file: backend/src/agents/read_only_repos.rs:672-702#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:1029-1060#resolve_with_dirs]
 
 ```json
 [
@@ -244,9 +285,9 @@ rename, or across volumes a copy that skips links, made under a temporary name
 and renamed into place, so a crash never leaves a partial run). Failures are
 logged and the directory is left where it was. The file work runs off the
 async executor.
-[src: file: backend/src/workflows/run_artifacts.rs:74-122#resolve_root]
-[src: file: backend/src/workflows/run_artifacts.rs:124-140#refusal]
-[src: file: backend/src/workflows/run_artifacts.rs:161-190#open_root]
+[src: file: backend/src/workflows/run_artifacts.rs:79-127#resolve_root]
+[src: file: backend/src/workflows/run_artifacts.rs:129-145#refusal]
+[src: file: backend/src/workflows/run_artifacts.rs:166-195#open_root]
 [src: file: backend/src/workflows/run_artifacts.rs:247-257#open_run_dir]
 [src: file: backend/src/core/rooted_fd.rs:362-400#remove_child]
 [src: file: backend/src/workflows/run_artifacts.rs:350-391#migrate_from]
@@ -341,7 +382,7 @@ path, since the cwd is the copy. The copy goes with the artifacts directory.
 The automated policy and dispatch regressions use temporary repositories and
 fake CLI processes. They verify declarations and arguments; they do not prove
 vendor sandbox enforcement.
-[src: file: backend/src/agents/read_only_repos.rs:1182-1203#fixture]
+[src: file: backend/src/agents/read_only_repos.rs:1714-1735#fixture]
 [src: file: backend/tests/adapter_worker_policy.rs:41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 The dispatch regression checks initial and resumed Codex adapter arguments:
@@ -353,7 +394,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test.rs:12402-12463#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test_tests_up.rs:12555-12616#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

@@ -55,8 +55,8 @@ How the choice is made, in one place: every native agent process goes through
 own OS sandbox. A Claude launch whose `--settings` enable it keeps it (and tells
 it the data directory); a Codex launch that did not turn its sandbox off has it
 replaced; everything else is wrapped as it is.
-[src: file: backend/src/core/vault_guard.rs:150-160#launch_sandbox]
-[src: file: backend/src/core/vault_guard.rs:343-362#wrap_launch]
+[src: file: backend/src/core/vault_guard.rs:166-176#launch_sandbox]
+[src: file: backend/src/core/vault_guard.rs:357-376#wrap_launch]
 
 - macOS wraps with `sandbox-exec` (allow by default, one deny on the data
   directory). Linux wraps with `bwrap`: the data directory is replaced by an empty
@@ -69,12 +69,30 @@ replaced; everything else is wrapped as it is.
 - Claude's rules name the directory as `Read(//abs/path/**)` (two slashes: a path
   from the filesystem root), for `Read`, `Edit` and `Write`. A deny rule is checked
   before the permission mode, so the bypass flag does not lift it.
-  [src: file: backend/src/core/vault_guard.rs:461-470#claude_vault_permission_deny]
+  [src: file: backend/src/core/vault_guard.rs:472-481#claude_vault_permission_deny]
   `sandbox.filesystem.denyRead` is a documented field of Claude Code's sandbox
   settings ("paths to deny reading within the sandbox, merged with paths from
   `Read(...)` deny permission rules", read from the installed 2.1.285 binary's
   settings schema); the `//` spelling is Claude's documented form for a path from
   the filesystem root and is proven by the live probe below, not by a unit test.
+
+### A browser started by the agent (KT-1977)
+
+An MCP server is a child of the agent, so it runs inside the profile that wraps
+the agent. Chrome isolates its helper processes with a Seatbelt profile of its
+own, and macOS refuses one from inside another: Chrome logs `sandbox
+initialization failed: Operation not permitted` and the page crashes (measured
+with `@playwright/mcp` 0.0.86 and `chrome-devtools-mcp` 1.13.0 under
+`sandbox-exec`). A launch behind Kronn's Seatbelt profile therefore carries
+`PLAYWRIGHT_MCP_SANDBOX=false` (`vault_guard::browser_env_inside`), which the
+Playwright server reads as its `--no-sandbox`: the pages that browser loads are
+no longer isolated by Chrome, inside an agent that can already do everything
+the user can except read the data directory. A browser started outside a
+wrapped launch keeps its sandbox. `chrome-devtools-mcp` reads no such variable
+and needs `--chrome-arg=--no-sandbox` in its own arguments; an agent CLI that
+does not hand its environment to its MCP servers is not covered either.
+Running the browser servers outside the wrap is the planned answer. Bubblewrap
+is not measured.
 
 ### Codex: the sandbox is replaced, not nested
 
@@ -89,7 +107,7 @@ therefore starts Codex with `--sandbox=danger-full-access` (dropping any
 | `read-only` (Codex's default for `exec`) | the temp directories, `CODEX_HOME` (else `~/.codex`), `/dev`; `~/.npm` for an `npx` launch | everything | denied, read and write |
 | `workspace-write` (the task worker) | the same, plus the worktree; the worktree's `.git` stays read-only | everything | denied, read and write |
 
-[src: file: backend/src/core/vault_guard.rs:260-293#codex_seatbelt_profile]
+[src: file: backend/src/core/vault_guard.rs:276-309#codex_seatbelt_profile]
 
 macOS is allow-by-default with a broad `file-write*` deny, the allowed roots, the
 `.git` deny, and the data-directory deny last (the last matching rule wins). Linux
@@ -155,7 +173,7 @@ exist on the host, as given and with their links resolved, in two tiers:
   `runner::reach_is_full_access(launch_full_access, has_read_only_grants)`. No
   native agent can hold such grants today (`read_only_repos` is refused for any
   agent but Claude Code and Codex), so on that route it is defense in depth.
-  [src: file: backend/src/core/vault_guard.rs:642-648#launch_reach]
+  [src: file: backend/src/core/vault_guard.rs:649-656#launch_reach]
 - Owner decision (2026-11-10): the owner's rule above holds for an agent in full
   access: `~/.ssh`, `~/.aws`, `gh` stay reachable, as in the owner's terminal.
   Only the restricted launches lose them. The validations keep the shared files
@@ -164,7 +182,7 @@ exist on the host, as given and with their links resolved, in two tiers:
   `trust_sandbox::credential_confinement` still builds a confinement, which hides
   the stores and no Kronn data; it is `None` only when the host has no sandbox, or
   when the setting is off and there is no store to hide.
-  [src: file: backend/src/core/vault_guard.rs:651-666#launch_confinement_for]
+  [src: file: backend/src/core/vault_guard.rs:665-680#launch_confinement_for]
 - A path that does not exist is not listed (bubblewrap cannot mount over it);
   a store created after the launch is not covered until the next one. A `HOME`
   other than the user's is not followed.
@@ -255,7 +273,7 @@ exist on the host, as given and with their links resolved, in two tiers:
   text: they are the fingerprints of the documents on disk, captured after the
   validation child stopped.
   The regression samples are `AS_WRITTEN` in `db::insert_redaction_measure`.
-  [src: file: backend/src/core/redact.rs:745#redact_agent_output]
+  [src: file: backend/src/core/redact.rs:790-801#redact_agent_output]
 - **Measured on a corpus, not yet on a database.** `db::insert_redaction_measure`
   (ignored) runs the insert path over every Agent message of a copy of a database
   and/or over text files cut into message-sized chunks. On this repository (prose,
@@ -420,7 +438,7 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
   [src: file: backend/src/core/strong_confirm.rs:126-137#OWN_PROOF]
 - `POST /api/config/auth-token/regenerate` is also in `DESTRUCTIVE_POSTS`
   (`lib.rs`): a remote peer is refused even while auth is off, like a reset.
-  [src: file: backend/src/lib.rs:1271-1293#DESTRUCTIVE_POSTS]
+  [src: file: backend/src/lib.rs:1026-1048#DESTRUCTIVE_POSTS]
 
 ## Files
 
