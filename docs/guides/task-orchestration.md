@@ -223,7 +223,7 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:12059#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:12061#has_room_publication]
 [src: file: backend/src/api/orchestration.rs:12098-12122#parent_milestones]
 [src: file: backend/src/api/orchestration.rs:10107-10131#publish_accepted_delivery_or_warn]
 [src: file: backend/src/api/orchestration_tests_up.rs:22184-22294#approving_a_delivery_publishes_one_derived_report_in_the_parent]
@@ -426,8 +426,10 @@ launch's own bridge token decides the role (KT-1962):
   already active somewhere only when its own launch holds it: an invite and a
   session id read in a room would otherwise hand out that session's resume
   credential, or end it where it is and make the caller its holder. The same
-  holds for a room joined through a contact, and a token does not resume
-  (`peer-resume`) under an id another session carries or carried. A session held
+  holds for a room joined through a contact. And the launch that holds the
+  worker's session is the worker, whatever other session it joined and names.
+  Known limit: a new launch in that room that holds neither session is a room
+  member like any other, so a principal by design. A session held
   elsewhere answers « not yours to take »; its bridge resumes it by itself. A
   caller without a token (a host CLI) joins as before.
 - **Worker**: a spawned worker (deliver, commit, status) is the grant minted

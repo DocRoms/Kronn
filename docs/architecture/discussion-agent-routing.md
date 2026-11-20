@@ -85,7 +85,7 @@ time, so any other Kronn call ends that wait; the call's result carries
 `wait_preempted` and the agent must re-arm. True zero-turn silence on such a
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
-[src: file: backend/src/api/disc_invite.rs:1170-1174#AWARENESS_MAX_MESSAGES]
+[src: file: backend/src/api/disc_invite.rs:1128-1132#AWARENESS_MAX_MESSAGES]
 [src: file: backend/scripts/disc-introspection-mcp.py:7420-7451#_WAIT_PREEMPTED_NOTICE]
 [src: file: backend/scripts/disc-introspection-mcp.py:12445-12452#_with_wait_preempted]
 
@@ -100,7 +100,7 @@ replay, never a skipped turn. Message revision events ride the same backlog.
 New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/sql/105_user_turn_catchup.sql:12-23#user_catchup_cursor]
 [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
-[src: file: backend/src/api/disc_invite.rs:1461-1489#ack_awareness_upto]
+[src: file: backend/src/api/disc_invite.rs:1423-1451#ack_awareness_upto]
 [src: file: backend/scripts/disc-introspection-mcp.py:3528-3537#_PENDING_AWARENESS_ACK_BY_DISC]
 [src: file: backend/scripts/disc-introspection-mcp.py:4037-4054#_ack_pending_read_cursors]
 [src: file: backend/scripts/disc-introspection-mcp.py:4079-4091#_stage_awareness_ack]
@@ -189,7 +189,7 @@ receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
 [src: file: backend/src/db/discussions.rs:1559-1578#insert_message_with_targets_and_dispatches]
-[src: file: backend/src/api/disc_invite.rs:1732-1751#addressed_to_caller]
+[src: file: backend/src/api/disc_invite.rs:1694-1713#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
 `message_cli_authors`. This is local routing provenance, not portable transcript
@@ -210,7 +210,7 @@ loading session tables.
 [src: file: backend/src/db/sql/100_message_cli_authors.sql:1-14#message_cli_authors]
 [src: file: backend/src/api/disc_source.rs:455-488#author_cli_session_id] [src: file: backend/src/api/disc_source.rs:542-577#message_cli_author_target]
 [src: file: backend/src/api/disc_invite.rs:1680-1738#reply_target]
-[src: file: backend/src/api/disc_invite.rs:2078-2098#addressed_to_session]
+[src: file: backend/src/api/disc_invite.rs:2036-2056#addressed_to_session]
 [src: file: backend/src/api/disc_introspection.rs:85-88#reply_target] [src: file: backend/src/api/disc_introspection.rs:515-528#reply_target]
 
 An untargeted live peer append in a native discussion deliberately addresses

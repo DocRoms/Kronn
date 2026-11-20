@@ -561,7 +561,7 @@ paid for inside the catalogue budget; on an execution the limit itself escalated
 back to its worker, unless the campaign's `token_budget` is spent: the answer then says `stop_reason:
 token_budget_exhausted` and nothing is scheduled (a `request_changes` or a worker reassignment is stopped the same way). The whole contract, the sentinel and the UI are in
 [worker review rounds](../worker-review-rounds.md).
-`[src: file: backend/src/api/orchestration.rs:18793-18798#extend_execution_review_rounds]`
+`[src: file: backend/src/api/orchestration.rs:18809-18814#extend_execution_review_rounds]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played
@@ -794,7 +794,7 @@ input schema — the model supplies only `offer_id`; there is no fallback to
 agent-type/alias matching or any other permissive resolution if either is missing.
 [src: file: backend/src/api/orchestration.rs:7876-8218#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:8023-8027#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:19002-19003#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:19018-19019#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6445-6491#call_task_exec_accept_worker_offer]
 
 `task_exec_deliver` does not perform a room return: the execution transitions to
@@ -812,7 +812,7 @@ and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong
 attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `kronn-internal` MCP server for that session before retrying.
-`[src: file: backend/src/api/orchestration.rs:19002-19003#source_binding_session_id]`
+`[src: file: backend/src/api/orchestration.rs:19018-19019#source_binding_session_id]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:6433-6458#source_binding_session_id]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
@@ -1318,7 +1318,7 @@ durable event id and retain the revised transcript id separately in
 `target_message_id`.
 [src: file: backend/scripts/disc-introspection-mcp.py:4037-4057#_ack_pending_read_cursors] [src: file: backend/scripts/disc-introspection-mcp.py:7210-7227#delivered_message_ids]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:10799-10847#test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor]
-[src: file: backend/src/api/disc_invite.rs:1193-1255#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1307-1315#withheld_by_routing]
+[src: file: backend/src/api/disc_invite.rs:1188-1250#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1269-1277#withheld_by_routing]
 
 Human turns use typed identities. `discussion_agent` means the configured
 native agent, `agent` means a punctual native invocation, and `cli` means one
