@@ -565,10 +565,44 @@ pub fn scan_sensitive_files(worktree: &Path) -> SensitiveSubstrings {
 }
 
 /// Content identities, independent of HEAD/index status. No document contents
-/// or credentials are retained in the snapshot.
+/// or credentials are retained in the snapshot: only SHA-256 fingerprints of
+/// the whole file and of each of its lines.
 #[derive(Default)]
 pub struct DocsSnapshot {
-    files: std::collections::BTreeMap<std::path::PathBuf, [u8; 32]>,
+    files: std::collections::BTreeMap<std::path::PathBuf, FileSnapshot>,
+}
+
+struct FileSnapshot {
+    fingerprint: [u8; 32],
+    /// Fingerprints of the lines the file held. `None` when the file was too
+    /// large to read: every line then counts as added.
+    lines: Option<HashSet<[u8; 32]>>,
+}
+
+fn line_fingerprint(line: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(line.as_bytes()).into()
+}
+
+fn line_fingerprints(text: &str) -> HashSet<[u8; 32]> {
+    text.split('\n').map(line_fingerprint).collect()
+}
+
+/// `text` with every line already present before the step blanked out. Line
+/// numbers and byte offsets of the added lines stay those of the document.
+/// Patterns are matched on the added lines only: a match that needs a line
+/// the step did not write (across a newline) is not seen.
+fn added_lines_only(text: &str, before: &HashSet<[u8; 32]>) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if !before.contains(&line_fingerprint(line)) {
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 const MAX_AUDIT_BUFFER_BYTES: usize = 16 * 1024 * 1024;
@@ -739,15 +773,23 @@ pub async fn snapshot_docs(worktree: &Path) -> Result<DocsSnapshot, String> {
     tokio::task::spawn_blocking(move || {
         let mut snapshot = DocsSnapshot::default();
         for relative in document_paths(&worktree)? {
-            if let Some(document) =
-                read_document(&worktree.join(&relative), false).map_err(|e| {
-                    format!(
-                        "Cannot fingerprint document {}: {e}",
-                        document_path_label(&relative)
-                    )
-                })?
-            {
-                snapshot.files.insert(relative, document.fingerprint);
+            if let Some(document) = read_document(&worktree.join(&relative), true).map_err(|e| {
+                format!(
+                    "Cannot fingerprint document {}: {e}",
+                    document_path_label(&relative)
+                )
+            })? {
+                let lines = document
+                    .content
+                    .as_deref()
+                    .map(|bytes| line_fingerprints(document_text(bytes).as_ref()));
+                snapshot.files.insert(
+                    relative,
+                    FileSnapshot {
+                        fingerprint: document.fingerprint,
+                        lines,
+                    },
+                );
             }
         }
         Ok(snapshot)
@@ -773,7 +815,7 @@ pub struct DocsAudit {
     pub incomplete: Vec<String>,
 }
 
-/// Inspect only content changed since the pre-step snapshot. Never mutate the
+/// Inspect only lines added since the pre-step snapshot. Never mutate the
 /// worktree or index: another process may have authored any observed change.
 /// The caller must fail the step on rejection or an incomplete audit, and
 /// show the possible secrets.
@@ -807,7 +849,8 @@ pub async fn audit_docs_writes(
             }
         };
         present.insert(path.clone());
-        if before.files.get(&path) == Some(&document.fingerprint) {
+        let previous = before.files.get(&path);
+        if previous.map(|file| &file.fingerprint) == Some(&document.fingerprint) {
             continue;
         }
         let Some(bytes) = document.content else {
@@ -818,7 +861,16 @@ pub async fn audit_docs_writes(
             continue;
         };
         let content = document_text(&bytes);
-        let content = content.as_ref();
+        // Only the lines the step added are inspected: a line the document
+        // already held is not the step's doing.
+        let added;
+        let content = match previous.and_then(|file| file.lines.as_ref()) {
+            Some(lines) => {
+                added = added_lines_only(content.as_ref(), lines);
+                added.as_str()
+            }
+            None => content.as_ref(),
+        };
         audit.inspected.push(document_path_label(&path));
         // Only the first known secret is named: every line worth a look is
         // told, the rejected one too (it can hold another run).
@@ -1297,6 +1349,77 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn audit_ignores_lines_present_before_the_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fixture_git(root, &["init", "-q"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        let known = "Origin: https://internal.example/v1/some-long-sensitive-value";
+        let entropy = format!("Value {BASE64_TOKEN} here.");
+        let path = root.join("docs/third-parties.md");
+        std::fs::write(&path, format!("# Third parties\n{known}\n{entropy}\n")).unwrap();
+        let mut sensitive = SensitiveSubstrings::new();
+        sensitive.add("some-long-sensitive-value", "application/.env");
+        let before = snapshot_docs(root).await.unwrap();
+
+        // The step edits another line: the old ones are not its doing.
+        std::fs::write(
+            &path,
+            format!("# Third parties\n{known}\n{entropy}\nNew prose.\n"),
+        )
+        .unwrap();
+        let audit = audit_docs_writes(root, &sensitive, &before).await.unwrap();
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+        assert!(
+            audit.possible_secrets.is_empty(),
+            "{:?}",
+            audit.possible_secrets
+        );
+
+        // The step adds the same substring and another run: both are seen,
+        // at their real lines.
+        std::fs::write(
+            &path,
+            format!("# Third parties\n{known}\n{entropy}\nCopy: some-long-sensitive-value\nAlso {HEX_TOKEN}\n"),
+        )
+        .unwrap();
+        let audit = audit_docs_writes(root, &sensitive, &before).await.unwrap();
+        assert_eq!(audit.rejections.len(), 1);
+        assert!(matches!(
+            audit.rejections[0].1,
+            SecretRejection::SensitiveFileSubstring { line: 4, .. }
+        ));
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/third-parties.md".to_string(), vec![5])]
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_ignores_high_entropy_lines_present_before_the_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fixture_git(root, &["init", "-q"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        let old = format!("Value {BASE64_TOKEN} here.");
+        let path = root.join("docs/notes.md");
+        std::fs::write(&path, format!("# Notes\n{old}\n")).unwrap();
+        let before = snapshot_docs(root).await.unwrap();
+        std::fs::write(
+            &path,
+            format!("# Notes\nIntro.\n{old}\nCommit {HEX_TOKEN}.\n"),
+        )
+        .unwrap();
+        let audit = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+            .await
+            .unwrap();
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![4])]
+        );
     }
 
     /// The rejections of an audit alone.
