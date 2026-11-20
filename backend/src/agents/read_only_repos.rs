@@ -883,6 +883,7 @@ const SYSTEM_DIRS: &[&str] = &[
 
 /// The Git directory a linked worktree keeps outside its checkout.
 fn git_common_dir(checkout: &Path) -> Option<PathBuf> {
+    // lane-git-allow: a read in the registered checkout or the room's own directory
     crate::core::cmd::project_git_cmd()
         .arg("-C")
         .arg(checkout)
