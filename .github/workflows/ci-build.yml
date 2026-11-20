@@ -22,6 +22,10 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Cargo 1.100 builds test binaries under build/<pkg>/<hash>/out/; the coverage
+  # report of the nextest archive then misses most objects (32 % instead of 83+).
+  # Keep the previous layout until KT-1788 handles both.
+  __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: "1"
   # onnxruntime-node's postinstall downloads CUDA binaries CI never uses, from
   # a host that times out on GitHub runners (see ci-test.yml).
   ONNXRUNTIME_NODE_INSTALL: skip
@@ -34,7 +38,7 @@ env:
 jobs:
   # Labels are read live: a re-run replays the original event payload.
   require-ci-build-label:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       pull-requests: read
@@ -59,7 +63,7 @@ jobs:
   test-desktop-compile:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -180,7 +184,7 @@ jobs:
   portability-scope:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       run: ${{ steps.scope.outputs.run }}
@@ -204,8 +208,8 @@ jobs:
           fi
           changed=$(git diff --name-only "$BASE" "$HEAD")
           echo "$changed"
-          suites='^backend/src/(core/worktree|core/fs_guard|core/rooted_fd|api/maintenance|db/orchestration|agents/wsl|acp/secret_files|core/config_copies|core/durable_file|core/backup|db/migrations)'
-          if echo "$changed" | grep -Eq "$suites|^backend/Cargo\.(toml|lock)\$|^rust-toolchain"; then
+          suites='^backend/src/(core/worktree|core/fs_guard|core/rooted_fd|api/maintenance|db/orchestration|agents/wsl|acp/secret_files|core/config_copies|core/durable_file|core/backup|core/atomic_file|db/migrations)'
+          if echo "$changed" | grep -Eq "$suites|^backend/Cargo\.(toml|lock)\$|^backend/crates/|^backend/src/layer[0-9]+\.rs\$|^rust-toolchain"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -275,21 +279,23 @@ jobs:
         if: github.event_name == 'pull_request' && matrix.os == 'macos-latest' && needs.portability-scope.outputs.mac != 'true'
         run: echo "This change does not touch the macOS suites' modules; the push to main runs them."
 
+      # Each filter names a module twice: its own tests (`core::worktree`) and
+      # the ones a higher crate compiles for it (`uptests::core__worktree__..`).
       - name: Worktree lifecycle and disk guards
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features core::worktree
+        run: cargo test --workspace --lib --no-default-features -- core::worktree core__worktree
 
       - name: Disk maintenance surface
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features api::maintenance
+        run: cargo test --workspace --lib --no-default-features -- api::maintenance api__maintenance
 
       - name: Cleanup authorisation from durable state
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features db::orchestration
+        run: cargo test --workspace --lib --no-default-features -- db::orchestration db__orchestration
 
       - name: Windows to WSL agent launches
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features agents::wsl
+        run: cargo test --workspace --lib --no-default-features -- agents::wsl agents__wsl
 
       # KT-1595 — the write guards: rooted (directory-fd) writes on macOS, the
       # lstat walk + write by path kept on Windows (residual risk documented in
@@ -297,19 +303,19 @@ jobs:
       # tests of that behaviour; the swap tests are unix-only.
       - name: File write guards (rooted on unix, lstat walk on Windows)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features core::fs_guard
+        run: cargo test --workspace --lib --no-default-features -- core::fs_guard core__fs_guard
 
       - name: Secret file paths (drives, UNC shares, links)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features acp::secret_files
+        run: cargo test --workspace --lib --no-default-features -- acp::secret_files acp__secret_files
 
       - name: Sealed config copies (set-aside moves, never replacing)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features core::config_copies
+        run: cargo test --workspace --lib --no-default-features -- core::config_copies core__config_copies
 
       - name: Durable copies (backups synced on Windows)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features core::durable_file
+        run: cargo test --workspace --lib --no-default-features -- core::durable_file core__durable_file
 
       - name: Save cargo registry and build (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-portability.outputs.cache-hit != 'true'
@@ -327,7 +333,7 @@ jobs:
   build-release:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -349,7 +355,7 @@ jobs:
           restore-keys: release-v1-${{ runner.os }}-
       - name: Build backend (release)
         working-directory: backend
-        run: cargo build --release --locked --bin kronn
+        run: cargo build --release --locked -p kronn --bin kronn
       - name: Save cargo registry and release dependencies (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-release.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -376,7 +382,7 @@ jobs:
       - lint-windows-skips
       - boot-scope
       - test-boot-windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       # Only a label check that ran and failed means "label missing". One that
@@ -424,7 +430,7 @@ jobs:
   lint-windows-skips:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -465,7 +471,7 @@ jobs:
   boot-scope:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       run: ${{ steps.scope.outputs.run }}
@@ -536,7 +542,7 @@ jobs:
 
       - name: Build kronn.exe
         working-directory: backend
-        run: cargo build --locked --bin kronn
+        run: cargo build --locked -p kronn --bin kronn
 
       - name: Install the Playwright browser
         working-directory: frontend
@@ -576,3 +582,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cache-boot.outputs.cache-primary-key }}
+
+# Linux jobs name their image: four confinement tests fail on ubuntu-26.04, where
+# `ubuntu-latest` lands on some jobs and not on others (KT-1929).

@@ -27,7 +27,7 @@ const FOLDERS: [&str; 3] = ["conventions", "gotchas", "people"];
 const MAX_POINTERS: usize = 10;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct SeedReport {
+pub struct SeedReport {
     /// Paths under the docs folder that were created or regenerated.
     pub written: Vec<String>,
     /// Generated files the briefing no longer feeds.
@@ -303,7 +303,7 @@ fn scaffold_of(folder: &str) -> &'static str {
 }
 
 /// Seed the three folders under `docs_dir` from the briefing `notes`.
-pub(crate) fn seed(project_root: &Path, docs_dir: &Path, notes: Option<&str>) -> SeedReport {
+pub fn seed(project_root: &Path, docs_dir: &Path, notes: Option<&str>) -> SeedReport {
     let mut report = SeedReport::default();
     let saved = notes.map(super::super::briefing_load::parse_saved_briefing);
     let mut files: Vec<(String, String)> = Vec::new();

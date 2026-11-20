@@ -14,25 +14,24 @@ use crate::models::{
 };
 
 /// Heading of the answers section inside `docs/briefing.md`.
-pub(crate) const FACTS_HEADING: &str = "## Project facts";
-/// Machine-readable copy of the answers, one line, invisible once rendered.
-const ANSWERS_PREFIX: &str = "<!-- kronn:project-answers v1 ";
-const ANSWERS_SUFFIX: &str = " -->";
+pub const FACTS_HEADING: &str = "## Project facts";
+pub use crate::models::projects::parse_answers;
+use crate::models::projects::{ANSWERS_PREFIX, ANSWERS_SUFFIX};
 /// First line of a `docs/project.md` Kronn may regenerate. Removing it hands
 /// the file over to humans: the audit then never rewrites it.
-pub(crate) const GENERATED_MARKER: &str = "<!-- kronn:generated=\"briefing\"";
+pub const GENERATED_MARKER: &str = "<!-- kronn:generated=\"briefing\"";
 
-pub(crate) const NOT_PROVIDED: &str = "Not provided — ask before assuming.";
+pub const NOT_PROVIDED: &str = "Not provided — ask before assuming.";
 /// External documentation spaces one project can list.
-pub(crate) const MAX_EXTERNAL_DOCS: usize = 6;
+pub const MAX_EXTERNAL_DOCS: usize = 6;
 /// Longest note attached to one project fact (KT-1196).
-pub(crate) const FACT_NOTE_MAX_CHARS: usize = 300;
+pub const FACT_NOTE_MAX_CHARS: usize = 300;
 const JIRA_PLUGIN: &str = "mcp-atlassian";
 const GITHUB_PLUGIN: &str = "mcp-github";
 
 // ─── Validation ─────────────────────────────────────────────────────────────
 
-pub(crate) fn check_text(field: &str, value: &str, max: usize) -> Result<(), String> {
+pub fn check_text(field: &str, value: &str, max: usize) -> Result<(), String> {
     if value.chars().count() > max {
         return Err(format!("{field}: at most {max} characters"));
     }
@@ -82,7 +81,7 @@ fn is_http_url(url: &str) -> bool {
 
 /// Trim, normalise and validate the answers; environments and people keep the
 /// first entry per kind/role.
-pub(crate) fn normalize_answers(
+pub fn normalize_answers(
     answers: &BriefingProjectAnswers,
 ) -> Result<BriefingProjectAnswers, String> {
     let mut out = answers.clone();
@@ -258,7 +257,7 @@ fn forge_label(v: BriefingForge) -> &'static str {
     }
 }
 
-pub(crate) fn branch_label(v: BriefingDefaultBranch) -> Option<&'static str> {
+pub fn branch_label(v: BriefingDefaultBranch) -> Option<&'static str> {
     match v {
         BriefingDefaultBranch::Unknown => None,
         BriefingDefaultBranch::Main => Some("main"),
@@ -268,7 +267,7 @@ pub(crate) fn branch_label(v: BriefingDefaultBranch) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn commit_label(v: BriefingCommitConvention) -> &'static str {
+pub fn commit_label(v: BriefingCommitConvention) -> &'static str {
     match v {
         BriefingCommitConvention::Unknown => NOT_PROVIDED,
         BriefingCommitConvention::Conventional => "Conventional Commits",
@@ -277,7 +276,7 @@ pub(crate) fn commit_label(v: BriefingCommitConvention) -> &'static str {
     }
 }
 
-pub(crate) fn yes_no_label(v: BriefingYesNo) -> &'static str {
+pub fn yes_no_label(v: BriefingYesNo) -> &'static str {
     match v {
         BriefingYesNo::Unknown => NOT_PROVIDED,
         BriefingYesNo::Yes => "Required",
@@ -285,7 +284,7 @@ pub(crate) fn yes_no_label(v: BriefingYesNo) -> &'static str {
     }
 }
 
-pub(crate) fn merge_label(v: BriefingMergeStrategy) -> &'static str {
+pub fn merge_label(v: BriefingMergeStrategy) -> &'static str {
     match v {
         BriefingMergeStrategy::Unknown => NOT_PROVIDED,
         BriefingMergeStrategy::Squash => "Squash",
@@ -294,7 +293,7 @@ pub(crate) fn merge_label(v: BriefingMergeStrategy) -> &'static str {
     }
 }
 
-pub(crate) fn review_label(v: BriefingReviewPolicy) -> &'static str {
+pub fn review_label(v: BriefingReviewPolicy) -> &'static str {
     match v {
         BriefingReviewPolicy::Unknown => NOT_PROVIDED,
         BriefingReviewPolicy::NoReview => "No required review",
@@ -303,7 +302,7 @@ pub(crate) fn review_label(v: BriefingReviewPolicy) -> &'static str {
     }
 }
 
-pub(crate) fn cadence_label(v: BriefingReleaseCadence) -> &'static str {
+pub fn cadence_label(v: BriefingReleaseCadence) -> &'static str {
     match v {
         BriefingReleaseCadence::Unknown => NOT_PROVIDED,
         BriefingReleaseCadence::Continuous => "Continuous (every merge)",
@@ -332,7 +331,7 @@ fn external_doc_label(v: BriefingExternalDocKind) -> &'static str {
     }
 }
 
-pub(crate) fn role_label(v: BriefingPersonRole) -> &'static str {
+pub fn role_label(v: BriefingPersonRole) -> &'static str {
     match v {
         BriefingPersonRole::Arbiter => "Arbiter (final call)",
         BriefingPersonRole::TechLead => "Tech lead",
@@ -343,7 +342,7 @@ pub(crate) fn role_label(v: BriefingPersonRole) -> &'static str {
 }
 
 /// Markdown-table-safe rendering of a user-entered value.
-pub(crate) fn cell(value: &str) -> String {
+pub fn cell(value: &str) -> String {
     value
         .replace('|', "\\|")
         .replace('<', "&lt;")
@@ -371,7 +370,7 @@ fn code_or_not_provided(value: &str) -> String {
 /// The `## Project facts` section appended to `docs/briefing.md`, or `None`
 /// when every card was left unanswered (the briefing then stays byte-identical
 /// to the six-question format).
-pub(crate) fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<String> {
+pub fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<String> {
     if *answers == BriefingProjectAnswers::default() {
         return None;
     }
@@ -504,21 +503,10 @@ pub(crate) fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<S
     Some(out)
 }
 
-/// The answers recorded in a briefing, if any.
-pub(crate) fn parse_answers(notes: &str) -> Option<BriefingProjectAnswers> {
-    notes.lines().find_map(|line| {
-        let json = line
-            .trim()
-            .strip_prefix(ANSWERS_PREFIX)?
-            .strip_suffix(ANSWERS_SUFFIX)?;
-        serde_json::from_str(json).ok()
-    })
-}
-
 /// `notes` without the sections under `headings` (each from its heading to the
 /// next `## ` heading or the end) and without any line starting with one of
 /// `machine_prefixes`.
-pub(crate) fn strip_sections(notes: &str, headings: &[&str], machine_prefixes: &[&str]) -> String {
+pub fn strip_sections(notes: &str, headings: &[&str], machine_prefixes: &[&str]) -> String {
     let mut out = String::with_capacity(notes.len());
     let mut skipping = false;
     for line in notes.split_inclusive('\n') {
@@ -544,7 +532,7 @@ pub(crate) fn strip_sections(notes: &str, headings: &[&str], machine_prefixes: &
 /// `notes` without the form-owned sections (`## Project facts`,
 /// `## Existing documentation`, `## Project rules`) and without any stray
 /// machine copy.
-pub(crate) fn strip_facts_section(notes: &str) -> String {
+pub fn strip_facts_section(notes: &str) -> String {
     strip_sections(
         notes,
         &[
@@ -562,7 +550,7 @@ pub(crate) fn strip_facts_section(notes: &str) -> String {
 
 /// The briefing as the audit prompts see it: the human-readable facts stay,
 /// the machine copies (which repeat them) go.
-pub(crate) fn strip_answers_line(notes: &str) -> String {
+pub fn strip_answers_line(notes: &str) -> String {
     strip_sections(
         notes,
         &[],
@@ -578,7 +566,7 @@ pub(crate) fn strip_answers_line(notes: &str) -> String {
 /// exactly as answered: the reviewer may drop or garble them, and the answers
 /// belong to the form, not to the model. They go before `## Kronn options`
 /// when the review kept it, so that section stays last.
-pub(crate) fn reattach_facts(previous: Option<&str>, reviewed: &str) -> String {
+pub fn reattach_facts(previous: Option<&str>, reviewed: &str) -> String {
     let facts = previous
         .and_then(parse_answers)
         .and_then(|a| render_facts_section(&a));
@@ -642,7 +630,7 @@ pub(crate) fn reattach_facts(previous: Option<&str>, reviewed: &str) -> String {
 /// The answers plus what the repository itself says: an empty forge/repository
 /// is taken from the project's git remote. The flag says the repository was
 /// inferred, so the page cites its source.
-pub(crate) fn effective_answers(
+pub fn effective_answers(
     answers: Option<BriefingProjectAnswers>,
     repo_url: Option<&str>,
 ) -> (BriefingProjectAnswers, bool) {
@@ -666,7 +654,7 @@ pub(crate) fn effective_answers(
 
 /// One GET against a configured connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProbeRequest {
+pub struct ProbeRequest {
     pub plugin_id: String,
     pub config_id: String,
     pub endpoint: String,
@@ -674,14 +662,14 @@ pub(crate) struct ProbeRequest {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum ProbeResponse {
+pub enum ProbeResponse {
     Found(serde_json::Value),
     NotFound,
     Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CheckStatus {
+pub enum CheckStatus {
     /// Nothing a connection could check.
     NotApplicable,
     Verified {
@@ -710,7 +698,7 @@ impl CheckStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProjectChecks {
+pub struct ProjectChecks {
     pub tracker_key: CheckStatus,
     pub forge_repo: CheckStatus,
     pub default_branch: CheckStatus,
@@ -721,7 +709,7 @@ pub(crate) struct ProjectChecks {
 }
 
 impl ProjectChecks {
-    pub(crate) fn mismatches(&self) -> Vec<String> {
+    pub fn mismatches(&self) -> Vec<String> {
         [
             ("tracker key", &self.tracker_key),
             ("repository", &self.forge_repo),
@@ -786,7 +774,7 @@ fn failure_reason(error: &str) -> String {
 /// Check what a configured connection can confirm, read-only: the Jira
 /// project key, the GitHub repository and its default branch. No connection
 /// is not an error, just "not verified".
-pub(crate) async fn run_checks<F, Fut>(
+pub async fn run_checks<F, Fut>(
     answers: &BriefingProjectAnswers,
     connections: &[(String, String)],
     probe: F,
@@ -926,7 +914,7 @@ where
 }
 
 /// The Confluence space key an address names (`…/wiki/spaces/<KEY>/…`).
-pub(crate) fn confluence_space_key(url: &str) -> Option<String> {
+pub fn confluence_space_key(url: &str) -> Option<String> {
     let rest = url.split("/spaces/").nth(1)?;
     let key: String = rest
         .chars()
@@ -998,7 +986,7 @@ where
 
 /// Render `docs/project.md`. Deterministic: same answers, checks and date give
 /// the same bytes.
-pub(crate) fn render_project_doc(
+pub fn render_project_doc(
     answers: &BriefingProjectAnswers,
     repo_inferred: bool,
     checks: &ProjectChecks,
@@ -1170,14 +1158,14 @@ pub(crate) fn render_project_doc(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProjectDocWrite {
+pub enum ProjectDocWrite {
     Written,
     /// The file lost its generated marker: a human owns it.
     KeptHumanOwned,
 }
 
 /// Write `docs/project.md` unless a human took it over.
-pub(crate) fn write_project_doc(
+pub fn write_project_doc(
     project_root: &Path,
     docs_dir: &Path,
     body: &str,
@@ -1199,7 +1187,7 @@ pub(crate) fn write_project_doc(
 
 /// What the audit did with `docs/project.md`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct ProjectDocReport {
+pub struct ProjectDocReport {
     pub written: bool,
     pub kept_human_owned: bool,
     pub kept_without_answers: bool,
@@ -1263,7 +1251,7 @@ async fn api_probe(
 /// Audit hook: render `docs/project.md` from the briefing and the read-only
 /// checks, then seed `conventions/`, `gotchas/` and `people/` from the same
 /// briefing (KT-819). Never fails the audit; the report says what happened.
-pub(crate) async fn fill_project_doc_for_audit(
+pub async fn fill_project_doc_for_audit(
     state: &crate::AppState,
     project_id: &str,
     project_path: &Path,
@@ -1364,7 +1352,7 @@ async fn write_project_page(
 }
 
 #[path = "operating_seed.rs"]
-pub(crate) mod operating_seed;
+pub mod operating_seed;
 
 #[cfg(test)]
 #[path = "project_doc_tests.rs"]

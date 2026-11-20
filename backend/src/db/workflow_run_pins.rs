@@ -3,10 +3,17 @@
 //! `workflows::run_pins`.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+use crate::models::Workflow;
 
 /// The row holding the run's own workflow definition.
 pub const RUN_KIND: &str = "run";
+/// Pin kind of a Quick API.
+pub const QUICK_API: &str = "quick_api";
 
 pub fn has_pin(conn: &Connection, run_id: &str) -> Result<bool> {
     Ok(conn
@@ -78,4 +85,62 @@ pub fn purge(conn: &Connection, run_id: &str) -> Result<usize> {
         "DELETE FROM workflow_run_pins WHERE run_id = ?1",
         params![run_id],
     )?)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RunHeader {
+    pub pinned_at: DateTime<Utc>,
+    /// `None` for a BatchQuickPrompt run, which has no workflow of its own.
+    #[serde(default)]
+    pub workflow: Option<Workflow>,
+    /// `revision_fingerprint` at pin time; `None` when inherited.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    /// Zone of the run's `{{time.now}}` (KT-1103); absent (pinned before
+    /// zones existed) means UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// `revision_fingerprint` of the pinned closure without repository
+    /// profiles: what a human-validated workflow scope (KT-1270) is compared
+    /// with. `None` when inherited or pinned before scopes existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_revision: Option<String>,
+}
+
+pub fn header(conn: &Connection, run_id: &str) -> Result<Option<RunHeader>> {
+    match get(conn, run_id, RUN_KIND, "")? {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
+/// The definition `run` pinned, if it has one.
+pub fn pinned_workflow(conn: &Connection, run_id: &str) -> Result<Option<Workflow>> {
+    Ok(header(conn, run_id)?.and_then(|header| header.workflow))
+}
+
+/// The pinned revision of a resource when the run has a pin, else the live row.
+pub fn pinned_or_live<T: DeserializeOwned>(
+    conn: &Connection,
+    run_id: Option<&str>,
+    kind: &str,
+    label: &str,
+    id: &str,
+    live: impl Fn(&Connection, &str) -> Result<Option<T>>,
+) -> Result<std::result::Result<Option<T>, String>> {
+    let Some(run_id) = run_id.filter(|run_id| has_pin(conn, run_id).unwrap_or(false)) else {
+        return Ok(Ok(live(conn, id)?));
+    };
+    let Some(json) = get(conn, run_id, kind, id)? else {
+        return Ok(Err(format!(
+            "{label} `{id}` is not part of the revision this run started with: launch a new run to use it."
+        )));
+    };
+    // The pinned revision runs only while the resource still exists.
+    if live(conn, id)?.is_none() {
+        return Ok(Err(format!(
+            "{label} `{id}` was deleted while this run was in progress: the run cannot load it."
+        )));
+    }
+    Ok(Ok(Some(serde_json::from_str(&json)?)))
 }

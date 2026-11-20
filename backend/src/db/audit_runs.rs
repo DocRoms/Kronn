@@ -1348,7 +1348,7 @@ impl StepTokens {
     /// Sum reported usage across two executed attempts. A component either
     /// attempt did not report stays unknown: a partial sum would read as
     /// complete and be priced (KT-1094).
-    pub(crate) fn plus(self, other: Self) -> Self {
+    pub fn plus(self, other: Self) -> Self {
         let sum = |a: Option<u64>, b: Option<u64>| Some(a?.saturating_add(b?));
         let reported = |tokens: &Self| tokens.input.is_some() || tokens.output.is_some();
         Self {
@@ -1367,7 +1367,7 @@ impl StepTokens {
     /// report a component adds nothing to it (a sum over a turn is a floor that
     /// is still consumed, unlike across attempts where a silent one makes it
     /// unknown).
-    pub(crate) fn across_turns(self, other: Self) -> Self {
+    pub fn across_turns(self, other: Self) -> Self {
         let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
@@ -1383,7 +1383,7 @@ impl StepTokens {
 
     /// The usage of a step's attempts so far, `previous` being `None` before
     /// the first one: no attempt yet is not an attempt that reported nothing.
-    pub(crate) fn after_attempt(previous: Option<Self>, attempt: Self) -> Self {
+    pub fn after_attempt(previous: Option<Self>, attempt: Self) -> Self {
         previous.map_or(attempt, |previous| previous.plus(attempt))
     }
 
@@ -1398,7 +1398,7 @@ impl StepTokens {
 
     /// The usage a structured transport (an ACP session, an HTTP provider)
     /// reported for the run. `None` when it reported nothing.
-    pub fn from_reported(usage: Option<crate::agents::runner::ReportedUsage>) -> Self {
+    pub fn from_reported(usage: Option<crate::models::ReportedUsage>) -> Self {
         let Some(usage) = usage else {
             return Self::UNKNOWN;
         };
@@ -1508,7 +1508,7 @@ impl StepTokens {
 
 /// A later documentary gate can invalidate an earlier successful agent step.
 /// Preserve its timing/usage and original warning; resume must not skip it.
-pub(crate) fn invalidate_documentary_steps(
+pub fn invalidate_documentary_steps(
     conn: &Connection,
     run_id: &str,
     warnings: &[(u32, String)],
@@ -1736,11 +1736,25 @@ pub fn price_steps(conn: &Connection, steps: &mut [AuditRunStep]) -> Result<()> 
         );
         step.estimated_cost_usd_micros = priced
             .cost_usd
-            .and_then(crate::agents::chat_codec::usd_to_micros);
+            .and_then(crate::core::pricing::usd_to_micros);
         step.cost_unknown_reason = priced.cost_unknown.map(|reason| reason.reason().to_owned());
     }
     Ok(())
 }
+
+// At boot no audit runner exists in this process: every `Running` row is a zombie.
+fn boot_reconcile(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
+    match reconcile_stale_runs(conn, 0) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            "Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted",
+            n
+        ),
+        Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 30, run: boot_reconcile } }
 
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
@@ -2344,7 +2358,7 @@ mod tests {
             )),
         )
         .usd()
-        .and_then(crate::agents::chat_codec::usd_to_micros);
+        .and_then(crate::core::pricing::usd_to_micros);
         assert!(expected.is_some_and(|micros| micros > 0));
         assert_eq!(steps[0].estimated_cost_usd_micros, expected);
         assert_eq!(
@@ -3106,7 +3120,7 @@ mod tests {
 
     #[test]
     fn a_reported_usage_becomes_parts_and_a_headline_total() {
-        use crate::agents::runner::{PromptCacheUsage, ReportedUsage};
+        use crate::models::{PromptCacheUsage, ReportedUsage};
         let tokens = StepTokens::from_reported(Some(ReportedUsage {
             input_tokens: 6_126,
             output_tokens: 28,
@@ -3394,67 +3408,6 @@ mod tests {
         assert_eq!(runs[0].id, "new");
         assert_eq!(runs[1].id, "mid");
         assert_eq!(runs[2].id, "old");
-    }
-
-    #[test]
-    fn documentary_failure_invalidates_prior_success_without_losing_usage() {
-        let conn = fresh_conn();
-        let now = Utc::now();
-        insert_running(&conn, "repair", "p1", "Full", "LiteLlm", now).unwrap();
-        let attempt = StepTokens {
-            input: Some(100),
-            output: Some(10),
-            cache_read: Some(50),
-            cache_write: None,
-            ..StepTokens::UNKNOWN
-        };
-        let combined = attempt.plus(attempt);
-        assert_eq!(combined.total(), Some(220), "input as reported");
-        assert_eq!(combined.cache_write, None);
-        for step in 1..=3 {
-            insert_audit_step_start(&conn, "repair", step, "docs/a.md", now).unwrap();
-            finalize_audit_step(
-                &conn,
-                "repair",
-                step,
-                now,
-                500,
-                &combined,
-                Some(660),
-                true,
-                None,
-                false,
-            )
-            .unwrap();
-        }
-        invalidate_documentary_steps(
-            &conn,
-            "repair",
-            &[
-                (1, "docs/a.md: invalid line".into()),
-                (3, "docs/c.md: invented path".into()),
-            ],
-        )
-        .unwrap();
-        let steps = list_audit_steps(&conn, "repair").unwrap();
-        assert_eq!(
-            crate::api::audit::full::already_succeeded_step_indices(&steps),
-            [2].into_iter().collect()
-        );
-        assert_eq!(steps[0].step_tokens, Some(220));
-        assert_eq!(steps[0].duration_ms, Some(500));
-        assert!(steps[2]
-            .step_warning
-            .as_ref()
-            .unwrap()
-            .contains("invented path"));
-        assert_eq!(
-            get_by_id(&conn, "repair")
-                .unwrap()
-                .unwrap()
-                .last_completed_step,
-            1
-        );
     }
     // ---- KT-1211: cancel and failed steps keep the docs whole ----
 

@@ -149,7 +149,7 @@ async fn briefing_residuals_fresh_clone_keeps_the_generated_project_doc_without_
         );
     }
     std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs/project.md"),
+        Path::new(crate::BACKEND_DIR).join("../templates/docs/project.md"),
         docs.join("project.md"),
     )
     .unwrap();

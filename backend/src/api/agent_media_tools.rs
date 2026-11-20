@@ -21,10 +21,13 @@ mod tests;
 /// Longest one `media_job_status` call blocks. The media worker keeps running
 /// past it: the step calls again, or the asset is simply found in the run.
 const MAX_WAIT_SECS: u64 = 300;
-#[cfg(not(test))]
-const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
-#[cfg(test)]
-const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+fn poll_every() -> std::time::Duration {
+    if crate::core::test_mode::on() {
+        std::time::Duration::from_millis(50)
+    } else {
+        std::time::Duration::from_secs(2)
+    }
+}
 
 /// Where a generation comes from, and so where its asset goes.
 pub(super) struct MediaOrigin {
@@ -487,7 +490,7 @@ impl KronnToolExecutor {
             if settled || !outcome.ok || started.elapsed().as_secs() >= wait {
                 break outcome;
             }
-            tokio::time::sleep(POLL_EVERY).await;
+            tokio::time::sleep(poll_every()).await;
         };
         let mut outcome = flatten_envelope(outcome);
         if !outcome.ok {

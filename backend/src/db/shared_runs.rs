@@ -166,13 +166,13 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<SharedRun>> {
 }
 /// Action reconciliation needs lifecycle metadata, never the potentially large
 /// result or stderr. Keep those columns out of the writer's read path.
-pub(crate) struct SharedRunLifecycle {
+pub struct SharedRunLifecycle {
     pub status: SharedRunStatus,
     pub diagnostic: Option<String>,
     pub finished_at: Option<DateTime<Utc>>,
 }
 
-pub(crate) fn lifecycle(conn: &Connection, id: &str) -> Result<Option<SharedRunLifecycle>> {
+pub fn lifecycle(conn: &Connection, id: &str) -> Result<Option<SharedRunLifecycle>> {
     Ok(conn
         .query_row(
             "SELECT status, diagnostic, finished_at FROM shared_runs WHERE id=?1",
@@ -356,7 +356,7 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
             },
             "steps": steps_without_outputs(&run.step_results),
             // KT-811 — a card reads "quota", not "running", while the run waits.
-            "quota": crate::workflows::quota_wait::pending_wait(run),
+            "quota": super::workflows::pending_wait(run),
         })),
         diagnostic: None,
         created_at: run.started_at,
@@ -433,6 +433,19 @@ pub fn media_run(job: &crate::db::media_jobs::MediaJob) -> SharedRun {
 pub fn sync_media(conn: &Connection, job: &crate::db::media_jobs::MediaJob) -> Result<()> {
     upsert(conn, &media_run(job))
 }
+
+fn boot_repair(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
+    match repair_stale_workflow_projections(conn) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            "Re-synced {} shared runs still marked live for finished workflow runs",
+            n
+        ),
+        Err(e) => tracing::warn!("Failed to repair stale shared-run projections: {}", e),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 90, run: boot_repair } }
 
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {

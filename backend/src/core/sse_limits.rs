@@ -129,8 +129,8 @@ pub fn agent_run(inner: SseStream) -> SseStream {
 }
 
 /// Render a whole SSE response as text, for tests of the handlers that build one.
-#[cfg(test)]
-pub(crate) async fn sse_text(sse: axum::response::sse::Sse<SseStream>) -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub async fn sse_text(sse: axum::response::sse::Sse<SseStream>) -> String {
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
 

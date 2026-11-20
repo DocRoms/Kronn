@@ -34,7 +34,7 @@ impl ConfiguredApi {
         })
     }
 
-    fn serves(&self, host: &str) -> bool {
+    pub fn serves(&self, host: &str) -> bool {
         let pattern = self
             .host
             .split('*')
@@ -206,7 +206,3 @@ fn plugin_bypasses(
     }
     found
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "doctrine_warnings_test.rs"]
-mod tests;

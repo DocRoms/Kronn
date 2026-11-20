@@ -1,8 +1,4 @@
-use std::collections::BTreeMap;
 use std::path::Path;
-
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::core::{docs_location::DocsRoot, fs_guard, kronn_state, scanner};
 use crate::models::PlaceholderDoc;
@@ -23,37 +19,8 @@ const LEGACY_SPEC_SHA256: &[&str] = &[
     "fdee567d41a0fd0b01f5887f1d06fb1ce4c2000200fcd97d65f606409784f78a", // b30260a25
 ];
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct TemplateManifest {
-    pub version: Option<String>,
-    /// Paths relative to the docs root, hashes of upstream template bytes.
-    pub files: BTreeMap<String, String>,
-    /// The last spec bytes Kronn installed; never inferred from a filename.
-    #[serde(default)]
-    pub installed_spec_sha256: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct TemplateRename {
-    pub from: String,
-    pub to: String,
-    /// An occupied destination is preserved and needs human reconciliation.
-    pub conflict: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct TemplateUpdate {
-    pub available: bool,
-    pub installed_version: Option<String>,
-    pub current_version: Option<String>,
-    pub missing_files: Vec<PlaceholderDoc>,
-    pub renames: Vec<TemplateRename>,
-    /// Removed upstream paths whose successor cannot be proven uniquely.
-    pub unresolved_files: Vec<String>,
-    pub spec_modified: bool,
-}
+pub use crate::core::kronn_state::TemplateManifest;
+pub use crate::models::{TemplateRename, TemplateUpdate};
 
 fn version(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
@@ -271,6 +238,18 @@ fn retain_unresolved(
         }
     }
     Ok(())
+}
+
+/// Records an audit in the project state together with the template manifest
+/// (the manifest part lives here: it needs the audit chain above `kronn_state`).
+pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String> {
+    kronn_state::record_audit_with(project_path, audit_type, |previous| {
+        let templates = crate::api::projects::template::resolve_templates_dir().join("docs");
+        if !templates.is_dir() {
+            return Ok(None);
+        }
+        for_audit(project_path, &templates, previous).map(Some)
+    })
 }
 
 /// Recording audit metadata must not install files or adopt modified spec bytes.

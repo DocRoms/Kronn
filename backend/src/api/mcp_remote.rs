@@ -422,7 +422,7 @@ pub struct McpQpRunResponse {
 /// Render a QP template substituting `{{var}}` placeholders. Mirrors
 /// the front-end's `renderTemplate` so the server-side path produces
 /// the same prompt the UI would have sent.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn render_qp_template(template: &str, vars: &HashMap<String, String>) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {
@@ -455,7 +455,7 @@ pub async fn qp_run(
 /// `qp_run` with the launches its estimate may count: `Some(project)` for an
 /// agent caller (`Some(None)`: a project-less one, which counts none),
 /// `None` for a human.
-pub(crate) async fn qp_run_scoped(
+pub async fn qp_run_scoped(
     state: &AppState,
     metrics_scope: Option<Option<String>>,
     req: McpQpRunRequest,
@@ -1152,6 +1152,7 @@ mod tests {
             trigger_context: None,
             step_results: vec![],
             tokens_used: 0,
+            shadow_tokens_used: 0,
             workspace_path: None,
             started_at: started,
             finished_at: finished,

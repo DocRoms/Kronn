@@ -133,7 +133,7 @@ pub enum LivePageActionClaimOutcome {
 /// fixed, so a tag/attribute scan is sufficient and keeps this dependency
 /// footprint at zero. `to_ascii_lowercase` (not `to_lowercase`) preserves
 /// byte offsets even when the surrounding HTML contains non-ASCII text.
-pub(crate) fn page_action_block_ranges(html: &str) -> Vec<(String, std::ops::Range<usize>)> {
+pub fn page_action_block_ranges(html: &str) -> Vec<(String, std::ops::Range<usize>)> {
     let lower = html.to_ascii_lowercase();
     let mut blocks = Vec::new();
     let mut cursor = 0usize;
@@ -177,7 +177,7 @@ pub(crate) fn page_action_block_ranges(html: &str) -> Vec<(String, std::ops::Ran
     blocks
 }
 
-pub(crate) fn extract_page_action_blocks(html: &str) -> Vec<(String, String)> {
+pub fn extract_page_action_blocks(html: &str) -> Vec<(String, String)> {
     page_action_block_ranges(html)
         .into_iter()
         .map(|(reference, range)| (reference, html[range].trim().to_string()))
@@ -572,7 +572,7 @@ fn launch_by_id(
 }
 
 /// The offer itself, never one of its launches.
-pub(crate) fn declaration(conn: &Connection, action_id: &str) -> Result<Option<LivePageAction>> {
+pub fn declaration(conn: &Connection, action_id: &str) -> Result<Option<LivePageAction>> {
     declaration_by_id(conn, action_id)
 }
 
@@ -1239,6 +1239,167 @@ pub fn complete_quick_prompt(
     transaction.commit()?;
     Ok(())
 }
+
+/// The Quick Prompts and skills behind a Page (KT-1450): those its publishing
+/// workflows, the workflows its actions launch, and their sub-workflows use,
+/// with what the normal execution and each shadow of a step loads.
+fn list_live_page_resources(
+    conn: &Connection,
+    page_id_or_slug: &str,
+) -> Result<Option<Vec<crate::models::LivePageResource>>> {
+    use super::live_pages::{get_live_page, list_live_page_workflows, shadow_versions};
+    use crate::db::discussion_actions::DiscussionActionKind;
+    use crate::models::{LivePageResource, LivePageResourceUse, Workflow};
+    let Some(detail) = get_live_page(conn, page_id_or_slug)? else {
+        return Ok(None);
+    };
+    let Some(links) = list_live_page_workflows(conn, &detail.page.id)? else {
+        return Ok(None);
+    };
+    let all: HashMap<String, Workflow> = crate::db::workflows::list_workflows(conn)?
+        .into_iter()
+        .map(|workflow| (workflow.id.clone(), workflow))
+        .collect();
+    let mut queue: Vec<String> = links.into_iter().map(|link| link.id).collect();
+    let mut direct_prompts = Vec::new();
+    let html = &detail.revision.html;
+    for (_, range) in crate::db::live_page_actions::page_action_block_ranges(html) {
+        let Ok(action) =
+            serde_json::from_str::<crate::db::discussion_actions::ActionFence>(&html[range])
+        else {
+            continue;
+        };
+        match action.kind {
+            DiscussionActionKind::Workflow => queue.push(action.target_id),
+            DiscussionActionKind::QuickPrompt => direct_prompts.push(action.target_id),
+            _ => {}
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut found: Vec<LivePageResource> = Vec::new();
+    let mut add = |kind: &str,
+                   id: &str,
+                   name: String,
+                   latest: Option<u32>,
+                   used: Option<LivePageResourceUse>| {
+        let index = match found.iter().position(|r| r.kind == kind && r.id == id) {
+            Some(index) => index,
+            None => {
+                found.push(LivePageResource {
+                    kind: kind.into(),
+                    id: id.into(),
+                    name,
+                    latest_version: latest,
+                    uses: Vec::new(),
+                });
+                found.len() - 1
+            }
+        };
+        if let Some(used) = used {
+            found[index].uses.push(used);
+        }
+    };
+    let prompt_name = |id: &str| -> Result<(String, Option<u32>, Vec<String>)> {
+        let qp = crate::db::quick_prompts::get_quick_prompt(conn, id)?;
+        let latest = crate::db::quick_prompts::current_version_index(conn, id)?;
+        Ok(match qp {
+            Some(qp) => (qp.name, latest, qp.skill_ids),
+            None => (id.to_string(), latest, Vec::new()),
+        })
+    };
+    let skill_name = |base: &str| {
+        crate::core::skills::get_skill(base)
+            .map(|skill| skill.name)
+            .unwrap_or_else(|| base.to_string())
+    };
+    for id in &direct_prompts {
+        let (name, latest, _) = prompt_name(id)?;
+        add("quick_prompt", id, name, latest, None);
+    }
+    while let Some(workflow_id) = queue.pop() {
+        if !seen.insert(workflow_id.clone()) {
+            continue;
+        }
+        let Some(workflow) = all.get(&workflow_id) else {
+            continue;
+        };
+        for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
+            if let Some(child) = &step.sub_workflow_id {
+                queue.push(child.clone());
+            }
+            let mut skills = step.skill_ids.clone();
+            for qp_id in step
+                .quick_prompt_id
+                .iter()
+                .chain(step.batch_quick_prompt_id.iter())
+            {
+                let (name, latest, qp_skills) = prompt_name(qp_id)?;
+                // Only `quick_prompt_id` takes a pinned version, never the batch prompt.
+                let pinned = step
+                    .quick_prompt_version
+                    .filter(|_| step.quick_prompt_id.as_ref() == Some(qp_id));
+                if skills.is_empty() {
+                    skills = match pinned {
+                        Some(index) => {
+                            crate::db::quick_prompts::get_quick_prompt_version(conn, qp_id, index)?
+                                .map(|version| version.skill_ids)
+                                .unwrap_or(qp_skills)
+                        }
+                        None => qp_skills,
+                    };
+                }
+                let used = LivePageResourceUse {
+                    workflow_id: workflow.id.clone(),
+                    workflow_name: workflow.name.clone(),
+                    step_name: step.name.clone(),
+                    normal: pinned.map(|index| format!("v{index}")),
+                    shadows: shadow_versions(step, |shadow| {
+                        shadow
+                            .quick_prompt_versions
+                            .get(qp_id)
+                            .map(|n| format!("v{n}"))
+                            .or_else(|| match &shadow.prompt {
+                                Some(crate::models::ShadowPrompt::QuickPrompt { id, version })
+                                    if id == qp_id =>
+                                {
+                                    Some(version.map_or_else(String::new, |n| format!("v{n}")))
+                                }
+                                _ => None,
+                            })
+                    }),
+                };
+                add("quick_prompt", qp_id, name, latest, Some(used));
+            }
+            for skill_id in skills {
+                let base = crate::core::skill_versions::split_pin(&skill_id)
+                    .map(|(base, _)| base.to_string())
+                    .unwrap_or_else(|_| skill_id.clone());
+                let used = LivePageResourceUse {
+                    workflow_id: workflow.id.clone(),
+                    workflow_name: workflow.name.clone(),
+                    step_name: step.name.clone(),
+                    normal: Some(skill_id.clone()),
+                    shadows: shadow_versions(step, |shadow| {
+                        shadow
+                            .skills
+                            .get(&skill_id)
+                            .or_else(|| shadow.skills.get(&base))
+                            .cloned()
+                    }),
+                };
+                let latest = crate::core::skill_versions::newest_index(&base);
+                add("skill", &base, skill_name(&base), latest, Some(used));
+            }
+        }
+    }
+    found.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(Some(found))
+}
+inventory::submit! { crate::core::uplink::PageResources(list_live_page_resources) }
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "live_page_action_retention_tests.rs"]
@@ -2073,73 +2234,6 @@ mod tests {
             panic!("expected a fresh claim");
         };
         assert_eq!(variables["service"], "Add feature");
-    }
-
-    #[test]
-    fn a_launch_whose_run_was_interrupted_at_boot_frees_its_row() {
-        let conn = connection();
-        insert_target(&conn);
-        let html = action_block(
-            "implem",
-            r#"{"kind":"quick_exec","target_id":"qe-1","values":[{"name":"service","provenance":"dynamic_binding","source_ref":"<page.dataset.tickets.find(key).key>"}]}"#,
-        );
-        insert_page(&conn, "page-autocode", "rev-1", &html);
-        insert_dataset(
-            &conn,
-            "page-autocode",
-            "tickets",
-            "collection",
-            r#"[{"key":"EW-7633"}]"#,
-        );
-        ingest_page_actions(&conn, "page-autocode", "rev-1", &html).unwrap();
-        crate::db::workflows::insert_workflow(
-            &conn,
-            &crate::db::tests::sample_workflow("w-implem"),
-        )
-        .unwrap();
-        let mut run = crate::db::tests::sample_run("run-implem", "w-implem");
-        run.status = crate::models::RunStatus::Running;
-        crate::db::workflows::insert_run(&conn, &run).unwrap();
-        let click = || {
-            claim_launch(
-                &conn,
-                "page-action:page-autocode:implem",
-                &HashMap::new(),
-                &HashMap::from([("service".into(), "EW-7633".into())]),
-            )
-            .unwrap()
-            .unwrap()
-        };
-        let LivePageActionClaimOutcome::Claimed { action: first, .. } = click() else {
-            panic!("the first click launches");
-        };
-        complete(
-            &conn,
-            &first.id,
-            kronn_action_engine::ActionCompletion {
-                state: DiscussionActionState::Running,
-                shared_run_id: Some("run-implem".into()),
-                result_discussion_id: None,
-                deep_link: None,
-                diagnostic: None,
-            },
-        )
-        .unwrap();
-        assert!(
-            matches!(click(), LivePageActionClaimOutcome::Existing(ref running) if running.id == first.id)
-        );
-
-        // A backend restart interrupts the run.
-        crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
-
-        let LivePageActionClaimOutcome::Claimed { action: second, .. } = click() else {
-            panic!("an interrupted run must not block its row");
-        };
-        assert_ne!(second.id, first.id);
-        let settled = get(kronn_action_engine::Reconcile::Persisted, &conn, &first.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(settled.state, DiscussionActionState::Failed);
     }
 
     /// The reported shape: one "Framer" block over a list of tickets, one

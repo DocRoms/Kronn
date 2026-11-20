@@ -794,7 +794,7 @@ impl SecretFacts {
                                 facts.literals.collect(path, text);
                                 let found = scan_text(path, text);
                                 // Rust keeps its tests at the end of the file: a hit
-                                // that only the part after `#[cfg(test)]` has is a fixture.
+                                // that only the part after `#[cfg(any(test, feature = "test-support"))]` has is a fixture.
                                 if !found.is_empty()
                                     && path.ends_with(".rs")
                                     && rust_test_start(text).is_some_and(|start| {
@@ -954,8 +954,8 @@ impl SecretFacts {
     }
 }
 
-/// Where the test part of a Rust file starts: its first `#[cfg(test)]` (or
-/// `#[cfg(all(test, …))]`) attribute.
+/// Where the test part of a Rust file starts: its first `#[cfg(any(test, feature = "test-support"))]` (or
+/// `#[cfg(all(any(test, feature = "test-support"), …))]`) attribute.
 fn rust_test_start(text: &str) -> Option<usize> {
     ["#[cfg(test)]", "#[cfg(all(test"]
         .iter()

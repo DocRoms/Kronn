@@ -6,6 +6,11 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
 const NONCE_LEN: usize = 12;
 
+/// AES-GCM refuses a message only beyond its length limit (64 GiB).
+fn encryption_failed(e: aes_gcm::Error) -> String {
+    format!("Encryption failed: {}", e)
+}
+
 /// Encrypt a plaintext string using AES-256-GCM.
 /// Returns a base64-encoded string: nonce || ciphertext.
 pub fn encrypt(plaintext: &str, key: &[u8; 32]) -> Result<String, String> {
@@ -16,7 +21,7 @@ pub fn encrypt(plaintext: &str, key: &[u8; 32]) -> Result<String, String> {
 
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_bytes())
-        .map_err(|e| format!("Encryption failed: {}", e))?;
+        .map_err(encryption_failed)?;
 
     let mut combined = nonce_bytes.to_vec();
     combined.extend_from_slice(&ciphertext);
@@ -61,7 +66,7 @@ pub fn encrypt_bytes_aad(plaintext: &[u8], key: &[u8; 32], aad: &[u8]) -> Result
                 aad,
             },
         )
-        .map_err(|e| format!("Encryption failed: {}", e))?;
+        .map_err(encryption_failed)?;
 
     let mut combined = nonce_bytes.to_vec();
     combined.extend_from_slice(&ciphertext);
@@ -229,6 +234,22 @@ mod hex {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_encryption_failure_is_named_without_the_plaintext() {
+        assert_eq!(
+            encryption_failed(aes_gcm::Error),
+            "Encryption failed: aead::Error"
+        );
+    }
+
+    #[test]
+    fn decrypt_refuses_a_plaintext_that_is_not_utf8() {
+        let key = [7u8; 32];
+        let sealed = encrypt_bytes_aad(&[0xff, 0xfe, 0xfd], &key, b"").unwrap();
+        let error = decrypt(&sealed, &key).unwrap_err();
+        assert!(error.starts_with("UTF-8 decode failed"), "{error}");
+    }
 
     #[test]
     fn parse_secret_rejects_non_ascii_and_signs_without_panicking() {

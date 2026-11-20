@@ -6,6 +6,9 @@ every item carrying `#[cfg(test)]` or `#[cfg(all(test, …))]` (the latter being
 how the `full-tests` feature gates test modules) is blanked out, whether it is
 a `mod tests { … }` block, a `mod tests;` line or a test-only helper. The
 production code before, between and after those items is always scanned.
+So is test support (`feature = "test-support"`, helpers for the tests of the
+crates above) and the files a higher crate compiles as tests only (`*_up.rs`
+and the wrappers under `src/uptests/`).
 Run from `backend/`: `python3 scripts/ci/lint_with_conn_unwrap.py`."""
 import pathlib
 import re
@@ -19,7 +22,11 @@ _NOT_NEWLINE = re.compile(r"[^\n]")
 # `#[cfg(test)]` and `#[cfg(all(test, …))]` (feature = "full-tests", unix, …)
 # mark a test-only item. `#[cfg(feature = "full-tests")]` alone does not: the
 # predicate must start with `test`.
-_TEST_CFG = re.compile(r"#\[cfg\((?:test|all\(test\b[^\]]*)\)\]")
+# So does a predicate that opens with `test` inside `any(` / `all(`:
+# `any(test, feature = "test-support")` is how test support is gated. A negated
+# one (`not(any(test, …))`) is production code. String contents are blanked
+# before this runs, so the feature name itself cannot be matched.
+_TEST_CFG = re.compile(r"#\[cfg\((?:(?:any|all)\()*test\b[^\]]*\)\]")
 _ATTRIBUTE_OPEN = re.compile(r"\s*#!?\[")
 _LITERAL_START = re.compile(r"[/\"r']")
 _CHAR_LITERAL = re.compile(r"'(\\(?:u\{[0-9a-fA-F]{1,6}\}|.)|[^\\'])'")
@@ -184,9 +191,18 @@ def find_violations(text, path="<mem>"):
     return viol
 
 
+def test_only_file(path):
+    """A file only a `#[cfg(test)] mod uptests` reaches: tests of a module
+    compiled by a higher crate (docs/architecture/backend-crates.md)."""
+    path = pathlib.PurePath(path)
+    return path.name.endswith("_up.rs") or "uptests" in path.parts
+
+
 def main():
     viol = []
     for f in pathlib.Path("src").rglob("*.rs"):
+        if test_only_file(f):
+            continue
         viol.extend(find_violations(f.read_text(), str(f)))
     if viol:
         print("::error::unwrap() inside a with_conn closure panics the DB request — return an error instead:")

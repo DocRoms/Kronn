@@ -69,7 +69,7 @@ pub struct TemplateMergeWarning {
 }
 
 /// `TemplateMergeWarning::code` of docs a remote base cannot contain.
-pub(crate) const REMOTE_BASE_MISSES_LOCAL_DOCS: &str = "remote_base_misses_local_docs";
+pub const REMOTE_BASE_MISSES_LOCAL_DOCS: &str = "remote_base_misses_local_docs";
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -367,10 +367,10 @@ pub fn merge_state(repo: &Path) -> TemplateMergeState {
 }
 
 /// `error_code` of the refusal below.
-pub(crate) const PENDING_INTEGRATION_CODE: &str = "template_merge_pending_integration";
+pub const PENDING_INTEGRATION_CODE: &str = "template_merge_pending_integration";
 
 /// Refuse audits of a checkout that does not yet contain accepted template changes.
-pub(crate) fn audit_launch_refusal(repo: &Path) -> Option<serde_json::Value> {
+pub fn audit_launch_refusal(repo: &Path) -> Option<serde_json::Value> {
     (branch_exists(repo) && merge_branch_unintegrated(repo)).then(|| serde_json::json!({
         "error": format!(
             "Template merge `{}` is pending integration — integrate its accepted commits into this checkout before launching an audit.",
@@ -385,7 +385,7 @@ pub(crate) fn audit_launch_refusal(repo: &Path) -> Option<serde_json::Value> {
 /// the offer and the pending state end with the integration. Nothing is lost:
 /// a worktree with proposed or uncommitted files, or a branch some commit of
 /// which neither the checkout nor the remote default branch contains, stays.
-pub(crate) fn clean_integrated_merge(repo: &Path) {
+pub fn clean_integrated_merge(repo: &Path) {
     if !is_git_repo(repo) || !branch_exists(repo) || merge_branch_unintegrated(repo) {
         return;
     }

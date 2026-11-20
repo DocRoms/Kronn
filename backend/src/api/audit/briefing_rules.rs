@@ -13,17 +13,17 @@ use crate::models::{
 
 use super::project_doc::{cell, check_text};
 
-pub(crate) const RULES_HEADING: &str = "## Project rules";
-pub(crate) const RULES_ANSWERS_PREFIX: &str = "<!-- kronn:project-rules v1 ";
+pub const RULES_HEADING: &str = "## Project rules";
+pub const RULES_ANSWERS_PREFIX: &str = "<!-- kronn:project-rules v1 ";
 const RULES_ANSWERS_SUFFIX: &str = " -->";
-pub(crate) const MAX_RULES: usize = 20;
-pub(crate) const TEXT_MAX_CHARS: usize = 200;
-pub(crate) const PATTERN_MAX_CHARS: usize = 100;
+pub const MAX_RULES: usize = 20;
+pub const TEXT_MAX_CHARS: usize = 200;
+pub const PATTERN_MAX_CHARS: usize = 100;
 /// Keeps a file glob readable; the matcher is linear whatever the pattern.
 const MAX_GLOB_STARS: usize = 3;
 
 /// Opening line of the Kronn-generated section of the coding-rules doc.
-pub(crate) const DOC_SECTION_OPEN: &str = "<!-- kronn:section name=\"project-rules\"";
+pub const DOC_SECTION_OPEN: &str = "<!-- kronn:section name=\"project-rules\"";
 const DOC_SECTION_END: &str = "<!-- kronn:section:end -->";
 const CODING_RULES_FILE: &str = "coding-rules.md";
 
@@ -83,7 +83,7 @@ fn check_pattern(pattern: &ProjectRulePattern) -> Result<ProjectRulePattern, Str
 /// Trim and validate the lines: at most [`MAX_RULES`], each a single bounded
 /// line; empty lines and exact duplicates are dropped; only a ban may carry a
 /// pattern.
-pub(crate) fn normalize(rules: &BriefingProjectRules) -> Result<BriefingProjectRules, String> {
+pub fn normalize(rules: &BriefingProjectRules) -> Result<BriefingProjectRules, String> {
     let mut out = BriefingProjectRules::default();
     for rule in &rules.rules {
         let text = rule.text.trim().to_string();
@@ -137,7 +137,7 @@ fn rule_line(rule: &ProjectRule) -> String {
 
 /// The `## Project rules` section, or `None` without any line (the briefing
 /// then keeps its earlier shape byte for byte).
-pub(crate) fn render_section(rules: &BriefingProjectRules) -> Option<String> {
+pub fn render_section(rules: &BriefingProjectRules) -> Option<String> {
     if rules.rules.is_empty() {
         return None;
     }
@@ -159,7 +159,7 @@ pub(crate) fn render_section(rules: &BriefingProjectRules) -> Option<String> {
 }
 
 /// The rules recorded in a briefing, if any.
-pub(crate) fn parse(notes: &str) -> Option<BriefingProjectRules> {
+pub fn parse(notes: &str) -> Option<BriefingProjectRules> {
     notes.lines().find_map(|line| {
         let json = line
             .trim()
@@ -171,14 +171,14 @@ pub(crate) fn parse(notes: &str) -> Option<BriefingProjectRules> {
 
 /// `notes` without the rules section: the steps that judge the code get
 /// their own short block instead, the other steps read the coding-rules doc.
-pub(crate) fn strip_section(notes: &str) -> String {
+pub fn strip_section(notes: &str) -> String {
     super::project_doc::strip_sections(notes, &[RULES_HEADING], &[RULES_ANSWERS_PREFIX])
 }
 
 // ─── Audit prompt ───────────────────────────────────────────────────────────
 
 /// The steps that judge the code: every step writing a TD index.
-pub(crate) fn judges_code(target_file: &str) -> bool {
+pub fn judges_code(target_file: &str) -> bool {
     // By file name: a step target lives under the project's docs root (KT-1192).
     target_file
         .rsplit('/')
@@ -188,7 +188,7 @@ pub(crate) fn judges_code(target_file: &str) -> bool {
 
 /// The rules block for a step prompt; empty for a step that does not judge
 /// the code and when the briefing states no rule.
-pub(crate) fn prompt_block(target_file: &str, rules: Option<&BriefingProjectRules>) -> String {
+pub fn prompt_block(target_file: &str, rules: Option<&BriefingProjectRules>) -> String {
     let Some(rules) = rules.filter(|r| !r.rules.is_empty()) else {
         return String::new();
     };
@@ -284,7 +284,7 @@ fn find_doc_section(content: &str) -> Option<(usize, usize)> {
 /// `content` with the generated section set to `rules`: replaced in place,
 /// inserted before the first `## ` heading, or removed when there is no rule.
 /// The rest of the doc is left byte for byte.
-pub(crate) fn upsert_doc_section(content: &str, rules: Option<&BriefingProjectRules>) -> String {
+pub fn upsert_doc_section(content: &str, rules: Option<&BriefingProjectRules>) -> String {
     let section = rules.filter(|r| !r.rules.is_empty()).map(doc_section);
     if let Some((start, end)) = find_doc_section(content) {
         let (head, tail) = (&content[..start], &content[end..]);
@@ -319,7 +319,7 @@ pub(crate) fn upsert_doc_section(content: &str, rules: Option<&BriefingProjectRu
 
 /// Bring the coding-rules doc in line with the briefing's rules. No-op when
 /// the doc does not exist yet; `Ok(true)` when the file was rewritten.
-pub(crate) fn sync_coding_rules_doc(
+pub fn sync_coding_rules_doc(
     project_root: &Path,
     rules: Option<&BriefingProjectRules>,
 ) -> Result<bool, String> {
@@ -346,7 +346,7 @@ pub(crate) fn sync_coding_rules_doc(
 
 /// [`sync_coding_rules_doc`] from the briefing notes, for the audit hooks:
 /// never fails the audit, a failure is logged.
-pub(crate) fn sync_from_notes(project_root: &Path, notes: Option<&str>) {
+pub fn sync_from_notes(project_root: &Path, notes: Option<&str>) {
     let rules = notes.and_then(parse);
     if let Err(e) = sync_coding_rules_doc(project_root, rules.as_ref()) {
         tracing::warn!("project rules not written to the coding-rules doc: {e}");

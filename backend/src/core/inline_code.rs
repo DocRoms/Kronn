@@ -1257,7 +1257,7 @@ fn interpreter_script<'a>(cmd: &str, args: &'a [String]) -> Option<&'a str> {
 
 /// Roles of an interpreter's arguments: program text (the inline code and
 /// its option), option positions until the data start, data after.
-pub(crate) fn interpreter_roles(
+pub fn interpreter_roles(
     cmd: &str,
     args: &[String],
     tainted: &[bool],

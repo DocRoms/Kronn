@@ -943,7 +943,8 @@ pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool
         .optional()?;
     value
         .map(|disabled| {
-            Ok(disabled != 0 || super::orchestration::discussion_has_cli_worker(conn, disc_id)?)
+            Ok(disabled != 0
+                || super::execution_activity::discussion_has_cli_worker(conn, disc_id)?)
         })
         .transpose()
 }
@@ -959,12 +960,12 @@ pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Re
     Ok(changed)
 }
 
-pub(crate) fn set_disc_no_agent_within_tx(
+pub fn set_disc_no_agent_within_tx(
     transaction: &rusqlite::Transaction<'_>,
     disc_id: &str,
     no_agent: bool,
 ) -> Result<bool> {
-    if !no_agent && super::orchestration::discussion_has_cli_worker(transaction, disc_id)? {
+    if !no_agent && super::execution_activity::discussion_has_cli_worker(transaction, disc_id)? {
         anyhow::bail!("this room is owned by a CLI worker; reassign the execution before enabling a native agent");
     }
     let affected = transaction.execute(
@@ -1052,7 +1053,7 @@ pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
     // KT-1492: what the room's trust level approved is taken back in the same
     // transaction (the trigger drops its setting on every path that deletes it).
     let affected =
-        crate::db::trust::delete_and_withdraw(conn, "Kronn (the room was deleted)", |conn| {
+        crate::core::uplink::delete_and_withdraw(conn, "Kronn (the room was deleted)", |conn| {
             Ok(conn.execute("DELETE FROM discussions WHERE id = ?1", params![id])?)
         })?;
     Ok(affected > 0)
@@ -1911,10 +1912,7 @@ pub fn insert_native_agent_message_with_audit_documents(
     if validation_documents.is_some() {
         anyhow::ensure!(
             child_run_was_success
-                && crate::api::discussions::ends_with_terminal_signal(
-                    &msg.content,
-                    "KRONN:VALIDATION_COMPLETE"
-                ),
+                && ends_with_terminal_signal(&msg.content, "KRONN:VALIDATION_COMPLETE"),
             "Document fingerprints require a successful terminal validation reply"
         );
     }
@@ -2003,13 +2001,10 @@ pub fn insert_native_agent_message_with_audit_documents(
     };
     let mut alias_cli_targets: Vec<MessageTarget> = Vec::new();
     let mut providers_resolved_to_cli: Vec<AgentType> = Vec::new();
-    for provider in
-        candidate_agents
-            .iter()
-            .cloned()
-            .chain(crate::api::disc_helpers::agent_mentions_in_prose(
-                &msg.content,
-            ))
+    for provider in candidate_agents
+        .iter()
+        .cloned()
+        .chain(crate::agents::agent_mentions_in_prose(&msg.content))
     {
         if &provider == source_agent || providers_resolved_to_cli.contains(&provider) {
             continue;
@@ -2360,6 +2355,10 @@ pub fn clear_discussion_workspace(conn: &Connection, id: &str) -> Result<bool> {
     Ok(affected > 0)
 }
 
+/// Workspace mode of a discussion that reviews a commit (KT-1645): it owns a
+/// detached worktree and never falls back to the project's main checkout.
+pub const REVIEW_WORKSPACE_MODE: &str = "Review";
+
 /// Ids of the archived review discussions (KT-1645) that still point at a
 /// worktree: the ones whose checkout is due for release.
 pub fn archived_review_ids_with_workspace(conn: &Connection) -> Result<Vec<String>> {
@@ -2369,10 +2368,9 @@ pub fn archived_review_ids_with_workspace(conn: &Connection) -> Result<Vec<Strin
           ORDER BY updated_at",
     )?;
     let ids = statement
-        .query_map(
-            params![crate::core::worktree::REVIEW_WORKSPACE_MODE],
-            |row| row.get::<_, String>(0),
-        )?
+        .query_map(params![REVIEW_WORKSPACE_MODE], |row| {
+            row.get::<_, String>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ids)
 }
@@ -2900,7 +2898,7 @@ pub fn insert_message(
 /// placeholder (`redact::redact_agent_output`: its false-positive rate was
 /// measured, `db::insert_redaction_measure`). Only the agent's own role: what a
 /// human typed is theirs.
-pub(crate) fn mask_agent_output(role: &crate::models::MessageRole, content: String) -> String {
+pub fn mask_agent_output(role: &crate::models::MessageRole, content: String) -> String {
     if matches!(role, crate::models::MessageRole::Agent) {
         crate::core::redact::redact_agent_output(&content)
     } else {
@@ -2988,32 +2986,16 @@ fn insert_message_inner(
             &msg.id,
             &content,
         )?;
-        super::discussion_actions::ingest_message_actions(conn, discussion_id, &msg.id, &content)?;
-        let invalid_cards = super::discussion_questions::ingest_message_questions(
-            conn,
-            discussion_id,
-            &msg.id,
-            &content,
-        )?;
-        super::discussion_questions::report_invalid_cards(
-            conn,
-            &msg.id,
-            msg.lint_report.as_ref(),
-            invalid_cards,
-        )?;
-        super::audit_validation::on_agent_message(
-            conn,
-            discussion_id,
-            &msg.id,
-            &content,
-            &msg.timestamp.to_rfc3339(),
-        )?;
+        if let Some(hook) = crate::core::uplink::linked::<crate::core::uplink::AgentMessageIngest>()
+        {
+            (hook.0)(conn, discussion_id, msg, &content)?;
+        }
     }
 
     // KT-1247 — a message from the worker is activity: it pushes the silent-
     // worker clock of the execution that owns this room.
     if matches!(msg.role, crate::models::MessageRole::Agent) {
-        let _ = super::orchestration::note_room_activity(conn, discussion_id);
+        let _ = super::execution_activity::note_room_activity(conn, discussion_id);
     }
 
     Ok(next_order)
@@ -3473,7 +3455,7 @@ pub struct ReviseMessageParams<'a> {
     pub dispatches: &'a [UserDispatchSpec<'a>],
 }
 
-pub(crate) fn content_hash(content: &str) -> String {
+pub fn content_hash(content: &str) -> String {
     Sha256::digest(content.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -4085,7 +4067,7 @@ pub fn update_message_tokens(
 /// joined CLI of that provider unless the provider is the room's own agent.
 /// `None` keeps the native meaning (punctual spawn or discussion agent).
 /// Human-composed mentions never go through this: KT-211 keeps them literal.
-pub(crate) fn agent_alias_cli_target(
+pub fn agent_alias_cli_target(
     provider: &AgentType,
     reply_author: Option<&MessageTarget>,
     joined_cli: &[MessageTarget],
@@ -4109,10 +4091,7 @@ pub(crate) fn agent_alias_cli_target(
 }
 
 /// Every joined, non-workflow CLI session of a discussion as a typed target.
-pub(crate) fn joined_cli_targets(
-    conn: &Connection,
-    discussion_id: &str,
-) -> Result<Vec<MessageTarget>> {
+pub fn joined_cli_targets(conn: &Connection, discussion_id: &str) -> Result<Vec<MessageTarget>> {
     Ok(
         crate::db::discussion_sessions::list_participant_views(conn, discussion_id)?
             .into_iter()
@@ -4125,7 +4104,7 @@ pub(crate) fn joined_cli_targets(
 /// A joined session as a typed CLI target, or `None` when the bridge could not
 /// identify its provider (it joins as `Unknown`): such a peer cannot be addressed
 /// by type, and it must not make the whole room unreadable.
-pub(crate) fn session_cli_target(agent_type: &str, session_pk: i64) -> Option<MessageTarget> {
+pub fn session_cli_target(agent_type: &str, session_pk: i64) -> Option<MessageTarget> {
     match parse_agent_type(agent_type) {
         Ok(agent) => Some(MessageTarget::cli(agent, session_pk)),
         Err(_) => {
@@ -4139,7 +4118,7 @@ pub(crate) fn session_cli_target(agent_type: &str, session_pk: i64) -> Option<Me
     }
 }
 
-pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
+pub fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
     Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
@@ -4162,7 +4141,7 @@ pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
     })
 }
 
-pub(crate) fn format_agent_type(a: &AgentType) -> String {
+pub fn format_agent_type(a: &AgentType) -> String {
     match a {
         AgentType::ClaudeCode => "ClaudeCode".into(),
         AgentType::Codex => "Codex".into(),
@@ -4597,17 +4576,46 @@ pub fn delete_context_file(
     Ok(affected > 0)
 }
 
+/// A context file entry for prompt building (text or image reference).
+pub struct ContextEntry {
+    /// The context file's id — what `media_generate` takes as a reference.
+    pub id: String,
+    pub filename: String,
+    pub text: String,
+    pub disk_path: Option<String>,
+}
+
+/// STRICT terminal-position check (Codex A5 v3): does `text`, once
+/// right-trimmed, END on a line that is exactly `signal` (ASCII case
+/// tolerated)? Unlike `detect_terminal_signal` — a lenient tail-window
+/// `contains` meant for live stream truncation — this cannot be satisfied
+/// by a quotation or an instruction that merely mentions the marker
+/// mid-sentence. Gate-grade: used by validate-audit.
+/// Markdown emphasis around the line (`**…**`, backticks) is tolerated: the
+/// stream truncates right after the signal, which leaves `**KRONN:…` behind.
+pub fn ends_with_terminal_signal(text: &str, signal: &str) -> bool {
+    text.trim_end()
+        .lines()
+        .last()
+        .map(|line| {
+            line.trim()
+                .trim_matches(|c| matches!(c, '*' | '`' | '_'))
+                .eq_ignore_ascii_case(signal)
+        })
+        .unwrap_or(false)
+}
+
 /// Get all context files for prompt injection (text + image references).
 pub fn get_context_files_for_prompt(
     conn: &Connection,
     discussion_id: &str,
-) -> rusqlite::Result<Vec<crate::core::context_files::ContextEntry>> {
+) -> rusqlite::Result<Vec<ContextEntry>> {
     let mut stmt = conn.prepare(
         "SELECT filename, extracted_text, disk_path, id FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
     )?;
     let rows = stmt
         .query_map(rusqlite::params![discussion_id], |row| {
-            Ok(crate::core::context_files::ContextEntry {
+            Ok(ContextEntry {
                 filename: row.get(0)?,
                 text: row.get(1)?,
                 disk_path: row.get(2)?,
@@ -4640,9 +4648,9 @@ pub fn list_attachment_files(
     Ok(rows)
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 #[path = "discussions_test.rs"]
-mod discussions_test;
+pub mod discussions_test;
 
 /// KT-251 DoD 3 — the id an in-flight answer already carries.
 ///

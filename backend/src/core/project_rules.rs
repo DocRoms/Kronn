@@ -428,9 +428,7 @@ fn import_specs<'a>(line: &'a str, syntax: Syntax, go_block: &mut bool) -> Vec<&
             }
         }
         Syntax::Rust => {
-            let t = t
-                .trim_start_matches("pub(crate) ")
-                .trim_start_matches("pub ");
+            let t = t.trim_start_matches("pub ").trim_start_matches("pub ");
             path_after(t, "use ")
                 .or_else(|| path_after(t, "extern crate "))
                 .into_iter()
@@ -568,7 +566,7 @@ fn glob_tokens(pattern: &str) -> Vec<GlobToken> {
 }
 
 /// Glob match in O(pattern × path) time: a bottom-up table, no backtracking.
-pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
+pub fn glob_matches(pattern: &str, path: &str) -> bool {
     let tokens = glob_tokens(pattern);
     let text = path.as_bytes();
     let m = text.len();
@@ -600,7 +598,7 @@ pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
 }
 
 /// A glob without `/` matches a file name at any depth, as in `.gitignore`.
-pub(crate) fn glob_hit(pattern: &str, rel: &str) -> bool {
+pub fn glob_hit(pattern: &str, rel: &str) -> bool {
     if pattern.contains('/') {
         glob_matches(pattern, rel)
     } else {

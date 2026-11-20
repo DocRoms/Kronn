@@ -6,16 +6,16 @@ use crate::agents::{generation_settings, runner};
 use crate::models::{AgentType, Discussion, ModelTier, ModelTiersConfig, QuickPrompt};
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct HttpSettings {
+pub struct HttpSettings {
     pub reasoning_effort: Option<String>,
     pub max_tokens: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-pub(crate) struct InvalidLaunchSettings(String);
+pub struct InvalidLaunchSettings(String);
 
-pub(crate) fn capture(
+pub fn capture(
     conn: &Connection,
     discussion: &Discussion,
     qp: &QuickPrompt,
@@ -83,7 +83,7 @@ pub(crate) fn capture(
     Ok(())
 }
 
-pub(crate) fn for_http_run(
+pub fn for_http_run(
     conn: &Connection,
     discussion_id: &str,
     agent: &AgentType,

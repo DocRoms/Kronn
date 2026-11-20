@@ -29,7 +29,7 @@ pub enum DiscussionActionKind {
 }
 
 impl DiscussionActionKind {
-    pub(crate) fn as_db_str(self) -> &'static str {
+    pub fn as_db_str(self) -> &'static str {
         match self {
             Self::QuickPrompt => "quick_prompt",
             Self::QuickApi => "quick_api",
@@ -39,7 +39,7 @@ impl DiscussionActionKind {
         }
     }
 
-    pub(crate) fn from_db_str(value: &str) -> Option<Self> {
+    pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
             "quick_prompt" => Some(Self::QuickPrompt),
             "quick_api" => Some(Self::QuickApi),
@@ -65,7 +65,7 @@ pub enum DiscussionActionState {
 }
 
 impl DiscussionActionState {
-    pub(crate) fn from_db_str(value: &str) -> Option<Self> {
+    pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
             "proposed" => Some(Self::Proposed),
             "launching" => Some(Self::Launching),
@@ -182,26 +182,26 @@ pub enum ClaimLaunchOutcome {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ActionFence {
-    pub(crate) kind: DiscussionActionKind,
-    pub(crate) target_id: String,
+pub struct ActionFence {
+    pub kind: DiscussionActionKind,
+    pub target_id: String,
     #[serde(default)]
-    pub(crate) project_id: Option<String>,
+    pub project_id: Option<String>,
     #[serde(default)]
-    pub(crate) values: Vec<ActionFenceValue>,
+    pub values: Vec<ActionFenceValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ActionFenceValue {
-    pub(crate) name: String,
+pub struct ActionFenceValue {
+    pub name: String,
     #[serde(default)]
-    pub(crate) value: Option<String>,
+    pub value: Option<String>,
     #[serde(default = "user_input_provenance")]
-    pub(crate) provenance: DiscussionActionValueProvenance,
+    pub provenance: DiscussionActionValueProvenance,
     #[serde(default)]
-    pub(crate) source_ref: Option<String>,
+    pub source_ref: Option<String>,
     #[serde(default)]
-    pub(crate) suggested_by: Option<String>,
+    pub suggested_by: Option<String>,
 }
 
 fn user_input_provenance() -> DiscussionActionValueProvenance {
@@ -236,13 +236,13 @@ pub fn extract_action_fences(content: &str) -> Vec<String> {
     fences
 }
 
-pub(crate) struct TargetContract {
-    pub(crate) name: String,
-    pub(crate) project_id: Option<String>,
-    pub(crate) variables: Vec<PromptVariable>,
+pub struct TargetContract {
+    pub name: String,
+    pub project_id: Option<String>,
+    pub variables: Vec<PromptVariable>,
 }
 
-pub(crate) fn target_contract(
+pub fn target_contract(
     conn: &Connection,
     kind: DiscussionActionKind,
     target_id: &str,
@@ -289,7 +289,7 @@ pub(crate) fn target_contract(
 /// blocks (KT-538), where `live_page_actions::claim_launch` resolves the
 /// value server-side from the real dataset/page row instead of ever trusting
 /// a client-declared value for it.
-pub(crate) fn resolved_values(
+pub fn resolved_values(
     declarations: &[PromptVariable],
     proposed: Vec<ActionFenceValue>,
     allow_dynamic_binding: bool,

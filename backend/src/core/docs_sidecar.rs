@@ -218,7 +218,7 @@ fn source_bundle_path() -> PathBuf {
     } else {
         "kronn-docs"
     };
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(crate::BACKEND_DIR)
         .join("../desktop/src-tauri/resources/docs-sidecar/kronn-docs")
         .join(executable)
 }

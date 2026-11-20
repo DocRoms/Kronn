@@ -1,4 +1,4 @@
-.PHONY: install start start-build start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff docs-reanchor test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
+.PHONY: typegen typegen-check install start start-build start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff docs-reanchor test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -304,7 +304,7 @@ clean:
 ## Production build (no Docker)
 build:
 	@echo "$(GREEN)▸ Building backend...$(RESET)"
-	cd backend && cargo build --release
+	cd backend && cargo build --release -p kronn
 	@echo "$(GREEN)▸ Building frontend...$(RESET)"
 	cd frontend && pnpm install && pnpm build
 	@echo "$(GREEN)▸ Done. Binary at target/release/$(APP_NAME)$(RESET)"
@@ -323,7 +323,7 @@ dev-backend:
 # lands HERE, not in backend/target/.
 run-backend:
 	@echo "$(GREEN)▸ Building backend...$(RESET)"
-	cd backend && cargo build
+	cd backend && cargo build -p kronn
 	@echo "$(GREEN)▸ Starting backend (bare binary — no watcher)...$(RESET)"
 	./target/debug/kronn
 
@@ -351,12 +351,25 @@ check:
 	@command -v pnpm   >/dev/null 2>&1 && echo "  ✓ pnpm" || echo "  ✗ pnpm (optional, for dev)"
 
 ## Generate TypeScript types from Rust models
+## backend/bindings/ is owned by this target: it is wiped first so a type that
+## was renamed or removed (or an older run's files) can never leak into the output.
+## Every crate of the backend exports into that one directory.
 typegen:
-	@echo "$(GREEN)▸ Generating ts-rs bindings from Rust models...$(RESET)"
-	cd backend && cargo test --lib export_bindings -- --nocapture
+	@echo "$(GREEN)▸ Generating ts-rs bindings from Rust models (clean bindings dir)...$(RESET)"
+	rm -rf backend/bindings
+	cd backend && TS_RS_EXPORT_DIR="$(CURDIR)/backend/bindings" cargo test --workspace --lib export_bindings -- --nocapture
 	@echo "$(GREEN)▸ Assembling frontend/src/types/generated.ts from the bindings...$(RESET)"
 	@node frontend/scripts/assemble-generated-types.mjs
 	@echo "$(GREEN)▸ generated.ts regenerated — commit it with your Rust model change.$(RESET)"
+
+## Fail when the committed generated.ts differs from a fresh regeneration. The
+## export goes to a brand-new temp dir (TS_RS_EXPORT_DIR), so a stale
+## backend/bindings cannot influence the result; nothing is written to the tree.
+typegen-check:
+	@echo "$(CYAN)▸ Regenerating bindings into a fresh dir and comparing with generated.ts...$(RESET)"
+	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/kronn-typegen.XXXXXX") && trap 'rm -rf "$$tmp"' EXIT && \
+	  (cd backend && TS_RS_EXPORT_DIR="$$tmp" cargo test --workspace --lib export_bindings) && \
+	  node frontend/scripts/assemble-generated-types.mjs --bindings "$$tmp" --check
 
 ## Run the backend suite CI runs, with the runner CI uses (cargo-nextest,
 ## backend/.config/nextest.toml): every test in its own process, then the
@@ -366,7 +379,7 @@ typegen:
 test-backend: require-nextest
 	@echo "$(CYAN)▸ Running backend tests with cargo-nextest (as CI)...$(RESET)"
 	cd backend && cargo nextest run --workspace $(NEXTEST_ARGS)
-	cd backend && cargo test --doc
+	cd backend && cargo test --workspace --doc
 
 require-nextest:
 	@cargo nextest --version >/dev/null 2>&1 \
@@ -386,7 +399,7 @@ test-backend-cov:
 ## Library unit tests only: a quick loop, not the gate.
 test-backend-lib: require-nextest
 	@echo "$(CYAN)▸ Running backend library tests...$(RESET)"
-	cd backend && cargo nextest run --lib $(NEXTEST_ARGS)
+	cd backend && cargo nextest run --workspace --lib $(NEXTEST_ARGS)
 
 ## Install the backend test tools CI uses: cargo-nextest and cargo-llvm-cov
 ## (prebuilt through cargo-binstall when present, built from source otherwise).
@@ -535,6 +548,7 @@ help:
 	@echo "  make check          Verify prerequisites"
 	@echo "  make kiro-login     Kiro OAuth login (device flow in container)"
 	@echo "  make typegen        Sync Rust → TS types"
+	@echo "  make typegen-check  Fail if generated.ts differs from a fresh regeneration"
 	@echo "  make test-backend   Backend tests (cargo-nextest, as CI)"
 	@echo "  make test-backend-cov  Backend coverage gate (as CI)"
 	@echo "  make install-dev-tools  Install cargo-nextest and cargo-llvm-cov"
@@ -631,4 +645,4 @@ docs-reanchor:
 		fi; \
 	fi; \
 	if [ -z "$$base" ]; then echo "docs-reanchor: no target-branch merge-base found; re-anchoring unique #symbol moves only (pass BASE=<rev> for the Git line map)" >&2; fi; \
-	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" KRONN_DOCS_REANCHOR_BASE="$$base" cargo test --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture
+	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" KRONN_DOCS_REANCHOR_BASE="$$base" cargo test --workspace --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture

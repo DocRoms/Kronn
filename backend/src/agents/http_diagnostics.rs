@@ -13,10 +13,7 @@ struct Failure {
     http_status: Option<u16>,
 }
 
-pub(crate) fn record_failure(
-    stderr: &Arc<Mutex<Vec<String>>>,
-    status: Option<reqwest::StatusCode>,
-) {
+pub fn record_failure(stderr: &Arc<Mutex<Vec<String>>>, status: Option<reqwest::StatusCode>) {
     let failure = Failure {
         version: 1,
         http_status: status.map(|s| s.as_u16()),
@@ -30,13 +27,13 @@ pub(crate) fn record_failure(
 }
 
 /// A successful negotiated fallback must not leave a stale failure diagnostic.
-pub(crate) fn clear_failure(stderr: &Arc<Mutex<Vec<String>>>) {
+pub fn clear_failure(stderr: &Arc<Mutex<Vec<String>>>) {
     if let Ok(mut lines) = stderr.lock() {
         lines.retain(|line| !line.starts_with(PREFIX));
     }
 }
 
-pub(crate) fn failure_summary(stderr: &[String]) -> Option<String> {
+pub fn failure_summary(stderr: &[String]) -> Option<String> {
     stderr.iter().rev().find_map(|line| {
         let failure: Failure = serde_json::from_str(line.strip_prefix(PREFIX)?).ok()?;
         if failure.version != 1 {

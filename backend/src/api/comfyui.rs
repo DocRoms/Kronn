@@ -300,7 +300,7 @@ pub async fn video_companions(base: &str) -> anyhow::Result<WanCompanions> {
     wan_companions(&text_encoders, &vaes)
 }
 
-pub(crate) fn reference_family(
+pub fn reference_family(
     config: &ComfyUiConfig,
     model: &str,
     modality: MediaModality,

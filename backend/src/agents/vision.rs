@@ -35,25 +35,25 @@ use tokio::io::AsyncReadExt;
 /// Catalogue capability tag marking a model that accepts images as input. The
 /// catalogue's `image` tag means image GENERATION (see `CAPABILITY_CHAT`), so it
 /// is deliberately not read here.
-pub(crate) const CAPABILITY_VISION: &str = "vision";
+pub const CAPABILITY_VISION: &str = "vision";
 
 /// Largest image sent as is. Providers differ (Anthropic documents 5 MB per
 /// image, OpenAI and Gemini accept more). Larger uploads are downscaled before
 /// transmission; their original on disk is preserved.
-pub(crate) const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
 /// Most images in one request. The newest ones win: a discussion that attached a
 /// dozen screenshots is asking about the latest, and the older ones stay listed
 /// in the notice so the model knows they exist and cannot be seen.
-pub(crate) const MAX_IMAGES: usize = 8;
+pub const MAX_IMAGES: usize = 8;
 /// Raw bytes across one request's images (base64 adds a third on the wire).
-pub(crate) const MAX_TOTAL_BYTES: usize = 12 * 1024 * 1024;
+pub const MAX_TOTAL_BYTES: usize = 12 * 1024 * 1024;
 /// What one image costs in the prompt-size estimates, expressed in bytes of
 /// text. Vision models bill an image by its dimensions, not by the bytes of its
 /// base64 — a 4 MB screenshot is a few thousand tokens, not a million — so the
 /// encoded payload is left out of the estimates and this flat figure (about
 /// 1.3-2k tokens) is charged instead. See `messages_wire_len`.
-pub(crate) const IMAGE_PROMPT_BYTES: usize = 6_000;
+pub const IMAGE_PROMPT_BYTES: usize = 6_000;
 
 /// One image attached to the discussion, as the dispatcher knows it. `path` is
 /// `None` for a legacy row whose bytes were never stored.
@@ -79,7 +79,7 @@ pub struct ContextImages {
 
 /// Whether a model accepts images, and how sure we are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImageSupport {
+pub enum ImageSupport {
     Supported,
     /// Positively reported as text-only.
     Unsupported,
@@ -89,7 +89,7 @@ pub(crate) enum ImageSupport {
 
 /// Why an image was not sent. Every variant becomes one sentence in the notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Withheld {
+pub enum Withheld {
     /// The model cannot see, or nobody knows whether it can.
     ModelCannotSee,
     TooLarge {
@@ -107,7 +107,7 @@ pub(crate) enum Withheld {
 
 /// One image ready for the wire.
 #[derive(Debug, Clone)]
-pub(crate) struct SentImage {
+pub struct SentImage {
     pub id: String,
     pub filename: String,
     pub mime: &'static str,
@@ -116,7 +116,7 @@ pub(crate) struct SentImage {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct PreparedImages {
+pub struct PreparedImages {
     pub sent: Vec<SentImage>,
     /// In attachment order.
     pub withheld: Vec<(String, Withheld)>,
@@ -130,7 +130,7 @@ pub(crate) struct PreparedImages {
 
 /// Identify an image by its first bytes, never by its extension: a `.png` that is
 /// really a JPEG is still deliverable, and a renamed text file is not an image.
-pub(crate) fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -147,7 +147,7 @@ pub(crate) fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
 /// Ollama: `/api/show` lists what the model does in `capabilities`
 /// (`["completion", "vision", …]`). A server too old to report it answers
 /// without the field, which proves nothing.
-pub(crate) fn ollama_show_vision(show: &Value) -> ImageSupport {
+pub fn ollama_show_vision(show: &Value) -> ImageSupport {
     match show.get("capabilities").and_then(Value::as_array) {
         Some(capabilities) if capabilities.iter().any(|c| c.as_str() == Some("vision")) => {
             ImageSupport::Supported
@@ -160,7 +160,7 @@ pub(crate) fn ollama_show_vision(show: &Value) -> ImageSupport {
 /// LiteLLM: `/model/info` carries `model_info.supports_vision` per deployment.
 /// A deployment LiteLLM does not know leaves it false or absent, which is "not
 /// declared", not "text-only" — hence `Unknown`, never `Unsupported`.
-pub(crate) fn litellm_model_info_vision(info: &Value, alias: &str) -> ImageSupport {
+pub fn litellm_model_info_vision(info: &Value, alias: &str) -> ImageSupport {
     let declared = info["data"].as_array().is_some_and(|entries| {
         entries.iter().any(|entry| {
             entry["model_name"] == alias && entry["model_info"]["supports_vision"] == true
@@ -176,7 +176,7 @@ pub(crate) fn litellm_model_info_vision(info: &Value, alias: &str) -> ImageSuppo
 /// Ask a LiteLLM-style proxy whether `alias` accepts images. Best-effort, like
 /// the rest of `/model/info`: the route is optional and often admin-gated, and
 /// any failure is `Unknown`.
-pub(crate) async fn litellm_vision(base: &str, api_key: Option<&str>, alias: &str) -> ImageSupport {
+pub async fn litellm_vision(base: &str, api_key: Option<&str>, alias: &str) -> ImageSupport {
     let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .connect_timeout(std::time::Duration::from_secs(3))
@@ -205,7 +205,7 @@ pub(crate) async fn litellm_vision(base: &str, api_key: Option<&str>, alias: &st
 /// `provider` is the provider's own answer; the catalogue's `vision` capability
 /// for `model` overrides it, because an operator who set it by hand knows
 /// something the provider's metadata does not.
-pub(crate) async fn prepare(
+pub async fn prepare(
     images: &ContextImages,
     model: &str,
     provider: ImageSupport,
@@ -380,14 +380,14 @@ impl PreparedImages {
     }
 
     /// The size the request's images add to the prompt estimates, in bytes of text.
-    pub(crate) fn prompt_bytes(&self) -> usize {
+    pub fn prompt_bytes(&self) -> usize {
         self.sent.len() * IMAGE_PROMPT_BYTES
     }
 
     /// The statement the model reads about its attachments, or `""` when the
     /// discussion has none. Every image is accounted for — seen, or explicitly
     /// not — so the model is never left to infer what it holds.
-    pub(crate) fn notice(&self) -> String {
+    pub fn notice(&self) -> String {
         if self.total_items == 0 {
             return String::new();
         }
@@ -517,7 +517,7 @@ fn withheld_sentence(name: &str, reason: &Withheld, french: bool) -> String {
 /// OpenAI-compatible: the `content` string becomes `[text part, image_url
 /// parts…]`, each image a `data:` URL. Ollama's native `/api/chat`: the message
 /// gains an `images` array of bare base64.
-pub(crate) fn attach_to_chat_body(body: &mut Value, openai_wire: bool, sent: &[SentImage]) {
+pub fn attach_to_chat_body(body: &mut Value, openai_wire: bool, sent: &[SentImage]) {
     if sent.is_empty() {
         return;
     }
@@ -554,7 +554,7 @@ pub(crate) fn attach_to_chat_body(body: &mut Value, openai_wire: bool, sent: &[S
 /// the serialised JSON, with every embedded image's base64 replaced by the flat
 /// [`IMAGE_PROMPT_BYTES`]. Counting the payload itself would make one screenshot
 /// look like a quarter of a million tokens and trip every context guard.
-pub(crate) fn messages_wire_len(body: &Value) -> usize {
+pub fn messages_wire_len(body: &Value) -> usize {
     let serialised = body["messages"].to_string().len();
     let Some(messages) = body["messages"].as_array() else {
         return serialised;

@@ -1,4 +1,5 @@
 use crate::core::kronn_state::*;
+use crate::core::template_manifest::record_audit;
 use std::path::PathBuf;
 
 fn fresh_tmp(name: &str) -> PathBuf {

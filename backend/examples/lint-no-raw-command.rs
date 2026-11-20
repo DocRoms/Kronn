@@ -41,11 +41,16 @@ use walkdir::WalkDir;
 ///   - Anything matching `*_test.rs` is test-only by convention.
 ///   - Files under a `tests/` directory are modules of a `#[cfg(test)] mod tests`,
 ///     a cfg this per-file parse cannot see.
+///   - `*_up.rs` and the wrappers under `uptests/` are the tests a higher crate
+///     compiles for a module, reached only through `#[cfg(test)] mod uptests`.
 fn is_exempt_file(path: &Path) -> bool {
     let p = path.to_string_lossy();
     p.ends_with("core/cmd.rs")
         || p.ends_with("core\\cmd.rs")
         || p.contains("_test.rs")
+        || p.ends_with("_up.rs")
+        || p.contains("/uptests/")
+        || p.contains("\\uptests\\")
         || p.contains("/tests/")
         || p.contains("\\tests\\")
 }
@@ -61,22 +66,24 @@ fn is_test_cfg(attr: &syn::Attribute) -> bool {
         return false;
     }
     let mut found = false;
-    let _ = attr.parse_nested_meta(|meta| {
-        if meta.path.is_ident("test") {
-            found = true;
-        }
-        // Recurse into `any(...)` / `all(...)` / `not(...)`.
-        if meta.path.is_ident("any") || meta.path.is_ident("all") {
-            let _ = meta.parse_nested_meta(|inner| {
-                if inner.path.is_ident("test") {
-                    found = true;
-                }
-                Ok(())
-            });
-        }
-        Ok(())
-    });
+    let _ = attr.parse_nested_meta(|meta| requires_test(meta, &mut found));
     found
+}
+
+/// Looks for `test` through any depth of `any(...)` / `all(...)`, never
+/// through `not(...)`: `any(all(test, feature = "full-tests"), feature =
+/// "test-support")` is test-only, `not(any(test, …))` is production code.
+fn requires_test(meta: syn::meta::ParseNestedMeta, found: &mut bool) -> syn::Result<()> {
+    if meta.path.is_ident("test") {
+        *found = true;
+    }
+    if meta.path.is_ident("any") || meta.path.is_ident("all") {
+        return meta.parse_nested_meta(|inner| requires_test(inner, found));
+    }
+    if meta.input.peek(syn::Token![=]) {
+        meta.value()?.parse::<syn::Lit>()?;
+    }
+    Ok(())
 }
 
 fn attrs_mark_test(attrs: &[syn::Attribute]) -> bool {
@@ -359,6 +366,39 @@ mod tests {
         "#;
         let v = lint_src(src);
         assert!(v.is_empty(), "cfg(test) mod must be skipped: {v:?}");
+    }
+
+    #[test]
+    fn ignores_command_new_under_nested_test_support_cfg() {
+        let src = r#"
+            #[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+            pub mod probe { fn f() { let _ = std::process::Command::new("sh").status(); } }
+            #[cfg(all(any(test, feature = "test-support"), unix))]
+            fn helper() { let _ = std::process::Command::new("git").status(); }
+        "#;
+        let v = lint_src(src);
+        assert!(v.is_empty(), "nested test cfg must be skipped: {v:?}");
+    }
+
+    #[test]
+    fn flags_command_new_under_a_negated_test_cfg() {
+        let src = r#"
+            #[cfg(not(any(test, feature = "test-support")))]
+            fn real() { let _ = std::process::Command::new("git").status(); }
+            #[cfg(feature = "full-tests")]
+            fn also_real() { let _ = std::process::Command::new("git").status(); }
+        "#;
+        assert_eq!(lint_src(src).len(), 2);
+    }
+
+    #[test]
+    fn files_compiled_as_tests_by_a_higher_crate_are_exempt() {
+        assert!(is_exempt_file(Path::new("src/api/git_ops_tests_up.rs")));
+        assert!(is_exempt_file(Path::new(
+            "src/uptests/api__git_ops__tests.rs"
+        )));
+        assert!(!is_exempt_file(Path::new("src/api/git_ops.rs")));
+        assert!(!is_exempt_file(Path::new("src/core/startup.rs")));
     }
 
     #[test]

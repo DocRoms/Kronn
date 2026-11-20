@@ -92,7 +92,7 @@ pub fn tracker_project(
         return Ok(Ok(workflow.project_id.clone()));
     };
     let TrackerSourceConfig::GitHub { owner, repo } = source;
-    let tracked = crate::api::discover::normalize_repo_url(&format!(
+    let tracked = crate::core::github_connection::normalize_repo_url(&format!(
         "https://github.com/{}/{}",
         owner.trim(),
         repo.trim()
@@ -100,10 +100,9 @@ pub fn tracker_project(
     let mut linked: Vec<String> = crate::db::projects::list_projects(conn)?
         .into_iter()
         .filter(|project| {
-            project
-                .repo_url
-                .as_deref()
-                .is_some_and(|url| crate::api::discover::normalize_repo_url(url.trim()) == tracked)
+            project.repo_url.as_deref().is_some_and(|url| {
+                crate::core::github_connection::normalize_repo_url(url.trim()) == tracked
+            })
         })
         .map(|project| project.id)
         .filter(|id| scope.allows(workflow.project_id.as_deref(), id))

@@ -15,7 +15,7 @@ use super::template::TemplateContext;
 /// Longest chain of runs launching one another. Each round of a loop between
 /// workflows adds generations; a loop that never settles stops here instead of
 /// spending tokens forever.
-pub(crate) const MAX_TRIGGER_CHAIN: usize = 20;
+pub const MAX_TRIGGER_CHAIN: usize = 20;
 
 pub async fn execute_trigger_workflow_step(
     state: &crate::AppState,

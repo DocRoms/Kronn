@@ -247,6 +247,22 @@ pub fn repair(conn: &Connection) -> Result<RepairReport> {
     Ok(report)
 }
 
+// KT-1122 — recognise validations that already signalled completion and
+// archive the stale ones an old audit left open. Idempotent.
+fn boot_repair(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
+    match repair(conn) {
+        Ok(RepairReport { completed: 0, archived: 0 }) => {}
+        Ok(report) => tracing::info!(
+            "Repaired audit validations: {} completion(s) recognised, {} stale discussion(s) archived",
+            report.completed,
+            report.archived
+        ),
+        Err(e) => tracing::warn!("Failed to repair audit validation state: {}", e),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 40, run: boot_repair } }
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 
 use crate::AppState;
 
-pub(super) fn state() -> AppState {
+pub fn state() -> AppState {
     AppState::new_defaults(
         std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::core::config::default_config(),
@@ -16,7 +16,7 @@ pub(super) fn state() -> AppState {
     )
 }
 
-pub(super) async fn seed_project(state: &AppState, path: &std::path::Path) {
+pub async fn seed_project(state: &AppState, path: &std::path::Path) {
     let path = path.to_string_lossy().into_owned();
     state
         .db
@@ -320,9 +320,7 @@ async fn a_lease_nobody_could_settle_is_signalled_then_released_by_the_cleanup()
 }
 
 /// A validation discussion of run `r1` with one queued agent turn.
-pub(super) async fn queued_validation(
-    state: &AppState,
-) -> crate::db::agent_dispatch::AgentDispatchJob {
+pub async fn queued_validation(state: &AppState) -> crate::db::agent_dispatch::AgentDispatchJob {
     state
         .db
         .with_conn(|conn| {

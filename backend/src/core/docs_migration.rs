@@ -20,7 +20,7 @@
 //! expected to commit the result via the operator's normal git flow.
 
 use std::path::Path;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,7 +396,7 @@ pub fn backfill_docs_index(project_path: &Path) {
 /// Idempotent : skips silently if `docs/index.md` already exists, so
 /// re-running the migration (or operators who hand-craft an index)
 /// won't get clobbered.
-pub(crate) fn ensure_docs_index(project_root: &Path, docs_dir: &Path) -> Result<(), String> {
+pub fn ensure_docs_index(project_root: &Path, docs_dir: &Path) -> Result<(), String> {
     let index_path = docs_dir.join("index.md");
     let body = build_docs_index_body(docs_dir);
     // no-follow create-only: a pre-existing index (including a dangling
@@ -563,7 +563,7 @@ fn rewrite_root_redirectors(project_path: &Path) -> usize {
 }
 
 /// Pure-text path rewrite. Exposed for unit tests.
-pub(crate) fn rewrite_refs_in_text(text: &str) -> String {
+pub fn rewrite_refs_in_text(text: &str) -> String {
     let mut t = text.to_string();
     // Specific rename first (most specific).
     t = t.replace("ai/index.md", "docs/AGENTS.md");
@@ -673,7 +673,7 @@ pub fn prefill_files(project_path: &Path, files: &[std::path::PathBuf]) -> usize
 /// Build the (placeholder → value) map from filesystem heuristics.
 /// Only emits entries for placeholders we can answer with confidence;
 /// unknown ones stay as `{{...}}` for the agent to fill during bootstrap.
-pub(crate) fn compute_replacements(project_path: &Path) -> Vec<(&'static str, String)> {
+pub fn compute_replacements(project_path: &Path) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
 
     // PROJECT_NAME — directory basename, Title-Cased + dashes/underscores → spaces.
@@ -746,13 +746,13 @@ fn rewrite_file_with_replacements(
 /// Compact view of which package managers / build tools are present in
 /// the project. Drives `STACK_SUMMARY`, `TEST_CMD`, `LINT_CMD`.
 #[derive(Default)]
-pub(crate) struct StackSignals {
-    pub(crate) rust: bool,
-    pub(crate) typescript: bool,
-    pub(crate) javascript: bool,
-    pub(crate) python: bool,
-    pub(crate) go: bool,
-    pub(crate) php: bool,
+pub struct StackSignals {
+    pub rust: bool,
+    pub typescript: bool,
+    pub javascript: bool,
+    pub python: bool,
+    pub go: bool,
+    pub php: bool,
     /// Linters that ship with their toolchain — clippy, `go vet` — can be
     /// assumed from the language. These three cannot: they are optional
     /// packages, and naming one the project does not have puts a command in
@@ -858,13 +858,13 @@ impl StackSignals {
     }
 }
 
-pub(crate) fn detect_stack_signals(project_path: &Path) -> StackSignals {
+pub fn detect_stack_signals(project_path: &Path) -> StackSignals {
     detect_stack(project_path, true)
 }
 
 /// Languages only, for the audit detectors: no file content is read and a
 /// symlinked manifest does not count, so nothing outside the project is touched.
-pub(crate) fn detect_stack_languages(project_path: &Path) -> StackSignals {
+pub fn detect_stack_languages(project_path: &Path) -> StackSignals {
     detect_stack(project_path, false)
 }
 

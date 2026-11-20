@@ -7,7 +7,7 @@ use crate::db::discussion_ceiling_requests::{
     ROUND_STEP,
 };
 
-pub(crate) struct CeilingQuestion {
+pub struct CeilingQuestion {
     pub key: String,
     pub ceilings: Vec<Ceiling>,
     /// Appended to the agent's answer: the notice, then the question fence.
@@ -114,7 +114,7 @@ fn words(language: &str) -> Words {
     }
 }
 
-pub(crate) fn ceiling_question(report: &CeilingReport, language: &str) -> CeilingQuestion {
+pub fn ceiling_question(report: &CeilingReport, language: &str) -> CeilingQuestion {
     let words = words(language);
     let key = format!(
         "{QUESTION_KEY_PREFIX}{}",

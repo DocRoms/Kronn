@@ -51,7 +51,7 @@ pub struct AcceptAuditStepResponse {
 
 /// Why an acceptance is refused, before anything is written.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TargetRefusal {
+pub enum TargetRefusal {
     Missing,
     Template,
 }
@@ -59,7 +59,7 @@ pub(crate) enum TargetRefusal {
 /// The step's target must exist, hold something, and no longer be the
 /// template: a step whose document was never written cannot be accepted.
 /// The synthetic review step has no target to check.
-pub(crate) fn check_target(
+pub fn check_target(
     project_path: &std::path::Path,
     target_file: &str,
 ) -> Result<(), TargetRefusal> {
@@ -81,7 +81,7 @@ pub(crate) fn check_target(
 }
 
 /// The change a step made, as a bounded unified diff.
-pub(crate) fn diff_excerpt(before: &str, after: &str) -> String {
+pub fn diff_excerpt(before: &str, after: &str) -> String {
     let diff = crate::core::repository_resources::unified_diff(before.as_bytes(), after.as_bytes());
     let mut lines = diff.lines();
     let mut excerpt: Vec<&str> = lines.by_ref().take(MAX_DIFF_LINES).collect();
@@ -92,7 +92,7 @@ pub(crate) fn diff_excerpt(before: &str, after: &str) -> String {
 }
 
 /// What makes accepting `row` as it stands need an explicit override.
-pub(crate) fn accept_blocker_of(
+pub fn accept_blocker_of(
     row: &crate::models::AuditRunStep,
 ) -> Option<super::step_guard::AcceptBlocker> {
     use super::step_guard::{AcceptBlocker, STATE_RESTORED};

@@ -90,7 +90,7 @@ pub async fn execute_batch_apicall_step(
 }
 
 /// Same fan-out under an explicit policy, so tests can reach a local server.
-pub(crate) async fn execute_batch_apicall_step_with_policy(
+pub async fn execute_batch_apicall_step_with_policy(
     step: &WorkflowStep,
     project_id: Option<&str>,
     state: &crate::AppState,

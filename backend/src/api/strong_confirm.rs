@@ -40,6 +40,9 @@ use crate::core::trust_proof::{self, Binding, Channel, ProofError};
 use crate::models::{ApiErrorCode, ApiResponse, StrongGrant, StrongGrantRequest};
 use crate::AppState;
 
+/// The header that carries the strong-confirmation code on any channel.
+pub const CONFIRM_HEADER: &str = "x-kronn-confirm";
+
 /// Largest JSON body read to look for a `kronn_confirm` field.
 const PEEK_LIMIT: usize = 1024 * 1024;
 
@@ -70,7 +73,7 @@ impl Presented {
                 .map(str::to_owned)
         };
         Self {
-            code: read(crate::api::trust::CONFIRM_HEADER),
+            code: read(CONFIRM_HEADER),
             grant: read(strong::GRANT_HEADER),
         }
     }

@@ -8,7 +8,7 @@
 //! alone refuses the two alike (OpenCode does: `read` on `*.env.*` is `ask`).
 //!
 //! Two places apply this rule, for two kinds of runtime:
-//! - the broker ([`super::permission_broker`]) for a runtime that reports the
+//! - the permission broker for a runtime that reports the
 //!   path of a read it asks about;
 //! - [`opencode_config_content`], handed to OpenCode at spawn, because OpenCode
 //!   asks about a `read` WITHOUT its path — the broker sees "a read" and nothing

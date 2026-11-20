@@ -54,7 +54,7 @@ pub struct AcpAuditEntry {
 }
 
 /// Label the runner gives a session that serves no discussion.
-pub(crate) const UNBOUND_SESSION_LABEL: &str = "unbound-discussion";
+pub const UNBOUND_SESSION_LABEL: &str = "unbound-discussion";
 
 /// Project/session scope a broker enforces on top of the `full_access` gate.
 /// Two independent, defense-in-depth checks key off this:
@@ -894,7 +894,7 @@ fn refusal_message(
 /// runtime's request shape. Argument values and titles (model text, a shell
 /// command) are never rendered: only `kind`, `status`, `toolCallId`,
 /// `optionId`, `sessionUpdate` and Vibe's `_meta.tool_name`/`effect_kind`.
-pub(crate) fn value_shape(value: &Value, depth: usize) -> String {
+pub fn value_shape(value: &Value, depth: usize) -> String {
     const LABELS: &[&str] = &[
         "kind",
         "status",

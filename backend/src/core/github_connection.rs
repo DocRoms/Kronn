@@ -32,6 +32,18 @@ pub const MAX_TOKEN_CHARS: usize = 512;
 
 // ─── Remote detection ───────────────────────────────────────────────────────
 
+/// Normalize a repo URL for comparison (strip .git suffix, lowercase, strip protocol prefix)
+pub fn normalize_repo_url(url: &str) -> String {
+    url.to_lowercase()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .replace("https://github.com/", "github:")
+        .replace("https://gitlab.com/", "gitlab:")
+        .replace("git@github.com:", "github:")
+        .replace("git@gitlab.com:", "gitlab:")
+        .to_string()
+}
+
 /// `owner/name` when `url` points at a repository on github.com (HTTPS, SSH or
 /// scp-like form). GitHub Enterprise hosts are not github.com and return `None`.
 pub fn github_repo_slug(url: &str) -> Option<String> {

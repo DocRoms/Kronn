@@ -32,7 +32,3 @@ pub fn render_guide(source: &str) -> String {
         .replace(STEP_TYPES_MARKER, &step_types_inline())
         .replace(STEP_TYPE_COUNT_MARKER, &StepType::ALL.len().to_string())
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "authoring_doctrine_test.rs"]
-mod tests;

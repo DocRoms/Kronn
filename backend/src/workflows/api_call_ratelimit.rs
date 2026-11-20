@@ -111,7 +111,7 @@ pub async fn acquire_slot(plugin_slug: &str, config_id: &str) {
 /// Wait-or-skip variant for tests + diagnostic UIs: returns `true` when
 /// a slot was available immediately, `false` when we'd have to wait.
 /// Production code should use [`acquire_slot`] which actually blocks.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn try_acquire_slot(plugin_slug: &str, config_id: &str) -> bool {
     let Some(rate) = default_rate_per_second(plugin_slug) else {
         return true;
@@ -148,7 +148,7 @@ fn quota_for_rate(rate_per_sec: u32) -> Quota {
 
 /// Reset the global state — test-only. Avoids cross-test pollution when
 /// two cases hit the same plugin slug.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn reset_buckets() {
     BUCKETS.lock().await.clear();
 }

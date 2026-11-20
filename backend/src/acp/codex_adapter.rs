@@ -66,7 +66,7 @@ pub struct CodexAcpAdapter {
 
 impl CodexAcpAdapter {
     /// Runs `program` instead of the vendor CLI.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_program(mut self, program: &std::path::Path) -> Self {
         self.program = program.to_string_lossy().into_owned();
         self
@@ -99,7 +99,7 @@ impl CodexAcpAdapter {
     }
 
     /// Test-only: drive a fixture script instead of the real `codex` binary.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn new_with_program(
         program: impl Into<String>,
         model: Option<String>,

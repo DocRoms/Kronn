@@ -367,3 +367,9 @@ pub fn price_reply(
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "pricing_test.rs"]
 mod pricing_test;
+
+/// A provider-reported USD amount as integer micro-USD, so usage stays `Eq`.
+/// Negative or non-finite amounts are not a cost.
+pub fn usd_to_micros(usd: f64) -> Option<u64> {
+    (usd.is_finite() && usd >= 0.0).then(|| (usd * 1_000_000.0).round() as u64)
+}

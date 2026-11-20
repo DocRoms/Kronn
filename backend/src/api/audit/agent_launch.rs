@@ -24,7 +24,7 @@ use crate::AppState;
 /// What an HTTP provider reads from Settings. Snapshotted once per audit, so every
 /// step of a run resolves the same models and endpoints even if Settings change
 /// underneath it.
-struct HttpSettings {
+pub struct HttpSettings {
     model_tiers: ModelTiersConfig,
     endpoints: HttpEndpoints,
     ollama_context_overrides: HashMap<String, u64>,
@@ -56,7 +56,7 @@ impl HttpSettings {
 /// zero — until a step's agent has reported something, so a runtime that reports
 /// nothing never makes a run look free (KT-927).
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct RunTokens {
+pub struct RunTokens {
     total: u64,
     known: bool,
     /// The highest running total shown so far: the live counter never goes down
@@ -66,7 +66,7 @@ pub(super) struct RunTokens {
 
 impl RunTokens {
     /// Count a finished step. A step of unknown cost leaves the tally as it was.
-    pub(super) fn add(&mut self, step: Option<u64>) {
+    pub fn add(&mut self, step: Option<u64>) {
         if let Some(step) = step {
             self.total = self.total.saturating_add(step);
             self.known = true;
@@ -74,13 +74,13 @@ impl RunTokens {
     }
 
     /// The run's total, `None` while no step has reported.
-    pub(super) fn total(&self) -> Option<u64> {
+    pub fn total(&self) -> Option<u64> {
         self.known.then_some(self.total)
     }
 
     /// The running total with the step in progress at its latest reading,
     /// never below one already shown.
-    pub(super) fn with(&mut self, step: u64) -> u64 {
+    pub fn with(&mut self, step: u64) -> u64 {
         self.shown = self.total.saturating_add(step).max(self.shown);
         self.shown
     }
@@ -92,13 +92,13 @@ impl RunTokens {
 /// are summed as they come, and the final line replaces the sum when it
 /// arrives. The reading never goes down (KT-1313).
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct StreamTurns {
+pub struct StreamTurns {
     summed: Option<crate::db::audit_runs::StepTokens>,
 }
 
 impl StreamTurns {
     /// The attempt's usage once `reading` is folded into `current`.
-    pub(super) fn fold(
+    pub fn fold(
         &mut self,
         current: crate::db::audit_runs::StepTokens,
         reading: crate::db::audit_runs::StepTokens,
@@ -118,10 +118,10 @@ impl StreamTurns {
     }
 }
 
-pub(super) struct AuditAgentLauncher {
+pub struct AuditAgentLauncher {
     state: AppState,
     /// `None` for a CLI agent: its spawn is left exactly as it always was.
-    http: Option<HttpSettings>,
+    pub http: Option<HttpSettings>,
     /// The agent runs inside Kronn's ACP host: OpenCode and the other native ACP
     /// agents, and Claude and Codex through their adapters. What `start` hands
     /// back is then a lifeline process, not the agent (KT-927).
@@ -144,13 +144,13 @@ pub(super) struct AuditAgentLauncher {
 }
 
 impl AuditAgentLauncher {
-    pub(super) async fn new(state: &AppState, agent: &AgentType) -> Self {
+    pub async fn new(state: &AppState, agent: &AgentType) -> Self {
         Self::with_route(state, agent, crate::acp::resolve_acp_route(agent)).await
     }
 
     /// `new` with the ACP route given rather than read from the environment, so a
     /// test can pick it without mutating process-wide variables.
-    pub(super) async fn with_route(
+    pub async fn with_route(
         state: &AppState,
         agent: &AgentType,
         route: crate::acp::AcpProductionRoute,
@@ -186,7 +186,7 @@ impl AuditAgentLauncher {
 
     /// Launcher for one audit request. A named connection must exist and
     /// target this agent; an HTTP agent's `Custom` target requires one.
-    pub(super) async fn for_request(
+    pub async fn for_request(
         state: &AppState,
         agent: &AgentType,
         connection_id: Option<&str>,
@@ -260,7 +260,7 @@ impl AuditAgentLauncher {
     /// run belongs to a lifeline that does no work, so `cancel_audit` must not
     /// go looking for the agent there: killing it only made the pipeline believe
     /// the step was over while the agent kept working (KT-927, about 8 minutes).
-    pub(super) fn stops_with_token(&self) -> bool {
+    pub fn stops_with_token(&self) -> bool {
         self.http.is_some() || self.acp
     }
 
@@ -273,7 +273,7 @@ impl AuditAgentLauncher {
     /// Which live version sources this run's agent reaches (KT-1000). Read
     /// from the same `.mcp.json` the agent will be handed; `watch` says
     /// whether a dependency watch result is stored.
-    pub(super) fn version_source_inputs(
+    pub fn version_source_inputs(
         &self,
         agent: &AgentType,
         project_path: &Path,
@@ -304,7 +304,7 @@ impl AuditAgentLauncher {
     /// `stops_with_token`), whose provider, tool loop or session no process kill
     /// can reach.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn start(
+    pub async fn start(
         &self,
         agent_type: &AgentType,
         tier: ModelTier,
@@ -365,23 +365,18 @@ impl AuditAgentLauncher {
 
 /// What an audit agent can reach beyond its prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct VersionReach {
+pub struct VersionReach {
     /// `Some(stdio_only)` when the agent mounts the project's MCP servers.
-    pub(super) mcp: Option<bool>,
+    pub mcp: Option<bool>,
     /// A native web tool is available to it during an audit.
-    pub(super) web: bool,
+    pub web: bool,
 }
 
 /// Only what the launch code establishes: a direct Claude CLI gets the
 /// project's `.mcp.json` (`--mcp-config`) and, with full access, its own web
 /// tools; an ACP session gets the project's stdio servers; an HTTP agent has
 /// only `AUDIT_TOOLS`. Other CLIs are not known to mount either.
-pub(super) fn version_reach(
-    http: bool,
-    acp: bool,
-    full_access: bool,
-    agent: &AgentType,
-) -> VersionReach {
+pub fn version_reach(http: bool, acp: bool, full_access: bool, agent: &AgentType) -> VersionReach {
     if http {
         VersionReach {
             mcp: None,
@@ -407,18 +402,18 @@ pub(super) fn version_reach(
 
 /// How often a step without text is looked at: its tokens and its last tool can
 /// move for minutes without a line arriving (an HTTP tool loop, an ACP session).
-pub(super) const ACTIVITY_TICK: Duration = Duration::from_secs(1);
+pub const ACTIVITY_TICK: Duration = Duration::from_secs(1);
 
 /// The last tool of a step's agent, whichever channel reports it: an HTTP agent
 /// writes it on its run's usage, an ACP agent on the activity sink. The usage
 /// is the run's own counters, which both kinds update without a text line.
-pub(super) struct AuditActivityProbe {
+pub struct AuditActivityProbe {
     http: runner::ToolActivityProbe,
     acp: Option<tokio::sync::watch::Receiver<Option<crate::models::AgentActivity>>>,
 }
 
 impl AuditActivityProbe {
-    pub(super) fn new(
+    pub fn new(
         http: runner::ToolActivityProbe,
         acp: Option<tokio::sync::watch::Receiver<Option<crate::models::AgentActivity>>>,
     ) -> Self {
@@ -427,7 +422,7 @@ impl AuditActivityProbe {
 
     /// The last tool call's category and the step's call count, `None`
     /// before the first.
-    pub(super) fn tool(&self) -> Option<(String, u32)> {
+    pub fn tool(&self) -> Option<(String, u32)> {
         let (category, calls) = self.http.read().or_else(|| {
             let activity = self.acp.as_ref()?.borrow().clone()?;
             Some((activity.category, activity.calls))
@@ -443,7 +438,7 @@ impl AuditActivityProbe {
 /// What changed in a step since it was last looked at. Polled on every text
 /// line and on every `ACTIVITY_TICK`, so a tool chain without prose still moves
 /// the counters; a quiet provider moves nothing.
-pub(super) struct StepActivityWatch {
+pub struct StepActivityWatch {
     probe: AuditActivityProbe,
     agent_type: AgentType,
     seen_usage: crate::db::audit_runs::StepTokens,
@@ -451,7 +446,7 @@ pub(super) struct StepActivityWatch {
 }
 
 impl StepActivityWatch {
-    pub(super) fn new(probe: AuditActivityProbe, agent_type: AgentType) -> Self {
+    pub fn new(probe: AuditActivityProbe, agent_type: AgentType) -> Self {
         Self {
             probe,
             agent_type,
@@ -461,7 +456,7 @@ impl StepActivityWatch {
     }
 
     /// The step's usage when it moved since the last call.
-    pub(super) fn tokens_moved(&mut self) -> Option<crate::db::audit_runs::StepTokens> {
+    pub fn tokens_moved(&mut self) -> Option<crate::db::audit_runs::StepTokens> {
         let reading = crate::db::audit_runs::StepTokens::from_reported(self.probe.usage())
             .inclusive_for(&self.agent_type);
         (reading.total().is_some() && reading != self.seen_usage).then(|| {
@@ -471,7 +466,7 @@ impl StepActivityWatch {
     }
 
     /// The last tool and the call count when either moved since the last call.
-    pub(super) fn tool_moved(&mut self) -> Option<(String, u32)> {
+    pub fn tool_moved(&mut self) -> Option<(String, u32)> {
         let current = self.probe.tool()?;
         (self.seen_tool.as_ref() != Some(&current)).then(|| {
             self.seen_tool = Some(current.clone());
@@ -483,7 +478,7 @@ impl StepActivityWatch {
 /// The running step's latest actions for the details panel, by category,
 /// fed by whichever pipeline runs the agent: a CLI's stream-json lines here,
 /// an HTTP or ACP run's calls through its probe.
-pub(super) struct StepRecentFeed {
+pub struct StepRecentFeed {
     local: crate::agents::activity::RecentActivity,
     probe: Option<runner::ToolActivityProbe>,
     calls: u64,
@@ -492,7 +487,7 @@ pub(super) struct StepRecentFeed {
 
 impl StepRecentFeed {
     /// `probe` is the run's, for an agent whose tool calls are not in its lines.
-    pub(super) fn new(probe: Option<runner::ToolActivityProbe>) -> Self {
+    pub fn new(probe: Option<runner::ToolActivityProbe>) -> Self {
         Self {
             local: Default::default(),
             probe,
@@ -504,7 +499,7 @@ impl StepRecentFeed {
     /// One parsed stream-json event of a CLI agent: a tool's start counts, by
     /// its category, which is returned for the chip. Its input and the prose
     /// are never read.
-    pub(super) fn on_stream_event(
+    pub fn on_stream_event(
         &mut self,
         event: &runner::StreamJsonEvent,
     ) -> Option<crate::models::ActivityCategory> {
@@ -519,7 +514,7 @@ impl StepRecentFeed {
     }
 
     /// The current snapshot when it changed since the last call.
-    pub(super) fn moved(&mut self) -> Option<crate::models::AuditRecentActivity> {
+    pub fn moved(&mut self) -> Option<crate::models::AuditRecentActivity> {
         let mut current = self.local.snapshot();
         if current.entries.is_empty() {
             if let Some(remote) = self.probe.as_ref().and_then(|probe| probe.recent()) {
@@ -548,7 +543,7 @@ pub(super) enum StepWake {
 /// when every attempt that ran reported one: summing over a silent attempt would
 /// show a floor as the whole.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StepCost {
+pub enum StepCost {
     #[default]
     NoAttempt,
     Known(u64),
@@ -556,7 +551,7 @@ pub(super) enum StepCost {
 }
 
 impl StepCost {
-    pub(super) fn with_attempt(self, reported_usd_micros: Option<u64>) -> Self {
+    pub fn with_attempt(self, reported_usd_micros: Option<u64>) -> Self {
         match (self, reported_usd_micros) {
             (Self::Unknown, _) | (_, None) => Self::Unknown,
             (Self::NoAttempt, Some(cost)) => Self::Known(cost),
@@ -565,7 +560,7 @@ impl StepCost {
     }
 
     /// The cost to record; `None` keeps the column NULL (unknown, never 0).
-    pub(super) fn usd_micros(self) -> Option<u64> {
+    pub fn usd_micros(self) -> Option<u64> {
         match self {
             Self::Known(cost) => Some(cost),
             Self::NoAttempt | Self::Unknown => None,
@@ -575,7 +570,7 @@ impl StepCost {
 
 /// The model a run is recorded with: the one(s) its runtime reported serving,
 /// else the configured one, labelled so it never passes for an observation.
-pub(super) fn run_model_label(observed: &[String], configured: Option<&str>) -> Option<String> {
+pub fn run_model_label(observed: &[String], configured: Option<&str>) -> Option<String> {
     if !observed.is_empty() {
         return Some(observed.join(" / "));
     }
@@ -584,11 +579,3 @@ pub(super) fn run_model_label(observed: &[String], configured: Option<&str>) -> 
         .filter(|model| !model.is_empty())
         .map(|model| format!("{model} (configured)"))
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "agent_launch_tests.rs"]
-mod tests;
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "agent_launch_acp_tests.rs"]
-mod acp_tests;

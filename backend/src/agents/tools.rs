@@ -154,7 +154,7 @@ pub struct ToolCallFragment {
 }
 
 /// Decode a provider's `tool_calls` array into fragments.
-pub(crate) fn parse_tool_calls(raw: &Value) -> Vec<ToolCallFragment> {
+pub fn parse_tool_calls(raw: &Value) -> Vec<ToolCallFragment> {
     let Some(items) = raw.as_array() else {
         return Vec::new();
     };
@@ -182,7 +182,7 @@ pub(crate) fn parse_tool_calls(raw: &Value) -> Vec<ToolCallFragment> {
 
 /// Merges fragments across frames into finished calls.
 #[derive(Debug, Default)]
-pub(crate) struct ToolCallAccumulator {
+pub struct ToolCallAccumulator {
     /// Keyed by wire index so out-of-order frames still land correctly.
     parts: std::collections::BTreeMap<usize, (Option<String>, Option<String>, String)>,
     /// Finished calls seen so far, each given its own slot after the streamed ones.
@@ -255,7 +255,7 @@ impl ToolCallAccumulator {
 /// closing '}' symbol", HTTP 400 — observed against qwen3:4b). Sending the
 /// wrong one breaks the loop on the second turn, after the tool has already
 /// run.
-pub(crate) fn assistant_tool_call_message(calls: &[ToolCall], string_arguments: bool) -> Value {
+pub fn assistant_tool_call_message(calls: &[ToolCall], string_arguments: bool) -> Value {
     json!({
         "role": "assistant",
         "content": "",
@@ -276,7 +276,7 @@ pub(crate) fn assistant_tool_call_message(calls: &[ToolCall], string_arguments: 
 
 /// Render one tool result. `tool_call_id` is what OpenAI correlates on;
 /// `name` is what Ollama reads, so both are always present.
-pub(crate) fn tool_result_message(outcome: &ToolOutcome) -> Value {
+pub fn tool_result_message(outcome: &ToolOutcome) -> Value {
     json!({
         "role": "tool",
         "tool_call_id": outcome.call.id,
@@ -288,7 +288,7 @@ pub(crate) fn tool_result_message(outcome: &ToolOutcome) -> Value {
 /// The most one tool answer may add to the history the model resends every
 /// turn. Above `read_file`'s own 256 KiB cap plus JSON escaping, so it only
 /// stops a tool that has no bound of its own.
-pub(crate) const MAX_TOOL_RESULT_BYTES: usize = 320 * 1024;
+pub const MAX_TOOL_RESULT_BYTES: usize = 320 * 1024;
 
 fn bounded_tool_content(content: String) -> String {
     if content.len() <= MAX_TOOL_RESULT_BYTES {
@@ -339,7 +339,7 @@ fn trace_status(outcome: &ToolOutcome, safe: bool) -> String {
     }
 }
 
-pub(crate) fn trace_line(outcome: &ToolOutcome) -> String {
+pub fn trace_line(outcome: &ToolOutcome) -> String {
     // Arguments are shown ONLY for the workspace tools, whose inputs are paths
     // and globs in the user's own repo. Everything else — `api_call` above all —
     // can carry arbitrary bodies and query values, and these lines land in

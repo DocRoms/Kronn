@@ -158,7 +158,7 @@ class Wiring(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text()
         target = re.search(r"^docs-reanchor:\n(?P<body>(?:\t.*\n)+)", makefile, re.MULTILINE)["body"]
         self.assertIn(f'{rust_const("REANCHOR_ENV")}="$(or $(DOCS),all)"', target)
-        self.assertIn(f"cargo test --lib {GATE_TEST}", target)
+        self.assertIn(f"cargo test --workspace --lib {GATE_TEST}", target)
         releasing = (ROOT / "docs/operations/releasing.md").read_text()
         steps = releasing.split("## Steps", 1)[1].split("\n## ", 1)[0]
         self.assertIn("`make docs-reanchor`", steps)

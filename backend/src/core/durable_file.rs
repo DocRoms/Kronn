@@ -5,7 +5,7 @@ use std::path::Path;
 /// Syncs `path`'s content to disk. Windows' `FlushFileBuffers` refuses a
 /// read-only handle (os error 5), so the file is opened for writing, without
 /// truncating it.
-pub(crate) fn sync_file(path: &Path) -> std::io::Result<()> {
+pub fn sync_file(path: &Path) -> std::io::Result<()> {
     std::fs::OpenOptions::new()
         .write(true)
         .open(path)?

@@ -314,3 +314,35 @@ mod cost_aggregate_tests {
         assert_eq!(total.unknown_cost_tokens, 3000);
     }
 }
+
+/// Prompt-cache tokens a runtime reported beside its input and output.
+/// `None` means not reported, never zero.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PromptCacheUsage {
+    pub cached_prompt_tokens: Option<u64>,
+    pub cache_write_prompt_tokens: Option<u64>,
+}
+
+/// One run's reported usage, parts kept apart. `input_tokens` is as the agent
+/// reports it, so whether it already contains the cached share depends on the
+/// agent (see `core::pricing::TokenCounters::from_agent_report`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportedUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub prompt_cache: PromptCacheUsage,
+}
+
+impl PromptCacheUsage {
+    /// Read Anthropic's `cache_read_input_tokens` / `cache_creation_input_tokens`.
+    pub fn from_anthropic_usage(usage: &serde_json::Value) -> Self {
+        Self {
+            cached_prompt_tokens: usage
+                .get("cache_read_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+            cache_write_prompt_tokens: usage
+                .get("cache_creation_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+        }
+    }
+}

@@ -59,7 +59,7 @@ pub struct ClaudeAcpAdapter {
 
 impl ClaudeAcpAdapter {
     /// Runs `program` instead of the vendor CLI.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_program(mut self, program: &std::path::Path) -> Self {
         self.program = program.to_string_lossy().into_owned();
         self
@@ -94,8 +94,8 @@ impl ClaudeAcpAdapter {
     }
 
     /// Test-only: drive a fixture script instead of the real `claude` binary.
-    #[cfg(test)]
-    pub(crate) fn new_with_program(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_with_program(
         program: impl Into<String>,
         model: Option<String>,
         full_access: bool,

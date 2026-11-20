@@ -11,9 +11,50 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use crate::agents::runner::{
-    RoomAgentBridgeContext, TaskWorkerBridgeContext, WorkflowStepBridgeContext,
-};
+/// Server-derived identity for one CLI-backed discussion agent executing a
+/// durable task. The child process forwards this opaque context through the
+/// Kronn MCP bridge; the backend still revalidates every field against the
+/// execution and dispatch rows before accepting a delivery.
+/// Identity of a room's own native agent for the current turn, derived by the
+/// dispatcher from the running dispatch job. Like the worker context it only
+/// travels in the process environment, never in the prompt or tool arguments.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoomAgentBridgeContext {
+    pub discussion_id: String,
+    pub agent_type: String,
+    pub dispatch_job_id: String,
+    pub source_message_id: String,
+}
+
+/// Capability of a workflow Agent step whose `room_id` names a room (KT-793).
+/// Like the room agent's identity it only travels in the process environment;
+/// the backend accepts it while that very step runs, and only for that room.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowStepBridgeContext {
+    pub discussion_id: String,
+    pub run_id: String,
+    pub step_key: String,
+    pub capability: String,
+}
+
+impl std::fmt::Debug for WorkflowStepBridgeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowStepBridgeContext")
+            .field("discussion_id", &self.discussion_id)
+            .field("run_id", &self.run_id)
+            .field("step_key", &self.step_key)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskWorkerBridgeContext {
+    pub execution_id: String,
+    pub discussion_id: String,
+    pub agent_type: String,
+    pub dispatch_job_id: String,
+    pub source_message_id: String,
+}
 
 /// Variable the bridge reads its per-launch token from (layer B).
 pub const BRIDGE_TOKEN_ENV: &str = "KRONN_BRIDGE_TOKEN";
@@ -467,15 +508,15 @@ pub fn inherited_from(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static PARENT_OVERRIDE: std::cell::RefCell<Option<Vec<(OsString, OsString)>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Runs `body` as if the backend's environment were `parent` (this thread only).
-#[cfg(test)]
-pub(crate) fn with_parent_env<T>(parent: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_parent_env<T>(parent: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
     let parent = parent
         .iter()
         .map(|(name, value)| (OsString::from(name), OsString::from(value)))
@@ -492,7 +533,7 @@ pub(crate) fn with_parent_env<T>(parent: &[(&str, &str)], body: impl FnOnce() ->
 }
 
 fn parent_env() -> Vec<(OsString, OsString)> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(parent) = PARENT_OVERRIDE.with(|cell| cell.borrow().clone()) {
         return parent;
     }
@@ -514,7 +555,7 @@ pub fn parent_var_string(name: &str) -> Option<String> {
 
 /// Environment names compare like the platform does: case-insensitively on
 /// Windows.
-fn same_name(left: &OsStr, right: &OsStr) -> bool {
+pub fn same_name(left: &OsStr, right: &OsStr) -> bool {
     if cfg!(windows) {
         left.eq_ignore_ascii_case(right)
     } else {
@@ -524,10 +565,10 @@ fn same_name(left: &OsStr, right: &OsStr) -> bool {
 
 /// The desktop's withheld variables and whether it withholds at all.
 #[derive(Default, Clone)]
-struct Withheld {
+pub struct Withheld {
     /// Set once the desktop withholds its environment.
-    active: bool,
-    vars: Vec<(OsString, OsString)>,
+    pub active: bool,
+    pub vars: Vec<(OsString, OsString)>,
 }
 
 /// Variables moved out of the process environment, kept for the builder
@@ -537,25 +578,21 @@ static WITHHELD: std::sync::Mutex<Withheld> = std::sync::Mutex::new(Withheld {
     vars: Vec::new(),
 });
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static WITHHELD_OVERRIDE: std::cell::RefCell<Option<Withheld>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Runs `body` as if the desktop had withheld `vars` (this thread only).
-#[cfg(test)]
-pub(crate) fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
     with_withheld_state(true, vars, body)
 }
 
 /// [`with_withheld_env`] with the withholding switched on or not yet.
-#[cfg(test)]
-pub(crate) fn with_withheld_state<T>(
-    active: bool,
-    vars: &[(&str, &str)],
-    body: impl FnOnce() -> T,
-) -> T {
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_withheld_state<T>(active: bool, vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
     let state = Withheld {
         active,
         vars: vars
@@ -576,23 +613,27 @@ pub(crate) fn with_withheld_state<T>(
 
 /// Run `f` on the withheld state (the test override on this thread, if any).
 fn with_state<T>(f: impl FnOnce(&mut Withheld) -> T) -> T {
-    #[cfg(test)]
-    {
-        let mut f = Some(f);
-        let overridden = WITHHELD_OVERRIDE.with(|cell| {
-            cell.borrow_mut()
-                .as_mut()
-                .map(|state| (f.take().unwrap())(state))
-        });
-        if let Some(result) = overridden {
-            return result;
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let mut f = Some(f);
+            let overridden = WITHHELD_OVERRIDE.with(|cell| {
+                cell.borrow_mut()
+                    .as_mut()
+                    .map(|state| (f.take().unwrap())(state))
+            });
+            if let Some(result) = overridden {
+                return result;
+            }
+            let f = f.take().unwrap();
+            let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
+            f(&mut state)
         }
-        let f = f.take().unwrap();
-        let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
-        f(&mut state)
-    }
-    #[cfg(not(test))]
-    {
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut state)
     }
@@ -603,7 +644,7 @@ fn withheld() -> Vec<(OsString, OsString)> {
 }
 
 /// The live environment plus the withheld variables it no longer holds.
-fn with_withheld(
+pub fn with_withheld(
     mut live: Vec<(OsString, OsString)>,
     withheld: &[(OsString, OsString)],
 ) -> Vec<(OsString, OsString)> {
@@ -652,7 +693,7 @@ pub fn vars_os() -> Vec<(OsString, OsString)> {
 
 /// What a write does to the live process environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LiveWrite {
+pub enum LiveWrite {
     /// Only the withheld set changes.
     None,
     Set,
@@ -660,7 +701,7 @@ enum LiveWrite {
 
 /// Once the desktop withholds, a name off the webview allow-list is never
 /// live: a write only updates the withheld set.
-fn live_write(state: &Withheld, name: &OsStr) -> LiveWrite {
+pub fn live_write(state: &Withheld, name: &OsStr) -> LiveWrite {
     if state.active && !webview_keeps(name) {
         LiveWrite::None
     } else {
@@ -767,7 +808,7 @@ const WEBVIEW_PREFIXES: &[&str] = &[
 ];
 
 /// Whether the desktop keeps `name` in its live environment.
-fn webview_keeps(name: &OsStr) -> bool {
+pub fn webview_keeps(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false; // not valid Unicode: withheld like a credential
     };
@@ -778,7 +819,7 @@ fn webview_keeps(name: &OsStr) -> bool {
 
 /// Remove from this process's environment every variable `keep` refuses.
 #[allow(clippy::disallowed_methods)] // reads the live environment it empties
-fn take_process_environment_where(keep: impl Fn(&OsStr) -> bool) -> Vec<(OsString, OsString)> {
+pub fn take_process_environment_where(keep: impl Fn(&OsStr) -> bool) -> Vec<(OsString, OsString)> {
     let held: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(name, _)| !keep(name))
         .collect();
@@ -805,7 +846,7 @@ pub fn withhold_process_environment() {
 /// Withhold every live variable `keep` refuses, merged into the withheld set
 /// (a later call never drops what an earlier one, or [`set_var`], put there),
 /// and route later writes of such names to the set.
-fn withhold_where(keep: impl Fn(&OsStr) -> bool) {
+pub fn withhold_where(keep: impl Fn(&OsStr) -> bool) {
     let held = take_process_environment_where(keep);
     with_state(|state| {
         state.active = true;
@@ -911,6 +952,7 @@ impl AgentLaunch<'_> {
 /// Apply one agent launch's own values: temporary directory beside the
 /// project, room and workflow contexts, backend URL, bridge token and key.
 /// `backend_url` is resolved by the caller (WSL-aware on the direct route).
+/// The caller also keeps `.kronn/tmp/` out of `git status` (`mcp_scanner::ensure_local_exclude`).
 pub fn apply_agent_launch(
     command: &mut std::process::Command,
     work_dir: &Path,
@@ -921,9 +963,6 @@ pub fn apply_agent_launch(
     // into the work tree never crosses devices (EXDEV under Docker VirtioFS).
     let agent_tmpdir = work_dir.join(".kronn/tmp");
     let _ = std::fs::create_dir_all(&agent_tmpdir);
-    if let Some(project_path) = work_dir.to_str() {
-        crate::core::mcp_scanner::ensure_local_exclude(project_path, ".kronn/tmp/");
-    }
     command.env("TMPDIR", &agent_tmpdir);
     command.env("TEMP", &agent_tmpdir);
     command.env("TMP", &agent_tmpdir);
@@ -1030,8 +1069,9 @@ pub fn isolate(command: &mut std::process::Command, route: ChildRoute) {
 }
 
 /// Test helpers shared by the spawn sites' environment tests.
-#[cfg(all(test, feature = "full-tests"))]
-pub(crate) mod probe {
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+#[allow(clippy::disallowed_methods)] // test fixtures: a planted variable, a probe script
+pub mod probe {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -1155,7 +1195,3 @@ pub(crate) mod probe {
         }
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "child_env_test.rs"]
-mod child_env_test;

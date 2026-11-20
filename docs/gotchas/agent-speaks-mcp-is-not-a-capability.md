@@ -8,14 +8,14 @@ conclusions that do not hold.
 The flag decides whether the prompt DESCRIBES the MCP surface in prose. HTTP
 agents get their tools DECLARED on the request's `tools` field instead —
 deliberately, because describing them in prose taught the model to hallucinate
-calls it did not have. [src: file: backend/src/agents/runner.rs:4363-4367#is_http_chat_agent]
+calls it did not have. [src: file: backend/src/agents/runner.rs:3535-3539#is_http_chat_agent]
 
 So an HTTP agent that the flag excludes still has a catalogue, `disc_read`
 included, and can read a discussion back on its own.
-[src: file: backend/src/api/agent_tools.rs:1537-1556#disc_read]
+[src: file: backend/src/api/agent_tools.rs:1538-1557#disc_read]
 
 Vibe likewise has MCP: Kronn synchronises its servers into `.vibe/config.toml`.
-[src: file: backend/src/core/mcp_scanner.rs:1918-2038#sync_vibe_project_config]
+[src: file: backend/src/core/mcp_scanner.rs:1792-1912#sync_vibe_project_config]
 
 ## Why it matters
 

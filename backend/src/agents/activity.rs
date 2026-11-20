@@ -290,6 +290,6 @@ impl RecentActivity {
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 #[path = "activity_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

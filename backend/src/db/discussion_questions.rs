@@ -411,7 +411,7 @@ fn parse_spec(body: &str) -> Result<QuestionSpec, String> {
 /// with the example's own `decision-key`, which no human could have meant and
 /// which nothing could close: the table has no path out of `pending` but a
 /// human answer. Technical context is evidence, never an agent's intent.
-pub(crate) fn strip_context_blocks(content: &str) -> String {
+pub fn strip_context_blocks(content: &str) -> String {
     const OPEN: &str = "<!-- kronn:context";
     const CLOSE: &str = "<!-- /kronn:context -->";
     let mut out = String::with_capacity(content.len());

@@ -277,7 +277,7 @@ pub fn upsert(
 ///
 /// Legacy inspection API. Production continuation requires both boundaries
 /// from [`get_completed_checkpoint`], not this unqualified input cursor alone.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn get_with_progress(
     conn: &Connection,
     discussion_id: &str,
@@ -301,7 +301,7 @@ fn get_with_progress(
 
 /// Reproduce the legacy input-only state for migration regression tests.
 /// Production must use the transactional completed-turn proof instead.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn record_progress(
     conn: &Connection,
     discussion_id: &str,

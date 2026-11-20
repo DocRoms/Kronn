@@ -5,7 +5,7 @@ use crate::AppState;
 use axum::{extract::State, Json};
 
 #[derive(Clone, Debug)]
-pub(crate) enum RepoSourceAuth {
+pub enum RepoSourceAuth {
     Token {
         token: String,
         api_url: Option<String>,
@@ -16,7 +16,7 @@ pub(crate) enum RepoSourceAuth {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct AuthenticatedRepoSource {
+pub struct AuthenticatedRepoSource {
     pub source: RepoSource,
     pub auth: RepoSourceAuth,
 }
@@ -212,7 +212,7 @@ pub async fn discover_repos(
 
 /// Find all repository authentication sources from plugin configs and env vars.
 /// GitLab can use either a saved PAT or the local `glab auth login` session.
-pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<AuthenticatedRepoSource> {
+pub async fn find_all_provider_sources(state: &AppState) -> Vec<AuthenticatedRepoSource> {
     let mut sources: Vec<AuthenticatedRepoSource> = vec![];
 
     // Read encryption secret
@@ -392,17 +392,7 @@ fn gitlab_host_from_process_env() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// Normalize a repo URL for comparison (strip .git suffix, lowercase, strip protocol prefix)
-pub(crate) fn normalize_repo_url(url: &str) -> String {
-    url.to_lowercase()
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .replace("https://github.com/", "github:")
-        .replace("https://gitlab.com/", "gitlab:")
-        .replace("git@github.com:", "github:")
-        .replace("git@gitlab.com:", "gitlab:")
-        .to_string()
-}
+pub use crate::core::github_connection::normalize_repo_url;
 
 /// Fetch all repos for the authenticated GitHub user, including organization repos.
 /// Bounded per request: discovery paginates in a loop inside a GET handler —
@@ -637,7 +627,7 @@ fn gitlab_cli_hostname(value: &str) -> Result<String, String> {
 
 /// The `glab api` process listing a user's projects: the git-host
 /// environment (KT-1006) without any token or host override.
-fn gitlab_cli_command(hostname: &str) -> tokio::process::Command {
+pub fn gitlab_cli_command(hostname: &str) -> tokio::process::Command {
     let mut command =
         crate::core::cmd::async_cmd("glab", crate::core::child_env::ChildRoute::GitHost);
     command
@@ -767,15 +757,6 @@ fn parse_gitlab_repo(r: &serde_json::Value) -> RemoteRepo {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_glab_listing_gets_no_backend_secret_and_no_token() {
-        use crate::core::child_env::probe;
-        let command = probe::with_secret_parent("/usr/bin", "/home/u", || {
-            gitlab_cli_command("gitlab.example.com")
-        });
-        probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
-    }
 
     #[test]
     fn normalize_repo_url_strips_https_github_prefix() {

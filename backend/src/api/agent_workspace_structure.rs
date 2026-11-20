@@ -7,7 +7,7 @@
 //! both only refuse a change that makes a readable file worse.
 
 /// Stable marker consumed by the bounded worker loop, like the Rust one.
-pub(crate) const STRUCTURE_REFUSAL_PREFIX: &str = "Structure validation refused";
+pub const STRUCTURE_REFUSAL_PREFIX: &str = "Structure validation refused";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Language {
@@ -33,7 +33,7 @@ fn language(path: &std::path::Path) -> Option<Language> {
 }
 
 /// Whether this file gets the non-Rust structural guard at all.
-pub(crate) fn is_guarded(path: &std::path::Path) -> bool {
+pub fn is_guarded(path: &std::path::Path) -> bool {
     language(path).is_some()
 }
 
@@ -233,7 +233,7 @@ fn twig_imbalance(text: &str) -> Option<(usize, String)> {
 
 /// Refuse a change that unbalances a file whose delimiters were balanced. A
 /// file the lexer cannot read as balanced to begin with is not judged.
-pub(crate) fn validate_delimiters(
+pub fn validate_delimiters(
     path: &std::path::Path,
     requested: &str,
     original: &str,
@@ -270,7 +270,7 @@ fn describe(indent: &str) -> String {
 /// A bounded replacement keeps the indentation of the lines it replaces at
 /// its edges: the first non-blank line, and the last one when the range spans
 /// several. Inner lines may move freely.
-pub(crate) fn validate_range_indentation(
+pub fn validate_range_indentation(
     path: &std::path::Path,
     requested: &str,
     start_line: usize,
