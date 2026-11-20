@@ -293,7 +293,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             description: "Cache, pub/sub, streams, JSON, search — official Redis server".into(),
             transport: McpTransport::Stdio {
                 command: "uvx".into(),
-                args: vec!["--from".into(), "redis-mcp-server@latest".into(), "redis-mcp-server".into()],
+                args: vec!["--from".into(), "redis-mcp-server@0.5.1".into(), "redis-mcp-server".into()],
             },
             env_keys: vec!["REDIS_HOST".into(), "REDIS_PWD".into()],
             tags: vec!["cache".into(), "database".into()],
@@ -348,7 +348,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             description: "Logs, metrics, alarms — official AWS Labs server".into(),
             transport: McpTransport::Stdio {
                 command: "uvx".into(),
-                args: vec!["awslabs.cloudwatch-mcp-server@latest".into()],
+                args: vec!["awslabs.cloudwatch-mcp-server@0.3.2".into()],
             },
             env_keys: vec!["AWS_ACCESS_KEY_ID".into(), "AWS_SECRET_ACCESS_KEY".into(), "AWS_REGION".into()],
             tags: vec!["cloud".into(), "monitoring".into(), "aws".into()],
@@ -366,7 +366,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             description: "Unified access to all AWS services via CLI commands (EC2, S3, IAM, Lambda, RDS...) — official AWS Labs server".into(),
             transport: McpTransport::Stdio {
                 command: "uvx".into(),
-                args: vec!["awslabs.aws-api-mcp-server@latest".into()],
+                args: vec!["awslabs.aws-api-mcp-server@1.6.1".into()],
             },
             env_keys: vec!["AWS_ACCESS_KEY_ID".into(), "AWS_SECRET_ACCESS_KEY".into(), "AWS_REGION".into()],
             tags: vec!["cloud".into(), "aws".into(), "infrastructure".into(), "devops".into()],
@@ -731,7 +731,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             description: "Debug, inspect DOM/CSS, network, performance traces — official Google server. Requires Chrome installed on the host machine.".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "chrome-devtools-mcp@latest".into()],
+                args: vec!["-y".into(), "chrome-devtools-mcp@1.13.0".into()],
             },
             env_keys: vec![],
             tags: vec!["browser".into(), "debug".into(), "devtools".into(), "testing".into()],
@@ -758,7 +758,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                 // install` provides, so anyone with it can now drive a browser.
                 args: vec![
                     "-y".into(),
-                    "@playwright/mcp@latest".into(),
+                    "@playwright/mcp@0.0.86".into(),
                     "--browser".into(),
                     "chromium".into(),
                 ],
@@ -766,7 +766,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             env_keys: vec![],
             tags: vec!["browser".into(), "testing".into(), "e2e".into()],
             token_url: None,
-            token_help: Some("Run 'npx playwright install chromium' first to download the bundled browser".into()),
+            token_help: Some("Run 'npx -y @playwright/mcp@0.0.86 install-browser chrome-for-testing' once to download the browser this version drives".into()),
             publisher: "Microsoft".into(),
             official: true,
             alt_packages: vec![],
@@ -779,7 +779,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             description: "Up-to-date docs for any library — official Upstash server".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "@upstash/context7-mcp@latest".into()],
+                args: vec!["-y".into(), "@upstash/context7-mcp@4.7.3".into()],
             },
             env_keys: vec![],
             tags: vec!["docs".into(), "libraries".into()],
@@ -836,7 +836,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             description: "Managed Postgres, auth, storage — official Supabase server".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "@supabase/mcp-server-supabase@latest".into()],
+                args: vec!["-y".into(), "@supabase/mcp-server-supabase@0.19.0".into()],
             },
             env_keys: vec!["SUPABASE_ACCESS_TOKEN".into()],
             tags: vec!["database".into(), "auth".into(), "cloud".into()],
@@ -1482,7 +1482,7 @@ Official docs: https://dev.mailjet.com/email/reference/
             description: "Storage, Cosmos DB, Azure CLI, Resource Manager — official Microsoft server".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "@azure/mcp@latest".into()],
+                args: vec!["-y".into(), "@azure/mcp@4.0.0-beta.9".into()],
             },
             env_keys: vec![],
             tags: vec!["cloud".into(), "azure".into(), "microsoft".into(), "devops".into()],
@@ -1648,7 +1648,7 @@ Official docs: https://dev.mailjet.com/email/reference/
             description: "Serverless Postgres — branching, schema management — official Neon server".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "@neondatabase/mcp-server-neon@latest".into()],
+                args: vec!["-y".into(), "@neondatabase/mcp-server-neon@0.6.5".into()],
             },
             env_keys: vec!["NEON_API_KEY".into()],
             tags: vec!["database".into(), "postgres".into(), "serverless".into()],
@@ -1835,7 +1835,7 @@ the final report so the user can judge for themselves.
             description: "AI-optimized web search and content extraction — factual results for RAG and research".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "tavily-mcp@latest".into()],
+                args: vec!["-y".into(), "tavily-mcp@0.2.22".into()],
             },
             env_keys: vec!["TAVILY_API_KEY".into()],
             tags: vec!["search".into(), "web".into(), "rag".into(), "research".into()],
@@ -2692,6 +2692,32 @@ mod tests {
         }
         assert!(api_readiness_probe(CUSTOM_API_SERVER_ID).is_none());
         assert!(api_readiness_probe("api-google-search").is_none());
+    }
+
+    // KT-1975 — a server launched at `@latest` changes under the user: a
+    // Playwright release asked for a browser build nobody had, and the tool
+    // stopped. A version is a deliberate bump, checked against the publisher.
+    #[test]
+    fn no_catalogue_server_is_launched_at_a_floating_version() {
+        // Not published under these names: left as they are until KT-1975
+        // replaces them (a pin would name a version that does not exist).
+        let unpublished = [
+            "@anthropic-ai/gcloud-mcp@latest",
+            "@anthropic-ai/bigquery-mcp@latest",
+        ];
+        let floating: Vec<String> = builtin_registry()
+            .into_iter()
+            .filter_map(|definition| match definition.transport {
+                McpTransport::Stdio { args, .. } => Some((definition.id, args)),
+                _ => None,
+            })
+            .flat_map(|(id, args)| {
+                args.into_iter()
+                    .filter(|arg| arg.ends_with("@latest") && !unpublished.contains(&arg.as_str()))
+                    .map(move |arg| format!("{id}: {arg}"))
+            })
+            .collect();
+        assert!(floating.is_empty(), "{floating:?}");
     }
 
     fn registry_server(server_id: &str) -> McpServer {
