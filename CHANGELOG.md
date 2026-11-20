@@ -11,6 +11,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-11-19
+
 ### Added
 
 - **KT-1697 — A Decide step chooses its decision model from the workflow overview.** The step card and its pipeline chip show `Décision · <model> ▾` with a Local/HTTP badge, like the Agent step's model picker: one click lists the decision models (« Par défaut » first), the choice is saved at once and rolled back if the save fails; the editor has the same picker. A step with no model of its own still runs the configured Decision model. An OpenRouter connection's `decision_model` (e.g. `perplexity/pplx-decider-flash-v1.2`) is listed over HTTP and called on OpenRouter's System One API (`POST /api/v1/systemone`) with the connection's credential; a refused token fails the step with the usual `auth_refused` signal. Other providers have no documented decision contract and are not listed. Readiness flags a step whose model Ollama no longer lists or whose connection can no longer serve it, and the model is never swapped (see `docs/operations/ollama-local-models.md`).
@@ -52,31 +54,6 @@ Release notes for 0.9.3 and earlier are available in the
   confirmation, never by a sweep**; the worktree and branch of a stalled execution
   stay and the next resume rebuilds. No migration. See
   [disk-usage.md](docs/operations/disk-usage.md).
-
-### Security
-
-- P2P contacts authenticate with a per-contact secret, not the public invite code
-  (KT-1650). The invite code `kronn:pseudo@host:port` is only an address, so anyone
-  who knew a contact's pseudo and address could pass the WebSocket presence,
-  `claim-by-token`, `fetch-file` and the file-announcement host resolution as that
-  contact. Each paired contact now holds two random 256-bit secrets, one per
-  direction: the verifying side keeps only a SHA-256 hash and compares it in
-  constant time. **Breaking, by decision: existing contacts must re-pair, and a
-  peer that does not present its secret is refused** (the refusal says how to
-  re-pair). Settings > Identity now generates a pairing code
-  (`kronn:pseudo@host:port#secret`, single use, 7 days); paste it in Add contact
-  on the other side. Migration 297 adds the secret columns and the offer table and
-  moves existing accepted/pending contacts to `needs_repair`, keeping their rows
-  and shared discussions. An export never carries the secrets, so an import
-  brings contacts back as `needs_repair`. A pairing code pairs a new contact only:
-  to re-pair an existing contact use Re-pair on its entry, which issues a code bound
-  to that contact (migration 298); a code can never rebind another contact's row. A contact has at most one
-  live Re-pair code, and the 20-code cap only ever evicts unbound codes.
-  Pairing writes are transactional and conditional: a spent code cannot pair twice
-  and a contact paired, refused or deleted while a pairing is in flight is not
-  overwritten.
-
-### Added
 
 - Agents: a fallback per mode (KT-1518, redesigned by KT-1693). Each agent card
   in Settings > Agents has one row per mode the agent has (eco, standard,
@@ -298,6 +275,19 @@ Release notes for 0.9.3 and earlier are available in the
   stored in the scan config (`hidden_repos`) and `POST /api/projects/scan/hide`
   adds to it.
 
+- **KT-1408 — A task worker is warned before the execution limit, and its work is checkpointed when the limit stops it.** The results of the Kronn tools a worker already calls carry a warning about 30 minutes, then about 10 minutes, before the execution limit. When the limit stops a worker whose worktree holds uncommitted work, Kronn commits it as a `WIP checkpoint (Kronn)` commit (trailer `Kronn-Checkpoint: execution-time-limit`); when no commit can be made, the patch (64 KiB at most) is kept in the execution evidence. The resumed worker reads a note about the stop and builds on that work; a checkpoint is not a delivery.
+- **KT-1689 — A task execution waiting for a worker slot is reported, not interrupted.** An execution queued for a worker slot (task-worker cap, agent or host caps) stays `Working` with its dispatch queued, and the activity clock is suspended while the dispatch is `Pending`. After the queue deadline (6 hours by default, set host-wide with `KRONN_TASK_QUEUE_TIMEOUT_SECS`, counted from the creation of the queued dispatch) the principal room receives one event per dispatch with the reason (for example `task_worker_limit:2/2`), the queue position and the options: keep waiting, free a slot, take over. A resumed execution gets a new deadline.
+- **KT-1692 — The tokens of API plugin connections are checked ahead of the call.** Connections of Settings > APIs that have a probe (a declared readiness endpoint, or for a custom API a selected or identity-named GET endpoint without path parameters) are probed about 20 seconds after start and every 24 hours, so an expired or revoked token shows before a workflow or Quick API fails on it. A **Check** button on the connection card and **Check all tokens** in the plugin list header run it on demand. The card shows when the token was checked, the outcome (`ok`, `refused`, `inconclusive`), a redacted detail and the date of the last good probe or call. The probe is one authenticated GET to the connection's own provider; the token goes nowhere else.
+- **KT-1695 — "Activate all" for Quick Execs awaiting activation.** The Quick Exec panel title row has an "Activate all (N)" button with a confirmation that opens under the title; it covers every Quick Exec waiting for activation and counts each one once.
+- **KT-1696, KT-1707 — Step shadows and the merged result are visible and editable in the workflow overview.** Under each Agent step the overview shows one row per shadow with an agent and model picker, a transport badge, Active and Merge toggles, a remove button and "+ Shadow", and a summary of the merged result with a `?` popover; the branch map shows the shadow and merge lines, and the header button and the runs list carry the matching tags. A highlighted Principal row opens the block, and Principal and shadow rows share one `role · agent · model [badge]` layout. Merge is always saved as an explicit shadows list. Changes made in the overview are saved at once and rolled back if the save fails; the editor shows the same rows under the step agent.
+- **KT-1706, KT-1757, KT-1807 — A "Models and fallbacks" block on every agent and connection card.** CLI, Ollama (Local), ComfyUI and HTTP connection cards carry one block with a row per mode. Each mode's chain is one numbered column: the model, "If unavailable:", then numbered fallbacks with up and down buttons and a remove button, then "+ add", with the same layout on CLI, Local and HTTP cards. An inherited fallback says "via <card>" and a click opens that card; no control is shown that cannot act, and capability warnings are translated from a stable code. Fallbacks of media and text/decision rows of named HTTP connections are stored in the config (`POST /config/connection-fallback`) and honoured by the media runner. The reasoning level in Settings is a select listing only what the runtime supports.
+- **KT-1718 — Kronn sets a Claude task worker's shell time limits.** Settings > Workers has two new settings: the per-command maximum (`workers.bash_max_timeout_min`, 60 minutes by default, 1 to 240) and the default for a command that names no limit (`workers.bash_default_timeout_min`, 15 minutes by default). They are passed to every Claude task worker as `BASH_MAX_TIMEOUT_MS` and `BASH_DEFAULT_TIMEOUT_MS`, so a worker no longer depends on the shell Kronn was started from, and a saved change reaches the next spawn without a restart. The settings are shown next to the generation limit, with a warning when the maximum reaches it. The worker brief now says to run a long build in the foreground with an explicit timeout and never to end the turn while a command runs in the background.
+- **KT-1736, KT-1742 — Lane warm-up: a failure is announced, and the seed and the lane agree.** A failed lane warm-up is announced in the worker's room and the event keeps the first error lines of the build instead of the last 300 bytes. The warm-up builds the lib test binary only. On macOS the lane keeps clang's temporary files in the lane (`-save-temps=obj`) so that `aws-lc-sys` builds under the sandbox, and the seed is built with the same C flags. Lane warm-up is configurable globally (Settings > Workers) and per project, including the Rust roots. The first-build bound is now 60 minutes by default (was 30), with the precedence project, global, `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, default. A declared first-build command runs only under the lane OS sandbox, and warm marks and cached failures are kept per root.
+- **KT-1747, KT-1751 — Task worker lanes follow the project's own toolchains.** Beyond Cargo, Kronn detects a Node package (npm, yarn or pnpm), Composer, CocoaPods, Xcode and a Makefile, up to four levels deep. Each root's dependency directory (`node_modules/`, `vendor/`, `Pods/`) is layered into the lane without linking back to the main checkout's own code (a Composer autoloader and a Node workspace package resolve to the lane's copy), and a dependency directory the main checkout has not installed is a launch warning naming the install command. The worker brief gets a Project conventions section that points at the project's `AGENTS.md` or `CLAUDE.md` and states its commit format. A project can list the executables its validations may run (project card, Lane warm-up block, field "Validation executables"): a program name such as `composer`, or a repository path such as `vendor/bin/phpunit` or `./gradlew`; only that list widens the allowlist, for that project, and the global Settings > Workers entry is never read for it.
+- **KT-1750 — Commit identity and sign-off of Kronn's own commits are settings.** Settings > Workers has a "Commits Kronn" block (name, e-mail, sign-off Auto, Always or Never) and each project card can override it. It applies to a worker's `task_exec_commit`, the Git panel, the merge of the target branch into a task branch, the re-anchoring of doc citations and the WIP checkpoint. Name and e-mail are both set or both empty; the effective identity ranks the repository's own answers (including a directory-specific `includeIf` identity) before the global setting, then the machine's git config. Nothing is written into the repository's git config.
+- **KT-1721 — A worker's commit re-anchors the doc citations its code moved.** Each `task_exec_commit` (and `git_commit` for an HTTP agent) re-anchors, in the same call, every citation of every doc whose cited file the branch changed since the base, commits the re-pointed docs on their own, and lists them under `doc_citations.reanchored`. A citation it cannot place, or whose symbol was removed, stays as it is and is listed under `doc_citations.unresolved`; the worker points those by hand before delivering.
+- **KT-1843 — Exports list what they name and do not carry, and carry skills, directives and profiles.** A workflow or Artifact export now carries `not_carried`: a custom skill that a step, shadow, ref or bundled Quick Prompt binds and that no longer exists, a custom directive or profile, and the id of a saved Page, workflow or Quick object pasted in a step text and absent from the file (known whole ids only). The Workflows and Artifacts pages show that list in a dialog and download the file only once the reader confirms. A custom skill named by its whole id anywhere in a step (the list an Exec script loads, a prompt, a payload key) travels with the file, and a bundled skill brings the custom skills its text cites; an id prefix a script tests carries nothing. An export also carries the directives and profiles its resources use, and an import binds the identical local directive or profile instead of creating a copy. A Quick Prompt refuses a directive id that is no directive at save (ids it already holds stay accepted). `workflow_update` and `workflow_create_draft` on the MCP bridge now declare and forward `refs` like the HTTP-agent tools, and the import preview keeps the bullets of its lists inside the dialog.
+
 ### Changed
 
 - Settings > Agents: one « Can act in Kronn » switch per model, inside its card
@@ -392,6 +382,27 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Security
 
+- P2P contacts authenticate with a per-contact secret, not the public invite code
+  (KT-1650). The invite code `kronn:pseudo@host:port` is only an address, so anyone
+  who knew a contact's pseudo and address could pass the WebSocket presence,
+  `claim-by-token`, `fetch-file` and the file-announcement host resolution as that
+  contact. Each paired contact now holds two random 256-bit secrets, one per
+  direction: the verifying side keeps only a SHA-256 hash and compares it in
+  constant time. **Breaking, by decision: existing contacts must re-pair, and a
+  peer that does not present its secret is refused** (the refusal says how to
+  re-pair). Settings > Identity now generates a pairing code
+  (`kronn:pseudo@host:port#secret`, single use, 7 days); paste it in Add contact
+  on the other side. Migration 297 adds the secret columns and the offer table and
+  moves existing accepted/pending contacts to `needs_repair`, keeping their rows
+  and shared discussions. An export never carries the secrets, so an import
+  brings contacts back as `needs_repair`. A pairing code pairs a new contact only:
+  to re-pair an existing contact use Re-pair on its entry, which issues a code bound
+  to that contact (migration 298); a code can never rebind another contact's row. A contact has at most one
+  live Re-pair code, and the 20-code cap only ever evicts unbound codes.
+  Pairing writes are transactional and conditional: a spent code cannot pair twice
+  and a contact paired, refused or deleted while a pairing is in flight is not
+  overwritten.
+
 - An agent can no longer read another agent's login from the owner's home
   (KT-1656). A task worker that probed Gemini CLI printed `~/.gemini/settings.json`
   with its tokens into its transcript, which is stored and sent to the model
@@ -468,36 +479,21 @@ Release notes for 0.9.3 and earlier are available in the
   answers, names, links), nor when it last published. The export does not
   load those values either. A file exported before keeps importing with its
   values, and importing it again reuses the pages it already created.
-  Project repository resources are unchanged (#273).
+  Project repository resources are unchanged (#273, #274).
 
-### Fixed
+- **KT-1745 — Git on a worker's worktree is pinned to the registered repository and runs nothing the worker wrote.** Every git command Kronn runs on a worker's worktree uses `--git-dir` and `--work-tree` of the repository git registered for that worktree, never the worktree's own `.git` pointer; the pointer is verified before each command and a tampered one fails with `WorktreeTampered`. Git runs with hooks, `fsmonitor` and commit signing off and no external diff or textconv. Submodules never run a worker program, a nested `.git` configuration is vetted by asking git to list its keys, and a registered nested worktree is its own pinned lane. A deny-by-default test fails when a plain git spawn appears outside the lane builder. On Windows, git commands on a worker worktree no longer fail on the `\\?\` path prefix. The test harness marks its own binaries so the guards that stop a test writing into the real data directory (config with its encryption secret, profiles, skills) still fire when Cargo builds test binaries under `build/<pkg>/<hash>/out/`.
+- **KT-1753 — The git guard also refuses whole-tree restore, clean and forced branch in the main checkout; environment failures are classified for any project.** In a repository's main checkout a worker's `git restore` of the whole tree (`.`, `./`, `:/`, `:/*`, `:(top)` and the other spellings, including exclude-only pathspecs), `git clean` unless it is a dry run, and a forced `git branch` (`-f`, `--force`, `-D`, forced rename or copy) are refused unless the human confirmed. The brief's capability section names only the project's own toolchains and the lane's ports, and a Codex brief carries no merge section. The environment-failure classifier recognises exit 127, a tool missing behind `make`, sandbox EPERM, offline DNS and a compose service down, and a real red test stays the worker's.
+- **KT-1796 — The possible-secrets audit of a workflow step judges whole shared stretches and reads documents in any encoding.** What a changed document shares with a sensitive file blocks when the longest shared stretch (32 characters in a row, across one place or several) reads as a value (a digit with a letter, or letters of changing case), not a rule, a variable name or a plain path; JSON `\uXXXX` escapes are undone. No document is set aside as binary: a legacy-encoding, UTF-16 or terminal-capture document is read, and one full of control bytes is still searched for known secrets. A document that cannot be read whole fails the step after the others are recorded, and records adopted from a sub-workflow's child runs carry the full child run id and survive a deleted child run.
 
-- A task worker that bumps a dependency is no longer delivered uncompiled: before
-  the lane's first build, Kronn fetches the crates (and npm packages) its lock
-  files reference and the host cache lacks, outside the worker's sandbox, from
-  crates.io / the npm registry only. A lock naming a git dependency, another
-  registry or a tarball URL is refused whole and fetches nothing; the worker
-  gets no network of its own. Each fetch is journalled on the execution
-  (`dependency_fetch`). The lock files are parsed (TOML, YAML) rather than
-  scanned, and the fetch runs in a private scratch project under Kronn's data
-  directory with a cleared environment, so nothing the worker wrote (a
-  `.cargo/config.toml`, a `[patch]`, an `.npmrc`, a workspace registry) and no
-  host registry setting or token reaches it; leftovers are swept at startup
-  (KT-1649).
-- Windows: Kronn could not start after an upgrade with a pending migration ("Access denied (os error 5)"), and scheduled backups failed. The backup copy was flushed through a read-only handle, which Windows refuses; it is now opened for writing first, and the Windows CI job runs the test (KT-1625, #509).
+### Internal
 
-- An interrupted task execution no longer stays stuck on "recovery decision
-  already consumed": it can always resume or deliver, and a resume never
-  consumes the decision of a newer interruption (KT-1537, #492).
-- Importing an Artifact or a workflow whose step pins a version of a custom
-  skill the file carries (`custom-x@1`) no longer fails with "this version
-  does not exist" on a Kronn that never had the skill: the pin is checked
-  once the import has created it (#273).
-- A custom skill a JsonData step lists by id (say, per-repository skills
-  that an Exec script loads through the API) is now exported with the
-  workflow or Artifact, and the imported payload names the created copy.
-  Before, the file left it out and the script failed on the other Kronn
-  with "skills absent" (#273).
+- KT-1729: SettingsPage and DiscussionsPage test mocks gain the KT-1693 fallback calls (`getAgentFallback`, `getModelTiers`, `modelCatalogApi`).
+- KT-1733: non-component exports moved out of component files (react-refresh lint).
+- KT-1738: the SettingsPage run-retention test shares one pending `getServerConfig` promise.
+- KT-1744: the package is no longer its own dev-dependency, so `cargo test --lib` compiles the kronn lib once; the lib-test build without default features works again; the real-agent guard is armed by a call.
+- KT-1755: a nested sub-workflow run no longer pays the Agent arm's and the sub-workflow executor's whole stack frame (the Agent arm is boxed); a guard test runs the root and three nested sub-workflows on the production worker stack.
+- KT-1756: the cancelled-run worktree test waits on a marker instead of a bounded poll and a sleep.
+- KT-1761: `generated.ts` is assembled deterministically from a clean-dir typegen, with a `--check` gate.
 
 ## [0.15.2] - 2026-11-08
 

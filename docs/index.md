@@ -7,7 +7,23 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.15.2
+## Current release: 0.15.3
+
+- Workflows decide and compare: a Decide step picks its decision model, a step
+  runs shadows whose results can be merged, and each agent card carries one
+  "Models and fallbacks" chain per mode. See [shadow runs](guides/shadow-runs.md)
+  and the [agent fallback chain](operations/agent-fallback-chain.md).
+- Task workers follow the project's own toolchains, keep their work when the
+  execution limit stops them, and an integration never targets the owner's
+  checkout. See [task orchestration](guides/task-orchestration.md).
+- Git on a worker's worktree runs nothing the worker wrote, a possible secret in
+  a document is reported, and an export lists what it names and does not carry.
+  See the [workflow document audit](operations/workflow-docs-audit.md).
+- The backend builds as five layered crates, with size and memory gates in CI.
+  See [backend crates](architecture/backend-crates.md) and the
+  [0.15.3 release notes](../CHANGELOG.md).
+
+## Earlier releases
 
 - Trust levels (Standard, Trusted, Full access) approve what you trust your
   agents to do at the scope you choose; what a level grants runs under an OS
@@ -23,12 +39,9 @@ This folder is the project's living knowledge base, shared by humans and AI agen
   `./kronn start` pulls the published multi-architecture images instead of
   compiling. See [discussion project scope](design/discussion-project-scope.md),
   [install](install.md#published-images-and-source-builds) and the
-  [0.15.2 release notes](../CHANGELOG.md).
+  [0.15.2 release notes](../CHANGELOG.md#0152---2026-11-08).
 - New guides: [the Kronn way](guides/the-kronn-way.md) and
   [auditing a repository](guides/ai-audit.md).
-
-## Earlier releases
-
 - A Live Page action can run without its card once a human approves it, and
   Kronn ships « Ma Todo », a task board that runs without an agent. See
   [Live Pages](architecture/live-pages.md).

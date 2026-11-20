@@ -2499,7 +2499,7 @@ dependencies = [
 
 [[package]]
 name = "kronn"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "kronn-desktop"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "kronn-l0"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "kronn-l1"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "kronn-l2"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "kronn-l3"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
