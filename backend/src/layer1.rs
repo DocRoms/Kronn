@@ -94,6 +94,7 @@ pub mod core {
     pub mod task_worker_lane_warm;
     pub mod task_worker_sandbox;
     pub mod task_worker_seed_align;
+    pub mod task_worker_warm_skip;
     pub mod td_index;
     pub mod trust;
     pub mod trust_sandbox;

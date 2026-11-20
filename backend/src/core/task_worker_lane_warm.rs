@@ -38,6 +38,7 @@ use crate::core::task_worker_lane_settings;
 use crate::core::task_worker_root_marks::{self, RootMark, RootState};
 pub use crate::core::task_worker_seed_align::SeedAlignment;
 use crate::core::task_worker_seed_align::{self, AlignRequest, Assessment};
+use crate::core::task_worker_warm_skip::{self, WarmDecision, WarmSkip};
 use crate::models::WarmingStepKind;
 
 /// Overrides the `CARGO_BUILD_JOBS` a worker gets.
@@ -422,6 +423,12 @@ pub struct WarmStartRecord {
     /// aligned, how its build ended. `first_build` is their aggregate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crates: Vec<WarmedCrate>,
+    /// KT-1980 — set when the lane was not warmed because none of the
+    /// execution's validations can start a build ([`task_worker_warm_skip`]):
+    /// the rule's reason, the validations it read and the build binaries a
+    /// later gate is checked against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_by_validations: Option<WarmSkip>,
 }
 
 /// One Rust root (a workspace root or a standalone crate, found from the
@@ -491,6 +498,16 @@ impl WarmStartRecord {
             provision_ms: None,
             seed_ms: None,
             crates: Vec::new(),
+            skipped_by_validations: None,
+        }
+    }
+
+    /// KT-1980 — a lane the warm-skip rule left cold: no seed alignment, no
+    /// seed clone, no first build; the reason names the rule and the validations.
+    pub fn skipped_by_validations(skip: WarmSkip, build_jobs: u32) -> Self {
+        Self {
+            skipped_by_validations: Some(skip.clone()),
+            ..Self::not_applicable(&skip.reason, build_jobs)
         }
     }
 }
@@ -1086,6 +1103,7 @@ fn record_of(
         provision_ms: None,
         seed_ms,
         crates,
+        skipped_by_validations: None,
     }
 }
 
@@ -1819,8 +1837,14 @@ pub fn first_build_pending(work_dir: &Path) -> bool {
 /// Provision the lane of `work_dir`, then [`warm_lane`] it with the host's
 /// settings and gate. Never fails: a lane that cannot be prepared is recorded
 /// as not applicable, with the reason.
+///
+/// KT-1980 — `validations` are the commands of the execution's principal-owned
+/// gates. When the [`task_worker_warm_skip`] rule says none of them can start a
+/// build of a warm unit, the lane is provisioned but not warmed: no seed
+/// alignment, no seed clone, no first build, and the record says why.
 pub fn warm_worktree(
     work_dir: &Path,
+    validations: &[String],
     runner: &dyn ProbeRunner,
     cancel: &CancellationToken,
     on_wait: impl FnOnce(usize),
@@ -1836,6 +1860,14 @@ pub fn warm_worktree(
             let settings = WarmStartSettings::from_host_with_timeout(
                 effective.configured_first_build_timeout(),
             );
+            if let WarmDecision::Skip(skip) =
+                task_worker_warm_skip::decide(validations, effective.first_build_command.as_deref())
+            {
+                return WarmStartRecord {
+                    provision_ms: Some(provision_ms),
+                    ..WarmStartRecord::skipped_by_validations(skip, settings.build_jobs)
+                };
+            }
             let host = WarmHost {
                 seed_alignment: effective.seed_alignment,
                 compiler_env: effective.compiler_env,

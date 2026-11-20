@@ -8,9 +8,9 @@ the durable source binding and live membership stay in the principal room. The
 child remains the task/evidence room, and acceptance returns the work instructions
 directly to the CLI. A bridge reload therefore resumes the principal room instead
 of the child.
-[src: file: backend/src/api/orchestration.rs:7876-7896#accept_worker_offer_and_attach]
-[src: file: backend/src/api/orchestration.rs:8023-8027#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:19018-19019#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:7884-7904#accept_worker_offer_and_attach]
+[src: file: backend/src/api/orchestration.rs:8029-8033#worker_cli_session_id]
+[src: file: backend/src/api/orchestration.rs:19117-19118#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6445-6480#call_task_exec_accept_worker_offer]
 
 The terminal return path remains compatibility code for offers accepted by older
@@ -95,7 +95,7 @@ do not require a return because they never transfer the session.
 [src: file: backend/src/db/worker_offers.rs:523-533#pin]
 [src: file: backend/src/db/cli_worker_bindings.rs:33-73#pin]
 [src: file: backend/src/db/orchestration.rs:6719-6726#return_cli_worker_to_origin]
-[src: file: backend/src/db/orchestration.rs:9047-9071#restore_reassigned_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:9071-9095#restore_reassigned_cli_worker_to_origin]
 
 The return refuses a source binding or active membership moved to a third room,
 and rolls back the associated state transition. An explicitly unlinked known
