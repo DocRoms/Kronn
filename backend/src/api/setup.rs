@@ -289,6 +289,11 @@ pub async fn save_api_key(
             *live = config;
             // A new or changed key may lift a provider quota (KT-1657).
             crate::workflows::quota_wait::request_recheck();
+            // KT-1518 — and no agent stays on cooldown for the old account.
+            let _ = state
+                .db
+                .with_conn(crate::core::agent_fallback::clear_all_cooldowns)
+                .await;
             Json(ApiResponse::ok(ApiKeyDisplay {
                 id: key.id,
                 name: key.name,
@@ -367,6 +372,10 @@ pub async fn activate_api_key(
                 *live = config;
                 // Another account may not be out of quota (KT-1657).
                 crate::workflows::quota_wait::request_recheck();
+                let _ = state
+                    .db
+                    .with_conn(crate::core::agent_fallback::clear_all_cooldowns)
+                    .await;
                 Json(ApiResponse::ok(()))
             }
             Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
@@ -757,13 +766,28 @@ pub async fn get_workers_config(State(state): State<AppState>) -> Json<ApiRespon
     Json(ApiResponse::ok(state.config.read().await.workers.clone()))
 }
 
+/// GET /api/config/workers/first-build-env-secs — KT-1742: the host's
+/// `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (positive seconds), or null. It only
+/// fills an unset first-build bound; Settings > Workers shows it under the field.
+pub async fn get_first_build_env_secs() -> Json<ApiResponse<Option<u64>>> {
+    Json(ApiResponse::ok(
+        crate::core::task_worker_lane_warm::WarmStartSettings::first_build_timeout_env_secs(),
+    ))
+}
+
 /// POST /api/config/workers — the default review-round limit every launch
 /// path starts from: an integer ≥ 1, or unlimited. Anything else is a 400 and
 /// leaves the saved value alone.
 pub async fn save_workers_config(
     State(state): State<AppState>,
-    Json(value): Json<WorkersConfig>,
+    Json(mut value): Json<WorkersConfig>,
 ) -> Response {
+    // KT-1750 — validated below; stored trimmed, an emptied field as unset.
+    if let Ok(commit) = value.commit.clone().normalized() {
+        value.commit = commit;
+    }
+    // KT-1742 — a blank first-build command or compiler entry is none.
+    value.lane_warm = value.lane_warm.normalized();
     if let Err(reason) = value.validate() {
         return (
             StatusCode::BAD_REQUEST,
@@ -887,7 +911,9 @@ fn normalize_mention_color(color: Option<&str>) -> Result<Option<String>, &'stat
 /// POST /api/config/agent-tools
 /// Set (or clear) the operator switch for the Kronn tool executor on one HTTP
 /// agent (KT-1600). CLI agents bring their own tools and have no such switch;
-/// a named `Custom` connection carries its own setting on the connection.
+/// a named `Custom` connection carries its own setting on the connection, and
+/// so do LiteLLM and NVIDIA since KT-1687: their agent slot follows the switch
+/// of the provider's default connection (`sync_runtime_config`).
 pub async fn set_agent_tools(
     State(state): State<AppState>,
     Json(req): Json<SetAgentToolsRequest>,
@@ -895,9 +921,7 @@ pub async fn set_agent_tools(
     let mut config = state.config.write().await;
     let agent = match req.agent {
         AgentType::Ollama => &mut config.agents.ollama,
-        AgentType::LiteLlm => &mut config.agents.lite_llm,
-        AgentType::Nvidia => &mut config.agents.nvidia,
-        AgentType::Custom => {
+        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
             return Json(ApiResponse::err(
                 "Set the tools option on the external API connection itself",
             ))
@@ -999,6 +1023,7 @@ pub async fn get_server_config(
         run_payload_retention_days: config.server.run_payload_retention_days,
         disk_launch_min_free_gib: config.server.disk_launch_min_free_gib,
         disk_sweep_idle_hours: config.server.disk_sweep_idle_hours,
+        disk_stalled_build_days: config.server.disk_stalled_build_days,
         p2p_enabled: config.server.p2p_enabled,
         frontend_origins: config.server.frontend_origins.clone(),
         lane_seeds_copy_enabled: config.server.lane_seeds_copy_enabled,
@@ -1083,6 +1108,10 @@ pub async fn set_server_config(
     if let Some(hours) = req.disk_sweep_idle_hours {
         config.server.disk_sweep_idle_hours =
             hours.clamp(crate::core::disk_usage::MIN_SWEEP_IDLE_HOURS, 24 * 365);
+    }
+    if let Some(days) = req.disk_stalled_build_days {
+        config.server.disk_stalled_build_days =
+            days.clamp(crate::core::disk_usage::MIN_STALLED_BUILD_DAYS, 365);
     }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {
@@ -1484,7 +1513,7 @@ pub async fn get_auth_token(State(state): State<AppState>) -> Json<ApiResponse<O
 }
 
 /// Write or remove the OpenAI key from ~/.codex/auth.json
-fn sync_codex_auth(key: Option<&str>) -> Result<(), String> {
+pub fn sync_codex_auth(key: Option<&str>) -> Result<(), String> {
     if let Some(refusal) = crate::core::mcp_scanner::home_credential_write_refusal() {
         return Err(refusal.to_string());
     }
@@ -1493,7 +1522,7 @@ fn sync_codex_auth(key: Option<&str>) -> Result<(), String> {
 
 /// In Docker `KRONN_HOST_HOME` is a host path absent from the container, and
 /// the container `HOME/.codex` is the bind-mounted host directory.
-fn codex_auth_path() -> std::path::PathBuf {
+pub fn codex_auth_path() -> std::path::PathBuf {
     let host_home = crate::core::child_env::var("KRONN_HOST_HOME")
         .ok()
         .filter(|home| !home.is_empty() && !crate::core::env::is_docker());
@@ -2598,7 +2627,7 @@ fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
 
 /// The context file bytes read out of an archive, by file id (KT-1602).
 #[derive(Default)]
-struct ContextBlobs(std::collections::HashMap<String, Vec<u8>>);
+pub struct ContextBlobs(std::collections::HashMap<String, Vec<u8>>);
 
 /// Counts only: a failed assertion must not print the files.
 impl std::fmt::Debug for ContextBlobs {
@@ -2672,7 +2701,7 @@ fn write_context_blobs(
 }
 
 /// Import DB data from a DbExport struct. Returns warnings and invalid paths.
-async fn do_import_db(
+pub async fn do_import_db(
     state: &AppState,
     data: &DbExport,
     blobs: ContextBlobs,
@@ -2888,7 +2917,13 @@ async fn do_import_db(
                 }
             }
             for c in &contacts {
-                if let Err(e) = crate::db::contacts::insert_contact(&tx, c) {
+                // An export never carries pairing secrets (KT-1650): an imported
+                // contact has none, so it pairs again before it is dialled.
+                let mut c = c.clone();
+                if matches!(c.status.as_str(), "accepted" | "pending") {
+                    c.status = crate::db::contacts::STATUS_NEEDS_REPAIR.into();
+                }
+                if let Err(e) = crate::db::contacts::insert_contact(&tx, &c) {
                     tracing::warn!("Import contact error: {e}");
                 }
             }
@@ -2942,6 +2977,22 @@ async fn do_import_db(
         .map_err(|e| format!("{e:#}"))?;
     // The import went through: the bytes written for it stay.
     written.kept = true;
+    // KT-1751 fourth review — the project table was replaced: the lane snapshot
+    // is rebuilt from it, so no list of a project that is gone stays in force
+    // and a project that came in owns its tree. Fifth review: right after the
+    // commit, before the file writes below, and a failed listing leaves the
+    // snapshot empty and unarmed (`arm_lane_settings`), never the old one.
+    let lane_warm = state.config.read().await.workers.lane_warm.clone();
+    if let Err(e) =
+        crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &lane_warm).await
+    {
+        tracing::warn!("Import could not reload the lane settings: {e:#}");
+        warnings.push(
+            "The lane settings of the imported projects could not be reloaded: restart Kronn \
+             before launching a worker."
+                .to_string(),
+        );
+    }
     if pruned > 0 {
         warnings.push(format!(
             "{pruned} quick-prompt version row(s) dropped — their prompts are not part of this import"
@@ -3269,22 +3320,25 @@ fn reset_refusal(proxy_declared: bool) -> Option<String> {
     })
 }
 
-/// POST /api/setup/reset
-/// Delete config file to trigger first-run wizard again
-pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
-    // KT-1596 — a reset leaves a key-only config.toml, so a TLS proxy declared in
-    // the config would be forgotten at the next start while the proxy keeps
-    // forwarding the whole network from 127.0.0.1, and every proxied request
-    // would regain the loopback owner trust. Clearing the declaration is a
-    // deliberate act in Settings, never a side effect of a reset. Checked before
-    // anything is deleted.
-    // The effective declaration counts: config or env.
-    let declared = crate::core::net_expose::proxy_declared_for(&state.config.read().await.server);
-    if let Some(refusal) = reset_refusal(declared) {
-        return Json(ApiResponse::err(refusal));
+/// The data a reset clears, in one transaction (a failure clears nothing).
+/// KT-1751 fourth review — the lane snapshot is then rebuilt from the emptied
+/// table, with the global entry a reset installs: no deleted project's list
+/// stays in force.
+pub async fn reset_data(state: &AppState) -> anyhow::Result<()> {
+    clear_reset_tables(state).await?;
+    let global = config::default_config().workers.lane_warm;
+    if let Err(e) =
+        crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &global).await
+    {
+        // The table is empty either way: nothing of a project stays.
+        tracing::warn!("Reset could not reload the lane settings: {e:#}");
+        crate::core::task_worker_lane_settings::rebuild(&global, &[]);
     }
-    // Clear the data first: a failure reports, and nothing else changes.
-    if let Err(e) = state
+    Ok(())
+}
+
+async fn clear_reset_tables(state: &AppState) -> anyhow::Result<()> {
+    state
         .db
         .with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -3303,7 +3357,24 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
             Ok(())
         })
         .await
-    {
+}
+
+/// POST /api/setup/reset
+/// Delete config file to trigger first-run wizard again
+pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
+    // KT-1596 — a reset leaves a key-only config.toml, so a TLS proxy declared in
+    // the config would be forgotten at the next start while the proxy keeps
+    // forwarding the whole network from 127.0.0.1, and every proxied request
+    // would regain the loopback owner trust. Clearing the declaration is a
+    // deliberate act in Settings, never a side effect of a reset. Checked before
+    // anything is deleted.
+    // The effective declaration counts: config or env.
+    let declared = crate::core::net_expose::proxy_declared_for(&state.config.read().await.server);
+    if let Some(refusal) = reset_refusal(declared) {
+        return Json(ApiResponse::err(refusal));
+    }
+    // Clear the data first: a failure reports, and nothing else changes.
+    if let Err(e) = reset_data(&state).await {
         return Json(ApiResponse::err(format!(
             "Reset failed, nothing was cleared: {e}"
         )));
@@ -3325,7 +3396,13 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
         )));
     }
     // Remove the settings; a needed copy of the key stays in a key-only file.
-    if let Err(e) = config::reset_to_key_only().await {
+    // Under the config lock: no other writer of config.toml changes what the
+    // file must keep between the read of the retained key and the write.
+    let rewritten = {
+        let _config = state.config.write().await;
+        config::reset_to_key_only().await
+    };
+    if let Err(e) = rewritten {
         return Json(ApiResponse::err(format!(
             "Reset could not rewrite config.toml: {e}"
         )));
@@ -3617,8 +3694,13 @@ pub struct RestoreRecoveryRequest {
 /// GET /api/config/recovery/status — is a recovery passphrase configured?
 pub async fn recovery_status(State(state): State<AppState>) -> Json<ApiResponse<RecoveryStatus>> {
     let dir = config::config_dir().ok();
-    let key = state.config.read().await.encryption_secret.clone();
-    let mut status = recovery_status_in(dir.as_deref(), key.as_deref());
+    // Read under the config lock: never half-way through a rewrite of the file.
+    let (key, mut status) = {
+        let config = state.config.read().await;
+        let key = config.encryption_secret.clone();
+        let status = recovery_status_in(dir.as_deref(), key.as_deref());
+        (key, status)
+    };
     if let Some(k) = key.as_deref() {
         status.undecryptable_rows = crate::core::keystore::undecryptable_rows(&state.db, k)
             .await
@@ -3764,16 +3846,35 @@ pub async fn set_recovery(
     State(state): State<AppState>,
     Json(req): Json<SetRecoveryRequest>,
 ) -> Json<ApiResponse<SetRecoveryResponse>> {
-    // The write lock serializes concurrent sets: one recovery.key at a time.
-    let config = state.config.write().await;
-    match crate::core::keystore::set_recovery_passphrase(
-        &config,
-        &req.passphrase,
-        req.current_passphrase.as_deref(),
-        req.replace_unverified,
-    ) {
-        Ok(recovery_code) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
-        Err(e) => Json(ApiResponse::err(e.to_string())),
+    // Its own task: a client that goes away cannot stop it between the release
+    // of the file copy and the rewrite of config.toml.
+    let stored = tokio::spawn(async move {
+        // The write lock serializes concurrent sets: one recovery.key at a time.
+        let config = state.config.write().await;
+        let recovery_code = crate::core::keystore::set_recovery_passphrase(
+            &config,
+            &req.passphrase,
+            req.current_passphrase.as_deref(),
+            req.replace_unverified,
+        )?;
+        // The passphrase is stored either way; the file copy goes now when the
+        // boot's rule allows it, and otherwise at the next start.
+        if let Err(e) =
+            crate::core::keystore::release_disk_copy_if_settled(&config, &state.db).await
+        {
+            tracing::warn!(
+                "recovery: config.toml keeps its copy of the key until the next start ({e:#})"
+            );
+        }
+        anyhow::Ok(recovery_code)
+    })
+    .await;
+    match stored {
+        Ok(Ok(recovery_code)) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
+        Ok(Err(e)) => Json(ApiResponse::err(e.to_string())),
+        Err(e) => Json(ApiResponse::err(format!(
+            "the recovery passphrase task stopped: {e}"
+        ))),
     }
 }
 
@@ -3936,13 +4037,10 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
     if !req.url.starts_with("http://") && !req.url.starts_with("https://") {
         return Json(ApiResponse::err("Only http/https URLs are allowed"));
     }
-    // Test binaries (target/*/deps) must never launch a real browser: the
-    // integration suite exercises this endpoint's contract, and on macOS the
-    // real open() popped an example.com tab at every `cargo test` run.
-    let in_test_binary = std::env::current_exe()
-        .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
-        .unwrap_or(false);
-    if in_test_binary {
+    // Test binaries must never launch a real browser: the integration suite
+    // exercises this endpoint's contract, and on macOS the real open()
+    // popped an example.com tab at every `cargo test` run.
+    if crate::core::config::in_test_binary() {
         tracing::info!("open-url suppressed in a test binary: {}", req.url);
         return Json(ApiResponse::ok(()));
     }
@@ -4240,36 +4338,6 @@ mod tests {
 
         sync_codex_auth_at(&path, None).unwrap();
         assert!(!path.exists());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn codex_writer_refuses_an_isolated_instance_and_names_no_key() {
-        let _restore = crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&[
-            "HOME",
-            "KRONN_DATA_DIR",
-            "KRONN_HOST_HOME",
-            "KRONN_HOST_MCP_SYNC",
-            "KRONN_IN_DOCKER",
-        ]);
-        let dir = tempfile::tempdir().unwrap();
-        crate::core::child_env::set_var("HOME", dir.path());
-        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path().join("data"));
-        for name in ["KRONN_HOST_HOME", "KRONN_HOST_MCP_SYNC", "KRONN_IN_DOCKER"] {
-            crate::core::child_env::remove_var(name);
-        }
-
-        for key in [Some("sk-kt1162-never-leaks"), None] {
-            let error = sync_codex_auth(key).unwrap_err();
-            assert!(error.contains("KRONN_HOST_HOME"), "{error}");
-            assert!(!error.contains("sk-kt1162"), "{error}");
-        }
-        assert!(!dir.path().join(".codex").exists());
-
-        // The explicit redirect is honoured outside Docker.
-        let host = dir.path().join("host");
-        crate::core::child_env::set_var("KRONN_HOST_HOME", &host);
-        assert_eq!(codex_auth_path(), host.join(".codex/auth.json"));
     }
 
     #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
@@ -6471,7 +6539,7 @@ mod tests {
         // the next bootstrap audit of Kronn itself) refreshes the root
         // copy from the embedded const. This test pins the invariant so a
         // PR that edits one without the other fails CI immediately.
-        let root_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("backend has a parent")
             .join("docs/conventions/agents-md-format-v1.md");
@@ -6766,72 +6834,160 @@ mod network_exposure_tests {
 }
 
 #[cfg(test)]
-mod default_docs_dir_tests {
-    use super::*;
-
-    async fn docs_dir_reply(response: Response) -> (StatusCode, serde_json::Value) {
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (status, serde_json::from_slice(&body).unwrap())
-    }
-
-    /// KT-263: the default AI doc folder is normalized and persisted (it only
-    /// pre-fills the briefing, KT-1192), and refused with a 400 when it could
-    /// leave a project.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn default_docs_dir_is_normalized_saved_and_refused_when_unsafe() {
-        // Saving persists config.toml: never the developer's real one.
-        let _restore =
-            crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
-        let data = tempfile::tempdir().unwrap();
-        crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
-        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
-        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
-        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
-
-        let (status, body) = docs_dir_reply(
-            save_default_docs_dir(State(state.clone()), Json(Some(" ./handbook/ ".into()))).await,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["data"], "handbook");
-        assert_eq!(
-            state.config.read().await.scan.default_docs_dir.as_deref(),
-            Some("handbook")
-        );
-
-        for bad in ["../outside", "/etc", "C:\\docs", ".git/x"] {
-            let (status, body) = docs_dir_reply(
-                save_default_docs_dir(State(state.clone()), Json(Some(bad.into()))).await,
-            )
-            .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
-            assert_eq!(body["error_code"], "validation");
-            assert!(!body["error"].as_str().unwrap().is_empty());
-            assert_eq!(
-                state.config.read().await.scan.default_docs_dir.as_deref(),
-                Some("handbook"),
-                "a refused value leaves the saved one"
-            );
-        }
-
-        let (status, body) = docs_dir_reply(
-            save_default_docs_dir(State(state.clone()), Json(Some("  ".into()))).await,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(body["data"].is_null());
-        assert_eq!(state.config.read().await.scan.default_docs_dir, None);
-    }
-}
-
-#[cfg(test)]
-#[path = "setup_workers_tests.rs"]
-mod workers_config_tests;
-
-#[cfg(test)]
 #[path = "setup_context_files_tests.rs"]
 mod context_files_tests;
+
+/// GET /api/config/agent-fallback
+/// Every mode row that has a fallback (KT-1693) with the cooldowns still running.
+pub async fn get_agent_fallback(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
+    let agents = state.config.read().await.agents.clone();
+    let cooldowns = state
+        .db
+        .with_read_conn(|conn| crate::core::agent_fallback::list_cooldowns(conn, Utc::now()))
+        .await
+        .unwrap_or_default();
+    Json(ApiResponse::ok(crate::core::agent_fallback::overview(
+        &agents, cooldowns,
+    )))
+}
+
+/// POST /api/config/connection-fallback
+/// KT-1706 — sets (or, with `fallback: null`, removes) the fallback of one mode of
+/// a named HTTP connection (its id) or, for image and video, of ComfyUI
+/// (`local:comfyui`): what takes a request over when that source cannot serve it.
+/// A text mode on ComfyUI, a source that does not exist, a loop or a chain past
+/// the depth limit is refused with the reason; nothing is stored then. Applies to
+/// the next request, no restart.
+pub async fn set_connection_fallback(
+    State(state): State<AppState>,
+    Json(req): Json<SetConnectionFallbackRequest>,
+) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
+    use crate::core::connection_fallback as media;
+    let fallback = req.fallback.map(|mut target| {
+        target.model = target
+            .model
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty());
+        target
+    });
+    // Both ends must be something that exists: ComfyUI, or a stored connection.
+    let mut named = vec![req.owner.clone()];
+    if let Some(target) = &fallback {
+        named.push(target.connection.clone());
+    }
+    for id in named.into_iter().filter(|id| id != media::COMFYUI_OWNER) {
+        let lookup = id.clone();
+        let known = state
+            .db
+            .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
+            .await;
+        if !matches!(known, Ok(Some(_))) {
+            return Json(ApiResponse::err(format!(
+                "Unknown connection {id}: a media fallback is set between ComfyUI and named connections."
+            )));
+        }
+    }
+    if let Some(target) = &fallback {
+        let compatible = if target.connection == media::COMFYUI_OWNER {
+            let config = state.config.read().await;
+            let slot = match req.mode {
+                FallbackMode::Image => config.comfyui.image_model.as_deref(),
+                FallbackMode::Video => config.comfyui.video_model.as_deref(),
+                _ => None,
+            };
+            slot.is_some_and(|model| target.model.as_deref().is_none_or(|chosen| chosen == model))
+        } else {
+            let id = target.connection.clone();
+            state
+                .db
+                .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &id))
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|connection| {
+                    media::configured_model(&connection, req.mode, target.model.as_deref())
+                        .is_some()
+                })
+        };
+        if !compatible {
+            return Json(ApiResponse::err(
+                "The fallback must name a configured model of the same mode kind.",
+            ));
+        }
+    }
+    let mut config = state.config.write().await;
+    if let Some(target) = &fallback {
+        if let Err(error) = media::validate_row(&config.agents, &req.owner, req.mode, target) {
+            return Json(ApiResponse::err(error.to_string()));
+        }
+    } else if req.owner == media::COMFYUI_OWNER && media::modality_of(req.mode).is_none() {
+        return Json(ApiResponse::err(
+            media::ConnectionChainError::NotMedia(req.mode).to_string(),
+        ));
+    }
+    let previous = config.agents.clone();
+    media::set_row(&mut config.agents, &req.owner, req.mode, fallback);
+    if let Err(error) = config::save(&config).await {
+        config.agents = previous;
+        return Json(ApiResponse::err(format!("Failed to save: {error}")));
+    }
+    let agents = config.agents.clone();
+    drop(config);
+    let cooldowns = state
+        .db
+        .with_read_conn(|conn| crate::core::agent_fallback::list_cooldowns(conn, Utc::now()))
+        .await
+        .unwrap_or_default();
+    Json(ApiResponse::ok(crate::core::agent_fallback::overview(
+        &agents, cooldowns,
+    )))
+}
+
+/// POST /api/config/agent-fallback
+/// Sets (or, with `fallback: null`, removes) the fallback of one mode row of an
+/// agent: what takes over when this agent is unavailable on the provider side
+/// for that mode. A loop, a chain past the depth limit, a fallback of another
+/// kind of mode (text goes to text, image to image...), a fallback with more
+/// access than the agent it replaces, or an agent that cannot take part is
+/// refused with the reason; nothing is stored then. Applies to the next turn, no
+/// restart.
+pub async fn set_agent_fallback(
+    State(state): State<AppState>,
+    Json(req): Json<SetAgentFallbackRequest>,
+) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
+    let mut config = state.config.write().await;
+    let fallback = req.fallback.map(|mut link| {
+        link.model = link
+            .model
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty());
+        link
+    });
+    if let Some(link) = &fallback {
+        if let Err(error) =
+            crate::core::agent_fallback::validate_row(&config.agents, &req.agent, req.mode, link)
+        {
+            return Json(ApiResponse::err(error.to_string()));
+        }
+    }
+    if !crate::core::agent_fallback::set_row(&mut config.agents, &req.agent, req.mode, fallback) {
+        return Json(ApiResponse::err(
+            "This agent cannot have a fallback: a named connection is chosen in the workflow",
+        ));
+    }
+    if let Err(error) = config::save(&config).await {
+        return Json(ApiResponse::err(format!("Failed to save: {error}")));
+    }
+    let agents = config.agents.clone();
+    drop(config);
+    let cooldowns = state
+        .db
+        .with_read_conn(|conn| crate::core::agent_fallback::list_cooldowns(conn, Utc::now()))
+        .await
+        .unwrap_or_default();
+    Json(ApiResponse::ok(crate::core::agent_fallback::overview(
+        &agents, cooldowns,
+    )))
+}

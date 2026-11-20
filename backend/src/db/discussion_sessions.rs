@@ -860,6 +860,14 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             ("Pending", Some("watchdog_stall_redispatch")) => PresenceState::ResumeExpected,
             _ => continue,
         };
+        // KT-1758 — the claim keeps a `runtime_unavailable[n]: …` marker in
+        // `last_error` so the deferral count survives it. It is bookkeeping of
+        // the claim loop, not a reason for a RUNNING agent: the participant
+        // popover reads "agent dispatch" there, as it did before the marker.
+        let error = error.filter(|error| {
+            status != "Running"
+                || crate::db::agent_dispatch::parse_runtime_unavailable(error).is_none()
+        });
         insert_signal(
             agent_type,
             state,
@@ -1546,6 +1554,50 @@ pub fn join_via_token(
     agent_type: &str,
     session_id: &str,
 ) -> Result<JoinViaTokenResult> {
+    join_via_token_as(conn, plain_token, agent_type, session_id, None)
+}
+
+/// Why a launch cannot join again as a session it does not hold.
+pub const SESSION_HELD_ELSEWHERE: &str = "this session is already joined to a room and is \
+    not yours to take: an invite and a session id read in the room prove nothing. The bridge \
+    that joined it resumes it by itself; join under your own session id";
+
+/// A launch (`held` are the sessions it joined or resumed itself; `None` for a
+/// caller without a token) takes the name of a session active in any room only
+/// when it holds that session. Called before any write of a join.
+pub fn refuse_a_session_held_elsewhere(
+    conn: &Connection,
+    agent_type: &str,
+    session_id: &str,
+    held: Option<&[i64]>,
+) -> Result<()> {
+    let Some(held) = held else {
+        return Ok(());
+    };
+    let mut statement = conn.prepare(
+        "SELECT id FROM discussion_sessions
+          WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'",
+    )?;
+    let active: Vec<i64> = statement
+        .query_map(params![agent_type, session_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if active.iter().any(|pk| !held.contains(pk)) {
+        return Err(anyhow!(SESSION_HELD_ELSEWHERE));
+    }
+    Ok(())
+}
+
+/// [`join_via_token`] for a bridge token: `held` are the sessions that launch
+/// joined or resumed itself. Joining again as a session already active in the
+/// room hands out a new resume credential for it, so a launch may only do it
+/// for one it holds (KT-1962); a caller without a token passes `None`.
+pub fn join_via_token_as(
+    conn: &Connection,
+    plain_token: &str,
+    agent_type: &str,
+    session_id: &str,
+    held: Option<&[i64]>,
+) -> Result<JoinViaTokenResult> {
     let hash = sha256_hex(plain_token);
     let now = Utc::now().to_rfc3339();
     let (resume_token, resume_token_hash) = new_resume_credential();
@@ -1572,6 +1624,11 @@ pub fn join_via_token(
             INVITE_TTL_SECS / 60
         ));
     }
+
+    // A launch joins as a session active anywhere only when it holds it: the
+    // join below either reissues that session's credential (same room) or
+    // ends it where it is and makes the caller its new holder (another room).
+    refuse_a_session_held_elsewhere(&tx, agent_type, session_id, held)?;
 
     // Step 2a — idempotency on the session side : if THIS CLI session
     // already joined THIS disc, return the existing pk rather than
@@ -1768,9 +1825,22 @@ pub fn join_disc_session_resumable(
     agent_type: &str,
     session_id: &str,
 ) -> Result<JoinViaTokenResult> {
+    join_disc_session_resumable_as(conn, disc_id, agent_type, session_id, None)
+}
+
+/// [`join_disc_session_resumable`] for a bridge token: like an invite join, it
+/// takes the name of a session active anywhere only when the launch holds it.
+pub fn join_disc_session_resumable_as(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: &str,
+    held: Option<&[i64]>,
+) -> Result<JoinViaTokenResult> {
     let (resume_token, resume_token_hash) = new_resume_credential();
     let now = Utc::now().to_rfc3339();
     let tx = conn.unchecked_transaction()?;
+    refuse_a_session_held_elsewhere(&tx, agent_type, session_id, held)?;
     let session_pk = join_disc_session(&tx, disc_id, agent_type, session_id)?;
     tx.execute(
         "UPDATE discussion_sessions
@@ -1840,7 +1910,7 @@ pub fn join_disc_session(
 /// entropy is plenty).
 /// Crate-visible so a fixture can mint a session credential the same way the
 /// product does, instead of a test inventing a second hashing scheme.
-pub(crate) fn sha256_hex(input: &str) -> String {
+pub fn sha256_hex(input: &str) -> String {
     let mut h = Sha256::new();
     h.update(input.as_bytes());
     let digest = h.finalize();
@@ -3458,6 +3528,77 @@ mod tests {
             )
             .unwrap();
         assert!(used.is_some());
+    }
+
+    /// KT-1962: joining again as a session active in the room reissues its
+    /// credential, so a launch does it only for a session it holds.
+    #[test]
+    fn a_launch_joins_again_only_as_a_session_it_holds() {
+        let conn = setup_db();
+        let issued = create_invite_token(&conn, "d1").unwrap();
+        let first = join_via_token(&conn, &issued.token, "ClaudeCode", "sess-A").unwrap();
+        let hash_of = |pk: i64| -> String {
+            conn.query_row(
+                "SELECT resume_token_hash FROM discussion_sessions WHERE id = ?1",
+                [pk],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let kept = hash_of(first.session_pk);
+        for held in [&[][..], &[first.session_pk + 1][..]] {
+            let refused =
+                join_via_token_as(&conn, &issued.token, "ClaudeCode", "sess-A", Some(held))
+                    .unwrap_err();
+            assert_eq!(refused.to_string(), SESSION_HELD_ELSEWHERE);
+            assert_eq!(hash_of(first.session_pk), kept, "the credential is kept");
+        }
+        // The launch that holds it, a caller without a token, and a new
+        // session of any launch join as before.
+        let held = [first.session_pk];
+        let again =
+            join_via_token_as(&conn, &issued.token, "ClaudeCode", "sess-A", Some(&held)).unwrap();
+        assert_eq!(again.session_pk, first.session_pk);
+        assert!(join_via_token(&conn, &issued.token, "ClaudeCode", "sess-A").is_ok());
+        let fresh =
+            join_via_token_as(&conn, &issued.token, "ClaudeCode", "sess-B", Some(&[])).unwrap();
+        assert_ne!(fresh.session_pk, first.session_pk);
+
+        // Through another room: the join would end the session where it is
+        // and hand its name to the caller.
+        conn.execute(
+            "INSERT INTO discussions(id, title, created_at, updated_at)
+             VALUES ('d-other', 'other', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let elsewhere = create_invite_token(&conn, "d-other").unwrap();
+        let refused = join_via_token_as(&conn, &elsewhere.token, "ClaudeCode", "sess-A", Some(&[]))
+            .unwrap_err();
+        assert_eq!(refused.to_string(), SESSION_HELD_ELSEWHERE);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM discussion_sessions WHERE id = ?1",
+                [first.session_pk],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "active", "the session stays where it is");
+        // A room joined through a contact, without an invite: the same rule,
+        // in the join's own transaction.
+        for (room, held, taken) in [
+            ("d1", Some(&[][..]), false),
+            ("d-other", Some(&[][..]), false),
+            ("d1", Some(&held[..]), true),
+            ("d1", None, true),
+        ] {
+            let joined = join_disc_session_resumable_as(&conn, room, "ClaudeCode", "sess-A", held);
+            assert_eq!(joined.is_ok(), taken, "{room} {held:?}");
+        }
+        // Its holder moves it.
+        let moved = join_via_token_as(&conn, &elsewhere.token, "ClaudeCode", "sess-A", Some(&held))
+            .unwrap();
+        assert_eq!(moved.disc_id, "d-other");
     }
 
     #[test]

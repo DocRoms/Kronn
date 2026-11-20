@@ -631,6 +631,9 @@ pub enum ExecutionTimeoutKind {
     TotalDuration,
     ReviewWait,
     HumanWait,
+    /// KT-1689 — a `Working` execution still queued for its worker's turn. An
+    /// alert for the principal, never an interruption.
+    QueueWait,
 }
 
 /// Decide the resume action for a TaskExecution found mid-integration at boot
@@ -1615,6 +1618,35 @@ pub struct TaskExecutionWorkerSession {
     pub started_at: DateTime<Utc>,
 }
 
+/// Who holds the integration target branch (KT-1688).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum IntegrationTargetState {
+    /// Checked out in a Kronn-owned worktree: integration writes only there.
+    KronnWorktree,
+    /// Checked out nowhere: the branch is advanced by a ref compare-and-swap.
+    NotCheckedOut,
+    /// Checked out in the project's own working checkout: integration refuses.
+    OwnerCheckout,
+    /// Checked out in a worktree Kronn does not own: integration refuses.
+    ForeignWorktree,
+    /// The branch or its worktrees could not be read.
+    Unresolved,
+}
+
+/// Where an execution's integration will land, visible before it happens.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct TaskExecutionIntegrationTarget {
+    pub branch: String,
+    /// The worktree that holds `branch`; absent when none does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub worktree: Option<String>,
+    pub state: IntegrationTargetState,
+}
+
 /// One-call projection for the execution detail UI (KT-323). Durable state stays
 /// sourced from the orchestration aggregate; task DoD, manifests, validations
 /// and telemetry are joined here so clients never reconstruct lineage from chat.
@@ -1623,6 +1655,11 @@ pub struct TaskExecutionWorkerSession {
 pub struct TaskExecutionDetail {
     pub lineage: TaskExecutionLineage,
     pub target_branch: Option<String>,
+    /// KT-1688 — the integration target's worktree and who owns it, so a wrong
+    /// target shows before the integration, not at it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub integration_target: Option<TaskExecutionIntegrationTarget>,
     pub definition_of_done: Vec<PlanningDodItem>,
     pub attempts: Vec<TaskExecutionAttemptDetail>,
     /// Every CLI session the worker ran, attempts and relaunches included, oldest

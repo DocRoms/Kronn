@@ -15,7 +15,7 @@
 // (default 2): builds, not agent processes, load the machine, so a launch beyond
 // the cap waits `Queued` and starts when a slot frees.
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Bot } from 'lucide-react';
+import { AlertTriangle, Bot, Flame } from 'lucide-react';
 import { config as configApi } from '../../lib/api';
 import type { WorkersConfig } from '../../types/generated';
 import { userError } from '../../lib/userError';
@@ -23,6 +23,37 @@ import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { MAX_REVIEW_ROUNDS, MIN_REVIEW_ROUNDS } from '../../lib/reviewRounds';
 import { DEFAULT_HEAVY_OUTPUT_KB, MAX_HEAVY_OUTPUT_KB, MIN_HEAVY_OUTPUT_KB } from '../../lib/heavyOutput';
 import { DEFAULT_TASK_WORKERS, MAX_TASK_WORKERS, MIN_TASK_WORKERS } from '../../lib/taskWorkers';
+import {
+  DEFAULT_OS_JUNK_PATTERNS,
+  formatOsJunkPatterns,
+  osJunkListProblem,
+  parseOsJunkPatterns,
+} from '../../lib/osJunk';
+import {
+  commitFields,
+  commitSettingsOf,
+  isHalfIdentity,
+  sameCommitSettings,
+  SIGNOFF_SETTINGS,
+} from '../../lib/commitSettings';
+import type { SignoffSetting } from '../../types/generated';
+import {
+  commandOutlivesGeneration,
+  DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
+  DEFAULT_BASH_MAX_TIMEOUT_MIN,
+  MAX_BASH_TIMEOUT_MIN,
+  MIN_BASH_TIMEOUT_MIN,
+} from '../../lib/workerShellTimeouts';
+import {
+  MAX_MANAGED_WORKTREE_ROOTS,
+  parseManagedRoots,
+  validManagedRoots,
+} from '../../lib/managedWorktreeRoots';
+import { LaneWarmFields } from '../LaneWarmFields';
+import {
+  EMPTY_LANE_WARM_DRAFT, configOf, draftOf, draftProblem, sameDraft,
+  type LaneWarmDraft,
+} from '../../lib/laneWarm';
 import '../../pages/SettingsPage.css';
 
 interface Props {
@@ -36,7 +67,31 @@ export function WorkersSection({ t }: Props) {
   const [background, setBackground] = useState(true);
   const [taskWorkers, setTaskWorkers] = useState(String(DEFAULT_TASK_WORKERS));
   const [heavyKb, setHeavyKb] = useState(String(DEFAULT_HEAVY_OUTPUT_KB));
+  const [bashDefault, setBashDefault] = useState(String(DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
+  const [bashMax, setBashMax] = useState(String(DEFAULT_BASH_MAX_TIMEOUT_MIN));
+  // KT-1750 — comma-separated, an empty field meaning none.
+  const [junk, setJunk] = useState(formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS));
+  // KT-1750 — the commit identity and sign-off every project inherits.
+  const [commitName, setCommitName] = useState('');
+  const [commitEmail, setCommitEmail] = useState('');
+  const [commitSignoff, setCommitSignoff] = useState<SignoffSetting>('auto');
+  // KT-1748 — one absolute folder per line; the built-in roots are always included.
+  const [managedRoots, setManagedRoots] = useState('');
+  // KT-1742 — how every project's lane is warmed (a project may override it).
+  const [laneWarm, setLaneWarm] = useState<LaneWarmDraft>(EMPTY_LANE_WARM_DRAFT);
+  // The generation limit (Settings > Server) cuts the whole turn whatever a command is
+  // allowed, so it is shown next to the per-command cap. Read-only here.
+  const [generationMin, setGenerationMin] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => configApi.getServerConfig())
+      .then(cfg => { if (live) setGenerationMin(cfg?.agent_global_timeout_min ?? null); })
+      .catch(() => { /* the limit is a hint: the form works without it */ });
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -51,6 +106,15 @@ export function WorkersSection({ t }: Props) {
         setBackground(value.background_priority !== false);
         setTaskWorkers(String(value.max_concurrent_task_workers));
         setHeavyKb(String(value.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
+        setBashDefault(String(value.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
+        setBashMax(String(value.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+        setJunk(formatOsJunkPatterns(value.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS));
+        const fields = commitFields(value.commit);
+        setCommitName(fields.name);
+        setCommitEmail(fields.email);
+        setCommitSignoff(fields.signoff);
+        setManagedRoots((value.managed_worktree_roots ?? []).join('\n'));
+        setLaneWarm(draftOf(value.lane_warm));
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -65,14 +129,40 @@ export function WorkersSection({ t }: Props) {
   // unparseable field only blocks the save while it would actually be used.
   const heavy = Number(heavyKb);
   const validHeavy = Number.isInteger(heavy) && heavy >= MIN_HEAVY_OUTPUT_KB && heavy <= MAX_HEAVY_OUTPUT_KB;
-  const valid = (unlimited || validCount) && validWorkerCap && validHeavy;
+  const bashDefaultMin = Number(bashDefault);
+  const bashMaxMin = Number(bashMax);
+  const validBashMax = Number.isInteger(bashMaxMin)
+    && bashMaxMin >= MIN_BASH_TIMEOUT_MIN && bashMaxMin <= MAX_BASH_TIMEOUT_MIN;
+  const validBashDefault = Number.isInteger(bashDefaultMin)
+    && bashDefaultMin >= MIN_BASH_TIMEOUT_MIN && validBashMax && bashDefaultMin <= bashMaxMin;
+  const validBash = validBashMax && validBashDefault;
+  const junkList = parseOsJunkPatterns(junk);
+  const junkProblem = osJunkListProblem(junkList);
+  const validJunk = junkProblem === null;
+  const commitFieldsNow = { name: commitName, email: commitEmail, signoff: commitSignoff };
+  const halfCommit = isHalfIdentity(commitName, commitEmail);
+  const validLaneWarm = draftProblem(laneWarm) === null;
+  const rootList = parseManagedRoots(managedRoots);
+  const validRoots = validManagedRoots(rootList);
+  const savedRoots = saved?.managed_worktree_roots ?? [];
+  const rootsUnchanged = rootList.length === savedRoots.length
+    && rootList.every((root, index) => root === savedRoots[index]);
+  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validJunk
+    && !halfCommit && validRoots && validLaneWarm;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
     && (unlimited || count === saved.default_max_review_rounds);
   const unchanged = roundsUnchanged
+    && rootsUnchanged
     && saved !== null && workerCap === saved.max_concurrent_task_workers
-    && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB);
+    && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)
+    && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
+    && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN)
+    && formatOsJunkPatterns(junkList)
+      === formatOsJunkPatterns(saved.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS)
+    && sameCommitSettings(commitFieldsNow, saved.commit)
+    && sameDraft(laneWarm, draftOf(saved.lane_warm));
 
   const save = useAsyncGuard(async () => {
     if (!saved || !valid) return;
@@ -84,6 +174,15 @@ export function WorkersSection({ t }: Props) {
         background_priority: background,
         max_concurrent_task_workers: workerCap,
         heavy_output_kb: heavy,
+        bash_default_timeout_min: bashDefaultMin,
+        bash_max_timeout_min: bashMaxMin,
+        os_junk_patterns: junkList,
+        // Nothing set is no key at all, as the backend stores it.
+        ...(commitSettingsOf(commitFieldsNow) ? { commit: commitSettingsOf(commitFieldsNow) } : {}),
+        managed_worktree_roots: rootList,
+        // Validation executables are a project's own setting (KT-1751): the global
+        // entry never carries them, so a stale one is dropped, not refused.
+        lane_warm: configOf({ ...laneWarm, executablesText: '' }, saved.lane_warm),
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
@@ -91,6 +190,15 @@ export function WorkersSection({ t }: Props) {
       setBackground(next.background_priority !== false);
       setTaskWorkers(String(next.max_concurrent_task_workers));
       setHeavyKb(String(next.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
+      setBashDefault(String(next.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
+      setBashMax(String(next.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+      setJunk(formatOsJunkPatterns(next.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS));
+      const fields = commitFields(next.commit);
+      setCommitName(fields.name);
+      setCommitEmail(fields.email);
+      setCommitSignoff(fields.signoff);
+      setManagedRoots((next.managed_worktree_roots ?? []).join('\n'));
+      setLaneWarm(draftOf(next.lane_warm));
     } catch (cause) {
       setError(userError(cause));
     }
@@ -232,6 +340,184 @@ export function WorkersSection({ t }: Props) {
             {t('config.workers.heavyOutputInvalid', MIN_HEAVY_OUTPUT_KB, MAX_HEAVY_OUTPUT_KB)}
           </p>
         )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.shellTimeouts')}</span>
+          <span className="text-base font-semibold text-accent" style={{ marginLeft: 'auto' }} data-testid="workers-shell-current">
+            {saved === null
+              ? '…'
+              : t(
+                'config.workers.shellTimeoutsSummary',
+                saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
+                saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN,
+                generationMin ?? '…',
+              )}
+          </span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-shell-hint">{t('config.workers.shellTimeoutsHint')}</p>
+        <div className="flex-row gap-3">
+          <label className="flex-row gap-3">
+            <span className="text-sm">{t('config.workers.bashDefault')}</span>
+            <input
+              type="number"
+              className="set-input set-input-sm"
+              min={MIN_BASH_TIMEOUT_MIN}
+              max={MAX_BASH_TIMEOUT_MIN}
+              aria-label={t('config.workers.bashDefault')}
+              value={bashDefault}
+              disabled={saved === null}
+              onChange={event => setBashDefault(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+              data-testid="workers-bash-default-input"
+            />
+          </label>
+          <label className="flex-row gap-3">
+            <span className="text-sm">{t('config.workers.bashMax')}</span>
+            <input
+              type="number"
+              className="set-input set-input-sm"
+              min={MIN_BASH_TIMEOUT_MIN}
+              max={MAX_BASH_TIMEOUT_MIN}
+              aria-label={t('config.workers.bashMax')}
+              value={bashMax}
+              disabled={saved === null}
+              onChange={event => setBashMax(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+              data-testid="workers-bash-max-input"
+            />
+          </label>
+          <span className="flex-row gap-3" data-testid="workers-generation-limit">
+            <span className="text-sm">{t('config.workers.generationLimit')}</span>
+            <span className="text-base font-semibold">{generationMin ?? '…'}</span>
+          </span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-generation-hint">{t('config.workers.generationLimitHint')}</p>
+        {!validBash && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-shell-invalid">
+            {t('config.workers.shellTimeoutsInvalid', MIN_BASH_TIMEOUT_MIN, MAX_BASH_TIMEOUT_MIN)}
+          </p>
+        )}
+        {validBash && commandOutlivesGeneration(bashMaxMin, generationMin) && (
+          <div className="set-expose-warn" role="alert" data-testid="workers-shell-outlive-warning">
+            <AlertTriangle size={13} />
+            <span>{t('config.workers.shellTimeoutsOutlive')}</span>
+          </div>
+        )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.osJunk')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-junk-hint">{t('config.workers.osJunkHint')}</p>
+        <div className="flex-row gap-3">
+          <input
+            type="text"
+            className="set-input"
+            aria-label={t('config.workers.osJunk')}
+            placeholder={formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS)}
+            value={junk}
+            disabled={saved === null}
+            onChange={event => setJunk(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-junk-input"
+          />
+          <button
+            type="button"
+            className="set-icon-btn"
+            disabled={saved === null || junk === formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS)}
+            onClick={() => setJunk(formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS))}
+            data-testid="workers-junk-reset"
+          >
+            {t('config.workers.osJunkReset')}
+          </button>
+        </div>
+        {!validJunk && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-junk-invalid">
+            {t('config.workers.osJunkInvalid', junkProblem ?? '')}
+          </p>
+        )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.commit')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-commit-hint">{t('config.workers.commitHint')}</p>
+        <div className="flex-row gap-3">
+          <input
+            type="text"
+            className="set-input"
+            aria-label={t('config.workers.commitName')}
+            placeholder={t('config.workers.commitName')}
+            value={commitName}
+            disabled={saved === null}
+            onChange={event => setCommitName(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-commit-name"
+          />
+          <input
+            type="email"
+            className="set-input"
+            aria-label={t('config.workers.commitEmail')}
+            placeholder={t('config.workers.commitEmail')}
+            value={commitEmail}
+            disabled={saved === null}
+            onChange={event => setCommitEmail(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-commit-email"
+          />
+        </div>
+        {halfCommit && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-commit-incomplete">
+            {t('config.workers.commitIncomplete')}
+          </p>
+        )}
+        <div className="flex-row gap-4 mt-4">
+          <span className="text-sm">{t('config.workers.commitSignoff')}</span>
+          {SIGNOFF_SETTINGS.map(value => (
+            <label key={value} className="flex-row gap-3">
+              <input
+                type="radio"
+                name="workers-commit-signoff"
+                checked={commitSignoff === value}
+                disabled={saved === null}
+                onChange={() => setCommitSignoff(value)}
+                data-testid={`workers-commit-signoff-${value}`}
+              />
+              <span className="text-sm">{t(`config.workers.commitSignoff.${value}`)}</span>
+            </label>
+          ))}
+        </div>
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.managedRoots')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-roots-hint">{t('config.workers.managedRootsHint')}</p>
+        <textarea
+          className="set-input"
+          rows={3}
+          spellCheck={false}
+          aria-label={t('config.workers.managedRoots')}
+          placeholder={t('config.workers.managedRootsPlaceholder')}
+          value={managedRoots}
+          disabled={saved === null}
+          onChange={event => setManagedRoots(event.target.value)}
+          data-testid="workers-roots-input"
+        />
+        {!validRoots && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-roots-invalid">
+            {t('config.workers.managedRootsInvalid', MAX_MANAGED_WORKTREE_ROOTS)}
+          </p>
+        )}
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }} data-testid="workers-lane-warm">
+          <Flame size={14} className="text-accent" />
+          <span className="label">{t('laneWarm.title')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4">{t('laneWarm.help')}</p>
+        <LaneWarmFields
+          draft={laneWarm}
+          onChange={setLaneWarm}
+          scope="global"
+          disabled={saved === null}
+          idPrefix="workers-lane-warm"
+          t={t}
+        />
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}
       </div>
     </div>

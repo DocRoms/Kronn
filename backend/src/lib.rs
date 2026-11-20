@@ -8,15 +8,263 @@
     allow(dead_code, unused_imports)
 )]
 
-pub mod acp;
-pub mod agents;
-pub mod api;
-pub mod core;
-pub mod db;
-pub mod delivery;
-pub mod http_transport;
-pub mod models;
-pub mod workflows;
+pub mod acp {
+    pub use kronn_l3::acp::*;
+}
+pub mod agents {
+    pub use kronn_l3::agents::*;
+    pub mod media_runner;
+    pub mod readiness;
+}
+pub mod api {
+    pub use kronn_l3::api::*;
+    pub mod agents;
+    pub mod api_call_logs;
+    pub mod bundle;
+    pub mod cli_telemetry;
+    pub mod compare;
+    pub mod context_audit;
+    pub mod contribution;
+    pub mod debug;
+    pub mod default_contents;
+    pub mod desktop_port;
+    pub mod directives;
+    pub mod disc_portability;
+    pub mod disc_workspace;
+    pub mod discussion_actions;
+    pub mod discussion_video_sequence;
+    pub mod discussion_weight;
+    pub mod docs;
+    pub mod execution_variables;
+    pub mod external_api_connections;
+    pub mod github_connection;
+    pub mod health;
+    pub mod human_credentials;
+    pub mod id_resolver;
+    pub mod learnings;
+    pub mod live_page_actions;
+    pub mod maintenance;
+    pub mod model_catalog;
+    pub mod openapi;
+    pub mod profiles;
+    pub mod resource_refs;
+    pub mod rtk;
+    pub mod rtk_state;
+    pub mod setup;
+    pub mod stats;
+    pub mod themes;
+    pub mod ui_preferences;
+    pub mod usage;
+    pub mod user_context;
+    pub mod version;
+}
+pub mod core {
+    pub use kronn_l3::core::*;
+    pub mod backup;
+    pub mod context_audit;
+    pub mod faithfulness;
+    pub mod key_discovery;
+    pub mod learning_doc;
+    pub mod learning_gate;
+    pub mod learning_promote;
+    pub mod learning_scope;
+    pub mod learning_sweep;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "mcp_scanner_test.rs"]
+    pub mod mcp_scanner_test;
+    pub mod media_probe;
+    pub mod quick_exec_templates;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "registry_test.rs"]
+    pub mod registry_test;
+    pub mod review_payload;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "scanner_test.rs"]
+    pub mod scanner_test;
+    pub mod set_aside;
+    pub mod static_context;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "template_homogeneity_test.rs"]
+    pub mod template_homogeneity_test;
+    pub mod usage;
+}
+pub mod db {
+    pub use kronn_l3::db::*;
+    pub mod context_audits;
+    pub mod discussion_video_sequences;
+    pub mod discussion_weight;
+    pub mod id_resolver;
+    #[cfg(test)]
+    pub mod insert_redaction_measure;
+    #[cfg(all(test, feature = "full-tests"))]
+    pub mod large_db_measure;
+    pub mod learnings;
+    pub mod quick_exec_runs;
+    #[cfg(all(test, feature = "full-tests"))]
+    pub mod release_gate_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "tests.rs"]
+    pub mod tests;
+    pub mod ui_preferences;
+    #[cfg(all(test, feature = "full-tests"))]
+    pub mod upgrade_fixture_tests;
+}
+pub use kronn_l3::delivery;
+pub use kronn_l3::http_transport;
+pub use kronn_l3::models;
+pub use kronn_l3::state;
+pub mod workflows {
+    pub use kronn_l3::workflows::*;
+    pub mod interrupted_worktrees;
+}
+
+/// The hooks a lower crate calls into and whose provider is missing from this
+/// binary. Empty in the server: a hook left without its provider would turn a
+/// call into an error (or a silent no-op) only when the path is taken.
+pub fn missing_uplinks() -> Vec<&'static str> {
+    use crate::core::{uplink, uplink_state};
+    fn name<T: inventory::Collect>() -> Option<&'static str> {
+        uplink::linked::<T>()
+            .is_none()
+            .then(std::any::type_name::<T>)
+    }
+    [
+        name::<uplink::AgentMessageIngest>(),
+        name::<uplink::MessageQuestionIngest>(),
+        name::<uplink::PageActionIngest>(),
+        name::<uplink::TaskExecutionLookup>(),
+        name::<uplink::TaskDodAdoption>(),
+        name::<uplink::TrustWithdrawal>(),
+        name::<uplink::ApiCallSecrets>(),
+        name::<uplink::LoadableToolDeclarations>(),
+        name::<uplink::PageResources>(),
+        name::<uplink::ConfigApplied>(),
+        name::<uplink::ConfigMigration>(),
+        name::<uplink_state::DiscussionCreate>(),
+        name::<uplink_state::EscalatedFallback>(),
+        name::<uplink_state::WorkflowRoomTools>(),
+        name::<uplink_state::WorkflowTestTools>(),
+        name::<crate::db::BootStep>(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(test)]
+mod uplink_tests {
+    #[test]
+    fn every_hook_has_its_provider_in_the_top_crate() {
+        assert_eq!(super::missing_uplinks(), Vec::<&str>::new());
+    }
+
+    /// A hook added to a lower crate is checked at boot too.
+    #[test]
+    fn missing_uplinks_names_every_declared_hook() {
+        let src = std::path::Path::new(crate::BACKEND_DIR).join("src");
+        let checked = std::fs::read_to_string(src.join("lib.rs")).unwrap();
+        for file in ["core/uplink.rs", "core/uplink_state.rs", "db/mod.rs"] {
+            let text = std::fs::read_to_string(src.join(file)).unwrap();
+            for declared in text.split("inventory::collect!(").skip(1) {
+                let hook = declared.split(')').next().unwrap();
+                assert!(
+                    checked.contains(&format!("::{hook}>()")),
+                    "{hook} ({file}) is not listed in missing_uplinks"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_database_boot_steps_are_all_linked_and_ordered_apart() {
+        let mut orders: Vec<u16> = inventory::iter::<crate::db::BootStep>
+            .into_iter()
+            .map(|step| step.order)
+            .collect();
+        orders.sort_unstable();
+        assert_eq!(orders, [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    }
+}
+
+#[cfg(test)]
+mod crate_layout_tests {
+    use std::path::{Path, PathBuf};
+
+    fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The lints read `*_up.rs` and `uptests/` as test code without parsing a
+    /// `cfg`: that holds only while nothing but a `#[cfg(test)] mod uptests`
+    /// reaches them.
+    #[test]
+    fn up_files_are_reached_only_through_a_test_only_uptests_module() {
+        let src = Path::new(crate::BACKEND_DIR).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        let test_only = |path: &Path| {
+            path.parent().is_some_and(|dir| dir.ends_with("uptests"))
+                || path.to_string_lossy().ends_with("_up.rs")
+        };
+        let texts: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+            .collect();
+        let mut wrappers = 0;
+        for (path, _) in texts.iter().filter(|(path, _)| test_only(path)) {
+            let name = path.file_name().unwrap().to_string_lossy();
+            let wrapper = path.parent().unwrap().ends_with("uptests");
+            // A wrapper is declared by its module name, an up file by its path.
+            let needle = if wrapper {
+                format!("mod {};", name.trim_end_matches(".rs"))
+            } else {
+                format!("/{name}\"]")
+            };
+            let users: Vec<&PathBuf> = texts
+                .iter()
+                .filter(|(other, text)| other != path && text.contains(&needle))
+                .map(|(other, _)| other)
+                .collect();
+            assert!(
+                !users.is_empty(),
+                "{} is compiled by no crate",
+                path.display()
+            );
+            for user in users {
+                if wrapper {
+                    wrappers += 1;
+                    let root = std::fs::read_to_string(user).unwrap();
+                    let (before, inside) =
+                        root.split_once("\nmod uptests {").unwrap_or_else(|| {
+                            panic!("{} names {name} outside `mod uptests`", user.display())
+                        });
+                    assert!(
+                        inside.contains(&needle),
+                        "{} names {name} outside `mod uptests`",
+                        user.display()
+                    );
+                    let gate = before.lines().rev().find(|line| line.starts_with("#[cfg"));
+                    assert_eq!(gate, Some("#[cfg(test)]"), "{}", user.display());
+                } else {
+                    assert!(
+                        test_only(user),
+                        "{} is included by {}, which is not test-only",
+                        path.display(),
+                        user.display()
+                    );
+                }
+            }
+        }
+        assert!(wrappers > 0, "no wrapper was checked");
+    }
+}
 
 #[cfg(all(test, feature = "full-tests"))]
 mod api_tests;
@@ -28,17 +276,23 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::Mutex;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
 
+pub use crate::core::task_worker_lane_settings::arm_lane_settings;
 pub use crate::db::Database;
+pub(crate) use crate::http_transport::{
+    bearer_credential, frontend_origins, is_local_ip, logged_uri,
+};
 pub use crate::models::AppConfig;
+
+/// The `backend/` folder, the same in every crate of the workspace.
+pub const BACKEND_DIR: &str = env!("CARGO_MANIFEST_DIR");
+pub use crate::state::*;
 pub use crate::workflows::WorkflowEngine;
 
 /// Loads the config (defaults when none is saved) and arms the process-wide
@@ -201,6 +455,10 @@ pub async fn bootstrap_external_api_connections(
                 conn,
                 &legacy_connection_config,
             )?;
+            crate::db::external_api_connections::carry_agent_tools_off(
+                conn,
+                &legacy_connection_config,
+            )?;
             crate::db::external_api_connections::runtime_connections(conn)
         })
         .await?;
@@ -210,497 +468,6 @@ pub async fn bootstrap_external_api_connections(
             || changed;
     }
     Ok(changed)
-}
-
-// ─── Application State ──────────────────────────────────────────────────────
-
-/// Default maximum concurrent agent processes.
-pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
-
-/// Worker stack size. In a debug build one nested workflow run costs about
-/// 1 MiB of stack, so a foreach child overflowed the 2 MiB default (KT-1161).
-pub const RUNTIME_THREAD_STACK_SIZE: usize = 8 << 20;
-
-/// The multi-threaded runtime the backend runs on, shared by the server and
-/// desktop entry points so both get the same worker configuration.
-pub fn runtime_builder() -> tokio::runtime::Builder {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder
-        .enable_all()
-        .thread_stack_size(RUNTIME_THREAD_STACK_SIZE);
-    builder
-}
-
-/// Tracks running audit processes so they can be cancelled AND inspected.
-///
-/// `progress` is the data source for `GET /api/projects/:id/audit-status` —
-/// the UI polls it to resume the progress bar after tab/page navigation.
-/// Entries are inserted by the SSE streams (`full_audit`, `partial_audit`)
-/// and removed on completion/cancel/error.
-#[derive(Default)]
-pub struct AuditTracker {
-    /// Currently running child PID per project (if any). Only a direct CLI agent
-    /// is registered here: the PID of an HTTP or ACP agent is a lifeline, not
-    /// the agent.
-    pub running_pids: HashMap<String, u32>,
-    /// Cancellation of the step's agent per project, for an agent that does not
-    /// run as the process in `running_pids`: an HTTP agent lives in a task
-    /// (KT-924), an ACP agent — OpenCode and the others, Claude and Codex
-    /// through their adapters — in a session Kronn cancels and whose process it
-    /// then shuts down (KT-927). Killing the lifeline alone would leave either
-    /// reading and writing files.
-    pub agent_cancels: HashMap<String, tokio_util::sync::CancellationToken>,
-    /// Projects whose audit should be cancelled
-    pub cancelled: HashSet<String>,
-    /// Live progress snapshot per project — empty when no audit runs.
-    pub progress: HashMap<String, crate::models::AuditProgress>,
-    /// Projects with an audit lease held. One audit (Full, specialized OR
-    /// partial) per project at a time: `try_acquire_lease` is the single
-    /// atomic gate all three launch paths go through, replacing the old
-    /// check-then-insert race (two callers could both see the tracker + DB
-    /// idle, then both insert a Running row). Released by the run's
-    /// drop-guard when it ends — normally, on cancel, or on abandonment.
-    pub leased: HashSet<String>,
-    /// Leases whose run could not be settled (the drop guard's database write
-    /// failed): kept fail-closed, and named so the UI offers the cleanup that
-    /// releases them (KT-1134).
-    pub orphaned_leases: HashSet<String>,
-}
-
-impl AuditTracker {
-    /// Atomically take the audit lease for a project. Returns `false` if one
-    /// is already held (caller must refuse the launch). Called under the
-    /// tracker mutex, so the check-and-insert can't race a second caller.
-    pub fn try_acquire_lease(&mut self, project_id: &str) -> bool {
-        self.leased.insert(project_id.to_string())
-    }
-
-    /// Release a project's audit lease. Idempotent.
-    pub fn release_lease(&mut self, project_id: &str) {
-        self.leased.remove(project_id);
-        self.orphaned_leases.remove(project_id);
-    }
-
-    /// Whether the project's lease is held by a run nobody can settle.
-    pub fn lease_orphaned(&self, project_id: &str) -> bool {
-        self.leased.contains(project_id) && self.orphaned_leases.contains(project_id)
-    }
-
-    /// Seed progress when an audit stream starts. Called from the `start`
-    /// SSE event. Resets any stale progress row for the same project.
-    pub fn start_progress(&mut self, project_id: impl Into<String>, total_steps: u32, kind: &str) {
-        let project_id = project_id.into();
-        self.progress.insert(
-            project_id.clone(),
-            crate::models::AuditProgress {
-                project_id,
-                phase: "auditing".into(),
-                step_index: 0,
-                total_steps,
-                current_file: None,
-                started_at: chrono::Utc::now(),
-                kind: kind.into(),
-                step_tokens: None,
-                total_tokens_so_far: None,
-                current_tool: None,
-                current_tool_call_count: None,
-                agent: None,
-                tier: None,
-                connection_id: None,
-                recent_activity: None,
-                step_breakdown: None,
-            },
-        );
-    }
-
-    /// Record who runs the audit, for any client polling its progress.
-    pub fn set_auditor(
-        &mut self,
-        project_id: &str,
-        agent: crate::models::AgentType,
-        tier: crate::models::ModelTier,
-        connection_id: Option<String>,
-    ) {
-        if let Some(entry) = self.progress.get_mut(project_id) {
-            entry.agent = Some(agent);
-            entry.tier = Some(tier);
-            entry.connection_id = connection_id;
-        }
-    }
-
-    /// 0.8.3 — update the live-chip state on every step_progress
-    /// SSE event. The poll endpoint surfaces these fields so the
-    /// frontend can re-seed the chips when SSE buffers / stalls.
-    pub fn update_chips(
-        &mut self,
-        project_id: &str,
-        step_tokens: Option<u64>,
-        total_tokens_so_far: Option<u64>,
-        current_tool: Option<String>,
-    ) {
-        if let Some(entry) = self.progress.get_mut(project_id) {
-            if let Some(s) = step_tokens {
-                entry.step_tokens = Some(s);
-            }
-            if let Some(t) = total_tokens_so_far {
-                entry.total_tokens_so_far = Some(t);
-            }
-            if let Some(tool) = current_tool {
-                entry.current_tool = Some(tool);
-                // 0.8.4 (#319 / B3) — bump the tool-call counter for
-                // the live "still alive" chip. Every tool_call from
-                // the agent stream lands here, regardless of whether
-                // the agent also emitted a `Usage` block. Reset on
-                // step boundary via `clear_step_chips`.
-                entry.current_tool_call_count =
-                    Some(entry.current_tool_call_count.unwrap_or(0) + 1);
-            }
-        }
-    }
-
-    /// The running step's headline parts, read by a client polling the progress.
-    pub fn set_step_breakdown(
-        &mut self,
-        project_id: &str,
-        breakdown: crate::models::AuditTokenBreakdown,
-    ) {
-        if let Some(entry) = self.progress.get_mut(project_id) {
-            entry.step_breakdown = Some(breakdown);
-        }
-    }
-
-    /// An HTTP agent's tool activity: it reports its last tool and running
-    /// count rather than one event per call, so both are set, not bumped.
-    pub fn set_tool_activity(&mut self, project_id: &str, tool: String, calls: u32) {
-        if let Some(entry) = self.progress.get_mut(project_id) {
-            entry.current_tool = Some(tool);
-            entry.current_tool_call_count = Some(calls);
-        }
-    }
-
-    /// The running step's latest actions, replaced whole: the step's feed owns
-    /// the bounds and the sanitizing.
-    pub fn set_recent_activity(
-        &mut self,
-        project_id: &str,
-        recent: crate::models::AuditRecentActivity,
-    ) {
-        if let Some(entry) = self.progress.get_mut(project_id) {
-            entry.recent_activity = Some(recent);
-        }
-    }
-
-    /// 0.8.3 — clear the per-step ephemeral chips when a step ends.
-    /// Keeps `total_tokens_so_far` intact (it's cumulative across steps).
-    pub fn clear_step_chips(&mut self, project_id: &str) {
-        if let Some(entry) = self.progress.get_mut(project_id) {
-            entry.step_tokens = None;
-            entry.current_tool = None;
-            // 0.8.4 (#319 / B3) — the tool-call counter is per-step,
-            // not cumulative across the audit. Reset on every
-            // `step_start` so chip reads `🔧 Tool (1)` then `(2)` etc.
-            entry.current_tool_call_count = None;
-            entry.recent_activity = None;
-            entry.step_breakdown = None;
-        }
-    }
-
-    /// Update the step counter when a `step_start` SSE event fires. No-op
-    /// if no progress row exists (the caller never invoked `start_progress`).
-    pub fn advance_step(
-        &mut self,
-        project_id: &str,
-        step_index: u32,
-        current_file: Option<String>,
-    ) {
-        if let Some(entry) = self.progress.get_mut(project_id) {
-            entry.step_index = step_index;
-            entry.current_file = current_file;
-            entry.phase = "auditing".into();
-        }
-    }
-
-    /// Mark the audit as transitioning to phase 3 (validation discussion
-    /// creation). Brief window — the caller clears progress right after.
-    pub fn mark_validating(&mut self, project_id: &str) {
-        if let Some(entry) = self.progress.get_mut(project_id) {
-            entry.phase = "validating".into();
-        }
-    }
-
-    /// Remove the progress entry for a project — called on `done`,
-    /// `cancelled`, and fatal `step_error`.
-    pub fn clear_progress(&mut self, project_id: &str) {
-        self.progress.remove(project_id);
-    }
-
-    /// Read the current progress snapshot (cloned for safe release of the
-    /// mutex). Used by the `audit-status` endpoint.
-    pub fn get_progress(&self, project_id: &str) -> Option<crate::models::AuditProgress> {
-        self.progress.get(project_id).cloned()
-    }
-}
-
-/// Runtime switch of P2P federation, apart from the config lock (KT-1033).
-/// Federation checks take the read side for a short critical section (never
-/// across an await); turning P2P off takes the write side, so it waits for
-/// those in progress and none starts after.
-#[derive(Debug, Default)]
-pub struct P2pGate(std::sync::RwLock<bool>);
-
-impl P2pGate {
-    pub fn new(enabled: bool) -> Self {
-        Self(std::sync::RwLock::new(enabled))
-    }
-
-    pub fn enabled(&self) -> bool {
-        *self.read()
-    }
-
-    /// Hold while checking and acting; the value cannot turn off meanwhile.
-    pub fn read(&self) -> std::sync::RwLockReadGuard<'_, bool> {
-        self.0
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    pub fn set(&self, enabled: bool) {
-        *self
-            .0
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = enabled;
-    }
-}
-
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Arc<RwLock<AppConfig>>,
-    /// P2P federation on/off, mirrored from `server.p2p_enabled`.
-    pub p2p: Arc<P2pGate>,
-    pub db: Arc<Database>,
-    pub agent_semaphore: Arc<Semaphore>,
-    pub audit_tracker: Arc<Mutex<AuditTracker>>,
-    /// Broadcast channel for WebSocket messages (presence, heartbeat, chat, batch progress).
-    pub ws_broadcast: Arc<tokio::sync::broadcast::Sender<crate::models::WsMessage>>,
-    /// Registry of in-flight cancellable tasks keyed by a string id — used by
-    /// the "⏹ Arrêter" UI to abort a running agent discussion or workflow
-    /// run. Keys are a durable agent-dispatch id, a `disc_id` for legacy
-    /// non-dispatch streams, or a workflow `run_id`. Tokens are inserted when
-    /// work starts and removed in its finally-block — see the Registry impl below.
-    pub cancel_registry: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
-    /// Dispatches whose provider runtime has been successfully created and has
-    /// not yet returned. Cancellation registration happens earlier, so it must
-    /// not be used as process-liveness evidence.
-    pub agent_runtime_registry: Arc<Mutex<HashSet<String>>>,
-    /// KT-1108 — the discussion runs in progress, for a page that opens mid-run.
-    pub live_runs: Arc<crate::agents::run_progress::LiveRuns>,
-    /// Task executions with a `/resume` in flight. Boot resumes run once HTTP is
-    /// served, so a concurrent resume of the same execution is refused.
-    pub execution_resumes: Arc<Mutex<HashSet<String>>>,
-    /// OAuth2 access-token cache for API plugins. Keyed by `mcp_configs.id`,
-    /// value is the bearer token + its absolute expiry. In-memory only —
-    /// on restart, tokens are lost and re-exchanged on first use (one HTTP
-    /// call per active OAuth2 plugin). See `core::oauth2_cache`.
-    pub oauth2_cache:
-        Arc<tokio::sync::Mutex<HashMap<String, crate::core::oauth2_cache::CachedToken>>>,
-    /// Dependency update checks may hit remote registries, so project
-    /// overviews reuse results until a manifest changes or the cache expires.
-    pub dependency_update_cache: Arc<
-        tokio::sync::Mutex<
-            HashMap<String, crate::core::dependency_updates::CachedDependencyUpdates>,
-        >,
-    >,
-    /// Cached project language breakdowns. Git status itself stays live; only
-    /// the bounded source scan is reused between overview visits.
-    pub git_language_cache:
-        Arc<tokio::sync::Mutex<HashMap<String, crate::models::CachedProjectLanguages>>>,
-    pub agent_dispatch_notify: Arc<tokio::sync::Notify>,
-    /// Handle to the kronn-docs Python sidecar (PDF/DOCX/XLSX/… gen).
-    /// Always allocated — whether the sidecar is actually running is
-    /// stored INSIDE the handle. Routes in `api::docs` probe it at
-    /// call time and return a 503 if the bundled/runtime sidecar could
-    /// not be started.
-    pub docs_sidecar: Arc<crate::core::docs_sidecar::DocsSidecar>,
-    /// Invocation-local discovery endpoint for isolated routers. Production
-    /// leaves it unset and retains OLLAMA_HOST/Docker resolution.
-    pub ollama_base_url_override: Option<Arc<str>>,
-    /// Invocation-local source of the official library's manifests (KT-930),
-    /// so a test never reaches the real registry. Production leaves it unset
-    /// and uses the process-wide one.
-    pub ollama_registry_override: Option<Arc<crate::core::ollama_registry::OllamaRegistry>>,
-    /// Production-only data-directory lock. Spawned Git commits inherit a
-    /// duplicate of this handle so a replacement backend waits for Git/hooks.
-    pub data_dir_lock: Option<Arc<std::fs::File>>,
-    /// Workflow Agent steps running with a room capability (KT-793).
-    pub workflow_step_rooms: Arc<crate::workflows::step_room::WorkflowStepRooms>,
-}
-
-impl AppState {
-    /// Canonical factory for an `AppState` — default-initializes every
-    /// runtime field (semaphore, trackers, broadcast channel, cancel
-    /// registry, OAuth2 cache) from the two caller-supplied inputs.
-    ///
-    /// **Use this from every main (backend + desktop) instead of
-    /// constructing `AppState { ... }` inline.** Struct-literal
-    /// construction got us bitten in 0.5.0: when the `oauth2_cache`
-    /// field was added to `AppState`, `backend::main` was updated but
-    /// `desktop/src-tauri/main` was missed — the backend crate
-    /// compiled, `cargo tauri build` broke all 4 desktop OS targets at
-    /// release time. A single factory makes drift impossible. Tests
-    /// also use this (via `test_state()`) so the happy path is always
-    /// exercised.
-    pub fn new_defaults(
-        config: Arc<RwLock<AppConfig>>,
-        db: Arc<Database>,
-        max_agents: usize,
-    ) -> Self {
-        let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::models::WsMessage>(256);
-        // Nothing else holds the fresh config yet.
-        let (p2p_enabled, key) = config
-            .try_read()
-            .map(|config| (config.server.p2p_enabled, config.encryption_secret.clone()))
-            .unwrap_or((false, None));
-        db.assistant_guard().set_key(key);
-        let ws_broadcast = Arc::new(ws_tx);
-        let live_runs: Arc<crate::agents::run_progress::LiveRuns> = Arc::default();
-        Self {
-            p2p: Arc::new(P2pGate::new(p2p_enabled)),
-            config,
-            db,
-            agent_semaphore: Arc::new(Semaphore::new(max_agents)),
-            audit_tracker: Arc::new(Mutex::new(AuditTracker::default())),
-            ws_broadcast: ws_broadcast.clone(),
-            cancel_registry: Arc::new(Mutex::new(HashMap::new())),
-            agent_runtime_registry: Arc::new(Mutex::new(HashSet::new())),
-            live_runs: live_runs.clone(),
-            execution_resumes: Arc::new(Mutex::new(HashSet::new())),
-            oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            git_language_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            agent_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
-            docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
-            ollama_base_url_override: None,
-            ollama_registry_override: None,
-            data_dir_lock: None,
-            workflow_step_rooms: Arc::new(
-                crate::workflows::step_room::WorkflowStepRooms::publishing(ws_broadcast, live_runs),
-            ),
-        }
-    }
-
-    pub fn with_data_dir_lock(mut self, data_dir_lock: std::fs::File) -> Self {
-        self.data_dir_lock = Some(Arc::new(data_dir_lock));
-        self
-    }
-
-    pub fn with_ollama_base_url(mut self, base_url: impl Into<Arc<str>>) -> Self {
-        self.ollama_base_url_override = Some(base_url.into());
-        self
-    }
-
-    pub fn with_ollama_registry(
-        mut self,
-        registry: Arc<crate::core::ollama_registry::OllamaRegistry>,
-    ) -> Self {
-        self.ollama_registry_override = Some(registry);
-        self
-    }
-}
-
-pub struct AgentRuntimeGuard {
-    registry: Arc<Mutex<HashSet<String>>>,
-    key: String,
-}
-
-impl AgentRuntimeGuard {
-    pub fn insert(registry: &Arc<Mutex<HashSet<String>>>, key: impl Into<String>) -> Self {
-        let key = key.into();
-        if let Ok(mut entries) = registry.lock() {
-            entries.insert(key.clone());
-        }
-        Self {
-            registry: registry.clone(),
-            key,
-        }
-    }
-}
-
-impl Drop for AgentRuntimeGuard {
-    fn drop(&mut self) {
-        if let Ok(mut entries) = self.registry.lock() {
-            entries.remove(&self.key);
-        }
-    }
-}
-
-/// Helpers to manage the cancel registry without leaking mutex details all
-/// over the code. Keep this file-local so the registry convention stays
-/// consistent (RAII-style insertion + cleanup on drop).
-pub struct CancelGuard {
-    registry: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
-    key: String,
-    pub token: tokio_util::sync::CancellationToken,
-}
-
-impl CancelGuard {
-    /// Atomically reserve `key` only when no run is already registered.
-    ///
-    /// Peer-agent messages can arrive concurrently. Their native-run
-    /// dispatcher uses this variant so two nearly-simultaneous replies do
-    /// not start two local agents for the same discussion.
-    pub fn try_insert(
-        registry: &Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
-        key: impl Into<String>,
-    ) -> Option<Self> {
-        let key = key.into();
-        let token = tokio_util::sync::CancellationToken::new();
-        let mut map = registry.lock().ok()?;
-        if map.contains_key(&key) {
-            return None;
-        }
-        map.insert(key.clone(), token.clone());
-        drop(map);
-        Some(Self {
-            registry: registry.clone(),
-            key,
-            token,
-        })
-    }
-
-    /// Register a new cancellation token under `key`, returning a guard that
-    /// automatically removes it from the registry when dropped. If a token
-    /// already exists under this key (e.g. the user retried a run that never
-    /// cleaned up), it's silently replaced — the old token stays dangling
-    /// but is no longer reachable, which is fine since CancellationToken is
-    /// Arc-based and will be dropped when its last holder goes away.
-    pub fn insert(
-        registry: &Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
-        key: impl Into<String>,
-    ) -> Self {
-        let key = key.into();
-        let token = tokio_util::sync::CancellationToken::new();
-        if let Ok(mut map) = registry.lock() {
-            map.insert(key.clone(), token.clone());
-        }
-        Self {
-            registry: registry.clone(),
-            key,
-            token,
-        }
-    }
-}
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        if let Ok(mut map) = self.registry.lock() {
-            // Simple remove-by-key: if a later registration replaced this one
-            // before Drop runs (rare race), we'd wipe the fresh entry — but
-            // that scenario doesn't happen in practice since a disc_id/run_id
-            // is only active in one task at a time. If it ever does, the
-            // user's ⏹ button would briefly no-op until the next request.
-            map.remove(&self.key);
-        }
-    }
 }
 
 // ─── Auth Middleware ─────────────────────────────────────────────────────────
@@ -748,8 +515,11 @@ async fn auth_middleware(
     // a remote peer has no bearer token. It self-authenticates via its invite
     // code in the body, validated against our contacts in the handler (same
     // trust model as the WS Presence handshake).
+    // `/api/contacts/pair` is the same: a peer completing a pairing has no token
+    // yet, and the handler only accepts a live pairing code.
     if request.uri().path() == "/api/disc/claim-by-token"
         || request.uri().path() == "/api/disc/fetch-file"
+        || request.uri().path() == "/api/contacts/pair"
     {
         // These answer remote peers; a Kronn-launched agent's token never.
         if carries_bridge_token(&headers) {
@@ -895,17 +665,6 @@ fn auth_locked_refusal(proxy_fronted: bool) -> axum::response::Response {
         .into_response()
 }
 
-/// The credential of an `Authorization: Bearer …` header, the scheme matched
-/// case-insensitively (RFC 7235).
-pub(crate) fn bearer_credential(headers: &HeaderMap) -> Option<&str> {
-    let value = headers.get("authorization")?.to_str().ok()?.trim();
-    let (scheme, credential) = value.split_once(char::is_whitespace)?;
-    scheme
-        .eq_ignore_ascii_case("bearer")
-        .then(|| credential.trim())
-        .filter(|credential| !credential.is_empty())
-}
-
 /// Whether the Authorization header carries a bridge token, in any form.
 fn carries_bridge_token(headers: &HeaderMap) -> bool {
     headers
@@ -1019,6 +778,9 @@ async fn trust_confirm_gate(
             own_discussions: grant.own_discussions(),
             own_run: grant.scope.workflow_run_id.clone(),
             agent: grant.scope.agent.clone(),
+            room_agent_of: grant.scope.room_grant_discussions.clone(),
+            own_execution: grant.scope.task_execution_id.clone(),
+            own_sessions: grant.own_sessions(),
         });
     next.run(axum::extract::Request::from_parts(
         parts,
@@ -1065,6 +827,9 @@ async fn strong_code_gate(
             own_discussions: grant.own_discussions(),
             own_run: grant.scope.workflow_run_id.clone(),
             agent: grant.scope.agent.clone(),
+            room_agent_of: grant.scope.room_grant_discussions.clone(),
+            own_execution: grant.scope.task_execution_id.clone(),
+            own_sessions: grant.own_sessions(),
         });
     parts
         .extensions
@@ -1368,29 +1133,6 @@ fn request_is_local_ip(headers: &HeaderMap, request: &axum::extract::Request) ->
     false
 }
 
-/// Check if an IP address is local (localhost or Docker internal network).
-/// Docker bridge uses 172.16-31.x.x; the host accesses the gateway from
-/// an IP like 172.18.0.1. Peers connect from Tailscale (100.x), LAN (192.168.x),
-/// or public IPs — those are NOT local.
-///
-/// Strings only — HTTP source IPs always arrive as numeric strings
-/// (axum's `SocketAddr::ip()` already resolves hostnames upstream).
-/// We previously matched "localhost" defensively, but that opened a
-/// tiny attack surface where a misconfigured nginx could forge
-/// `X-Real-IP: localhost` to bypass auth. Numeric-only is safer.
-pub(crate) fn is_local_ip(ip: &str) -> bool {
-    if ip == "127.0.0.1" || ip == "::1" {
-        return true;
-    }
-    // Docker bridge: 172.16.0.0/12
-    if let Some(rest) = ip.strip_prefix("172.") {
-        if let Some(second) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
-            return (16..=31).contains(&second);
-        }
-    }
-    false
-}
-
 // ─── CORS ────────────────────────────────────────────────────────────────────
 
 /// Build CORS layer based on config domain.
@@ -1403,38 +1145,6 @@ fn redacted_request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
         uri = %logged_uri(request.uri()),
         version = ?request.version(),
     )
-}
-
-/// The part of a request URI that may be logged: the path, never the query.
-pub(crate) fn logged_uri(uri: &axum::http::Uri) -> &str {
-    uri.path()
-}
-
-/// Browser origins of the local frontend, for CORS and the WS Origin check.
-/// The nginx gateway ports exist only in the Docker deployment: a desktop or
-/// native backend on another port must not trust a page served there.
-pub(crate) fn frontend_origins(domain: &Option<String>, port: u16, in_docker: bool) -> Vec<String> {
-    match domain {
-        Some(d) => vec![
-            format!("https://{}", d),
-            format!("http://{}", d),
-            format!("https://{}:{}", d, port),
-            format!("http://{}:{}", d, port),
-        ],
-        None => {
-            let mut origins = vec![
-                format!("http://localhost:{}", port),
-                format!("http://127.0.0.1:{}", port),
-            ];
-            if in_docker {
-                for gateway in [3140, 3141] {
-                    origins.push(format!("http://localhost:{gateway}"));
-                    origins.push(format!("http://127.0.0.1:{gateway}"));
-                }
-            }
-            origins
-        }
-    }
 }
 
 /// The listed local origins, plus — read from the live config on each request,
@@ -1530,6 +1240,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/pages/{id}/export",
             get(api::artifact_portability::export),
         )
+        .route("/api/pages/{id}/data", get(api::live_pages::data))
         .route("/api/pages/{id}/revisions", get(api::live_pages::revisions))
         .route(
             "/api/pages/{id}/revisions/{revision_id}",
@@ -1540,6 +1251,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/workflows/{id}/shadow/promote",
             post(api::workflows::promote_shadow),
+        )
+        .route(
+            "/api/workflows/{id}/runs/{run_id}/step-shadows",
+            get(api::workflows::run_step_shadows),
         )
         .route(
             "/api/pages/{id}/publications",
@@ -1555,7 +1270,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/pages/{id}/html",
-            put(api::live_pages::update_html)
+            put(api::live_pages::update_html_route)
                 .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route(
@@ -1742,12 +1457,29 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_workers_config).post(api::setup::save_workers_config),
         )
         .route(
+            "/api/config/workers/first-build-env-secs",
+            get(api::setup::get_first_build_env_secs),
+        )
+        .route(
             "/api/config/scan-depth",
             get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
         )
         .route(
             "/api/config/agent-concurrency",
             post(api::setup::set_agent_concurrency),
+        )
+        .route(
+            "/api/discussions/{id}/fallback",
+            get(api::discussions::agent_fallback_override::get_discussion_fallback)
+                .put(api::discussions::agent_fallback_override::set_discussion_fallback),
+        )
+        .route(
+            "/api/config/agent-fallback",
+            get(api::setup::get_agent_fallback).post(api::setup::set_agent_fallback),
+        )
+        .route(
+            "/api/config/connection-fallback",
+            axum::routing::post(api::setup::set_connection_fallback),
         )
         .route(
             "/api/config/agent-access",
@@ -1817,7 +1549,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/planning/tasks/{id}/dod/{dod_id}",
-            patch(api::planning::update_dod_item),
+            patch(api::planning::update_dod_item_as),
         )
         .route(
             "/api/planning/tasks/{id}/discussions",
@@ -1860,6 +1592,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects", get(api::projects::list))
         .route("/api/projects", post(api::projects::create))
         .route("/api/projects/scan", post(api::projects::scan))
+        .route(
+            "/api/projects/scan/hide",
+            post(api::projects::hide_scanned_repo),
+        )
         .route("/api/projects/add-folder", post(api::projects::add_folder))
         .route("/api/projects/bootstrap", post(api::projects::bootstrap))
         .route("/api/projects/clone", post(api::projects::clone_project))
@@ -2192,6 +1928,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/workspace",
             get(api::projects::get_project_workspace).put(api::projects::set_project_workspace),
         )
+        // KT-1750 — what the repository says about who commits and whether
+        // to sign off, and what Kronn commits with.
+        .route(
+            "/api/projects/{id}/commit-policy",
+            get(api::projects::commit_policy::get),
+        )
         // 0.8.6 (#27) — autocomplete picker source for the
         // linked-repos drawer. Returns other Kronn-known projects
         // sorted by proximity.
@@ -2493,6 +2235,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/mcps/registry", get(api::mcps::list_registry))
         .route("/api/mcps/refresh", post(api::mcps::refresh))
         .route("/api/mcps/test-all", post(api::mcps::test_all_configs))
+        .route("/api/mcps/check-tokens", post(api::mcps::check_all_tokens))
         .route(
             "/api/mcps/bundles/preview",
             post(api::plugin_portability::preview_plugin_bundle),
@@ -2519,6 +2262,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/mcps/configs/{id}/probe",
             post(api::mcps::probe_config),
+        )
+        .route(
+            "/api/mcps/configs/{id}/check-token",
+            post(api::mcps::check_token),
         )
         .route(
             "/api/mcps/servers/{server_id}/access-policy",
@@ -3194,7 +2941,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // Not scoped by id — the disc identity is what the token resolves to.
         .route(
             "/api/discussions/peer-join",
-            post(api::disc_invite::peer_join),
+            post(api::disc_invite::peer_join_as),
         )
         .route(
             "/api/discussions/workflow-step-join",
@@ -3527,6 +3274,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::contacts::list).post(api::contacts::add),
         )
         .route("/api/contacts/invite-code", get(api::contacts::invite_code))
+        .route(
+            "/api/contacts/pairing-offer",
+            post(api::contacts::pairing_offer),
+        )
+        // Auth-exempt (see auth_middleware): gated on a live pairing code.
+        .route("/api/contacts/pair", post(api::contacts::pair))
         .route(
             "/api/contacts/network-info",
             get(api::contacts::network_info),
@@ -4416,7 +4169,7 @@ mod startup_config_tests {
 
     #[test]
     fn the_public_startup_arms_the_real_mode_flag_and_no_entry_point_does_it_alone() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = std::path::Path::new(crate::BACKEND_DIR).join("..");
         let lib = std::fs::read_to_string(root.join("backend/src/lib.rs")).unwrap();
         assert!(
             lib.contains("crate::core::anti_halluc::set_mode,\n    )\n    .await"),
@@ -4433,7 +4186,7 @@ mod startup_config_tests {
 
     #[test]
     fn every_entry_point_loads_its_config_through_the_shared_startup() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = std::path::Path::new(crate::BACKEND_DIR).join("..");
         for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
             let source = std::fs::read_to_string(root.join(entry)).unwrap();
             assert!(
@@ -4449,7 +4202,7 @@ mod startup_config_tests {
 
     #[test]
     fn every_entry_point_arms_the_project_docs_locations() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = std::path::Path::new(crate::BACKEND_DIR).join("..");
         for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
             let source = std::fs::read_to_string(root.join(entry)).unwrap();
             assert!(
@@ -4483,3 +4236,75 @@ mod startup_config_tests {
         assert_eq!(resolved, std::path::Path::new(&path).join(".ai"));
     }
 }
+
+// Tests of lower modules that need this layer.
+#[cfg(test)]
+#[allow(non_snake_case)] // <module path>__<test module>
+mod uptests {
+    #[cfg(all(test, feature = "full-tests"))]
+    mod agents__runner_test__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__audit__agent_launch__acp_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__audit__agent_launch__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__audit__briefing_docs__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__audit__cross_audit__tests;
+    #[cfg(test)]
+    mod api__audit__run__docs_writer_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__live_page_actions__trust_api_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__live_pages__dataset_api_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__mcps__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__orchestration__tests;
+    #[cfg(test)]
+    mod api__projects__crud__lane_registry_wiring_test;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__projects__docker__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__resource_refs__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__setup__default_docs_dir_tests;
+    #[cfg(test)]
+    mod api__setup__lane_snapshot_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__setup__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__setup__workers_config_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__trust__trust_gate_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__workflows__readiness_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api_tests__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__audit_validation__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__credential_store__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__rtk_state__rtk_state_test;
+    #[cfg(test)]
+    mod core__strong_confirm__strong_confirm_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__usage__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__discussions_test__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__external_api_connections__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__live_page_action_trusts__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__live_page_actions__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__live_page_datasets__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__delegate_subtasks_step__tests;
+}
+
+// This crate's test build is a unit-test binary for the crates below it.
+#[cfg(test)]
+inventory::submit! { crate::core::test_mode::UnitTestBinary }

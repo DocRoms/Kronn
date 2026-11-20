@@ -1,91 +1,22 @@
-pub mod activity;
-pub mod agent_api;
-pub mod agent_jobs;
-pub mod agent_tools;
+//! HTTP handlers, one module per domain.
+//!
+//! This file declares the `api` modules of the lowest crate. The crates above
+//! declare theirs in their root file (`layer1.rs` to `layer3.rs`, `lib.rs`)
+//! and re-export the ones below, so `crate::api::<module>` reads the same in
+//! every crate: docs/architecture/backend-crates.md.
+//!
+//! `docs/conventions/agents-md-format-v1.md` is a spec installed in user
+//! projects and its bytes are pinned (a change is a template update for every
+//! project). It uses this file as its example of a citation: line 14, lines
+//! 14-22, and the name `context_audit` within them. Keep these lines here.
+//!
+//! Where a module is declared says which crate compiles it:
+//! - `context_audit`, the spec's example, is declared in `lib.rs`: it belongs
+//!   to the top crate, which sees every layer;
+//! - the modules listed below belong to the lowest crate;
+//! - any other one belongs to the crate whose root file names it.
+//!
+//! A module moves between crates by moving its `pub mod` line; the size of
+//! each crate is capped (`backend/scripts/ci/crate_size.py`).
+
 pub mod agent_workspace_structure;
-pub mod agent_workspace_tools;
-pub mod agents;
-pub mod ai_docs;
-pub mod api_call_logs;
-pub mod artifact_portability;
-pub mod assistant_conversations;
-pub mod audit;
-pub mod bundle;
-pub mod cli_telemetry;
-pub mod comfyui;
-pub mod compare;
-pub mod contacts;
-pub mod context_audit;
-pub mod contribution;
-pub mod debug;
-pub mod default_contents;
-pub mod delivery_publication;
-pub mod desktop_port;
-pub mod directives;
-pub mod disc_git;
-pub mod disc_helpers;
-pub mod disc_introspection;
-pub mod disc_invite;
-pub mod disc_portability;
-pub mod disc_prompts;
-pub mod disc_source;
-pub mod disc_workspace;
-pub mod discover;
-pub mod discussion_actions;
-pub mod discussion_important;
-pub mod discussion_questions;
-pub mod discussion_scope;
-pub mod discussion_video_sequence;
-pub mod discussion_weight;
-pub mod discussions;
-pub mod disk;
-pub mod docs;
-pub mod execution_variables;
-pub mod external_api_connections;
-pub mod federation;
-pub mod git_ops;
-pub mod github_connection;
-pub mod health;
-pub mod human_credentials;
-pub mod id_resolver;
-pub mod learnings;
-pub mod lite_llm;
-pub mod live_page_actions;
-pub mod live_pages;
-pub mod maintenance;
-pub mod mcp_remote;
-pub mod mcps;
-pub mod media;
-pub mod media_reference_settings;
-pub mod media_request_guard;
-pub mod model_catalog;
-pub mod nvidia;
-pub mod ollama;
-pub mod openapi;
-pub mod orchestration;
-#[cfg(all(test, feature = "full-tests"))]
-pub(crate) mod other_projects_fixture;
-pub mod planning;
-pub mod plugin_portability;
-pub mod profiles;
-pub mod projects;
-pub mod quick_apis;
-pub mod quick_execs;
-pub mod quick_prompts;
-pub mod resource_refs;
-pub mod rtk;
-pub mod rtk_state;
-pub mod setup;
-pub mod shared_runs;
-pub mod signal_catalog;
-pub mod skills;
-pub mod stats;
-pub mod strong_confirm;
-pub mod themes;
-pub mod trust;
-pub mod ui_preferences;
-pub mod usage;
-pub mod user_context;
-pub mod version;
-pub mod workflows;
-pub mod ws;

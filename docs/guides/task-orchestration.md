@@ -17,8 +17,10 @@ This page is the operator workflow.
    brief.
 2. Attach the discussion to a registered project repository. Kronn refuses to
    provision an unmanaged or unresolved path.
-3. Select a committed base SHA and preserve unrelated workspace changes. The
-   child is pinned to that SHA; it never edits the parent checkout. Integration
+3. Name the integration branch (`base_rev`), or launch from a room that
+   declares one. The child is pinned to that branch's commit; it never edits
+   the parent checkout. Kronn never defaults to `main`; see
+   [Where integration happens](#where-integration-happens). Integration
    requires the selected target branch's checked-out worktree to be clean, not
    every checkout of the project; a target no worktree has checked out has
    nothing to keep clean.
@@ -47,6 +49,53 @@ Validation commands belong to the principal's launch policy. Kronn persists
 them on both campaign runs and the implicit run created by a single-task
 `task_exec_launch`; a worker manifest can report observations but cannot add,
 remove or replace these gates.
+
+### Where integration happens
+
+An integration advances the target branch, and a checkout that holds that
+branch is written to. So the target is never the owner's working checkout, and
+never `main` by default:
+
+- **The target is explicit or declared.** A launch takes the branch from
+  `base_rev`. Without one it takes the integration branch its room declares: the
+  `target_branch` of the room's active campaign (for example `integ/0.15.x`).
+  With neither, the launch is refused with `integration_target_undeclared`; it
+  does not fall back to `main`.
+- **The checkout holding the target must be Kronn's.** A target checked out
+  nowhere is advanced by a ref compare-and-swap that touches no checkout. One
+  checked out in a Kronn-owned worktree is advanced inside it. A worktree is
+  Kronn's when it sits under `<repo>/.kronn/worktrees`, under Kronn's autoCode
+  root (`~/.kronn/autocode-worktrees`), under a folder listed in Settings >
+  Workers (`managed_worktree_roots`, absolute paths) or in the project's
+  workspace settings, or when Kronn's workspace registry records it (a managed
+  discussion workspace or a workflow run). One checked out in the project's own
+  working checkout is refused with `integration_target_owner_checkout`, even if
+  the registry knows the path, and one checked out in any other worktree with
+  `integration_target_foreign_worktree`. Those checkouts hold files the owner
+  is working on, and fast-forwarding `main` there would also land a change
+  without going through the pull request.
+- **A managed worktree in use is not advanced.** If a run still uses the
+  worktree that holds the target (an unfinished workflow run, an unfinished task
+  execution, or a pending or running agent dispatch of its discussion), the
+  integration is refused with `integration_target_busy_worktree`, naming the
+  run, and nothing is changed. The execution parks like any refused
+  integration; resume it once the run has finished.
+- **The refusal comes at preflight and launch.** `task_exec_prepare` accepts the
+  `base_rev` you will launch with (or checks the room's declared branch) and
+  answers `launchable: false` with the same code; `task_exec_launch` refuses it
+  before an execution, a child room or a worktree exists. It is not discovered
+  at integration.
+- **The status shows where it will land.** `task_exec_status` carries
+  `target_branch`, `integration_worktree` (the worktree holding the branch,
+  absent when none does) and `integration_target_state` (`kronn_worktree`,
+  `not_checked_out`, `owner_checkout`, `foreign_worktree` or `unresolved`); the
+  `full` view has them as `target_branch` and `integration_target`. A wrong
+  target reads there before the integration, not at it.
+
+To integrate somewhere the owner is not working, create the integration branch
+and leave it checked out nowhere (or in a worktree under
+`<repo>/.kronn/worktrees`), then declare it on the campaign or pass it as
+`base_rev`.
 
 ### Default validations: fmt + clippy + targeted lib tests
 
@@ -124,6 +173,20 @@ execution boundary according to the worker transport:
   cannot proceed without such a bypass, the task fails visibly and can be
   reassigned; Kronn does not trade confinement for apparent progress.
 
+Every git command Kronn runs on a worker's worktree (inspect, stage, commit,
+merge, abort, doc re-anchoring) runs in Kronn's process, not the worker's
+sandbox. It is therefore built by one function that pins the repository to the
+registered project checkout (never to the worktree's own `.git` file, which the
+worker could redirect), gives git no hook, file-system monitor or signing
+program (so no program a worker names can run), and refuses with `WorktreeTampered` when the pointer was
+changed; the worker cannot write that file in the first place. The project's
+`worker_commit_hooks` setting (`off` by default, or `sandboxed`; a hook never runs
+as the host user)
+decides which gating hook Kronn itself runs, and a refusing hook is reported as
+`HookRefused` with its output, not as a conflict; `commit-msg` checks other than
+the DCO sign-off Kronn adds are not run. See
+[worker-commit-hooks](../operations/worker-commit-hooks.md).
+
 Sandbox startup failure is a launch failure, not a reason to run unsandboxed.
 Likewise, delivery is accepted only through the execution-scoped capability and
 against the exact managed branch/HEAD.
@@ -160,10 +223,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:10967-10971#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:10973-11022#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:9378-9402#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:40014-40115#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:12061#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:12098-12122#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:10107-10131#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration_tests_up.rs:22184-22294#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -171,11 +234,43 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:499-515#agent_handoff_paid_limit]
-[src: file: backend/src/db/discussions.rs:1702-1703#MAX_AGENT_HANDOFF_DEPTH]
+[src: file: backend/src/models/setup.rs:1070-1086#agent_handoff_paid_limit]
+[src: file: backend/src/db/discussions.rs:1703-1704#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1711-1746#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
 [src: file: backend/src/db/discussions.rs:2020-2063#already_scheduled]
+
+### Warming, queueing and which clock applies
+
+A launch goes through several waits before the worker's first tool call. Only
+the last one is the worker's own; the others are Kronn's, so the silent-worker
+clock (KT-1247) does not run during them (KT-1689).
+
+| Phase | Execution status | What shows in the status | Clock |
+| --- | --- | --- | --- |
+| Worktree creation, lane provisioning, seed clone, lane seeds | `Provisioning` | `phase: warming`, the `warming_steps` | None: the activity clock only expires a `Working` execution. |
+| Build-slot wait (`gate_wait`, up to the first-build timeout, 60 min by default) and lane first build (`first_build`, up to the first-build timeout) | `Provisioning` | `warming_steps` with their durations | None, same reason. A long wait or a 24-min build never counts as inactivity. |
+| Toolchain smoke check, brief, dispatch | `Provisioning` → `Working` | `smoke_check` step | None until the dispatch exists. |
+| Queued for a worker slot (task-worker cap, agent or host caps) | `Working`, dispatch `Pending` | `phase: queued`, reason `task_worker_limit:<running>/<cap>`, queue position | **Queue deadline** only (below). The activity clock is suspended while the dispatch is `Pending`. |
+| Worker's turn: claimed, agent started, tool calls, messages, commits | `Working`, dispatch `Running` | `launching`, `tool_activity`, `upstream_wait` | **Activity clock**: 20 min without a tool call, message, commit or delivery interrupts the execution (`activity_timeout`, resumable). It starts at the claim of the dispatch, not at its creation, and a single tool call in flight counts as activity up to its cap. |
+
+The activity clock default is 20 minutes
+(`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
+wins). A tool call in flight (a cold build run by the worker itself) is activity
+up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
+[src: file: backend/src/db/orchestration.rs:8135-8140#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+
+**Queue deadline.** An execution queued longer than the queue deadline is
+reported, never interrupted: the principal room receives one orchestration
+event per dispatch naming the reason (`task_worker_limit:2/2`) and the queue
+position, with the options (keep waiting, free a slot, take over). The execution
+stays `Working` and its dispatch stays queued; it starts when a slot frees. The
+deadline is 6 hours by default and is set host-wide with
+`KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
+falls back to the default). It counts from the creation of the queued dispatch.
+A resumed execution queues a new dispatch and gets its own deadline.
+[src: file: backend/src/db/orchestration.rs:8168-8171#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8179-8181#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -208,9 +303,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:2301-2329#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:2723-2743#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:2668-2721#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2796-2824#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:3594-3614#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:3539-3592#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -224,7 +319,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2640-2647#integration_target]
+[src: file: backend/src/core/worktree.rs:3215-3222#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -273,11 +368,81 @@ integration branch stays green on the strict `docs_citations_resolve_in_the_repo
 test without a release-time sweep. A citation the lane breaks for good (symbol
 removed or renamed) is the lane's to fix; the worker brief says so. The merge a
 worker finishes with `task_exec_commit` runs the same settlement.
-[src: file: backend/src/core/worktree.rs:2378-2482#build_candidate_detailed]
-[src: file: backend/src/core/worktree.rs:2517-2580#settle_branch_docs]
-[src: file: backend/src/core/docs_citations/merge.rs:306-322#resolve_anchor_only_conflicts]
-[src: file: backend/src/core/docs_citations/merge.rs:685-745#newly_unresolved]
+[src: file: backend/src/core/worktree.rs:2839-2943#build_candidate_detailed]
+[src: file: backend/src/core/worktree.rs:3063-3126#settle_branch_docs]
+[src: file: backend/src/core/docs_citations/merge.rs:318-334#resolve_anchor_only_conflicts]
+[src: file: backend/src/core/docs_citations/merge.rs:747-807#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]
+
+### The worker's own commit settles the citations its code shifted
+
+A worker that adds lines to a file many docs cite (`backend/src/api/orchestration.rs`
+is the usual one) moves anchors in docs it never opened, and it does not run the
+strict gate. Waiting for the integration to bounce those citations cost a whole
+review round (KT-1721: 79 and 105 unresolved on two lanes). So every plain
+`task_exec_commit` (and `git_commit` for an HTTP agent) is followed, in the same
+call, by the repo-wide re-anchoring against the execution's pinned base:
+
+1. every citation of every doc whose cited file the branch changed since the base,
+   not only the docs in the commit, is re-pointed under the integration's rules (a
+   `#symbol` the file defines once is placed whatever the distance, also when the
+   cited range now lies past the end of a file that shrank (KT-1684); the history
+   of the base, the previous commit and the branch settles the rest);
+2. the re-pointed docs are committed on their own (`Re-anchor doc citations moved
+   by the worker's code`) and listed under `doc_citations.reanchored`;
+3. a citation the evidence cannot place, or whose symbol was removed, stays as it
+   is and is listed under `doc_citations.unresolved` (with `unresolved_count`),
+   limited to what resolved on the base and no longer does. The worker points
+   those by hand, commits the doc, and only then delivers.
+
+A doc or a cited file with unstaged changes defers the re-anchoring
+(`doc_citations.reanchor_deferred`) rather than sweeping work in progress; the
+next commit re-anchors. A commit that finishes a merge keeps the merge's own
+settlement above.
+[src: file: backend/src/api/agent_workspace_tools.rs:762-789#git_commit_payload_reanchoring_docs]
+[src: file: backend/src/core/docs_citations/merge.rs:650-662#reanchor_branch_leaving_unplaced]
+
+### Who a bridge token can be
+
+The `task_exec_*` tools name their caller in the request body: a joined
+session, or the room's own agent during its turn. Both are facts any reader of
+the room sees, so for an agent Kronn launched the body is only a claim and the
+launch's own bridge token decides the role (KT-1962):
+
+- **Principal** (prepare, launch, status, resume, cancel, reassign, review):
+  the grant runs in the execution's parent room, does not own the worker's
+  room and was not minted for that execution. The room-agent identity also
+  wants the grant of that room's agent, launched with the provider the turn
+  names (a grant that names no launched agent is refused); a workflow step or another launch hosted in the room is a principal
+  by its own joined session only. Any other grant gets the answer of an
+  unknown execution, and a review it sends pins no principal session.
+- **Principal beside its worker**: when the worker is a CLI session of the
+  principal's own room (it accepted an offer and works from there), a grant of
+  that room may be the worker's. The session a token names as the principal's
+  must then be one that very launch joined or resumed through the bridge
+  (`peer-join`, `peer-resume`, the workflow step join); a co-member that only
+  read the session id is refused, and the worker's own session never makes it
+  the principal. For the same reason a token joins a room (`peer-join`) as a session
+  already active somewhere only when its own launch holds it: an invite and a
+  session id read in a room would otherwise hand out that session's resume
+  credential, or end it where it is and make the caller its holder. The same
+  holds for a room joined through a contact. And the launch that holds the
+  worker's session is the worker, whatever other session it joined and names.
+  Known limit: a new launch in that room that holds neither session is a room
+  member like any other, so a principal by design. A session held
+  elsewhere answers « not yours to take »; its bridge resumes it by itself. A
+  caller without a token (a host CLI) joins as before.
+- **Worker**: a spawned worker (deliver, commit, status) is the grant minted
+  for that execution and no other, even one that runs in the worker's room. A
+  worker that names its joined session (deliver, review) holds a grant minted
+  for that execution, or one that runs in the room this session is joined to.
+- **Offer**: a grant accepts an offer only for a session that runs in one of
+  its own rooms.
+
+A host CLI and the web UI carry no such token and are judged on the declared
+identity alone, as before. A principal whose token adopted the child room is
+refused like a worker: it acts through a token that owns only the parent room,
+or through the human UI.
 
 ### A DoD item the principal checks live, after integration
 
@@ -301,6 +466,25 @@ it: a worker's own session, an HTTP agent and an anonymous agent are refused.
   (`completed: true` and non-empty `evidence`). A bare tick is refused, as is
   ticking it through a `definition_of_done` replace, and downgrading it to a
   worker check in the same write that ticks it. The task closes on the last pending live check of an integrated execution.
+  A human ticks it in Kronn (plan panel or Planning page), which asks for the
+  proof and sends it as `evidence`. The same actors may tick once the execution
+  is over; an agent bound to another room is refused and asks the human.
+  The bridge proves the principal with the identity the `task_exec_*` tools
+  send, derived by the bridge and never named by the model (KT-1954): the
+  session joined to the execution's parent room, or the room's own agent during
+  its turn. A room agent's identity is made of facts any reader of the room
+  sees, so with a bridge token the grant itself must be the principal's: it
+  is the parent room's agent (a workflow step or another launch hosted there
+  is not) and does not own the worker's room. A session id is also a fact
+  the journal shows: on any planning write a bridge token's actor session is
+  marked as a claim that authorises nothing, and the joined-session proof holds
+  only for a grant that runs in the parent room and not in the worker's (a
+  workflow step that joined that room is a principal by its own session). The
+  worker's session, a session of the worker's room, another task's worker and a
+  bridge with no identity stay refused. The proof is
+  asked for a live check only, and the journal names the identity that was
+  proven. Before 0.15.3 the tick carried no joined
+  session, so every agent principal was refused its own check.
 - Unticking a live check (by `task_update_dod` or an array replace, principal or
   human only) clears its evidence, and a `done` task goes back to `in_progress`:
   the proof is owed again and the stale one cannot re-tick it.
@@ -481,6 +665,24 @@ response to provider quota/rate limits. Provider, tier, explicit model and
 profile change together; Kronn refuses the reassignment if it cannot update the
 durable child discussion that the runtime will actually execute.
 
+**Automatic fallback of a task worker (KT-1713).** When the worker's provider
+refuses a turn for a quota, a rate limit or a missing login and its agent has a
+fallback configured, Kronn reassigns the execution to that fallback in the same
+child room and worktree, and the parent room says « Task worker execution
+<id>: … → continued with … ». Two rules:
+
+- Codex is never chosen for it: its sandbox cannot write the linked worktree's
+  git directory, so it could not merge the target, commit or deliver. The room
+  names this reason when no other fallback can take over, and you reassign
+  yourself.
+- The move lasts as long as the quota window. Once it has ended, resuming the
+  execution (or the periodic quota sweep) hands it back to the worker you
+  declared, and the room says « … back on its declared worker … » instead of
+  redispatching the fallback. Reassigning by hand ends this memory.
+
+See [agent-fallback-chain](../operations/agent-fallback-chain.md#task-workers-kt-1713)
+for the mechanism.
+
 ## Resolve common failures
 
 | Symptom | Safe response |
@@ -490,6 +692,9 @@ durable child discussion that the runtime will actually execute.
 | Target branch moved | Refresh/relaunch against the new target; Kronn will not overwrite it. |
 | Dirty target worktree | Intentionally preserve or commit changes in the selected target branch's checkout, then retry integration. Do not move unrelated files from another checkout. |
 | Target checked out in several worktrees, or not a local branch | Leave at most one checkout of the pinned local target branch, and make sure the target is a branch, not a tag or SHA, before retrying; Kronn does not choose or switch a branch for you. |
+| `integration_target_undeclared`, `integration_target_owner_checkout` or `integration_target_foreign_worktree` at preflight or launch | Name an integration branch (`base_rev`) or declare one on the room's campaign, and pick one that is checked out nowhere or in a Kronn-owned worktree. Kronn never integrates into the owner's checkout or defaults to `main`. |
+| `integration_target_busy_worktree` at integration | The named run still uses the worktree that holds the target. Let it finish (or cancel it), then resume the integration; nothing was moved. |
+| `integration_target_foreign_worktree` for a worktree Kronn itself created elsewhere | Add its parent folder to Settings > Workers > Managed worktree folders (or to the project's workspace settings). |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
 | Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, set the task back to `todo` (`task_update status=todo`; the cancel keeps its status, usually `in_progress`, and the launch preflight refuses any other status), then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |

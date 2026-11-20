@@ -189,11 +189,15 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getScanIgnore: resolve([]),
       getScanDepth: resolve(2),
       getDefaultDocsDir: resolve(null),
+      getFirstBuildEnvSecs: resolve(null),
       saveDefaultDocsDir: resolve(null),
-      getWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256 }),
-      saveWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256 }),
+      getWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] }),
+      saveWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] }),
       getAgentAccess: resolve({ agents: {} }),
       getAgentAccessEffective: resolve([]),
+      getAgentFallback: resolve({ chains: [], cooldowns: [], media: [] }),
+      setAgentFallback: resolve({ chains: [], cooldowns: [], media: [] }),
+      setConnectionFallback: resolve({ chains: [], cooldowns: [], media: [] }),
       getModelTiers: resolve({ tiers: {} }),
       getGlobalContext: resolve(''),
       saveGlobalContext: resolve(undefined),
@@ -226,12 +230,21 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       setAgentFiles: resolve({ policy: 'repo' }),
   validationsAccess: resolve({ access: 'sandbox' }),
   setValidationsAccess: resolve({ access: 'sandbox' }),
+      commitPolicy: resolve({
+        settings: { signoff: 'auto' },
+        detected: { name: 'Dev', email: 'dev@corp.example', identity_source: 'repository', signoff: false, signoff_source: 'default' },
+        effective: { name: 'Dev', email: 'dev@corp.example', identity_source: 'repository', signoff: false, signoff_source: 'default' },
+        global_identity: false,
+      }),
+      workspace: resolve(null),
+      setWorkspace: resolve(true),
       laneSeeds: resolve({ seeds: [], source: 'none', copy_enabled: true, adopt_suggested: false, adopted_seeds: [], needs_confirmation: [], secret_findings: [], profile_file_written: false }),
       setLaneSeeds: resolve({ seeds: [], source: 'project', needs_confirmation: [], secret_findings: [], profile_file_written: false }),
       laneSeedCandidates: resolve([]),
       docsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       setDocsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       scan: resolve([]),
+      hideScanned: resolve(undefined),
       create: resolve({}),
       addFolder: resolve({}),
       update: resolve({}),
@@ -483,6 +496,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       nativeAgentMode: resolve({ disabled: false }),
       agentHandoffMode: resolve({ global_enabled: false, disabled: false, unlimited_override: false, effective_enabled: false, paid_limit: 1 }),
       executionVariableRetention: resolve({ global_days: 30, override_days: null, effective_days: 30 }),
+      fallback: resolve({}),
+      setFallback: resolve({}),
       workspaces: resolve([]),
       archive: resolve(undefined),
       unarchive: resolve(undefined),
@@ -551,6 +566,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
 
     workflows: {
       promoteShadow: resolve({}),
+      stepShadows: resolve([]),
       list: resolve([]),
       get: resolve(null),
       unsafeSteps: resolve([]),
@@ -779,7 +795,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     version: {
-      // Default mock = "no update available" so the UpdateBanner stays
+      // Default mock = "no update available" so the update notice stays
       // hidden in tests that don't explicitly opt in. Tests that want
       // to render the banner can override with `up_to_date: false`.
       check: resolve({ current: '0.7.1', latest: null, release_url: null, up_to_date: true }),

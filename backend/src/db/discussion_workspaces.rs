@@ -416,6 +416,96 @@ pub fn list_attached_managed_with_path(conn: &Connection) -> Result<Vec<Discussi
     Ok(rows)
 }
 
+/// Whether Kronn's workspace registry records `path` as one of its own
+/// checkouts (KT-1748): a managed discussion workspace, or the workspace of a
+/// workflow run. Only the exact path counts; an `external` workspace a user
+/// declared stays foreign. A database error answers `false`, never "managed".
+pub fn is_registered_managed_checkout(conn: &Connection, path: &std::path::Path) -> bool {
+    let path = path.to_string_lossy();
+    let known = |sql: &str| {
+        conn.query_row(sql, params![path.as_ref()], |_| Ok(()))
+            .optional()
+            .map(|row| row.is_some())
+            .unwrap_or(false)
+    };
+    known(
+        "SELECT 1 FROM discussion_workspaces WHERE ownership = 'managed' \
+         AND (canonical_path = ?1 OR workspace_path = ?1) LIMIT 1",
+    ) || known("SELECT 1 FROM workflow_runs WHERE workspace_path = ?1 LIMIT 1")
+}
+
+/// Who is using the checkout at `path` right now (KT-1748), as a phrase naming
+/// the run, or `None` when nothing recorded holds it. A holder is: a workflow run
+/// that has not finished, a task execution (other than `own_execution_id`, the
+/// integration asking) that has not reached Done/Failed/Cancelled, or a pending or
+/// running agent dispatch / resume job of the discussion bound to that path.
+/// A run in `waiting_runs` is not a holder: it waits on the caller and writes
+/// nothing meanwhile (KT-1795, a DelegateSubtasks step and its parent runs).
+/// A database error answers "busy": an unreadable registry never says idle.
+pub fn active_holder_of_checkout(
+    conn: &Connection,
+    path: &std::path::Path,
+    own_execution_id: Option<&str>,
+    waiting_runs: &[String],
+) -> Option<String> {
+    let path = path.to_string_lossy();
+    let own = own_execution_id.unwrap_or("");
+    let first = |sql: &str, params: &[&dyn rusqlite::ToSql], label: &dyn Fn(String) -> String| {
+        conn.query_row(sql, params, |row| row.get::<_, String>(0))
+            .optional()
+            .map(|row| row.map(label))
+    };
+    let active_run = || -> rusqlite::Result<Option<String>> {
+        let mut statement = conn.prepare(
+            "SELECT id FROM workflow_runs WHERE workspace_path = ?1 \
+             AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')",
+        )?;
+        let ids = statement.query_map(params![path.as_ref()], |row| row.get::<_, String>(0))?;
+        for id in ids {
+            let id = id?;
+            if !waiting_runs.contains(&id) {
+                return Ok(Some(format!("workflow run {id} is still active")));
+            }
+        }
+        Ok(None)
+    };
+    let probes = [
+        active_run(),
+        first(
+            "SELECT te.id FROM discussion_workspaces dw \
+               JOIN task_executions te ON te.id = dw.task_execution_id \
+              WHERE dw.ownership = 'managed' AND (dw.canonical_path = ?1 OR dw.workspace_path = ?1) \
+                AND te.id != ?2 AND te.status NOT IN ('Done', 'Failed', 'Cancelled') LIMIT 1",
+            params![path.as_ref(), own],
+            &|id| format!("task execution {id} is still active"),
+        ),
+        first(
+            "SELECT job.id FROM discussion_workspaces dw \
+               JOIN agent_dispatch_jobs job ON job.discussion_id = dw.disc_id \
+              WHERE (dw.canonical_path = ?1 OR dw.workspace_path = ?1) \
+                AND job.status IN ('Pending', 'Running') LIMIT 1",
+            params![path.as_ref()],
+            &|id| format!("agent dispatch {id} is pending or running"),
+        ),
+        first(
+            "SELECT job.id FROM discussion_workspaces dw \
+               JOIN agent_resume_jobs job ON job.discussion_id = dw.disc_id \
+              WHERE (dw.canonical_path = ?1 OR dw.workspace_path = ?1) \
+                AND job.status IN ('Pending', 'Running') LIMIT 1",
+            params![path.as_ref()],
+            &|id| format!("agent resume job {id} is pending or running"),
+        ),
+    ];
+    for probe in probes {
+        match probe {
+            Ok(Some(holder)) => return Some(holder),
+            Ok(None) => {}
+            Err(error) => return Some(format!("the registry could not be read: {error}")),
+        }
+    }
+    None
+}
+
 /// Retire a successfully removed managed checkout without erasing its lineage.
 ///
 /// `canonical_path` is cleared so the historical row cannot claim ownership of
@@ -582,525 +672,4 @@ pub fn release_history_lease(conn: &Connection, disc_id: &str, session_pk: i64) 
         params![disc_id, session_pk, Utc::now().to_rfc3339()],
     )?;
     Ok(changed > 0)
-}
-
-#[cfg(all(test, feature = "full-tests"))]
-mod tests {
-    use super::*;
-    use crate::db::migrations;
-    use crate::db::orchestration::launch_single_task;
-    use crate::models::{LaunchSingleTaskInput, OrchestrationActor, PlanningActorKind};
-
-    fn fixture() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        migrations::run(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO projects (id, name, path, created_at, updated_at)
-             VALUES ('p1', 'Kronn', '/repo', 'now', 'now')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO discussions (
-                 id, project_id, title, created_at, updated_at, workspace_mode
-             ) VALUES ('d1', 'p1', 'Room', 'now', 'now', 'Direct')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO discussion_sessions (
-                 id, disc_id, agent_type, session_id, role, status, joined_at
-             ) VALUES (7, 'd1', 'Codex', 'sess-1', 'peer', 'active', 'now')",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    #[test]
-    fn external_session_workspace_is_updated_in_place() {
-        let conn = fixture();
-        let first = upsert_external(
-            &conn,
-            "d1",
-            7,
-            None,
-            "p1",
-            "/repo-wt",
-            "/repo-wt",
-            "feature/one",
-            "abc",
-        )
-        .unwrap();
-        let second = upsert_external(
-            &conn,
-            "d1",
-            7,
-            None,
-            "p1",
-            "/repo-wt",
-            "/repo-wt",
-            "feature/two",
-            "def",
-        )
-        .unwrap();
-
-        assert_eq!(first.id, second.id);
-        assert_eq!(second.branch, "feature/two");
-        assert_eq!(list_for_discussion(&conn, "d1").unwrap().len(), 1);
-    }
-
-    #[test]
-    fn canonical_path_cannot_belong_to_two_discussions() {
-        let conn = fixture();
-        conn.execute(
-            "INSERT INTO discussions (
-                 id, project_id, title, created_at, updated_at, workspace_mode
-             ) VALUES ('d2', 'p1', 'Other', 'now', 'now', 'Direct')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO discussion_sessions (
-                 id, disc_id, agent_type, session_id, role, status, joined_at
-             ) VALUES (8, 'd2', 'ClaudeCode', 'sess-2', 'peer', 'active', 'now')",
-            [],
-        )
-        .unwrap();
-        upsert_external(
-            &conn, "d1", 7, None, "p1", "/repo-wt", "/repo-wt", "a", "abc",
-        )
-        .unwrap();
-
-        let error = upsert_external(
-            &conn, "d2", 8, None, "p1", "/repo-wt", "/repo-wt", "a", "abc",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("another discussion"));
-    }
-
-    #[test]
-    fn missing_external_workspace_keeps_its_path_and_ownership() {
-        let conn = fixture();
-        let declared = upsert_external(
-            &conn,
-            "d1",
-            7,
-            None,
-            "p1",
-            "/repo-wt",
-            "/repo-wt",
-            "feature/missing",
-            "abc",
-        )
-        .unwrap();
-
-        let missing = mark_missing(&conn, "d1", 7).unwrap().unwrap();
-
-        assert_eq!(missing.id, declared.id);
-        assert_eq!(missing.state, "missing");
-        assert_eq!(missing.ownership, "external");
-        assert_eq!(missing.workspace_path.as_deref(), Some("/repo-wt"));
-    }
-
-    #[test]
-    fn same_room_sessions_share_a_workspace_but_another_room_is_rejected() {
-        let conn = fixture();
-        conn.execute(
-            "INSERT INTO discussion_sessions (
-                 id, disc_id, agent_type, session_id, role, status, joined_at
-             ) VALUES (8, 'd1', 'ClaudeCode', 'sess-2', 'peer', 'active', 'now')",
-            [],
-        )
-        .unwrap();
-        upsert_external(
-            &conn, "d1", 7, None, "p1", "/repo-wt", "/repo-wt", "shared", "abc",
-        )
-        .unwrap();
-        upsert_external(
-            &conn, "d1", 8, None, "p1", "/repo-wt", "/repo-wt", "shared", "abc",
-        )
-        .expect("the same discussion may intentionally share one checkout");
-        assert_eq!(list_for_discussion(&conn, "d1").unwrap().len(), 2);
-
-        conn.execute(
-            "INSERT INTO discussions (
-                 id, project_id, title, created_at, updated_at, workspace_mode
-             ) VALUES ('d2', 'p1', 'Other', 'now', 'now', 'Direct')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO discussion_sessions (
-                 id, disc_id, agent_type, session_id, role, status, joined_at
-             ) VALUES (9, 'd2', 'Gemini', 'sess-3', 'peer', 'active', 'now')",
-            [],
-        )
-        .unwrap();
-        let error = upsert_external(
-            &conn, "d2", 9, None, "p1", "/repo-wt", "/repo-wt", "shared", "abc",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("another discussion"));
-    }
-
-    #[test]
-    fn history_rewrite_lease_is_exclusive_renewable_and_releasable() {
-        let conn = fixture();
-        conn.execute(
-            "INSERT INTO discussion_sessions (
-                 id, disc_id, agent_type, session_id, role, status, joined_at
-             ) VALUES (8, 'd1', 'ClaudeCode', 'sess-2', 'peer', 'active', 'now')",
-            [],
-        )
-        .unwrap();
-        for session_pk in [7, 8] {
-            upsert_external(
-                &conn,
-                "d1",
-                session_pk,
-                None,
-                "p1",
-                "/repo-wt",
-                "/repo-wt",
-                "release/0.9.7",
-                "abc",
-            )
-            .unwrap();
-        }
-
-        let first = acquire_history_lease(
-            &conn,
-            "d1",
-            7,
-            "refs/kronn-backup/release-0.9.7-before-squash",
-        )
-        .unwrap();
-        let HistoryLeaseAcquire::Acquired(first) = first else {
-            panic!("first holder must acquire")
-        };
-        let renewed = acquire_history_lease(
-            &conn,
-            "d1",
-            7,
-            "refs/kronn-backup/release-0.9.7-before-squash",
-        )
-        .unwrap();
-        let HistoryLeaseAcquire::Acquired(renewed) = renewed else {
-            panic!("same holder must renew idempotently")
-        };
-        assert_eq!(renewed.id, first.id);
-
-        let blocked = acquire_history_lease(
-            &conn,
-            "d1",
-            8,
-            "refs/kronn-backup/release-0.9.7-before-squash-2",
-        )
-        .unwrap();
-        let HistoryLeaseAcquire::Blocked(owner) = blocked else {
-            panic!("the second session must be refused")
-        };
-        assert_eq!(owner.session_pk, 7);
-        assert_eq!(owner.session_agent_type, "Codex");
-
-        assert!(!release_history_lease(&conn, "d1", 8).unwrap());
-        assert!(release_history_lease(&conn, "d1", 7).unwrap());
-        assert!(matches!(
-            acquire_history_lease(
-                &conn,
-                "d1",
-                8,
-                "refs/kronn-backup/release-0.9.7-before-squash-2"
-            )
-            .unwrap(),
-            HistoryLeaseAcquire::Acquired(_)
-        ));
-    }
-
-    #[test]
-    fn expired_history_lease_never_blocks_the_next_session() {
-        let conn = fixture();
-        conn.execute(
-            "INSERT INTO discussion_sessions (
-                 id, disc_id, agent_type, session_id, role, status, joined_at
-             ) VALUES (8, 'd1', 'ClaudeCode', 'sess-2', 'peer', 'active', 'now')",
-            [],
-        )
-        .unwrap();
-        for session_pk in [7, 8] {
-            upsert_external(
-                &conn, "d1", session_pk, None, "p1", "/repo-wt", "/repo-wt", "shared", "abc",
-            )
-            .unwrap();
-        }
-        acquire_history_lease(&conn, "d1", 7, "refs/kronn-backup/first").unwrap();
-        conn.execute(
-            "UPDATE discussion_workspace_history_leases SET expires_at = '2000-01-01T00:00:00Z'",
-            [],
-        )
-        .unwrap();
-        assert!(matches!(
-            acquire_history_lease(&conn, "d1", 8, "refs/kronn-backup/second").unwrap(),
-            HistoryLeaseAcquire::Acquired(_)
-        ));
-    }
-
-    // ─── KT-318 socle: backend-owned managed workspaces ──────────────────────
-
-    /// Seed the parent discussion + a planning task, then launch a REAL execution
-    /// in it (Pending) so the managed-workspace FK `task_execution_id →
-    /// task_executions(id)` is satisfied. Returns the real execution id — the
-    /// managed writer is exercised against a genuine execution row, not a literal.
-    fn seed_execution(conn: &Connection, task_id: &str, number: i64) -> String {
-        conn.execute(
-            "INSERT INTO discussions (id, project_id, title, created_at, updated_at, workspace_mode) \
-             VALUES ('d-parent', 'p1', 'Principal', 'now', 'now', 'Direct')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at) \
-             VALUES (?1, ?2, 'T', 'now', 'now')",
-            params![task_id, number],
-        )
-        .unwrap();
-        launch_single_task(
-            conn,
-            &LaunchSingleTaskInput::new(task_id, "d-parent"),
-            &OrchestrationActor {
-                kind: PlanningActorKind::Backend,
-                id: Some("orchestrator".into()),
-                session_id: None,
-                source_message_id: None,
-            },
-        )
-        .unwrap()
-        .execution
-        .id
-    }
-
-    #[test]
-    fn managed_workspace_is_backend_owned_and_idempotent_by_execution() {
-        let conn = fixture();
-        let exec = seed_execution(&conn, "task-1", 1);
-
-        // No joined CLI session at all — the backend provisioner owns the row.
-        let ws = upsert_managed(
-            &conn,
-            &exec,
-            "d1",
-            "d-parent",
-            Some("task-1"),
-            "p1",
-            "/repo/.kronn/worktrees/child",
-            "/repo/.kronn/worktrees/child",
-            "kronn/task/KT-1-abcdef",
-            "headsha",
-            "basesha",
-        )
-        .unwrap();
-        assert_eq!(ws.ownership, "managed");
-        assert_eq!(ws.state, "attached");
-        assert_eq!(ws.session_pk, None, "a managed row carries no CLI session");
-        assert_eq!(ws.task_execution_id.as_deref(), Some(exec.as_str()));
-        assert_eq!(ws.parent_discussion_id.as_deref(), Some("d-parent"));
-        assert_eq!(ws.base_sha.as_deref(), Some("basesha"));
-
-        // Idempotent by task_execution_id: a compensable retry re-attaches its OWN
-        // row (same id) and refreshes the mutable fields, never a duplicate.
-        let again = upsert_managed(
-            &conn,
-            &exec,
-            "d1",
-            "d-parent",
-            Some("task-1"),
-            "p1",
-            "/repo/.kronn/worktrees/child",
-            "/repo/.kronn/worktrees/child",
-            "kronn/task/KT-1-abcdef",
-            "newhead",
-            "basesha",
-        )
-        .unwrap();
-        assert_eq!(
-            again.id, ws.id,
-            "same execution reuses the same managed row"
-        );
-        assert_eq!(again.head_sha.as_deref(), Some("newhead"));
-        assert_eq!(
-            get_managed_for_execution(&conn, &exec).unwrap().unwrap().id,
-            ws.id
-        );
-
-        // Mark-missing keeps the auditable row (compensation-friendly, no orphan).
-        let missing = mark_missing_for_execution(&conn, &exec).unwrap().unwrap();
-        assert_eq!(missing.state, "missing");
-        assert_eq!(missing.ownership, "managed");
-
-        // Successful physical cleanup retires the checkout without erasing the
-        // room ↔ execution ↔ branch/commit evidence.
-        let retired = retire_managed_for_execution(&conn, &exec, Some("delivered-head"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(retired.state, "detached");
-        assert_eq!(retired.canonical_path, None);
-        assert_eq!(
-            retired.workspace_path.as_deref(),
-            Some("/repo/.kronn/worktrees/child")
-        );
-        assert_eq!(retired.head_sha.as_deref(), Some("delivered-head"));
-        assert_eq!(retired.task_execution_id.as_deref(), Some(exec.as_str()));
-
-        let principal_rows = list_visible_for_discussion(&conn, "d-parent").unwrap();
-        assert_eq!(principal_rows.len(), 1);
-        assert_eq!(principal_rows[0].disc_id, "d1");
-        assert_eq!(principal_rows[0].state, "detached");
-        assert_eq!(
-            get_visible_for_discussion(&conn, "d-parent", &ws.id)
-                .unwrap()
-                .unwrap()
-                .id,
-            ws.id
-        );
-
-        // Compensation still has an ownership-aware destructive primitive for
-        // workspaces which never reached a deliverable execution.
-        assert!(delete_managed_for_execution(&conn, &exec).unwrap());
-        assert!(get_managed_for_execution(&conn, &exec).unwrap().is_none());
-    }
-
-    #[test]
-    fn managed_workspace_set_null_orphan_is_explicitly_collectable() {
-        let conn = fixture();
-        let exec = seed_execution(&conn, "task-orphan", 2);
-        let workspace = upsert_managed(
-            &conn,
-            &exec,
-            "d1",
-            "d-parent",
-            Some("task-orphan"),
-            "p1",
-            "/repo/.kronn/worktrees/orphan",
-            "/repo/.kronn/worktrees/orphan",
-            "kronn/task/KT-2-orphan",
-            "head",
-            "base",
-        )
-        .unwrap();
-
-        conn.execute("DELETE FROM task_executions WHERE id = ?1", [&exec])
-            .unwrap();
-        let orphans = list_orphaned_managed(&conn).unwrap();
-        assert_eq!(orphans.len(), 1);
-        assert_eq!(orphans[0].id, workspace.id);
-        assert_eq!(orphans[0].task_execution_id, None);
-        assert!(delete_orphaned_managed(&conn, &workspace.id).unwrap());
-        assert!(list_orphaned_managed(&conn).unwrap().is_empty());
-    }
-
-    #[test]
-    fn one_managed_row_per_execution_and_managed_coexists_with_external() {
-        let conn = fixture();
-        let exec = seed_execution(&conn, "task-1", 1);
-        upsert_managed(
-            &conn,
-            &exec,
-            "d1",
-            "d-parent",
-            None,
-            "p1",
-            "/wt/a",
-            "/wt/a",
-            "kronn/task/KT-1-a",
-            "h",
-            "b",
-        )
-        .unwrap();
-
-        // A SECOND managed row for the SAME execution (different physical path) is
-        // rejected by the unique partial index — a retry cannot fork a second row.
-        let dup = conn.execute(
-            "INSERT INTO discussion_workspaces \
-             (id, disc_id, session_pk, project_id, workspace_path, canonical_path, branch, \
-              head_sha, ownership, state, created_at, updated_at, task_execution_id) \
-             VALUES ('other', 'd1', NULL, 'p1', '/wt/b', '/wt/b', 'br', 'h', 'managed', \
-                     'attached', 'now', 'now', ?1)",
-            params![exec],
-        );
-        assert!(
-            dup.is_err(),
-            "a second managed row for one execution must be rejected"
-        );
-
-        // A managed row (session_pk NULL) and an external row (session_pk set)
-        // coexist: the external unique index is (disc_id, session_pk) WHERE
-        // session_pk IS NOT NULL, so a NULL-session managed row never collides.
-        // Session id 9 (fixture already holds id 7) avoids a PK/uniqueness clash.
-        conn.execute(
-            "INSERT INTO discussion_sessions \
-             (id, disc_id, agent_type, session_id, role, status, joined_at) \
-             VALUES (9, 'd1', 'Codex', 'sess-9', 'peer', 'active', 'now')",
-            [],
-        )
-        .unwrap();
-        upsert_external(
-            &conn, "d1", 9, None, "p1", "/wt/ext", "/wt/ext", "br2", "h2",
-        )
-        .unwrap();
-        assert_eq!(list_for_discussion(&conn, "d1").unwrap().len(), 2);
-    }
-
-    #[test]
-    fn get_managed_for_discussion_detects_backend_owned_row_regardless_of_path() {
-        let conn = fixture();
-        let exec = seed_execution(&conn, "task-1", 1);
-
-        // No managed row yet → nothing to refuse.
-        assert!(get_managed_for_discussion(&conn, "d1").unwrap().is_none());
-
-        upsert_managed(
-            &conn,
-            &exec,
-            "d1",
-            "d-parent",
-            Some("task-1"),
-            "p1",
-            "/repo/.kronn/worktrees/child",
-            "/repo/.kronn/worktrees/child",
-            "kronn/task/KT-1-abcdef",
-            "h",
-            "b",
-        )
-        .unwrap();
-
-        // The refusal keys on (disc_id, ownership='managed'), so it fires whether a
-        // CLI re-declares the SAME canonical path or a DIFFERENT one — both resolve
-        // to "this room already has a backend-owned worktree, read it".
-        let found = get_managed_for_discussion(&conn, "d1").unwrap().unwrap();
-        assert_eq!(found.ownership, "managed");
-        assert_eq!(found.task_execution_id.as_deref(), Some(exec.as_str()));
-
-        // An external-only room is NOT refused — the detection must not over-fire.
-        conn.execute(
-            "INSERT INTO discussions (id, project_id, title, created_at, updated_at, workspace_mode) \
-             VALUES ('d-ext', 'p1', 'Ext', 'now', 'now', 'Direct')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO discussion_sessions \
-             (id, disc_id, agent_type, session_id, role, status, joined_at) \
-             VALUES (11, 'd-ext', 'Codex', 'sess-11', 'peer', 'active', 'now')",
-            [],
-        )
-        .unwrap();
-        upsert_external(
-            &conn, "d-ext", 11, None, "p1", "/wt/ext", "/wt/ext", "br", "h",
-        )
-        .unwrap();
-        assert!(get_managed_for_discussion(&conn, "d-ext")
-            .unwrap()
-            .is_none());
-    }
 }

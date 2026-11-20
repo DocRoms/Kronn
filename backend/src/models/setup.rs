@@ -132,6 +132,46 @@ pub struct WorkersConfig {
     /// The run itself is never refused.
     #[serde(default = "default_workers_heavy_output_kb")]
     pub heavy_output_kb: u32,
+    /// KT-1718 — the time, in minutes, a Claude task worker's shell command may
+    /// run when it names no limit of its own (`BASH_DEFAULT_TIMEOUT_MS`).
+    #[serde(default = "default_workers_bash_default_timeout_min")]
+    pub bash_default_timeout_min: u32,
+    /// KT-1718 — the longest a Claude task worker's shell command may run, even
+    /// when it asks for more (`BASH_MAX_TIMEOUT_MS`). Claude Code's own cap is
+    /// 10 minutes: a cold test-profile build outlasts it, and the worker loses
+    /// the turn. Keep it below the generation limit (`agent_global_timeout_min`),
+    /// which cuts the whole turn whatever a command is allowed.
+    #[serde(default = "default_workers_bash_max_timeout_min")]
+    pub bash_max_timeout_min: u32,
+    /// KT-1750 — file names an operating system or a file manager drops in any
+    /// folder (`.DS_Store`, `Thumbs.db`, …): they never count as a worker's
+    /// changes, so they block neither a delivery nor the cleanup of a checkout,
+    /// and are excluded from `git status` in every lane Kronn creates. A name,
+    /// or a name with one `*` standing for any run of characters; an empty list
+    /// means none.
+    #[serde(default = "default_workers_os_junk_patterns")]
+    pub os_junk_patterns: Vec<String>,
+    /// KT-1748 — absolute directories whose worktrees Kronn manages, on top of the
+    /// built-in roots (`<repo>/.kronn/worktrees`, `~/.kronn/autocode-worktrees`). A
+    /// branch checked out under one may be an integration target; the owner's own
+    /// checkout never is. A project can name more of its own.
+    #[serde(default)]
+    pub managed_worktree_roots: Vec<String>,
+    /// KT-1750 — who the commits Kronn makes are attributed to, and whether they
+    /// carry a `Signed-off-by`, for every project that neither sets its own in
+    /// its card nor has a repository that says (its own `user.name` /
+    /// `user.email`, a DCO file or hook, a signed history). Nothing set: the
+    /// machine's git identity, reported, and no sign-off. A TOML table: after the
+    /// plain values.
+    #[serde(
+        default,
+        skip_serializing_if = "super::ProjectCommitSettings::is_default"
+    )]
+    pub commit: super::ProjectCommitSettings,
+    /// KT-1742 — how every project's lane is warmed unless the project says
+    /// otherwise. Last field: a TOML table goes after the plain values.
+    #[serde(default)]
+    pub lane_warm: LaneWarmConfig,
 }
 
 impl Default for WorkersConfig {
@@ -142,8 +182,109 @@ impl Default for WorkersConfig {
             background_priority: true,
             max_concurrent_task_workers: DEFAULT_MAX_CONCURRENT_TASK_WORKERS,
             heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
+            bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
+            bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
+            os_junk_patterns: default_workers_os_junk_patterns(),
+            managed_worktree_roots: Vec::new(),
+            commit: super::ProjectCommitSettings::default(),
+            lane_warm: LaneWarmConfig::default(),
         }
     }
+}
+
+/// The OS junk of the three desktop systems: macOS, Windows, and the AppleDouble
+/// files macOS leaves on foreign file systems.
+pub const DEFAULT_OS_JUNK_PATTERNS: [&str; 4] = [".DS_Store", "Thumbs.db", "desktop.ini", "._*"];
+/// Most patterns, and longest one, the Settings form accepts.
+pub const MAX_OS_JUNK_PATTERNS: usize = 50;
+pub const MAX_OS_JUNK_PATTERN_LEN: usize = 100;
+
+fn default_workers_os_junk_patterns() -> Vec<String> {
+    DEFAULT_OS_JUNK_PATTERNS
+        .iter()
+        .map(|pattern| pattern.to_string())
+        .collect()
+}
+
+/// Why `pattern` cannot be an OS-junk pattern, or `None` when it can. A pattern
+/// is written into the repository's local exclude, so what git would read as
+/// something else (a comment, a negation, a path, a character class) is refused.
+pub fn os_junk_pattern_problem(pattern: &str) -> Option<String> {
+    if pattern.is_empty() {
+        return Some("a pattern cannot be empty".into());
+    }
+    if pattern.len() > MAX_OS_JUNK_PATTERN_LEN {
+        return Some(format!(
+            "`{pattern}` is longer than {MAX_OS_JUNK_PATTERN_LEN} characters"
+        ));
+    }
+    if pattern != pattern.trim() || pattern.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some(format!(
+            "`{pattern}` must not contain spaces or control characters"
+        ));
+    }
+    if pattern.starts_with('#') || pattern.starts_with('!') {
+        return Some(format!("`{pattern}` cannot start with `#` or `!`"));
+    }
+    if pattern.contains(['/', '\\', '[', ']', '?']) {
+        return Some(format!(
+            "`{pattern}` must be a file name: no `/`, `\\`, `[`, `]` or `?`"
+        ));
+    }
+    if pattern.matches('*').count() > 1 {
+        return Some(format!("`{pattern}` may contain only one `*`"));
+    }
+    if pattern.chars().all(|c| c == '*' || c == '.') {
+        return Some(format!("`{pattern}` would match too much"));
+    }
+    None
+}
+
+/// Most managed worktree roots one list (global or per project) may hold.
+pub const MAX_MANAGED_WORKTREE_ROOTS: usize = 32;
+
+/// Refuse a list of managed worktree roots the forms must never persist: each
+/// entry an absolute path with no `..`, and never the filesystem root (which
+/// would make every checkout on the machine Kronn's).
+pub fn validate_managed_worktree_roots(roots: &[String]) -> Result<(), String> {
+    if roots.len() > MAX_MANAGED_WORKTREE_ROOTS {
+        return Err(format!(
+            "managed_worktree_roots holds at most {MAX_MANAGED_WORKTREE_ROOTS} paths"
+        ));
+    }
+    for root in roots {
+        let path = std::path::Path::new(root.trim());
+        if root.trim().is_empty() || root.contains('\0') || !path.is_absolute() {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` is not an absolute path"
+            ));
+        }
+        if path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` must not contain `..`"
+            ));
+        }
+        if path.parent().is_none() {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` is the filesystem root; name the directory \
+                 that holds the worktrees"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The usable roots of a stored list, whatever a hand-edited file holds: only
+/// absolute paths without `..`, and never the filesystem root.
+pub fn effective_managed_worktree_roots(roots: &[String]) -> Vec<std::path::PathBuf> {
+    roots
+        .iter()
+        .filter(|root| validate_managed_worktree_roots(std::slice::from_ref(root)).is_ok())
+        .map(|root| std::path::PathBuf::from(root.trim()))
+        .collect()
 }
 
 fn default_workers_review_rounds() -> u32 {
@@ -152,6 +293,14 @@ fn default_workers_review_rounds() -> u32 {
 
 fn default_workers_heavy_output_kb() -> u32 {
     DEFAULT_HEAVY_OUTPUT_KB
+}
+
+fn default_workers_bash_default_timeout_min() -> u32 {
+    DEFAULT_BASH_DEFAULT_TIMEOUT_MIN
+}
+
+fn default_workers_bash_max_timeout_min() -> u32 {
+    DEFAULT_BASH_MAX_TIMEOUT_MIN
 }
 
 fn default_workers_max_concurrent_task_workers() -> u32 {
@@ -177,8 +326,59 @@ impl WorkersConfig {
             .clamp(1, MAX_CONCURRENT_TASK_WORKERS_LIMIT) as usize
     }
 
+    /// `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` for a Claude task
+    /// worker, in milliseconds, whatever a hand-edited `config.toml` holds: the
+    /// default never exceeds the maximum.
+    pub fn effective_bash_timeouts_ms(&self) -> (u64, u64) {
+        let max = self
+            .bash_max_timeout_min
+            .clamp(1, MAX_BASH_TIMEOUT_MIN_LIMIT);
+        let default = self.bash_default_timeout_min.clamp(1, max);
+        (u64::from(default) * 60_000, u64::from(max) * 60_000)
+    }
+
     /// Refuse what the Settings form must never persist.
     pub fn validate(&self) -> Result<(), String> {
+        self.commit
+            .clone()
+            .normalized()
+            .map_err(|problem| format!("commit: {problem}"))?;
+        if self.os_junk_patterns.len() > MAX_OS_JUNK_PATTERNS {
+            return Err(format!(
+                "os_junk_patterns holds at most {MAX_OS_JUNK_PATTERNS} patterns"
+            ));
+        }
+        for pattern in &self.os_junk_patterns {
+            if let Some(problem) = os_junk_pattern_problem(pattern) {
+                return Err(format!("os_junk_patterns: {problem}"));
+            }
+        }
+        validate_managed_worktree_roots(&self.managed_worktree_roots)?;
+        // KT-1751 review: a project's own setting; the global entry is never
+        // read for it, so storing one there would be silently ignored.
+        if self
+            .lane_warm
+            .validation_executables
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty())
+        {
+            return Err(
+                "lane_warm.validation_executables is a project's own setting: set it \
+                 on the project card (Lane warm-up), not in Settings > Workers"
+                    .to_string(),
+            );
+        }
+        if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
+            return Err(format!(
+                "bash_max_timeout_min must be between 1 and {MAX_BASH_TIMEOUT_MIN_LIMIT}"
+            ));
+        }
+        if !(1..=self.bash_max_timeout_min).contains(&self.bash_default_timeout_min) {
+            return Err(format!(
+                "bash_default_timeout_min must be between 1 and bash_max_timeout_min ({})",
+                self.bash_max_timeout_min
+            ));
+        }
         if !(1..=MAX_CONCURRENT_TASK_WORKERS_LIMIT).contains(&self.max_concurrent_task_workers) {
             return Err(format!(
                 "max_concurrent_task_workers must be between 1 and \
@@ -195,14 +395,385 @@ impl WorkersConfig {
                 "default_max_review_rounds must be between 1 and {MAX_REVIEW_ROUNDS_INTEGER}"
             ));
         }
+        self.lane_warm.validate()
+    }
+}
+
+/// KT-1742 — how a worker lane is warmed: its compiler environment, whether the
+/// seed it is cloned from is aligned with that environment, the command that
+/// builds it, and the time that build may take.
+///
+/// Set once globally (`[workers.lane_warm]`, Settings > Workers) and optionally
+/// per project (`ProjectWorkspace::lane_warm`, stored with the project). A field
+/// left `None` inherits: the project from the global entry, the global entry
+/// from what Kronn detects in the repository. Nothing here is specific to one
+/// language or repository.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LaneWarmConfig {
+    /// Build the seed (the project's own main-checkout target) once with the
+    /// lane's compiler environment, so a lane cloned from it reuses it. Default:
+    /// on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub seed_alignment: Option<bool>,
+    /// The environment the lane's builds run with for the C compiler, one
+    /// `NAME=value` per entry. `None` = detected (on macOS, the target-scoped
+    /// `CFLAGS_<triple>=-save-temps=obj` when the project builds C through the
+    /// `cc` crate, nothing otherwise); an empty list = none at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compiler_env: Option<Vec<String>>,
+    /// A shell command that replaces the detected first build (run in the
+    /// worktree root, same bound, same event). The way to warm a project that is
+    /// not a Cargo one: `composer install`, `npm ci`. `None` = detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_build_command: Option<String>,
+    /// The first build's time limit, in minutes. `None` = 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_build_timeout_min: Option<u32>,
+    /// Which Rust workspace roots of the project to warm, as directories
+    /// relative to the repository (`.` for the root itself). `None` = every root
+    /// found from the manifests. A project's own setting only: the global entry
+    /// cannot name directories of a repository it does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rust_roots: Option<Vec<String>>,
+    /// KT-1747 — the dependency directories a lane layers read-only from the main
+    /// checkout (`node_modules`, `vendor`, `Pods`, … at any depth), as
+    /// directories relative to the repository. `None` = the ones detected from
+    /// the manifests; a list = exactly those; an empty list = none. A project's
+    /// own setting only, like `rust_roots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dependency_dirs: Option<Vec<String>>,
+    /// KT-1751 — the executables this project's validations may run beyond
+    /// Kronn's own allowlist: a bare name (`composer`, `go`, `pytest`) or a
+    /// repository-relative path (`vendor/bin/phpunit`). The human's decision for
+    /// one project, set in its workspace settings: no agent tool writes it and the
+    /// global entry is not read for it. A shell is never accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub validation_executables: Option<Vec<String>>,
+}
+
+/// KT-1742 — default bound of a lane's first build, in minutes (measured: the
+/// `kronn` crate's own two compiles take 33 min at host load 14).
+pub const DEFAULT_LANE_FIRST_BUILD_TIMEOUT_MIN: u32 = 60;
+/// Largest first-build bound the settings accept (a day).
+pub const MAX_LANE_FIRST_BUILD_TIMEOUT_MIN: u32 = 1_440;
+const MAX_LANE_ENV_ENTRIES: usize = 32;
+const MAX_LANE_ENV_BYTES: usize = 2_000;
+const MAX_LANE_COMMAND_BYTES: usize = 4_000;
+const MAX_LANE_ROOTS: usize = 16;
+/// Variables a lane owns: letting a setting move them would break its sandbox,
+/// its target or its isolation.
+const LANE_OWNED_ENV: [&str; 6] = [
+    "CARGO_TARGET_DIR",
+    "CARGO_HOME",
+    "CARGO_BUILD_JOBS",
+    "CARGO_NET_OFFLINE",
+    "TMPDIR",
+    "PATH",
+];
+
+impl LaneWarmConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `compiler_env` as `(name, value)` pairs, `None` when it is left to
+    /// detection. An entry that is not `NAME=value` is skipped (validation
+    /// refuses it before it is stored).
+    pub fn compiler_env_pairs(&self) -> Option<Vec<(String, String)>> {
+        self.compiler_env.as_ref().map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| parse_lane_env_entry(entry).ok())
+                .collect()
+        })
+    }
+
+    /// The stored shape: a blank command is no command, a blank entry no entry.
+    pub fn normalized(mut self) -> Self {
+        self.first_build_command = self
+            .first_build_command
+            .map(|command| command.trim().to_string())
+            .filter(|command| !command.is_empty());
+        self.compiler_env = self.compiler_env.map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect()
+        });
+        // A blank list is « every detected root », not « no root ».
+        self.rust_roots = self
+            .rust_roots
+            .map(|roots| {
+                let mut kept: Vec<String> = Vec::new();
+                for root in roots {
+                    let root = normalize_lane_root(&root);
+                    if !root.is_empty() && !kept.contains(&root) {
+                        kept.push(root);
+                    }
+                }
+                kept
+            })
+            .filter(|roots| !roots.is_empty());
+        // An empty list is kept: it says "layer nothing", not "detect".
+        self.dependency_dirs = self.dependency_dirs.map(|dirs| {
+            let mut kept: Vec<String> = Vec::new();
+            for dir in dirs {
+                let dir = normalize_lane_root(&dir);
+                if !dir.is_empty() && !kept.contains(&dir) {
+                    kept.push(dir);
+                }
+            }
+            kept
+        });
+        // A blank list is no executable at all.
+        self.validation_executables = self
+            .validation_executables
+            .map(|entries| {
+                let mut kept: Vec<String> = Vec::new();
+                for entry in entries {
+                    let entry = normalize_validation_executable(&entry);
+                    if !entry.is_empty() && !kept.contains(&entry) {
+                        kept.push(entry);
+                    }
+                }
+                kept
+            })
+            .filter(|entries| !entries.is_empty());
+        self
+    }
+
+    /// Refuse what the settings forms must never persist.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(minutes) = self.first_build_timeout_min {
+            if !(1..=MAX_LANE_FIRST_BUILD_TIMEOUT_MIN).contains(&minutes) {
+                return Err(format!(
+                    "first_build_timeout_min must be between 1 and \
+                     {MAX_LANE_FIRST_BUILD_TIMEOUT_MIN}"
+                ));
+            }
+        }
+        if let Some(command) = &self.first_build_command {
+            if command.len() > MAX_LANE_COMMAND_BYTES || command.contains('\0') {
+                return Err(format!(
+                    "first_build_command is limited to {MAX_LANE_COMMAND_BYTES} characters \
+                     and cannot hold a NUL byte; put a long recipe in a script it calls"
+                ));
+            }
+        }
+        if let Some(roots) = &self.rust_roots {
+            if roots.len() > MAX_LANE_ROOTS {
+                return Err(format!("rust_roots is limited to {MAX_LANE_ROOTS} entries"));
+            }
+            for root in roots.iter().filter(|root| !root.trim().is_empty()) {
+                validate_lane_root(root)?;
+            }
+        }
+        if let Some(dirs) = &self.dependency_dirs {
+            if dirs.len() > MAX_LANE_ROOTS {
+                return Err(format!(
+                    "dependency_dirs is limited to {MAX_LANE_ROOTS} entries"
+                ));
+            }
+            for dir in dirs.iter().filter(|dir| !dir.trim().is_empty()) {
+                validate_lane_root(dir)
+                    .ok()
+                    .filter(|_| normalize_lane_root(dir) != ".")
+                    .ok_or_else(|| {
+                        format!(
+                            "dependency_dirs entry `{}` must be a directory inside the \
+                             repository (relative, no `..`, not the root itself)",
+                            normalize_lane_root(dir)
+                        )
+                    })?;
+            }
+        }
+        if let Some(entries) = &self.validation_executables {
+            if entries.len() > MAX_LANE_EXECUTABLES {
+                return Err(format!(
+                    "validation_executables is limited to {MAX_LANE_EXECUTABLES} entries"
+                ));
+            }
+            for entry in entries.iter().filter(|entry| !entry.trim().is_empty()) {
+                validate_validation_executable(entry)?;
+            }
+        }
+        if let Some(entries) = &self.compiler_env {
+            if entries.len() > MAX_LANE_ENV_ENTRIES {
+                return Err(format!(
+                    "compiler_env is limited to {MAX_LANE_ENV_ENTRIES} entries"
+                ));
+            }
+            for entry in entries.iter().filter(|entry| !entry.trim().is_empty()) {
+                parse_lane_env_entry(entry)?;
+            }
+        }
         Ok(())
     }
+}
+
+const MAX_LANE_EXECUTABLES: usize = 32;
+
+/// Names that are refused even if they appear in the allowlist.
+///
+/// The allowlist is a source file, so it will be edited. This is what makes DoD
+/// "no `sh -c`" hold against a future edit rather than against today's list: a
+/// shell added above is still rejected here, and the rejection names why.
+pub const DENIED_BINARIES: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "csh",
+    "tcsh",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "pwsh",
+    "env",
+    "eval",
+    "xargs",
+    "nohup",
+    "setsid",
+    "sudo",
+    "doas",
+    "ssh",
+    "perl",
+    "ruby",
+];
+
+/// KT-1751 — one entry of `validation_executables`: a bare program name or a
+/// path inside the repository, in plain characters (a validation is a literal
+/// argv, so nothing a shell would read), and never a program that runs a command
+/// line of its own.
+fn validate_validation_executable(entry: &str) -> Result<(), String> {
+    let entry = entry.trim();
+    // `./gradlew` is a repository path, `gradlew` a program on the PATH.
+    let is_path = entry.contains('/');
+    let entry = entry.strip_prefix("./").unwrap_or(entry);
+    let plain = entry
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '@' | '/'));
+    let refused = |why: &str| {
+        Err(format!(
+            "validation_executables entry `{entry}` {why}: use a program name \
+             (`composer`) or a path inside the repository (`vendor/bin/phpunit`)"
+        ))
+    };
+    if entry.is_empty() || entry.len() > 200 || !plain {
+        return refused("holds characters a program name or path does not");
+    }
+    if is_path {
+        let inside = !entry.starts_with('/')
+            && entry
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        return if inside {
+            Ok(())
+        } else {
+            refused("is not a path inside the repository")
+        };
+    }
+    if entry.starts_with('-') {
+        return refused("is an option, not a program");
+    }
+    if DENIED_BINARIES.contains(&entry) {
+        return refused("runs a command line of its own, which a validation never does");
+    }
+    Ok(())
+}
+
+/// KT-1751 review — a stored validation executable: trimmed, and a leading
+/// `./` dropped only where the rest is still a path (`./vendor/bin/phpunit` →
+/// `vendor/bin/phpunit`). A single-segment repository file keeps it
+/// (`./gradlew`): without it, it would be a bare name, a program on the PATH.
+pub fn normalize_validation_executable(entry: &str) -> String {
+    let entry = entry.trim();
+    match entry.strip_prefix("./") {
+        Some(rest) if rest.contains('/') => rest.to_string(),
+        _ => entry.to_string(),
+    }
+}
+
+/// `./redis-flush/` → `redis-flush`; the repository root stays `.`.
+pub fn normalize_lane_root(root: &str) -> String {
+    let trimmed = root.trim().trim_end_matches('/');
+    trimmed.strip_prefix("./").unwrap_or(trimmed).to_string()
+}
+
+/// A root names a directory inside the repository: relative, no `..`, no NUL.
+fn validate_lane_root(root: &str) -> Result<(), String> {
+    let root = normalize_lane_root(root);
+    let escapes = std::path::Path::new(&root).components().any(|part| {
+        !matches!(
+            part,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if root.is_empty() || escapes || root.contains('\0') || root.len() > 300 {
+        return Err(format!(
+            "rust_roots entry `{root}` must be a directory inside the repository \
+             (relative, no `..`)"
+        ));
+    }
+    Ok(())
+}
+
+/// `NAME=value` → `(NAME, value)`: a portable variable name, a value without a
+/// NUL byte, and not one of the variables a lane owns.
+pub fn parse_lane_env_entry(entry: &str) -> Result<(String, String), String> {
+    let (name, value) = entry
+        .trim()
+        .split_once('=')
+        .ok_or_else(|| format!("compiler_env entry `{entry}` is not NAME=value"))?;
+    let name = name.trim();
+    let portable = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !portable {
+        return Err(format!(
+            "compiler_env name `{name}` must be letters, digits and underscores"
+        ));
+    }
+    if name.starts_with("KRONN_") || LANE_OWNED_ENV.contains(&name) {
+        return Err(format!(
+            "compiler_env cannot set `{name}`: the lane owns it"
+        ));
+    }
+    if value.len() > MAX_LANE_ENV_BYTES || value.contains('\0') {
+        return Err(format!(
+            "compiler_env value of `{name}` is too long or holds a NUL byte"
+        ));
+    }
+    Ok((name.to_string(), value.to_string()))
 }
 
 /// KT-1525 — default size (KB) above which a step output is flagged heavy.
 pub const DEFAULT_HEAVY_OUTPUT_KB: u32 = 256;
 /// Largest threshold the Settings form accepts (100 MB).
 pub const MAX_HEAVY_OUTPUT_KB: u32 = 102_400;
+/// KT-1718 — default time a Claude task worker's shell command may run when it
+/// names no limit of its own. Claude Code's own default is 2 minutes.
+pub const DEFAULT_BASH_DEFAULT_TIMEOUT_MIN: u32 = 15;
+/// KT-1718 — default longest shell command of a Claude task worker (Claude
+/// Code's own cap is 10 minutes, which a cold `cargo test` build exceeds).
+pub const DEFAULT_BASH_MAX_TIMEOUT_MIN: u32 = 60;
+/// Largest per-command cap the Settings form accepts: the largest generation
+/// limit (`clamp_agent_global_timeout_min`), since a command outliving the
+/// generation is cut with it.
+pub const MAX_BASH_TIMEOUT_MIN_LIMIT: u32 = 240;
 /// Default cap on local task workers running at once (KT-1632). Builds, not
 /// agent processes, are what loads the machine: two lanes is what it carries.
 pub const DEFAULT_MAX_CONCURRENT_TASK_WORKERS: u32 = 2;
@@ -385,6 +956,11 @@ pub struct ServerConfig {
     /// live worktree, before a sweep (boot, periodic, pressure) may remove it.
     #[serde(default = "default_disk_sweep_idle_hours")]
     pub disk_sweep_idle_hours: u64,
+    /// KT-1691 — days a Blocked or Interrupted execution's lane build dir must
+    /// have been unwritten before it becomes purgeable (by a confirmed
+    /// per-entry delete, never by a sweep). Its worktree and branch stay.
+    #[serde(default = "default_disk_stalled_build_days")]
+    pub disk_stalled_build_days: u64,
     /// Maximum concurrent agent processes (default: 5)
     #[serde(default = "default_max_agents")]
     pub max_concurrent_agents: usize,
@@ -563,17 +1139,23 @@ fn default_anti_hallucination_mode() -> String {
 }
 /// A cold `cargo build` of this workspace writes a few GiB; the floor is set
 /// so a refused provisioning still leaves room to work, investigate and clean.
-pub(crate) const DEFAULT_DISK_CRITICAL_GIB: u64 = 5;
-pub(crate) const DEFAULT_DISK_WARNING_GIB: u64 = 20;
+pub const DEFAULT_DISK_CRITICAL_GIB: u64 = 5;
+pub const DEFAULT_DISK_WARNING_GIB: u64 = 20;
 /// KT-1318 — a worker's first build alone writes several GiB and a lane has
 /// been measured at 5-30 GiB; 30 GiB is the room a launch needs to finish.
-pub(crate) const DEFAULT_DISK_LAUNCH_MIN_FREE_GIB: u64 = 30;
-pub(crate) const DEFAULT_DISK_SWEEP_IDLE_HOURS: u64 = 6;
+pub const DEFAULT_DISK_LAUNCH_MIN_FREE_GIB: u64 = 30;
+pub const DEFAULT_DISK_SWEEP_IDLE_HOURS: u64 = 6;
+/// KT-1691 — a Blocked or Interrupted execution that left its build dir alone
+/// this long is not coming back soon; the next resume rebuilds.
+pub const DEFAULT_DISK_STALLED_BUILD_DAYS: u64 = 3;
 fn default_disk_launch_min_free_gib() -> u64 {
     DEFAULT_DISK_LAUNCH_MIN_FREE_GIB
 }
 fn default_disk_sweep_idle_hours() -> u64 {
     DEFAULT_DISK_SWEEP_IDLE_HOURS
+}
+fn default_disk_stalled_build_days() -> u64 {
+    DEFAULT_DISK_STALLED_BUILD_DAYS
 }
 fn default_disk_critical_gib() -> u64 {
     DEFAULT_DISK_CRITICAL_GIB
@@ -582,7 +1164,7 @@ fn default_disk_critical_gib() -> u64 {
 fn default_execution_variable_retention_days() -> u32 {
     30
 }
-pub(crate) const DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS: u32 = 7;
+pub const DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS: u32 = 7;
 fn default_interrupted_worktree_ttl_days() -> u32 {
     DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS
 }
@@ -595,7 +1177,7 @@ fn default_max_agents() -> usize {
 fn default_agent_stall_timeout() -> u32 {
     5
 }
-pub(crate) const DEFAULT_MAX_PROMPT_BYTES: usize = 4_000_000;
+pub const DEFAULT_MAX_PROMPT_BYTES: usize = 4_000_000;
 fn default_max_prompt_bytes() -> usize {
     DEFAULT_MAX_PROMPT_BYTES
 }
@@ -603,18 +1185,18 @@ fn default_max_prompt_bytes() -> usize {
 // at ~2 h 40 of honest work. The old ceiling existed to stop hung runs from
 // squatting the agent semaphore; since an abandoned tool loop now halts itself
 // at the next round boundary, a long window no longer keeps a dead run alive.
-pub(crate) const MAX_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
-pub(crate) const DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 30;
+pub const MAX_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
+pub const DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 30;
 fn default_agent_global_timeout() -> u32 {
     DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN
 }
 
-pub(crate) const DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
+pub const DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
 fn default_local_agent_global_timeout() -> u32 {
     DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN
 }
 
-pub(crate) fn clamp_agent_global_timeout_min(input: u64) -> u32 {
+pub fn clamp_agent_global_timeout_min(input: u64) -> u32 {
     input.clamp(1, u64::from(MAX_AGENT_GLOBAL_TIMEOUT_MIN)) as u32
 }
 
@@ -622,10 +1204,10 @@ pub(crate) fn clamp_agent_global_timeout_min(input: u64) -> u32 {
 /// request types deserialized from the frontend (where the user may
 /// omit the field). `pub(crate)` so other model sub-modules can keep
 /// the `default = "..."` attribute working after extraction.
-pub(crate) fn default_language() -> String {
+pub fn default_language() -> String {
     "fr".into()
 }
-pub(crate) fn default_ui_language() -> String {
+pub fn default_ui_language() -> String {
     "fr".into()
 }
 
@@ -734,6 +1316,10 @@ pub struct ScanConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub default_docs_dir: Option<String>,
+    /// Repositories the owner hid from "Detect repositories" (KT-1684), by
+    /// path: a hidden one is reported `hidden` by the scan and never offered again.
+    #[serde(default)]
+    pub hidden_repos: Vec<String>,
 }
 
 fn default_scan_depth() -> usize {
@@ -766,6 +1352,11 @@ pub struct AgentsConfig {
     /// Per-agent model tier overrides (Economy/Reasoning model names).
     #[serde(default)]
     pub model_tiers: ModelTiersConfig,
+    /// KT-1706 — what takes over a mode of a named HTTP connection (or the image or
+    /// video mode of ComfyUI) when its provider cannot serve a request. Kept apart
+    /// from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_fallbacks: Vec<ConnectionFallback>,
 }
 
 /// Endpoint slots of the OpenAI-wire providers, carried as one value.
@@ -847,6 +1438,41 @@ impl HttpEndpoints {
 }
 
 impl AgentsConfig {
+    /// The stored settings of one agent. `Custom` is a bucket of named
+    /// connections, not an agent with a card, so it has none.
+    pub fn agent_config(&self, agent: &AgentType) -> Option<&AgentConfig> {
+        Some(match agent {
+            AgentType::ClaudeCode => &self.claude_code,
+            AgentType::Codex => &self.codex,
+            AgentType::OpenCode => &self.open_code,
+            AgentType::GeminiCli => &self.gemini_cli,
+            AgentType::Kiro => &self.kiro,
+            AgentType::Vibe => &self.vibe,
+            AgentType::CopilotCli => &self.copilot_cli,
+            AgentType::Ollama => &self.ollama,
+            AgentType::LiteLlm => &self.lite_llm,
+            AgentType::Nvidia => &self.nvidia,
+            AgentType::Custom => return None,
+        })
+    }
+
+    /// Mutable twin of [`Self::agent_config`].
+    pub fn agent_config_mut(&mut self, agent: &AgentType) -> Option<&mut AgentConfig> {
+        Some(match agent {
+            AgentType::ClaudeCode => &mut self.claude_code,
+            AgentType::Codex => &mut self.codex,
+            AgentType::OpenCode => &mut self.open_code,
+            AgentType::GeminiCli => &mut self.gemini_cli,
+            AgentType::Kiro => &mut self.kiro,
+            AgentType::Vibe => &mut self.vibe,
+            AgentType::CopilotCli => &mut self.copilot_cli,
+            AgentType::Ollama => &mut self.ollama,
+            AgentType::LiteLlm => &mut self.lite_llm,
+            AgentType::Nvidia => &mut self.nvidia,
+            AgentType::Custom => return None,
+        })
+    }
+
     /// Set `full_access` for a CLI agent. Every one of them reads it: Claude and
     /// Codex through their adapter's flag, the others by widening the ACP broker.
     pub fn set_full_access(&mut self, agent: &AgentType, value: bool) -> Result<(), &'static str> {
@@ -948,6 +1574,20 @@ pub struct AgentConfig {
     /// to the frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// KT-1693 — what takes over when THIS agent is unavailable on the provider
+    /// side (rate limit, quota or credits spent, outage, CLI not authenticated),
+    /// one row per mode (eco / standard / advanced / decision / image / video):
+    /// at most one fallback per mode, off by default. When the fallback is itself
+    /// unavailable, the fallback set on ITS own row applies. A discussion or a
+    /// workflow step may override a mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_fallbacks: Vec<ModeFallback>,
+    /// KT-1518 — the agent-level chain this version replaced. Read once at
+    /// start-up and carried onto the text mode rows
+    /// (`AgentsConfig::migrate_fallback_chains`), then cleared; never written.
+    #[serde(default, skip_serializing)]
+    #[ts(skip)]
+    pub fallback_chain: Vec<AgentFallback>,
     /// Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
     /// Tools are on by default: `Some(false)` withholds them from every model
     /// of this agent (for one that cannot take tool calls); `None` and
@@ -955,6 +1595,191 @@ pub struct AgentConfig {
     /// from a model it lists without `tools`. Ignored by CLI agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_enabled: Option<bool>,
+}
+
+/// KT-1693 — a mode of an agent: the kind of work one model of it serves. The
+/// three text modes are the quality tiers (`ModelTier`); decision, image and
+/// video are capabilities, never tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackMode {
+    Eco,
+    Standard,
+    Advanced,
+    Decision,
+    Image,
+    Video,
+}
+
+/// What a mode produces: a fallback only ever goes to the same kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackKind {
+    Text,
+    Decision,
+    Image,
+    Video,
+}
+
+impl FallbackMode {
+    pub const ALL: [FallbackMode; 6] = [
+        FallbackMode::Eco,
+        FallbackMode::Standard,
+        FallbackMode::Advanced,
+        FallbackMode::Decision,
+        FallbackMode::Image,
+        FallbackMode::Video,
+    ];
+
+    /// The three text modes, which an agent-level chain of 0.15.3 is carried to.
+    pub const TEXT: [FallbackMode; 3] = [
+        FallbackMode::Eco,
+        FallbackMode::Standard,
+        FallbackMode::Advanced,
+    ];
+
+    pub fn kind(self) -> FallbackKind {
+        match self {
+            FallbackMode::Eco | FallbackMode::Standard | FallbackMode::Advanced => {
+                FallbackKind::Text
+            }
+            FallbackMode::Decision => FallbackKind::Decision,
+            FallbackMode::Image => FallbackKind::Image,
+            FallbackMode::Video => FallbackKind::Video,
+        }
+    }
+
+    pub fn from_tier(tier: ModelTier) -> Self {
+        match tier {
+            ModelTier::Economy => FallbackMode::Eco,
+            ModelTier::Default => FallbackMode::Standard,
+            ModelTier::Reasoning => FallbackMode::Advanced,
+        }
+    }
+
+    /// The tier a text mode resolves to; `None` for decision, image and video.
+    pub fn tier(self) -> Option<ModelTier> {
+        match self {
+            FallbackMode::Eco => Some(ModelTier::Economy),
+            FallbackMode::Standard => Some(ModelTier::Default),
+            FallbackMode::Advanced => Some(ModelTier::Reasoning),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FallbackMode::Eco => "eco",
+            FallbackMode::Standard => "standard",
+            FallbackMode::Advanced => "advanced",
+            FallbackMode::Decision => "decision",
+            FallbackMode::Image => "image",
+            FallbackMode::Video => "video",
+        }
+    }
+}
+
+/// What a fallback cannot give that the agent it replaces could: a stable code,
+/// so the UI translates the warning instead of showing an English sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackGap {
+    /// No MCP tools.
+    NoMcpTools,
+    /// Cannot write in the worktree.
+    NoWriteAccess,
+    /// Images are not guaranteed.
+    NoImageInput,
+    /// A capped context window.
+    CappedContext,
+}
+
+/// How an agent is reached; shown as a badge on every fallback pill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackTransport {
+    /// A CLI process on this machine (OpenCode's ACP included).
+    Cli,
+    /// A remote HTTP API (LiteLLM, NVIDIA, a named connection).
+    Http,
+    /// A local model server (Ollama).
+    Local,
+}
+
+impl FallbackTransport {
+    pub fn label(self) -> &'static str {
+        match self {
+            FallbackTransport::Cli => "CLI",
+            FallbackTransport::Http => "HTTP",
+            FallbackTransport::Local => "Local",
+        }
+    }
+}
+
+/// KT-1693 — one fallback: the agent and, optionally, the model that takes over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentFallback {
+    pub agent: AgentType,
+    /// A specific model on the fallback. `None`: the mode below (else the SAME
+    /// mode as the interrupted turn), resolved on the fallback agent (a model
+    /// name is provider-specific, so the failing agent's model is never carried
+    /// over).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The mode of the model the fallback runs on. `None`: the mode of the row
+    /// (or of the turn) it replaces. Must be of the same kind as that mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<FallbackMode>,
+}
+
+/// KT-1693 — the fallback set on one mode row of an agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModeFallback {
+    pub row: FallbackMode,
+    pub fallback: AgentFallback,
+}
+
+/// KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
+/// id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
+/// model; without one, the model that target has in its own slot of the mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConnectionFallbackTarget {
+    pub connection: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// KT-1706 — the fallback of one mode of an owner (a connection id, or
+/// `local:comfyui` for `image` and `video`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConnectionFallback {
+    pub owner: String,
+    pub row: FallbackMode,
+    pub fallback: ConnectionFallbackTarget,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetConnectionFallbackRequest {
+    pub owner: String,
+    pub mode: FallbackMode,
+    /// The fallback of this row; `None` removes it.
+    pub fallback: Option<ConnectionFallbackTarget>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetAgentFallbackRequest {
+    pub agent: AgentType,
+    pub mode: FallbackMode,
+    /// The fallback of this mode row; `None` removes it.
+    pub fallback: Option<AgentFallback>,
 }
 
 // ─── Model tiers ──────────────────────────────────────────────────────────
@@ -1402,6 +2227,9 @@ pub struct ServerConfigPublic {
     pub disk_launch_min_free_gib: u64,
     /// KT-1318 - hours a lane build dir must be idle before a sweep may take it.
     pub disk_sweep_idle_hours: u64,
+    /// KT-1691 - days a Blocked/Interrupted execution's build dir must be idle
+    /// before it becomes purgeable.
+    pub disk_stalled_build_days: u64,
     pub p2p_enabled: bool,
     pub frontend_origins: Vec<String>,
     /// KT-1438 - copy lane seeds into task worktrees (default on).
@@ -1464,6 +2292,9 @@ pub struct UpdateServerConfigRequest {
     /// KT-1318 - `server.disk_sweep_idle_hours`.
     #[serde(default)]
     pub disk_sweep_idle_hours: Option<u64>,
+    /// KT-1691 - `server.disk_stalled_build_days`.
+    #[serde(default)]
+    pub disk_stalled_build_days: Option<u64>,
     /// KT-1438 - `server.lane_seeds_copy_enabled`.
     #[serde(default)]
     pub lane_seeds_copy_enabled: Option<bool>,

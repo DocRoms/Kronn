@@ -1186,3 +1186,151 @@ fn inside_a_caller_transaction_the_deletion_and_withdrawal_join_it() {
     assert_eq!(count(&conn, "SELECT COUNT(*) FROM discussions"), 1);
     assert_nothing_changed(&conn, "qe1");
 }
+
+/// A worker room `child` opened from `parent`, without the rows around it.
+fn delegate(conn: &Connection, parent: &str, child: &str) {
+    conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    conn.execute(
+        "INSERT INTO task_executions
+             (id, orchestration_run_id, task_id, parent_discussion_id, sub_discussion_id,
+              status, review_rounds, max_review_rounds, attempt_no, worker_target_kind,
+              worker_agent_type, worker_model_tier, created_at, updated_at)
+         VALUES (?2, 'run', ?2, ?1, ?2, 'Working', 0, 3, 0, 'agent',
+                 'ClaudeCode', 'reasoning', 'now', 'now')",
+        [parent, child],
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+}
+
+#[test]
+fn a_worker_room_is_held_to_the_level_of_the_room_that_delegated_to_it() {
+    let conn = connection();
+    set(&conn, TrustScope::Instance, None, TrustLevel::Full);
+    set(
+        &conn,
+        TrustScope::Room,
+        Some("principal"),
+        TrustLevel::Standard,
+    );
+    delegate(&conn, "principal", "worker");
+    delegate(&conn, "worker", "sub-worker");
+    for room in ["worker", "sub-worker"] {
+        let trust = effective(&conn, &TrustOrigin::room(room)).unwrap();
+        assert_eq!(
+            (trust.level, trust.source, trust.source_id.as_deref()),
+            (TrustLevel::Standard, TrustScope::Room, Some("principal")),
+            "{room}"
+        );
+        assert!(
+            level_grants(
+                &conn,
+                &TrustOrigin::room(room),
+                TrustApproval::QuickExecLine
+            )
+            .unwrap()
+            .is_none(),
+            "{room}"
+        );
+    }
+    // A room nobody delegated to keeps the instance level.
+    let other = effective(&conn, &TrustOrigin::room("other")).unwrap();
+    assert_eq!(other.level, TrustLevel::Full);
+}
+
+#[test]
+fn a_long_or_shared_delegation_chain_never_opens_a_higher_level() {
+    let conn = connection();
+    set(&conn, TrustScope::Instance, None, TrustLevel::Full);
+    set(&conn, TrustScope::Room, Some("r0"), TrustLevel::Standard);
+    for depth in 0..20 {
+        delegate(&conn, &format!("r{depth}"), &format!("r{}", depth + 1));
+    }
+    let deep = effective(&conn, &TrustOrigin::room("r20")).unwrap();
+    assert_eq!(
+        (deep.level, deep.source_id.as_deref()),
+        (TrustLevel::Standard, Some("r0"))
+    );
+    // Too long to follow, with no setting anywhere: Standard, not the instance.
+    for depth in 0..80 {
+        delegate(&conn, &format!("x{depth}"), &format!("x{}", depth + 1));
+    }
+    let endless = effective(&conn, &TrustOrigin::room("x80")).unwrap();
+    assert_eq!(endless.level, TrustLevel::Standard);
+    // Two rooms delegated to the same room: the lowest holds, whichever came first.
+    set(&conn, TrustScope::Room, Some("wide"), TrustLevel::Full);
+    set(
+        &conn,
+        TrustScope::Room,
+        Some("narrow"),
+        TrustLevel::Standard,
+    );
+    conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    for (id, parent) in [("e-wide", "wide"), ("e-narrow", "narrow")] {
+        conn.execute(
+            "INSERT INTO task_executions
+                 (id, orchestration_run_id, task_id, parent_discussion_id, sub_discussion_id,
+                  status, review_rounds, max_review_rounds, attempt_no, worker_target_kind,
+                  worker_agent_type, worker_model_tier, created_at, updated_at)
+             VALUES (?1, 'run', ?1, ?2, 'shared', 'Done', 0, 3, 0, 'agent',
+                     'ClaudeCode', 'reasoning', 'now', 'now')",
+            [id, parent],
+        )
+        .unwrap();
+    }
+    let shared = effective(&conn, &TrustOrigin::room("shared")).unwrap();
+    assert_eq!(
+        (shared.level, shared.source_id.as_deref()),
+        (TrustLevel::Standard, Some("narrow"))
+    );
+}
+
+#[test]
+fn a_delegating_room_lowers_a_worker_and_never_raises_it() {
+    let conn = connection();
+    set(&conn, TrustScope::Instance, None, TrustLevel::Standard);
+    set(&conn, TrustScope::Room, Some("principal"), TrustLevel::Full);
+    delegate(&conn, "principal", "worker");
+    let trust = effective(&conn, &TrustOrigin::room("worker")).unwrap();
+    assert_eq!(
+        (trust.level, trust.source),
+        (TrustLevel::Standard, TrustScope::Instance)
+    );
+    // The level a human gave the worker's own room is the one in force.
+    set(
+        &conn,
+        TrustScope::Room,
+        Some("principal"),
+        TrustLevel::Standard,
+    );
+    set(&conn, TrustScope::Room, Some("worker"), TrustLevel::Trusted);
+    let own = effective(&conn, &TrustOrigin::room("worker")).unwrap();
+    assert_eq!(
+        (own.level, own.source_id.as_deref()),
+        (TrustLevel::Trusted, Some("worker"))
+    );
+}
+
+#[test]
+fn lowering_a_room_takes_back_what_its_worker_was_granted() {
+    let conn = connection();
+    set(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
+    delegate(&conn, "principal", "worker");
+    quick_exec_row(&conn, "by-worker", true, true);
+    grant(
+        &conn,
+        &TrustOrigin::room("worker"),
+        TrustApproval::QuickExecLine,
+        "w",
+        None,
+        Some(TrustObject::quick_exec("by-worker")),
+    )
+    .unwrap();
+    set(
+        &conn,
+        TrustScope::Room,
+        Some("principal"),
+        TrustLevel::Standard,
+    );
+    assert_eq!(approved(&conn, "by-worker"), (None, None));
+}

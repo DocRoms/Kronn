@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.15.2"
+version.workspace = true
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -21,10 +21,6 @@ name = "it"
 path = "tests/it.rs"
 
 [features]
-# Reads `KRONN_TEST_NO_REAL_AGENTS` (KT-1189). Off in every build a user runs:
-# only the dev-dependency on this package below turns it on, for the
-# integration test binary, so a release or debug `kronn` ignores the variable.
-test-support = []
 # `full-tests` (default) compiles every unit-test module. The macOS portability
 # job turns it off (`--no-default-features`) and compiles only the four suites
 # it runs: the full lib-test binary (9 200 tests) needs more memory than the
@@ -32,7 +28,100 @@ test-support = []
 default = ["full-tests"]
 full-tests = []
 
+[workspace]
+members = [".", "crates/*"]
+# A bare `cargo clippy` or `cargo test` covers every crate, not the top one
+# alone. The server is built with `-p kronn`, which resolves its features only.
+default-members = [".", "crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.15.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+
 [dependencies]
+kronn-l0 = { path = "crates/l0", default-features = false }
+kronn-l1 = { path = "crates/l1", default-features = false }
+kronn-l2 = { path = "crates/l2", default-features = false }
+kronn-l3 = { path = "crates/l3", default-features = false }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
+toml = { workspace = true }
+serde_yaml = { workspace = true }
+csv = { workspace = true }
+rusqlite = { workspace = true }
+cron = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+iana-time-zone = { workspace = true }
+walkdir = { workspace = true }
+open = { workspace = true }
+which = { workspace = true }
+libc = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+aes-gcm = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+base64 = { workspace = true }
+image = { workspace = true }
+keyring = { workspace = true }
+argon2 = { workspace = true }
+zeroize = { workspace = true }
+fs2 = { workspace = true }
+reqwest = { workspace = true }
+serde_json_path = { workspace = true }
+governor = { workspace = true }
+secrecy = { workspace = true }
+tokio-tungstenite = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+regex-lite = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories = { workspace = true }
+syn = { workspace = true }
+proc-macro2 = { workspace = true }
+calamine = { workspace = true }
+zip = { workspace = true }
+pdf-extract = { workspace = true }
+ts-rs = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+html5ever = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+errno = { workspace = true }
+
+[dev-dependencies]
+kronn-l0 = { path = "crates/l0", default-features = false, features = ["test-support"] }
+kronn-l1 = { path = "crates/l1", default-features = false, features = ["test-support"] }
+kronn-l2 = { path = "crates/l2", default-features = false, features = ["test-support"] }
+kronn-l3 = { path = "crates/l3", default-features = false, features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+futures = { workspace = true }
+wiremock = { workspace = true }
+walkdir = { workspace = true }
+proptest = { workspace = true }
+
+[workspace.dependencies]
 # Web framework
 axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
@@ -111,6 +200,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 regex-lite = "0.1"
 thiserror = "2"
 anyhow = "1"
+# Link-time registry: a lower crate calls into a higher one (core::uplink).
+inventory = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"     # XDG paths
@@ -140,30 +231,14 @@ utoipa-swagger-ui = { version = "10.0.2", features = ["axum", "vendored"] }
 html5ever = "0.40.1"
 
 # rooted_io reads a file's link count through its handle on Windows.
-[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
-
-[dev-dependencies]
-# This package, with its `test-support` feature: the one way the integration
-# crates (tests/*) arm the real-agent guard. Dev-dependencies never reach
-# `cargo build`, so the feature is off for the shipped binary (KT-1189).
-kronn = { path = ".", features = ["test-support"] }
-# `test-util` only: it lets a test reach a 30-minute agent deadline on a paused
-# clock instead of waiting for it (KT-80). Dev-only, no production feature change.
-tokio = { version = "1", features = ["test-util"] }
+errno = "0.3"   # errno on every unix target, to tell a readdir error from the end
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3"
 tempfile = "3"
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
-futures = "0.3"
-wiremock = "0.6"          # HTTP mock server for ApiCall step tests
-# `syn` and `proc-macro2` are regular dependencies because the same AST parser
-# now protects agent edits; the AST-aware lint example still reuses them.
-walkdir = "2"
-proptest = "1"          # Property tests for crypto (roundtrip + universal tamper rejection)
-
-# ── Build profiles ───────────────────────────────────────────────────────────
+wiremock = "0.6"
+proptest = "1"
 
 [profile.dev]
 # Compile deps with optimizations, keep local code in debug mode
@@ -192,6 +267,3 @@ strip = true
 inherits = "release"
 lto = false
 codegen-units = 16
-
-[target.'cfg(unix)'.dependencies]
-errno = "0.3"   # errno on every unix target, to tell a readdir error from the end

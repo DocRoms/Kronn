@@ -14,7 +14,7 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 use crate::api::orchestration::{
-    decide_review_as_delegation_step, provision_campaign_task_execution, run_integration,
+    decide_review_as_delegation_step, provision_campaign_task_execution, run_integration_waited_on,
     CampaignProvisionInput, IntegrationOutcome, ReviewOutcome,
 };
 use crate::core::worktree;
@@ -36,8 +36,8 @@ use super::template::TemplateContext;
 /// server-generated UUIDs, so the prefix cannot collide with a human room.
 const DISCUSSION_PREFIX: &str = "wf-delegate-";
 const DEFAULT_CONCURRENCY: u32 = 1;
-pub(crate) const MAX_CONCURRENCY: u32 = 8;
-pub(crate) const MAX_REVIEW_ROUNDS: u32 = 10;
+pub const MAX_CONCURRENCY: u32 = 8;
+pub const MAX_REVIEW_ROUNDS: u32 = 10;
 const DEFAULT_TIMEOUT_SECS: u64 = 6 * 3600;
 /// Between two reads of the durable state when nothing moved. An SQL read,
 /// never a model call.
@@ -46,13 +46,13 @@ const DIFF_MAX_CHARS: usize = 40_000;
 /// A subtask whose approved delivery conflicts this many times stops the step.
 const CONFLICT_LIMIT: i64 = 2;
 
-pub(crate) fn is_delegation_discussion(discussion_id: &str) -> bool {
+pub fn is_delegation_discussion(discussion_id: &str) -> bool {
     discussion_id.starts_with(DISCUSSION_PREFIX)
 }
 
 /// Why the step stopped; the name is the `[SIGNAL: …]` `on_result` routes on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DelegationSignal {
+pub enum DelegationSignal {
     Ok,
     Escalated,
     Conflict,
@@ -76,7 +76,7 @@ impl DelegationSignal {
 
 /// What the reviewer receives: a fresh session's whole context.
 #[derive(Debug, Clone)]
-pub(crate) struct ReviewRequest {
+pub struct ReviewRequest {
     pub execution_id: String,
     pub attempt_no: u32,
     pub task_reference: String,
@@ -86,7 +86,7 @@ pub(crate) struct ReviewRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ReviewReply {
+pub struct ReviewReply {
     pub text: String,
     pub tokens: Option<u64>,
     pub cost_usd: Option<f64>,
@@ -101,7 +101,7 @@ pub(crate) struct ReviewReply {
 /// between two reads of the durable state. Tests drive fake workers from
 /// `idle`, so every wait there is synchronous with the step.
 #[async_trait::async_trait]
-pub(crate) trait DelegationWorld: Send + Sync {
+pub trait DelegationWorld: Send + Sync {
     async fn review(&self, request: ReviewRequest) -> ReviewReply;
     async fn idle(&self);
     fn now(&self) -> Instant {
@@ -114,7 +114,7 @@ pub(crate) trait DelegationWorld: Send + Sync {
 }
 
 /// One delegation, resolved from the step and the run.
-pub(crate) struct Delegation<'a> {
+pub struct Delegation<'a> {
     pub state: &'a AppState,
     pub run_id: &'a str,
     pub step_name: &'a str,
@@ -130,7 +130,7 @@ pub(crate) struct Delegation<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct SubtaskReport {
+pub struct SubtaskReport {
     pub task: String,
     pub title: String,
     pub status: String,
@@ -141,11 +141,14 @@ pub(crate) struct SubtaskReport {
     pub integration_conflicts: u32,
     pub worker: Option<String>,
     pub cost_usd: Option<f64>,
+    /// Why `cost_usd` is `None`, so a missing cost is never read as zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_unknown_reason: Option<String>,
     pub tokens: u64,
 }
 
 #[derive(Debug)]
-pub(crate) struct DelegationReport {
+pub struct DelegationReport {
     pub signal: DelegationSignal,
     pub summary: String,
     pub discussion_id: Option<String>,
@@ -172,6 +175,9 @@ struct Setup {
     campaign_id: String,
     target_branch: String,
     subtasks: Vec<Subtask>,
+    /// The run and the parent runs sharing its worktree: they wait on the step
+    /// and never hold the target against its integrations (KT-1795).
+    waiting_runs: Vec<String>,
 }
 
 struct Stop {
@@ -197,10 +203,11 @@ fn step_actor(run_id: &str, step_name: &str) -> PlanningActor {
         )),
         session_id: None,
         source_message_id: None,
+        token_declared: false,
     }
 }
 
-fn worker_selection(worker: &DelegateWorker) -> CampaignWorkerSelection {
+pub fn worker_selection(worker: &DelegateWorker) -> CampaignWorkerSelection {
     let target = if crate::agents::runner::is_http_chat_agent(&worker.agent) {
         MessageTarget::discussion_agent(worker.agent.clone())
     } else {
@@ -224,17 +231,17 @@ fn resolve_worker(config: &DelegateSubtasksConfig, tags: &[String]) -> Option<De
         .or_else(|| config.default_worker.clone())
 }
 
-fn review_message_id(execution_id: &str, attempt_no: u32) -> String {
+pub fn review_message_id(execution_id: &str, attempt_no: u32) -> String {
     format!("wf-review:{execution_id}:{attempt_no}")
 }
 
 /// Keyed by the reviewed attempt: a successful reassignment advances the
 /// attempt, so a marker for the current one means it is still pending.
-fn reassign_marker_id(execution_id: &str, attempt_no: u32) -> String {
+pub fn reassign_marker_id(execution_id: &str, attempt_no: u32) -> String {
     format!("wf-reassign:{execution_id}:{attempt_no}")
 }
 
-pub(crate) async fn run_delegation(
+pub async fn run_delegation(
     delegation: &Delegation<'_>,
     world: &dyn DelegationWorld,
 ) -> DelegationReport {
@@ -494,34 +501,81 @@ async fn prepare(delegation: &Delegation<'_>) -> Result<Setup, Stop> {
     .map_err(|error| Stop::new(DelegationSignal::Failed, format!("{error:#}")))?;
 
     // The saga would hold every approval on a dirty target: refuse before launching.
-    let all_done = children.iter().all(|child| {
-        matches!(
+    let all_settled = children.iter().all(|child| {
+        let awaiting = child.summary.awaiting_merge.as_ref();
+        subtask_settled(
             child.summary.status,
-            PlanningTaskStatus::Done | PlanningTaskStatus::Archived
+            awaiting.map(|merge| merge.branch.as_str()),
+            &target_branch,
         )
     });
-    if !all_done {
-        let checkout = worktree::integration_target_worktree(&repo_path, &target_branch)
+    if !all_settled {
+        // KT-1795 — a branch no worktree holds is integrated by moving its
+        // ref: there is no checkout to inspect.
+        let target = worktree::integration_target(&repo_path, &target_branch)
             .map_err(|error| Stop::new(DelegationSignal::Blocked, error))?;
-        let dirty = worktree::worktree_dirty_files(&checkout)
-            .map_err(|error| Stop::new(DelegationSignal::Blocked, error))?;
-        if !dirty.is_empty() {
-            return Err(Stop::new(
-                DelegationSignal::Blocked,
-                format!(
-                    "`{target_branch}` has {} uncommitted file(s) in {}; commit them before delegating",
-                    dirty.len(),
-                    checkout.display()
-                ),
-            ));
+        if let worktree::IntegrationTarget::CheckedOut(checkout) = target {
+            let dirty = worktree::worktree_dirty_files(&checkout)
+                .map_err(|error| Stop::new(DelegationSignal::Blocked, error))?;
+            if !dirty.is_empty() {
+                return Err(Stop::new(
+                    DelegationSignal::Blocked,
+                    format!(
+                        "`{target_branch}` has {} uncommitted file(s) in {}; commit them before delegating",
+                        dirty.len(),
+                        checkout.display()
+                    ),
+                ));
+            }
         }
     }
+    let waiting_runs = waiting_runs(&delegation.state.db, delegation.run_id)
+        .await
+        .map_err(|error| Stop::new(DelegationSignal::Failed, format!("{error:#}")))?;
     Ok(Setup {
         discussion_id,
         campaign_id: campaign.id,
         target_branch,
         subtasks,
+        waiting_runs,
     })
+}
+
+/// The run, then each parent run that shares its worktree (a sub-workflow
+/// child inherits it), up the chain.
+async fn waiting_runs(db: &Database, run_id: &str) -> anyhow::Result<Vec<String>> {
+    let run_id = run_id.to_string();
+    db.with_read_conn(move |conn| {
+        let path: Option<String> = conn
+            .query_row(
+                "SELECT workspace_path FROM workflow_runs WHERE id = ?1",
+                [&run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let mut runs = vec![run_id];
+        let Some(path) = path else {
+            return Ok(runs);
+        };
+        loop {
+            let current = runs.last().cloned().unwrap_or_default();
+            let parent: Option<String> = conn
+                .query_row(
+                    "SELECT parent.id FROM workflow_runs child \
+                       JOIN workflow_runs parent ON parent.id = child.parent_run_id \
+                      WHERE child.id = ?1 AND parent.workspace_path = ?2",
+                    rusqlite::params![current, path],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match parent {
+                Some(parent) if !runs.contains(&parent) => runs.push(parent),
+                _ => return Ok(runs),
+            }
+        }
+    })
+    .await
 }
 
 /// The run's technical room for this step, created once and found again on resume.
@@ -737,6 +791,21 @@ async fn integration_conflicts(db: &Database, execution_id: &str) -> anyhow::Res
     .await
 }
 
+/// KT-1802 — a subtask is settled when its task is closed, or when it stays
+/// open only to await the merge of its integration into the step's target
+/// (KT-1519). A task reopened since, or awaiting another branch, is not.
+pub fn subtask_settled(
+    status: PlanningTaskStatus,
+    awaiting_merge: Option<&str>,
+    target: &str,
+) -> bool {
+    match status {
+        PlanningTaskStatus::Done | PlanningTaskStatus::Archived => true,
+        PlanningTaskStatus::InProgress => awaiting_merge == Some(target),
+        _ => false,
+    }
+}
+
 /// One look at the durable state, and at most one round of actions on it.
 async fn advance(
     delegation: &Delegation<'_>,
@@ -749,14 +818,17 @@ async fn advance(
     let task_ids: Vec<String> = setup.subtasks.iter().map(|task| task.id.clone()).collect();
     let executions = latest_executions(db, &setup.campaign_id, task_ids.clone()).await?;
     let ids = task_ids.clone();
-    let statuses: Vec<PlanningTaskStatus> = db
+    let tasks: Vec<(PlanningTaskStatus, Option<String>)> = db
         .with_read_conn(move |conn| {
             ids.iter()
                 .map(|id| {
-                    Ok(crate::db::planning::get_task(conn, id)?
+                    let summary = crate::db::planning::get_task(conn, id)?
                         .context("subtask vanished")?
-                        .summary
-                        .status)
+                        .summary;
+                    Ok((
+                        summary.status,
+                        summary.awaiting_merge.map(|merge| merge.branch),
+                    ))
                 })
                 .collect()
         })
@@ -827,7 +899,8 @@ async fn advance(
                 if let Some(stop) = past_deadline(world, deadline) {
                     return Ok(Progress::Stopped(stop));
                 }
-                if let IntegrationOutcome::Refused { reason } = integrate(db, &execution.id).await?
+                if let IntegrationOutcome::Refused { reason } =
+                    integrate(db, setup, &execution.id).await?
                 {
                     return Ok(Progress::Stopped(Stop::new(
                         DelegationSignal::Blocked,
@@ -853,12 +926,10 @@ async fn advance(
         return Ok(Progress::Moved);
     }
 
-    if statuses.iter().all(|status| {
-        matches!(
-            status,
-            PlanningTaskStatus::Done | PlanningTaskStatus::Archived
-        )
-    }) {
+    let settled = tasks.iter().all(|(status, awaiting)| {
+        subtask_settled(*status, awaiting.as_deref(), &setup.target_branch)
+    });
+    if settled {
         return Ok(Progress::Stopped(Stop::new(
             DelegationSignal::Ok,
             format!(
@@ -963,16 +1034,20 @@ async fn advance(
     Ok(Progress::Idle)
 }
 
-async fn integrate(db: &Database, execution_id: &str) -> anyhow::Result<IntegrationOutcome> {
-    run_integration(db, execution_id)
+async fn integrate(
+    db: &Database,
+    setup: &Setup,
+    execution_id: &str,
+) -> anyhow::Result<IntegrationOutcome> {
+    run_integration_waited_on(db, execution_id, &setup.waiting_runs)
         .await
         .map_err(|error| anyhow::anyhow!("integration failed: {error:?}"))
 }
 
 /// Typed reviewer output, a superset of `ReviewDecisionV1`'s verdicts.
 #[derive(Debug, Clone, serde::Deserialize)]
-struct ReviewerVerdict {
-    decision: String,
+pub struct ReviewerVerdict {
+    pub decision: String,
     #[serde(default)]
     comment: Option<String>,
     #[serde(default)]
@@ -986,7 +1061,7 @@ struct ReviewerVerdict {
 }
 
 /// The last JSON object of the reply that carries a `decision`.
-fn parse_verdict(text: &str) -> Option<ReviewerVerdict> {
+pub fn parse_verdict(text: &str) -> Option<ReviewerVerdict> {
     let mut found = None;
     for (start, _) in text.match_indices('{') {
         let mut stream = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>();
@@ -1144,7 +1219,7 @@ async fn review(
                         return Ok(Some(stop));
                     }
                     if let IntegrationOutcome::Refused { reason } =
-                        integrate(db, &execution.id).await?
+                        integrate(db, setup, &execution.id).await?
                     {
                         return Ok(Some(Stop::new(
                             DelegationSignal::Blocked,
@@ -1329,7 +1404,7 @@ async fn escalate(
     )))
 }
 
-fn orchestrator_note(id: String, content: String) -> DiscussionMessage {
+pub fn orchestrator_note(id: String, content: String) -> DiscussionMessage {
     let mut message = crate::api::orchestration::orchestrator_message(id, content);
     message.role = MessageRole::System;
     message
@@ -1493,15 +1568,19 @@ async fn review_request(
 async fn git_diff(work_dir: &str, base: &str, head: &str) -> anyhow::Result<String> {
     worktree::reject_option_like_rev(base).map_err(anyhow::Error::msg)?;
     worktree::reject_option_like_rev(head).map_err(anyhow::Error::msg)?;
-    let output = crate::core::cmd::async_git_cmd()
-        .args([
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            &format!("{base}..{head}"),
-            "--",
-        ])
-        .current_dir(work_dir)
+    // KT-1745 — a sub-task's worktree is the worker's: the repository is the
+    // registered one, and the diff runs no program the worktree names.
+    let mut command =
+        crate::core::lane_git::git(std::path::Path::new(work_dir)).map_err(anyhow::Error::msg)?;
+    command.args([
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        &format!("{base}..{head}"),
+        "--",
+    ]);
+    let output = tokio::process::Command::from(command)
         .output()
         .await
         .context("git diff could not run")?;
@@ -1532,23 +1611,43 @@ async fn subtask_reports(db: &Database, setup: &Setup) -> anyhow::Result<Vec<Sub
         };
         let task_id = subtask.id.clone();
         let execution_for_cost = execution.clone();
-        let (status, cost_usd, tokens) = db
+        let (status, cost_usd, cost_unknown_reason, tokens) = db
             .with_read_conn(move |conn| {
                 let status =
                     crate::db::planning::get_task(conn, &task_id)?.map(|task| task.summary.status);
                 let Some(execution) = execution_for_cost else {
-                    return Ok((status, None, 0u64));
+                    return Ok((status, None, Some("never launched".to_string()), 0u64));
                 };
-                let (cost, tokens): (Option<f64>, i64) = conn.query_row(
-                    "SELECT SUM(cost_usd), COALESCE(SUM(tokens_used), 0) FROM messages \
-                     WHERE discussion_id = ?1 OR id LIKE ?2",
-                    rusqlite::params![
-                        execution.sub_discussion_id.unwrap_or_default(),
-                        format!("wf-review:{}:%", execution.id)
-                    ],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
-                Ok((status, cost, tokens.max(0) as u64))
+                let (replies, priced, cost, tokens): (i64, i64, Option<f64>, i64) = conn
+                    .query_row(
+                        "SELECT COUNT(CASE WHEN role = 'Agent' THEN 1 END), \
+                                COUNT(CASE WHEN role = 'Agent' THEN cost_usd END), \
+                                SUM(cost_usd), COALESCE(SUM(tokens_used), 0) FROM messages \
+                         WHERE discussion_id = ?1 OR id LIKE ?2",
+                        rusqlite::params![
+                            execution.sub_discussion_id.unwrap_or_default(),
+                            format!("wf-review:{}:%", execution.id)
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )?;
+                // A partial sum would read as the whole cost.
+                let (cost, reason) = if replies > 0 && priced == replies {
+                    (cost, None)
+                } else if priced > 0 {
+                    let reason = format!(
+                        "{priced} of {replies} agent replies carry a cost: the sum would understate it"
+                    );
+                    (None, Some(reason))
+                } else {
+                    let session = crate::db::orchestration::list_worker_cli_sessions(conn, &execution.id)?
+                        .into_iter()
+                        .find_map(|session| session.cost_unknown_reason);
+                    let reason = session.unwrap_or_else(|| {
+                        "no priced message: the cost of this subtask is unknown".to_string()
+                    });
+                    (None, Some(reason))
+                };
+                Ok((status, cost, reason, tokens.max(0) as u64))
             })
             .await?;
         reports.push(SubtaskReport {
@@ -1570,6 +1669,7 @@ async fn subtask_reports(db: &Database, setup: &Setup) -> anyhow::Result<Vec<Sub
                 .as_ref()
                 .and_then(|execution| execution.worker_agent_type.clone()),
             cost_usd,
+            cost_unknown_reason,
             tokens,
         });
     }
@@ -1578,7 +1678,7 @@ async fn subtask_reports(db: &Database, setup: &Setup) -> anyhow::Result<Vec<Sub
 
 /// The production world: a fresh one-shot agent session per review, no
 /// orchestration tools, and an SQL read every [`IDLE_POLL`].
-pub(crate) struct LiveWorld<'a> {
+pub struct LiveWorld<'a> {
     pub reviewer: WorkflowStep,
     pub project_path: &'a str,
     pub project_id: Option<&'a str>,
@@ -1667,7 +1767,7 @@ fn reviewer_step(step: &WorkflowStep) -> WorkflowStep {
 
 /// Runner entry point.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute_delegate_subtasks_step(
+pub async fn execute_delegate_subtasks_step(
     state: &AppState,
     step: &WorkflowStep,
     run_id: &str,
@@ -1755,7 +1855,7 @@ pub(crate) async fn execute_delegate_subtasks_step(
 }
 
 /// `on_failure` cannot delegate: a rollback must not launch new work.
-pub(crate) fn forbidden_in_rollback(step: &WorkflowStep) -> StepOutcome {
+pub fn forbidden_in_rollback(step: &WorkflowStep) -> StepOutcome {
     finish(
         step,
         Instant::now(),
@@ -1780,7 +1880,7 @@ impl DelegationReport {
     }
 }
 
-pub(crate) fn finish(step: &WorkflowStep, start: Instant, report: DelegationReport) -> StepOutcome {
+pub fn finish(step: &WorkflowStep, start: Instant, report: DelegationReport) -> StepOutcome {
     let signal = report.signal.as_str();
     let data = json!({
         "discussion_id": report.discussion_id,
@@ -1835,7 +1935,3 @@ pub(crate) fn finish(step: &WorkflowStep, start: Instant, report: DelegationRepo
         condition_action,
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "delegate_subtasks_step_tests.rs"]
-mod tests;

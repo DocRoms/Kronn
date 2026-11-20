@@ -209,11 +209,6 @@
   border-color: rgba(255, 255, 255, 0.35);
   color: var(--kr-text-on-accent);
 }
-:root[data-theme="euronews"] .dash-scan-btn {
-  background: rgba(255, 255, 255, 0.14);
-  border-color: rgba(255, 255, 255, 0.35);
-  color: var(--kr-text-on-accent);
-}
 :root[data-theme="euronews"] .dash-nav-brand .text-accent {
   color: var(--kr-text-on-accent);
 }
@@ -256,23 +251,6 @@
   display: inline-flex;
   background: #fff;
   color: var(--kr-error);
-}
-
-/* ── Scan / action button ──────────────────────────────── */
-.dash-scan-btn {
-  padding: 7px var(--kr-sp-7);
-  border-radius: var(--kr-r-md);
-  border: 1px solid var(--kr-accent-border);
-  background: rgba(var(--kr-accent-rgb), 0.05);
-  color: var(--kr-accent);
-  cursor: pointer;
-  font-size: var(--kr-fs-base);
-  font-family: inherit;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-3);
-  transition: background 0.15s, border-color 0.15s;
 }
 
 /* ── Main content ──────────────────────────────────────── */
@@ -1068,6 +1046,17 @@ button.dash-badge-tech-debt {
   color: rgb(var(--kr-error-rgb));
 }
 
+/* KT-1750 — one field of the commit-identity block: its title (a `.text-sm`
+   span, like the Workers 'Commits Kronn' block; never `.label`, which is
+   larger and bolder than the section's h4), inputs and the value in force,
+   spaced like the section's own rows. */
+.project-commit-policy-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-2);
+}
+
 /* KT-1433 — full access to a project's validations needs a confirmed warning */
 .project-validations-access-warning {
   display: flex;
@@ -1285,7 +1274,7 @@ button.dash-badge-tech-debt {
   position: fixed;
   inset: 0;
   background: var(--kr-bg-overlay);
-  z-index: 1000;
+  z-index: var(--kr-z-modal);
   display: flex;
   align-items: center;
   justify-content: center;

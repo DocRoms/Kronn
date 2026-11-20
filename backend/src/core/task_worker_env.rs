@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,25 @@ pub const VITE_DEV_PORT_ENV: &str = "VITE_DEV_PORT";
 pub const VITE_CACHE_DIR_ENV: &str = "VITE_CACHE_DIR";
 /// Playwright's Chromium runs single-process: the sandbox denies its rendezvous.
 pub const E2E_CHROMIUM_SINGLE_PROCESS_ENV: &str = "KRONN_E2E_CHROMIUM_SINGLE_PROCESS";
+/// KT-1742 — the C compiler flags the `cc` crate (and so `aws-lc-sys`,
+/// `libsqlite3-sys`, …) reads for a macOS target, one variable per Apple
+/// architecture. They are target-scoped, never a plain `CFLAGS`: `cc` reads them
+/// first, and they reach no Linux or Windows build.
+pub const MACOS_TARGET_CFLAGS_ENV: [&str; 2] =
+    ["CFLAGS_aarch64_apple_darwin", "CFLAGS_x86_64_apple_darwin"];
+/// KT-1736 — keep Apple clang's intermediate files next to the object file.
+///
+/// A `.S` source is compiled in two jobs (preprocess, then assemble) and the
+/// driver hands the first one a temporary file in the per-user Darwin temp
+/// directory (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, `/private/var/folders/…/T`),
+/// not in `TMPDIR`. The OS sandbox of a lane grants no such directory, so the
+/// driver dies with `unable to make temporary file: Operation not permitted`
+/// and `aws-lc-sys` (its aarch64 assembly sources are `.S` files) cannot be
+/// built — which is what failed every lane warm-up of 2026-11-12. With
+/// `-save-temps=obj` the
+/// intermediate file is written beside the `.o`, inside the lane's own target,
+/// and the profile stays as narrow as it was.
+pub const CLANG_KEEP_TEMPS_IN_OBJ_DIR: &str = "-save-temps=obj";
 /// Lane ports live in `[LANE_PORT_BASE, LANE_PORT_BASE + 2 * LANE_PORT_SLOTS)`,
 /// away from the host's Kronn (3140) and Vite (5173).
 const LANE_PORT_BASE: u16 = 20_000;
@@ -99,6 +119,16 @@ const VITEST_CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
 const VITEST_CONFIG_PROBE_FILTER: &str = "kronn-lane-config-probe-no-such-test";
 /// What a failed probe's reason keeps of the command's output.
 const PROBE_DETAIL_BYTES: usize = 300;
+/// KT-1736 — how many error lines a failed probe keeps from the START of its
+/// output. The last [`PROBE_DETAIL_BYTES`] of a `cargo` build are its epilogue
+/// (`warning: build failed, waiting for other jobs`); the compiler's own message
+/// is far above them.
+const PROBE_FIRST_ERROR_LINES: usize = 8;
+/// A kept error line is clipped to this many characters (a `cc` command line is
+/// several kilobytes; its end names the file that failed).
+const PROBE_ERROR_LINE_CHARS: usize = 400;
+/// The longest line the scanner buffers; the rest of a longer one is dropped.
+const PROBE_SCANNED_LINE_BYTES: usize = 16 * 1024;
 
 /// The parallelism of every build and test tool the project uses, bounded by
 /// one `jobs` budget (KT-1634): Cargo's compilation, each Rust test binary
@@ -116,6 +146,30 @@ pub fn build_budget_env(jobs: u32) -> Vec<(&'static str, OsString)> {
         (NEXTEST_TEST_THREADS_ENV, OsString::from(&jobs)),
         (VITEST_MAX_WORKERS_ENV, OsString::from(&jobs)),
     ]
+}
+
+/// The detected C flags of a lane build on a host of the given family (KT-1736):
+/// the flag of [`CLANG_KEEP_TEMPS_IN_OBJ_DIR`] on macOS, nothing elsewhere.
+///
+/// KT-1742 — set under the target-scoped names of [`MACOS_TARGET_CFLAGS_ENV`].
+/// `cc` puts the value it read into the build script's fingerprint, so a lane
+/// seeded from the project's main-checkout `target/debug` reuses the seed's
+/// `aws-lc-sys`, `libsqlite3-sys` and their dependents only if that seed was
+/// built with the same value; Kronn builds the seed that way before cloning it
+/// ([`crate::core::task_worker_seed_align`]). With a plain `CFLAGS` set by the
+/// lane alone, every `cc` crate of an unflagged seed was rebuilt, the warm-up ran
+/// into its bound and left no marker. This is the DEFAULT of a project that
+/// builds C through `cc`; the owner's settings can replace it
+/// ([`crate::core::task_worker_lane_settings`]).
+pub fn compiler_temp_env_for(macos: bool) -> Vec<(&'static str, OsString)> {
+    if macos {
+        MACOS_TARGET_CFLAGS_ENV
+            .into_iter()
+            .map(|name| (name, OsString::from(CLANG_KEEP_TEMPS_IN_OBJ_DIR)))
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// [`build_budget_env`] with the host's budget
@@ -186,7 +240,7 @@ pub fn apply_build_budget(command: &mut std::process::Command, work_dir: &Path) 
 
 /// [`apply_build_budget`] with the budget and the operator's environment
 /// injected. A name the command already carries, or the operator set, wins.
-pub(crate) fn apply_build_budget_with(
+pub fn apply_build_budget_with(
     command: &mut std::process::Command,
     work_dir: &Path,
     budget: Vec<(&'static str, OsString)>,
@@ -305,7 +359,56 @@ impl WorkerLane {
         if let Some(source) = self.frontend_deps_source().filter(|path| path.is_dir()) {
             roots.push(source);
         }
+        for (path, _) in self.layered_dependency_dirs().0 {
+            if let Some(source) = self
+                .main_checkout
+                .as_ref()
+                .map(|root| root.join(&path))
+                .filter(|source| source.is_dir() && !roots.contains(source))
+            {
+                roots.push(source);
+            }
+        }
         roots
+    }
+
+    /// KT-1747 — the dependency directories this lane layers besides the
+    /// frontend's own (which keeps its dedicated link, see
+    /// [`WorkerLane::link_frontend_deps`]): the ones detected from the
+    /// worktree's manifests at any depth, or exactly the project's own list
+    /// ([`crate::core::task_worker_lane_settings`]). Each is paired with its
+    /// path relative to the repository; the second list holds the entries of
+    /// the project's list that name no directory inside the repository.
+    fn layered_dependency_dirs(&self) -> (Vec<(String, PathBuf)>, Vec<String>) {
+        let settings = crate::core::task_worker_lane_settings::effective_for(
+            &self.worktree,
+            self.main_checkout.as_deref(),
+        );
+        let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+        let (dirs, rejected) = crate::core::project_toolchains::dependency_dirs(
+            &profile,
+            settings.dependency_dirs.as_deref(),
+        );
+        let frontend = format!("{FRONTEND_DIR}/{NODE_MODULES}");
+        let dirs = dirs
+            .into_iter()
+            .filter(|dir| *dir != frontend)
+            .map(|dir| {
+                let destination = self.worktree.join(&dir);
+                (dir, destination)
+            })
+            .collect();
+        (dirs, rejected)
+    }
+
+    /// KT-1751 review — every dependency directory this lane takes from the
+    /// main checkout (relative to the repository, `/` separated): the layered
+    /// ones and the frontend's own link.
+    pub fn dependency_paths(&self) -> Vec<String> {
+        let (layered, _) = self.layered_dependency_dirs();
+        std::iter::once(format!("{FRONTEND_DIR}/{NODE_MODULES}"))
+            .chain(layered.into_iter().map(|(path, _)| path))
+            .collect()
     }
 
     /// Environment a task worker gets so no env-prefixed command is needed.
@@ -333,10 +436,45 @@ impl WorkerLane {
             self.data_dir.join("vite-cache").into_os_string(),
         ));
         env.push((E2E_CHROMIUM_SINGLE_PROCESS_ENV, OsString::from("1")));
+        env.extend(self.compiler_temp_env());
+        env.extend(self.package_manager_cache_env());
         if let Some(home) = self.effective_cargo_home(provisioned) {
             env.push((CARGO_HOME_ENV, home.into_os_string()));
         }
         env
+    }
+
+    /// KT-1751 — the download cache of each package manager the project uses
+    /// (npm, yarn, composer, found from the manifests at any depth), moved to
+    /// `<data dir>/cache/<name>`: inside the lane, so inside a write root, instead
+    /// of the user's home, which a lane may not write. Nothing is added for a
+    /// project that uses none of them (Kronn's own lanes are unchanged).
+    fn package_manager_cache_env(&self) -> Vec<(&'static str, OsString)> {
+        let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+        crate::core::project_toolchains::cache_env(&profile)
+            .into_iter()
+            .map(|(variable, folder)| {
+                (
+                    variable,
+                    self.data_dir.join("cache").join(folder).into_os_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The C compiler's environment of this lane (KT-1736, KT-1742): what keeps
+    /// its temporary files inside the lane on macOS ([`CLANG_KEEP_TEMPS_IN_OBJ_DIR`],
+    /// Apple clang's driver ignores `TMPDIR` for a `.S` source and the lane's
+    /// sandbox refuses the directory it picks instead), for a project that builds
+    /// C through `cc`; nothing elsewhere, so no cached build script is
+    /// invalidated for nothing. The owner can set or clear it globally and per
+    /// project (`LaneWarmConfig::compiler_env`); see
+    /// [`crate::core::task_worker_lane_settings`].
+    fn compiler_temp_env(&self) -> Vec<(&'static str, OsString)> {
+        crate::core::task_worker_lane_settings::compiler_env_for(
+            &self.worktree,
+            self.main_checkout.as_deref(),
+        )
     }
 
     /// The `CARGO_HOME` this lane's Cargo runs with, when one is set at all: the
@@ -394,14 +532,17 @@ impl WorkerLane {
         // A lane target beside the repo must never make the main checkout look
         // dirty: the integration preflight refuses a dirty target. A project
         // that already ignores `/target/` writes nothing.
-        if let Some(root) = self
-            .main_checkout
-            .as_ref()
-            .filter(|root| root.join(".git").exists())
-        {
-            if let Err(error) =
-                crate::core::worktree::ensure_local_git_exclude(root, LANE_TARGET_EXCLUDE)
-            {
+        if let Some(root) = self.main_checkout.as_ref() {
+            // KT-1595: provisioning runs on every worker launch, correction
+            // rounds included, so after an agent: the rule goes to the exclude
+            // of the git directory resolved from the REGISTERED checkout (a
+            // linked worktree or a project below the repo top included),
+            // never from the lane's pointer.
+            if let Err(error) = crate::core::worktree::ensure_local_git_exclude_pinned_for(
+                root,
+                root,
+                LANE_TARGET_EXCLUDE,
+            ) {
                 warnings.push(format!(
                     "cannot ignore the lane target directories: {error}"
                 ));
@@ -422,15 +563,89 @@ impl WorkerLane {
         // show as an untracked file and the delivery would find the worktree
         // dirty. Judged from inside the worktree, where the link exists.
         if matches!(frontend_deps, FrontendDeps::Linked(_)) && self.worktree.join(".git").exists() {
-            if let Err(error) = crate::core::worktree::ensure_local_git_exclude(
-                &self.worktree,
-                FRONTEND_DEPS_EXCLUDE,
-            ) {
+            // KT-1595: judged from the lane, written to the registered
+            // checkout's exclude (the one a linked worktree shares). Without a
+            // registered checkout (an unmanaged layout) nothing is written:
+            // the lane's `.git` pointer is not trusted after an agent ran.
+            let written = match self.main_checkout.as_deref() {
+                Some(root) => crate::core::worktree::ensure_local_git_exclude_pinned_for(
+                    &self.worktree,
+                    root,
+                    FRONTEND_DEPS_EXCLUDE,
+                ),
+                None => Err("the lane has no registered checkout".to_string()),
+            };
+            if let Err(error) = written {
                 warnings.push(format!("cannot ignore the node_modules link: {error}"));
             }
         }
+        let (layered, rejected) = self.layered_dependency_dirs();
+        warnings.extend(rejected.into_iter().map(|entry| {
+            format!(
+                "dependency_dirs entry `{entry}` is not a directory inside the repository: \
+                 ignored"
+            )
+        }));
+        let mut dependency_layers = Vec::new();
+        for (path, destination) in layered {
+            let source = self
+                .main_checkout
+                .as_ref()
+                .map(|root| root.join(&path))
+                .filter(|source| source.is_dir());
+            let state = self.link_deps_at(&destination, source);
+            if matches!(state, FrontendDeps::Linked(_)) && self.worktree.join(".git").exists() {
+                // KT-1595, as for the frontend link above: judged from the
+                // lane, written to the REGISTERED checkout's exclude, never to
+                // wherever the lane's (agent-writable) `.git` pointer says.
+                let written = match self.main_checkout.as_deref() {
+                    Some(root) => crate::core::worktree::ensure_local_git_exclude_pinned_for(
+                        &self.worktree,
+                        root,
+                        &format!("/{path}"),
+                    ),
+                    None => Err("the lane has no registered checkout".to_string()),
+                };
+                if let Err(error) = written {
+                    warnings.push(format!("cannot ignore the {path} layer: {error}"));
+                }
+            }
+            dependency_layers.push(DependencyLayer { path, state });
+        }
+        // KT-1747: a dependency directory the main checkout has not installed
+        // is a launch warning, not a silent gap: it names the command.
+        let missing: Vec<String> =
+            std::iter::once((format!("{FRONTEND_DIR}/{NODE_MODULES}"), &frontend_deps))
+                .chain(
+                    dependency_layers
+                        .iter()
+                        .map(|layer| (layer.path.clone(), &layer.state)),
+                )
+                .filter(|(_, state)| **state == FrontendDeps::SourceMissing)
+                .map(|(path, _)| path)
+                .collect();
+        if !missing.is_empty() {
+            let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+            // A package of a Node workspace has no install of its own (its
+            // dependencies are hoisted to the workspace root, whose own layer
+            // carries the warning when it is missing).
+            let workspace_package = |path: &str| {
+                profile.iter().any(|root| {
+                    root.workspace.is_some() && root.dependency_path().as_deref() == Some(path)
+                })
+            };
+            warnings.extend(
+                missing
+                    .iter()
+                    .filter(|path| !workspace_package(path))
+                    .map(|path| {
+                        crate::core::project_toolchains::missing_dependency_notice(&profile, path)
+                    }),
+            );
+        }
         Provisioned {
             frontend_deps,
+            dependency_layers,
             cargo_home_ready,
             shared_cargo_home,
             warnings,
@@ -471,6 +686,14 @@ impl WorkerLane {
         }
         let destination = frontend.join(NODE_MODULES);
         let source = self.frontend_deps_source().filter(|path| path.is_dir());
+        self.link_deps_at(&destination, source)
+    }
+
+    /// Make `destination` (a dependency directory of the worktree) available
+    /// from `source` (the main checkout's): layered entry by entry, never
+    /// replacing a directory the project has of its own.
+    fn link_deps_at(&self, destination: &Path, source: Option<PathBuf>) -> FrontendDeps {
+        let destination = destination.to_path_buf();
         match std::fs::symlink_metadata(&destination) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 // KT-1246 linked the whole directory, so Vite's config loader
@@ -542,25 +765,13 @@ impl WorkerLane {
     }
 }
 
-/// Link every entry of `source` into `destination`, except what a tool writes
-/// at run time (those stay the lane's own, in the real directory).
-fn link_entries(source: &Path, destination: &Path) -> Result<(), String> {
-    let entries = std::fs::read_dir(source)
-        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
-    // One entry that cannot be linked (a real directory the lane already has)
-    // must not leave the entries after it unlinked: go on, report the first.
-    let mut first_error = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if NODE_MODULES_LANE_OWNED.iter().any(|owned| name == *owned) {
-            continue;
-        }
-        if let Err(error) = ensure_symlink(&entry.path(), &destination.join(&name)) {
-            first_error.get_or_insert(error);
-        }
-    }
-    first_error.map_or(Ok(()), Err)
-}
+#[path = "task_worker_env_layers.rs"]
+mod layers;
+use layers::link_entries;
+#[path = "task_worker_env_probes.rs"]
+mod probes;
+pub use probes::check_frontend;
+use probes::check_rust;
 
 /// How the worktree's frontend dependencies were made available.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,10 +793,22 @@ fn private_cargo_home_requested() -> bool {
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
 }
 
+/// KT-1747 — how one dependency directory of the project (any toolchain, any
+/// depth) was made available to the lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyLayer {
+    /// The directory, relative to the repository, `/` separated.
+    pub path: String,
+    pub state: FrontendDeps,
+}
+
 /// What [`WorkerLane::provision`] managed to prepare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provisioned {
     pub frontend_deps: FrontendDeps,
+    /// Every other dependency directory the lane layers (KT-1747): `vendor/`,
+    /// `Pods/`, a nested package's `node_modules/`.
+    pub dependency_layers: Vec<DependencyLayer>,
     pub cargo_home_ready: bool,
     /// The host's own `CARGO_HOME`, when the lane runs with it rather than with
     /// its private one (see [`CARGO_HOME_ENV`]).
@@ -680,7 +903,7 @@ impl SharedCaches {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum LinkState {
+pub enum LinkState {
     Created,
     AlreadyLinked,
 }
@@ -688,7 +911,7 @@ pub(crate) enum LinkState {
 /// Link `destination` to `source`, replacing a link that points elsewhere. A
 /// real file or directory at `destination` is never touched: it is the
 /// operator's (or the worker's) own and is reported as an error.
-pub(crate) fn ensure_symlink(source: &Path, destination: &Path) -> Result<LinkState, String> {
+pub fn ensure_symlink(source: &Path, destination: &Path) -> Result<LinkState, String> {
     match std::fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             if std::fs::read_link(destination).is_ok_and(|current| current == source) {
@@ -777,6 +1000,51 @@ pub fn apply_launch_env(command: &mut std::process::Command, work_dir: &Path) {
     }
 }
 
+// ─── Shell command time limits (KT-1718) ──────────────────────────────────
+
+/// Claude Code's own variable for the time a shell command gets when it names
+/// no limit.
+pub const BASH_DEFAULT_TIMEOUT_ENV: &str = "BASH_DEFAULT_TIMEOUT_MS";
+/// Claude Code's own variable for the longest a shell command may run, whatever
+/// it asks for. Unset, the cap is 10 minutes: a cold test-profile build outlasts
+/// it, each timeout kills the compiler, and the worker loses the turn.
+pub const BASH_MAX_TIMEOUT_ENV: &str = "BASH_MAX_TIMEOUT_MS";
+
+/// Settings > Workers, published by `config::save` and at boot. The defaults
+/// are the model's, so a launch before the first publication matches a fresh
+/// config.
+static BASH_DEFAULT_TIMEOUT_MS: AtomicU64 =
+    AtomicU64::new(crate::models::DEFAULT_BASH_DEFAULT_TIMEOUT_MIN as u64 * 60_000);
+static BASH_MAX_TIMEOUT_MS: AtomicU64 =
+    AtomicU64::new(crate::models::DEFAULT_BASH_MAX_TIMEOUT_MIN as u64 * 60_000);
+
+/// Publish the owner's Settings > Workers shell limits to this process.
+pub fn set_bash_timeouts(workers: &crate::models::WorkersConfig) {
+    let (default_ms, max_ms) = workers.effective_bash_timeouts_ms();
+    BASH_DEFAULT_TIMEOUT_MS.store(default_ms, Ordering::Relaxed);
+    BASH_MAX_TIMEOUT_MS.store(max_ms, Ordering::Relaxed);
+}
+
+/// The two variables Kronn sets on a Claude task worker, as `(name, value)`.
+pub fn bash_timeout_env(default_ms: u64, max_ms: u64) -> [(&'static str, String); 2] {
+    [
+        (BASH_DEFAULT_TIMEOUT_ENV, default_ms.min(max_ms).to_string()),
+        (BASH_MAX_TIMEOUT_ENV, max_ms.to_string()),
+    ]
+}
+
+/// Give a Claude task worker the shell limits of Settings > Workers. They win
+/// over the backend's own environment: the worker's limit is a Kronn setting,
+/// not whatever shell the owner started Kronn from.
+pub fn apply_bash_timeouts(command: &mut std::process::Command) {
+    for (name, value) in bash_timeout_env(
+        BASH_DEFAULT_TIMEOUT_MS.load(Ordering::Relaxed),
+        BASH_MAX_TIMEOUT_MS.load(Ordering::Relaxed),
+    ) {
+        command.env(name, value);
+    }
+}
+
 // ─── Toolchain smoke check ────────────────────────────────────────────────
 
 /// One capability a worker can rely on, with the reason it can or cannot.
@@ -799,6 +1067,12 @@ impl Capability {
             available: false,
             reason: reason.into(),
         }
+    }
+
+    /// The project has no such toolchain, or does not test with this tool: the
+    /// brief says nothing about it instead of calling it unavailable.
+    pub fn is_not_applicable(&self) -> bool {
+        !self.available && self.reason.starts_with("not applicable")
     }
 }
 
@@ -907,8 +1181,8 @@ impl ProbeRunner for ProcessProbeRunner {
             Ok(child) => child,
             Err(error) => return failure(format!("cannot start `{}`: {error}", probe.program)),
         };
-        let stdout = child.stdout.take().map(drain_tail);
-        let stderr = child.stderr.take().map(drain_tail);
+        let stdout = child.stdout.take().map(|pipe| drain_output(pipe, false));
+        let stderr = child.stderr.take().map(|pipe| drain_output(pipe, true));
         let deadline = Instant::now() + probe.timeout;
         let mut cancelled = false;
         let status = loop {
@@ -927,13 +1201,15 @@ impl ProbeRunner for ProcessProbeRunner {
                 Err(error) => return failure(format!("cannot wait for the probe: {error}")),
             }
         };
-        let collect = |handle: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        let collect = |handle: Option<std::thread::JoinHandle<Captured>>| {
             handle
                 .and_then(|handle| handle.join().ok())
-                .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
                 .unwrap_or_default()
         };
         let (stdout, stderr) = (collect(stdout), collect(stderr));
+        let first_errors = stderr.first_errors;
+        let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).trim().to_string();
+        let (stdout, stderr) = (text(stdout.tail), text(stderr.tail));
         let detail = if stderr.is_empty() { stdout } else { stderr };
         let detail = detail.split_whitespace().collect::<Vec<_>>().join(" ");
         match status {
@@ -941,7 +1217,10 @@ impl ProbeRunner for ProcessProbeRunner {
                 success: true,
                 detail,
             },
-            Some(status) => failure(format!("exited with {status}: {detail}")),
+            Some(status) => failure(format!(
+                "exited with {status}: {}",
+                failure_detail(&first_errors, &detail)
+            )),
             None if cancelled => failure("cancelled".to_string()),
             None => failure(format!("timed out after {}s", probe.timeout.as_secs())),
         }
@@ -959,7 +1238,7 @@ impl ProbeRunner for ProcessProbeRunner {
 /// runs in a terminal. `setsid` must not follow `setpgid` (a group leader
 /// cannot create a session), so this replaces `process_group`, never adds to it.
 #[cfg(unix)]
-pub(crate) fn detach_from_terminal(command: &mut std::process::Command) {
+pub fn detach_from_terminal(command: &mut std::process::Command) {
     // SAFETY: the hook only calls `setsid`, which is async-signal-safe, and
     // touches no memory of the parent.
     unsafe {
@@ -987,21 +1266,104 @@ fn kill_process_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Read a pipe to its end, keeping only the last [`PROBE_DETAIL_BYTES`].
-fn drain_tail<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<Vec<u8>> {
+/// What a probe's pipe held: its last [`PROBE_DETAIL_BYTES`] and, when scanned,
+/// the first error lines it printed (KT-1736).
+#[derive(Default)]
+struct Captured {
+    tail: Vec<u8>,
+    first_errors: Vec<String>,
+}
+
+/// Whether `line` reports an error: a compiler's (`clang: error:`, `error[E…]`,
+/// `fatal error:`), cargo's (`error: failed to run custom build command`), a
+/// build script's (`error occurred in cc-rs`) or a panic. A mere mention of the
+/// word (`std::error::Error` in a warning) is not one.
+fn is_error_line(line: &str) -> bool {
+    let line = line.trim().to_ascii_lowercase();
+    line.starts_with("error")
+        || line.contains(": error")
+        || line.contains("fatal error")
+        || line.contains("error occurred")
+        || line.contains("panicked at")
+}
+
+/// `line` on one line, clipped to [`PROBE_ERROR_LINE_CHARS`] around an ellipsis
+/// that keeps both its start and its end.
+fn clip_error_line(line: &str) -> String {
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= PROBE_ERROR_LINE_CHARS {
+        return line;
+    }
+    let head = PROBE_ERROR_LINE_CHARS * 5 / 8;
+    let end = PROBE_ERROR_LINE_CHARS - head;
+    format!(
+        "{} … {}",
+        chars[..head].iter().collect::<String>(),
+        chars[chars.len() - end..].iter().collect::<String>()
+    )
+}
+
+/// The reason of a failed probe: its first error lines (those its last output
+/// does not already show), then its last output.
+fn failure_detail(first_errors: &[String], tail: &str) -> String {
+    let missing: Vec<&str> = first_errors
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !tail.contains(line))
+        .collect();
+    if missing.is_empty() {
+        return tail.to_string();
+    }
+    format!(
+        "first errors: {} | last output: {tail}",
+        missing.join(" | ")
+    )
+}
+
+/// Read a pipe to its end, keeping the last [`PROBE_DETAIL_BYTES`] and, when
+/// `scan_errors`, the first [`PROBE_FIRST_ERROR_LINES`] error lines.
+fn drain_output<R: Read + Send + 'static>(
+    mut pipe: R,
+    scan_errors: bool,
+) -> std::thread::JoinHandle<Captured> {
     std::thread::spawn(move || {
-        let mut tail: Vec<u8> = Vec::new();
+        let mut captured = Captured::default();
+        let mut pending: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
+        let flush = |pending: &mut Vec<u8>, captured: &mut Captured| {
+            if captured.first_errors.len() < PROBE_FIRST_ERROR_LINES {
+                let text = String::from_utf8_lossy(pending);
+                if is_error_line(&text) {
+                    captured.first_errors.push(clip_error_line(&text));
+                }
+            }
+            pending.clear();
+        };
         while let Ok(read) = pipe.read(&mut chunk) {
             if read == 0 {
                 break;
             }
-            tail.extend_from_slice(&chunk[..read]);
-            if tail.len() > PROBE_DETAIL_BYTES {
-                tail.drain(..tail.len() - PROBE_DETAIL_BYTES);
+            captured.tail.extend_from_slice(&chunk[..read]);
+            if captured.tail.len() > PROBE_DETAIL_BYTES {
+                let excess = captured.tail.len() - PROBE_DETAIL_BYTES;
+                captured.tail.drain(..excess);
+            }
+            if !scan_errors {
+                continue;
+            }
+            for &byte in &chunk[..read] {
+                if byte == b'\n' {
+                    flush(&mut pending, &mut captured);
+                } else if pending.len() < PROBE_SCANNED_LINE_BYTES {
+                    pending.push(byte);
+                }
             }
         }
-        tail
+        if scan_errors && !pending.is_empty() {
+            flush(&mut pending, &mut captured);
+        }
+        captured
     })
 }
 
@@ -1046,7 +1408,7 @@ pub fn smoke_check(
 
 /// [`smoke_check`] with the loopback bind injected, so a test never depends on
 /// the host letting it bind a port.
-pub(crate) fn smoke_check_with(
+pub fn smoke_check_with(
     lane: &WorkerLane,
     provisioned: &Provisioned,
     loopback_binding_allowed: bool,
@@ -1068,123 +1430,6 @@ pub(crate) fn smoke_check_with(
 fn bind_loopback_port() -> std::io::Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     Ok(listener.local_addr()?.port())
-}
-
-fn check_rust(
-    lane: &WorkerLane,
-    env: &[(String, OsString)],
-    runner: &dyn ProbeRunner,
-) -> Capability {
-    let Some(manifest_dir) = [lane.worktree.clone(), lane.worktree.join("backend")]
-        .into_iter()
-        .find(|dir| dir.join("Cargo.toml").is_file())
-    else {
-        return Capability::no("not applicable: no Cargo.toml at the worktree root or in backend/");
-    };
-    if let Err(error) = probe_writable(&lane.cargo_target_dir) {
-        return Capability::no(format!(
-            "the lane target directory {} is not writable: {error}",
-            lane.cargo_target_dir.display()
-        ));
-    }
-    let probe = |args: &[&str], timeout: Duration| ProbeCommand {
-        program: "cargo".into(),
-        args: args.iter().map(|arg| arg.to_string()).collect(),
-        cwd: manifest_dir.clone(),
-        env: env.to_vec(),
-        timeout,
-        priority: Priority::Normal,
-        clean_env: false,
-    };
-    let nextest = runner.run(&probe(&["nextest", "--version"], NEXTEST_TIMEOUT));
-    if !nextest.success {
-        return Capability::no(format!(
-            "`cargo nextest --version` failed: {}",
-            nextest.detail
-        ));
-    }
-    // A cold `cargo check` would compile the whole dependency graph; resolving
-    // it offline from the cache proves the part a sandbox actually breaks.
-    let fetch = runner.run(&probe(
-        &["fetch", "--offline", "--locked"],
-        OFFLINE_FETCH_TIMEOUT,
-    ));
-    if !fetch.success {
-        return Capability::no(format!(
-            "offline dependency resolution failed (`cargo fetch --offline --locked`): {}",
-            fetch.detail
-        ));
-    }
-    Capability::yes(format!(
-        "cargo nextest and the offline dependency cache work; lane target {}",
-        lane.cargo_target_dir.display()
-    ))
-}
-
-pub(crate) fn check_frontend(
-    lane: &WorkerLane,
-    provisioned: &Provisioned,
-    env: &[(String, OsString)],
-    runner: &dyn ProbeRunner,
-) -> Capability {
-    match &provisioned.frontend_deps {
-        FrontendDeps::NotApplicable => {
-            Capability::no("not applicable: the worktree has no frontend/package.json")
-        }
-        FrontendDeps::SourceMissing => Capability::no(
-            "the main checkout has no frontend/node_modules to reuse and a worker never installs \
-             from the network",
-        ),
-        FrontendDeps::Failed(error) => Capability::no(format!(
-            "frontend/node_modules could not be linked: {error}"
-        )),
-        FrontendDeps::Linked(_) | FrontendDeps::AlreadyPresent => {
-            let frontend = lane.frontend_dir();
-            let vitest = frontend.join(NODE_MODULES).join(".bin").join("vitest");
-            if !vitest.exists() {
-                return Capability::no("frontend/node_modules/.bin/vitest is missing");
-            }
-            let outcome = runner.run(&ProbeCommand {
-                program: vitest.to_string_lossy().into_owned(),
-                args: vec!["--version".into()],
-                cwd: frontend,
-                env: env.to_vec(),
-                timeout: VITEST_TIMEOUT,
-                priority: Priority::Normal,
-                clean_env: false,
-            });
-            if !outcome.success {
-                return Capability::no(format!("`vitest --version` failed: {}", outcome.detail));
-            }
-            let version = outcome.detail;
-            // `--version` never loads the config, which is where Vite writes
-            // (`node_modules/.vite-temp`) and where a lane failed with EPERM
-            // (KT-1266): a run that selects no test file loads it and exits.
-            let config = runner.run(&ProbeCommand {
-                program: vitest.to_string_lossy().into_owned(),
-                args: vec![
-                    "run".into(),
-                    "--passWithNoTests".into(),
-                    VITEST_CONFIG_PROBE_FILTER.into(),
-                ],
-                cwd: lane.frontend_dir(),
-                env: env.to_vec(),
-                timeout: VITEST_CONFIG_TIMEOUT,
-                priority: Priority::Normal,
-                clean_env: false,
-            });
-            if config.success {
-                Capability::yes(format!(
-                    "vitest {version} runs from frontend/node_modules and loads its config in the lane"
-                ))
-            } else {
-                Capability::no(format!(
-                    "vitest cannot load its config in the lane (`vitest run --passWithNoTests`): {}",
-                    config.detail
-                ))
-            }
-        }
-    }
 }
 
 fn check_port_binding(
@@ -1213,3 +1458,7 @@ fn probe_writable(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 #[path = "task_worker_env_test.rs"]
 mod task_worker_env_test;
+
+#[cfg(test)]
+#[path = "task_worker_env_deps_test.rs"]
+mod task_worker_env_deps_test;

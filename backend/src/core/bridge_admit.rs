@@ -172,6 +172,9 @@ pub async fn admit(
         own_discussions: grant.own_discussions(),
         own_run: grant.scope.workflow_run_id.clone(),
         agent: grant.scope.agent.clone(),
+        room_agent_of: grant.scope.room_grant_discussions.clone(),
+        own_execution: grant.scope.task_execution_id.clone(),
+        own_sessions: grant.own_sessions(),
     };
     Ok(Admitted {
         route,
@@ -195,6 +198,20 @@ pub async fn scope_json(
     let grant = &admitted.grant;
     if !bridge_token::scopes_response(route) {
         return Ok(());
+    }
+    // A session this launch joined or resumed is the one it holds: the
+    // session a later request names proves nothing by itself (KT-1962).
+    if matches!(
+        route.pattern,
+        "/api/discussions/peer-join"
+            | "/api/discussions/peer-resume"
+            | "/api/discussions/orchestrator-return-resume"
+            | "/api/discussions/workflow-step-join"
+    ) && envelope["success"] == true
+    {
+        if let Some(session_pk) = envelope["data"]["session_pk"].as_i64() {
+            grant.adopt_session(session_pk);
+        }
     }
     // Only a fresh row counts: an idempotent replay returns a discussion
     // chosen by caller-supplied session ids, which proves nothing.

@@ -243,6 +243,7 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
 
     let ignore = config.scan.ignore.clone();
     let depth = config.scan.scan_depth;
+    let hidden_repos = config.scan.hidden_repos.clone();
     drop(config);
 
     let existing_paths: Vec<String> = state
@@ -258,11 +259,48 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
         Ok(mut repos) => {
             for repo in &mut repos {
                 repo.has_project = existing_paths.contains(&repo.path);
+                repo.hidden = repo.hidden || hidden_repos.contains(&repo.path);
             }
             Json(ApiResponse::ok(repos))
         }
         Err(e) => Json(ApiResponse::err(format!("Scan failed: {}", e))),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct HideRepoRequest {
+    pub path: String,
+}
+
+/// Remembers `path` as hidden; `false` when it already was.
+fn remember_hidden_repo(scan: &mut ScanConfig, path: &str) -> bool {
+    if scan.hidden_repos.iter().any(|hidden| hidden == path) {
+        return false;
+    }
+    scan.hidden_repos.push(path.to_string());
+    true
+}
+
+/// POST /api/projects/scan/hide (KT-1684)
+/// "Hide" in the Detect repositories preview: the scan reports this repository
+/// `hidden` from now on, so it never comes back in the list.
+pub async fn hide_scanned_repo(
+    State(state): State<AppState>,
+    Json(req): Json<HideRepoRequest>,
+) -> Json<ApiResponse<()>> {
+    let path = req.path.trim();
+    if path.is_empty() || scanner::contains_parent_dir(path) {
+        return Json(ApiResponse::err(
+            "Repository path is empty or contains '..' components",
+        ));
+    }
+    let mut config = state.config.write().await;
+    if remember_hidden_repo(&mut config.scan, path) {
+        if let Err(e) = crate::core::config::save(&config).await {
+            return Json(ApiResponse::err(format!("Failed to save: {}", e)));
+        }
+    }
+    Json(ApiResponse::ok(()))
 }
 
 /// POST /api/projects
@@ -278,6 +316,21 @@ pub async fn create(
         return Json(ApiResponse::err(
             "Project path may not contain '..' components",
         ));
+    }
+
+    // A scan lists the repositories already registered too: sending one back
+    // must not register it twice.
+    let path_check = repo.path.clone();
+    let duplicate = state
+        .db
+        .with_conn(move |conn| {
+            let projects = crate::db::projects::list_projects(conn)?;
+            Ok(projects.iter().any(|p| p.path == path_check))
+        })
+        .await
+        .unwrap_or(false);
+    if duplicate {
+        return Json(ApiResponse::err("A project with this path already exists"));
     }
 
     let now = Utc::now();
@@ -318,7 +371,14 @@ pub async fn create(
         })
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(project)),
+        Ok(()) => {
+            // KT-1751: the project owns its tree from now on.
+            crate::core::task_worker_lane_settings::register_project(std::path::Path::new(
+                &project.path,
+            ));
+            super::sync_new_project(&state, &project.id, &project.path).await;
+            Json(ApiResponse::ok(project))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -495,6 +555,11 @@ pub async fn add_folder(
                 project.name,
                 project.path
             );
+            // KT-1751: a sub-folder project owns its tree from now on.
+            crate::core::task_worker_lane_settings::register_project(std::path::Path::new(
+                &project.path,
+            ));
+            super::sync_new_project(&state, &project.id, &project.path).await;
             Json(ApiResponse::ok(project))
         }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -610,6 +675,15 @@ pub async fn delete(
             if let Some(path) = stored_path {
                 super::docs_location::rekey(&state, &deleted_id, &path, None).await;
             }
+            // Rebuilt from the table, not from the path read above: that
+            // read can fail, and another row can hold the same folder.
+            let lane_warm = state.config.read().await.workers.lane_warm.clone();
+            if let Err(e) =
+                crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &lane_warm)
+                    .await
+            {
+                tracing::warn!("Project deleted, lane settings not reloaded: {e:#}");
+            }
             Json(ApiResponse::ok(()))
         }
         Ok(false) => Json(ApiResponse::err("Project not found")),
@@ -659,7 +733,7 @@ pub async fn set_default_skills(
 }
 
 /// GET/PUT /api/projects/{id}/workspace. A null body clears the inherited
-/// worktree preparation hooks.
+/// worktree preparation hooks and managed worktree roots.
 pub async fn get_project_workspace(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -701,15 +775,60 @@ pub async fn set_project_workspace(
             }
         }
     }
-    let stored = payload.filter(|workspace| !workspace.hooks.is_empty());
+    if let Some(workspace) = payload.as_ref() {
+        if let Err(reason) =
+            crate::models::validate_managed_worktree_roots(&workspace.managed_worktree_roots)
+        {
+            return Json(ApiResponse::err(reason));
+        }
+        // KT-1742 — the project's lane warm-up settings are refused or stored whole,
+        // like the hooks: a first-build command runs on the host.
+        if let Err(reason) = workspace.lane_warm.validate() {
+            return Json(ApiResponse::err(reason));
+        }
+    }
+    let payload = match payload {
+        Some(mut workspace) => {
+            workspace.commit = match workspace.commit.normalized() {
+                Ok(commit) => commit,
+                Err(reason) => return Json(ApiResponse::err(reason)),
+            };
+            workspace.lane_warm = workspace.lane_warm.normalized();
+            Some(workspace)
+        }
+        None => None,
+    };
+    let stored = payload.filter(|workspace| !workspace.is_empty());
+    let lane_warm = stored.as_ref().map(|workspace| workspace.lane_warm.clone());
+    let registered = stored
+        .as_ref()
+        .map(|workspace| workspace.commit.clone())
+        .unwrap_or_default();
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::projects::update_project_workspace(conn, &id, stored.as_ref())
+            let project_path =
+                crate::db::projects::get_project(conn, &id)?.map(|project| project.path);
+            crate::db::projects::update_project_workspace(conn, &id, stored.as_ref())?;
+            Ok(project_path)
         })
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(true)),
+        Ok(project_path) => {
+            if let Some(path) = project_path {
+                // Published at once: the next lane of this project reads it.
+                crate::core::task_worker_lane_settings::set_project(
+                    std::path::Path::new(&path),
+                    lane_warm.as_ref(),
+                );
+                // The merge and worker-commit code reads the setting without a database.
+                crate::core::commit_policy::register_project(
+                    &crate::core::scanner::resolve_host_path(&path),
+                    &registered,
+                );
+            }
+            Json(ApiResponse::ok(true))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
     }
 }
@@ -1232,6 +1351,10 @@ pub async fn remap_path(
             // there saw none of its plugins. Best-effort (logs on failure).
             if let Some(old_path) = old_path {
                 super::docs_location::rekey(&state, &id, &old_path, Some(&new_path)).await;
+                crate::core::task_worker_lane_settings::rekey_project(
+                    std::path::Path::new(&old_path),
+                    std::path::Path::new(&new_path),
+                );
             }
             super::resync_project_assets(&state, &id).await;
             Json(ApiResponse::ok(()))
@@ -1662,3 +1785,7 @@ mod bidirectional_link_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "lane_warm_workspace_test.rs"]
+mod lane_warm_workspace_test;
