@@ -1399,6 +1399,11 @@ export function AgentsSection({
                     refetchAgentAccess();
                   }}
                 />
+                {/* The switch alone said « Restricted » without saying what it restricts. */}
+                <p className="set-agent-access-what" data-testid={`agent-access-what-${agent.agent_type}`}>
+                  <strong>{t('config.fullAccessBadge')}</strong>
+                  <span>{t(isAgentFullAccess ? 'config.fullAccessCardOn' : 'config.fullAccessCardOff')}</span>
+                </p>
               </div>
             )}
             {expandedAgents.has(agent.agent_type) && (

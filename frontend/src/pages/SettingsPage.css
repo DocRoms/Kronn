@@ -6931,8 +6931,23 @@
 }
 
 .set-agent-access-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2) var(--kr-sp-4);
   padding: var(--kr-sp-3) var(--kr-sp-7) var(--kr-sp-4);
 }
+.set-agent-access-what {
+  display: flex;
+  flex: 1 1 16rem;
+  flex-wrap: wrap;
+  gap: 0 var(--kr-sp-2);
+  min-width: 0;
+  margin: 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-sm);
+}
+.set-agent-access-what strong { color: var(--kr-text-primary); }
 
 .set-desktop-port {
   display: grid;

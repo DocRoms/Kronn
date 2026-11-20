@@ -4092,6 +4092,8 @@ const zh: TranslationDict = {
   "config.fullAccessSwitchAria": "{0} 的完全访问",
   "config.fullAccessStateOn": "完全访问已开启",
   "config.fullAccessStateOff": "受限",
+  "config.fullAccessCardOn": "代理无需询问即可访问网络、修改文件和执行命令。",
+  "config.fullAccessCardOff": "受限：代理不能修改文件或执行命令。打开开关即可允许。",
   "config.fullAccessNoticeTitle": "部分智能体以完全访问运行",
   "config.fullAccessNoticeBySetting": "已在设置中开启完全访问",
   "config.fullAccessNoticeReview": "查看开关",

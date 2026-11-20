@@ -4124,6 +4124,8 @@ const es: TranslationDict = {
   'config.fullAccessSwitchAria': 'Acceso completo para {0}',
   'config.fullAccessStateOn': 'Acceso completo activo',
   'config.fullAccessStateOff': 'Restringido',
+  'config.fullAccessCardOn': 'El agente accede a la web, modifica archivos y ejecuta comandos sin preguntar.',
+  'config.fullAccessCardOff': 'Restringido: el agente no puede modificar archivos ni ejecutar comandos. Active el interruptor para permitirlo.',
   'config.fullAccessNoticeTitle': 'Algunos agentes funcionan con acceso completo',
   'config.fullAccessNoticeBySetting': 'acceso completo activado en los ajustes',
   'config.fullAccessNoticeReview': 'Revisar los interruptores',

@@ -605,6 +605,18 @@ describe('AgentsSection — full-access switch', () => {
     expect(screen.queryByTestId('agent-full-access-Ollama')).toBeNull();
   });
 
+  // A colleague could not find how to give OpenCode full access: the card
+  // showed « Restricted » and explained it only once « Edit » was open.
+  it('says on the closed card what the switch does', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentVibe', agent_type: 'Vibe', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    const what = screen.getByTestId('agent-access-what-Vibe');
+    expect(what).toHaveTextContent('config.fullAccessBadge');
+    expect(what).toHaveTextContent('config.fullAccessCardOff');
+  });
+
   it('renders the permission switch reflecting full_access=false', () => {
     renderSection({
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],

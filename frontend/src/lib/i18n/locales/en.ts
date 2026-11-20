@@ -4124,6 +4124,8 @@ const en: TranslationDict = {
   'config.fullAccessSwitchAria': 'Full access for {0}',
   'config.fullAccessStateOn': 'Full access on',
   'config.fullAccessStateOff': 'Restricted',
+  'config.fullAccessCardOn': 'The agent reaches the web, edits files and runs commands without asking.',
+  'config.fullAccessCardOff': 'Restricted: the agent cannot edit files or run commands. Turn the switch on to let it.',
   'config.fullAccessNoticeTitle': 'Some agents run with full access',
   'config.fullAccessNoticeBySetting': 'full access enabled in the settings',
   'config.fullAccessNoticeReview': 'Review the switches',
