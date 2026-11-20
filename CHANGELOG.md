@@ -13,6 +13,100 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- **KT-1697 — A Decide step chooses its decision model from the workflow overview.** The step card and its pipeline chip show `Décision · <model> ▾` with a Local/HTTP badge, like the Agent step's model picker: one click lists the decision models (« Par défaut » first), the choice is saved at once and rolled back if the save fails; the editor has the same picker. A step with no model of its own still runs the configured Decision model. An OpenRouter connection's `decision_model` (e.g. `perplexity/pplx-decider-flash-v1.2`) is listed over HTTP and called on OpenRouter's System One API (`POST /api/v1/systemone`) with the connection's credential; a refused token fails the step with the usual `auth_refused` signal. Other providers have no documented decision contract and are not listed. Readiness flags a step whose model Ollama no longer lists or whose connection can no longer serve it, and the model is never swapped (see `docs/operations/ollama-local-models.md`).
+
+- Orchestration: an integration never targets the owner's working checkout, and
+  an unspecified target is no longer `main` (KT-1688). A launch takes its
+  integration branch from `base_rev`, else from its room's campaign; with
+  neither it is refused (`integration_target_undeclared`). A target checked out
+  in the project's own checkout, or in a worktree outside `.kronn/worktrees`, is
+  refused at preflight and launch (`integration_target_owner_checkout`,
+  `integration_target_foreign_worktree`) instead of at integration; a branch no
+  checkout holds, or one held by a Kronn-owned worktree, stays valid. A
+  worktree is Kronn-owned under `<repo>/.kronn/worktrees`, under
+  `~/.kronn/autocode-worktrees`, under a folder of Settings > Workers
+  (`managed_worktree_roots`) or of the project's workspace settings, or when
+  Kronn's workspace registry records it (KT-1748). Integrating into such a
+  worktree while a run uses it is refused (`integration_target_busy_worktree`,
+  naming the run) until the run has finished.
+  `task_exec_prepare` accepts `base_rev`, and `task_exec_status` names the
+  target branch and its worktree (`integration_worktree`,
+  `integration_target_state`). The integration branch must now be named: a
+  launch that relied on the `main` default needs a `base_rev`.
+- **KT-1544 — Merge a step's main execution with its shadows.** A step with shadows can now condense the main execution and the shadows it selects (one, several or all) into one result that becomes the step's output. The merge waits for the shadows with a timeout and reports the missing ones; a condense pass dedups their points, verifies each against the code and records which executions found it, and a point it cannot verify is never published. The run view shows each execution's contribution and the merged result against each execution. Off by default.
+
+- **KT-1691 — Disk hygiene, second pass.** Three fixes after the 2026-11-11
+  incident (a 2 TB disk down to 173 GB free while 33 lane build dirs read ~190 GB
+  each). A lane's seed (`target/debug` of the main checkout) is now **pruned to its
+  latest build before it is cloned**: units of one configuration (package, kind, features,
+  profile, target, rustflags) superseded by a newer build of it, units built by an
+  older `rustc`, and units of packages `Cargo.lock` no longer lists, go with every file of
+  their hash; a unit is never pruned by age alone, and never while a build holds
+  Cargo's lock. Sizes are reported **real next to apparent**: `unique_bytes` is what
+  deleting an entry frees (APFS private size), `bytes` counts shared clone blocks in
+  full; the Disk panel, `disk_usage`, purge results and the pressure guard's "swept"
+  figure carry both, and say apparent where the file system cannot tell. Foreign
+  `wt-*` dirs, worktrees (and their `target/`) no workspace row names, and the build
+  dirs of executions Blocked or Interrupted for `server.disk_stalled_build_days`
+  (default 3) are listed with their age and **purgeable one entry at a time behind a
+  confirmation, never by a sweep**; the worktree and branch of a stalled execution
+  stay and the next resume rebuilds. No migration. See
+  [disk-usage.md](docs/operations/disk-usage.md).
+
+### Security
+
+- P2P contacts authenticate with a per-contact secret, not the public invite code
+  (KT-1650). The invite code `kronn:pseudo@host:port` is only an address, so anyone
+  who knew a contact's pseudo and address could pass the WebSocket presence,
+  `claim-by-token`, `fetch-file` and the file-announcement host resolution as that
+  contact. Each paired contact now holds two random 256-bit secrets, one per
+  direction: the verifying side keeps only a SHA-256 hash and compares it in
+  constant time. **Breaking, by decision: existing contacts must re-pair, and a
+  peer that does not present its secret is refused** (the refusal says how to
+  re-pair). Settings > Identity now generates a pairing code
+  (`kronn:pseudo@host:port#secret`, single use, 7 days); paste it in Add contact
+  on the other side. Migration 297 adds the secret columns and the offer table and
+  moves existing accepted/pending contacts to `needs_repair`, keeping their rows
+  and shared discussions. An export never carries the secrets, so an import
+  brings contacts back as `needs_repair`. A pairing code pairs a new contact only:
+  to re-pair an existing contact use Re-pair on its entry, which issues a code bound
+  to that contact (migration 298); a code can never rebind another contact's row. A contact has at most one
+  live Re-pair code, and the 20-code cap only ever evicts unbound codes.
+  Pairing writes are transactional and conditional: a spent code cannot pair twice
+  and a contact paired, refused or deleted while a pairing is in flight is not
+  overwritten.
+
+### Added
+
+- Agents: a fallback per mode (KT-1518, redesigned by KT-1693). Each agent card
+  in Settings > Agents has one row per mode the agent has (eco, standard,
+  advanced, and decision, image, video where it has such a model) drawn as an
+  inline chain — the mode's current model, → its fallback, → the inherited
+  fallback in a dashed pill (« set on <agent>'s card », a click opens that card)
+  — and every pill carries its transport badge: CLI, HTTP or Local. « + Add a
+  fallback » opens a menu filtered by kind of mode (text goes to any text mode,
+  image to image, video to video, decision to decision), grouped by agent; click
+  a pill to change it, ✕ to remove it. A fallback is off by default, one per mode
+  row; when it is itself unavailable, the one set on ITS own mode row applies
+  (4 links at most, a loop is refused). **Every installed agent takes part,
+  OpenCode included**, and the « paid fallback needs the owner's opt-in » rule is
+  gone: enabling a fallback is the consent. Every discussion (one row per text
+  mode in its settings) and every workflow Agent step (the row of its tier) uses
+  the same component to replace the fallback, go back to the default or cut it.
+  When an agent's provider cannot serve a turn — a rate limit, a quota or credits
+  spent, an outage past its retries, a CLI not signed in — the turn continues on
+  the fallback with the SAME tier, on a discussion turn, a workflow Agent step
+  and a task worker, and the room or run says
+  « Codex · gpt-5.6-sol: quota exhausted until 14:00 UTC → continued with
+  Claude Code · sonnet [CLI] ». A task failure, a refusal, a failing test or the
+  work's own timeout never triggers it. The failing agent is left alone until its
+  announced reset (or a short re-try window), new turns going straight to the
+  fallback, then returns by itself. **Migration**: the agent-level chain of
+  0.15.3 is carried at start-up onto that agent's text mode rows (« A → B → C »
+  stays « A → B → C »), and a discussion's stored override onto each text mode;
+  nothing else to do. The decision, image and video rows are stored, validated
+  and chained; the runtime switch of those step types is not wired yet. See
+  `docs/operations/agent-fallback-chain.md`.
 - HTTP agents: an operator switch for Kronn's tools, and a gate on models that
   cannot take them (KT-1600). Tools stay on by default for every HTTP agent. Turn
   them off per agent (Settings > Agents: Ollama, LiteLLM, NVIDIA) or per external
@@ -21,6 +115,28 @@ Release notes for 0.9.3 and earlier are available in the
   not yet re-read since the upgrade keeps them. An `api_call` result is capped at
   16 KiB with a `truncation_marker` telling the model to narrow its request.
   Migration 294 adds the nullable `tools_enabled` column; nothing is backfilled.
+- Workflows: shadows on the step (KT-1459). An Agent step carries 0 to 8
+  `shadows`; each re-runs only that step beside its main execution, on exactly
+  its input (same rendered prompt context, previous outputs and variables). A
+  shadow can be identical to the step (to measure how deterministic its agent is)
+  or change its agent, model and connection, its prompt (another Quick Prompt, a
+  version or an inline text) and its skills (pinned, swapped or dropped); it can
+  be limited to some projects, sampled one run in N, and given a budget (tokens,
+  duration, cost). Only the main output continues the workflow; a shadow never
+  runs an `external_effect` step or a Gate, and one that fails, stalls or spends
+  its budget never fails or delays the main step (the time budget is enforced,
+  tokens and cost are checked when it ends). The run view compares, per step, the
+  main execution and its shadows: what differs (agent, model, prompt version,
+  skill versions) and what is identical, tokens, cost and duration, each shadow's
+  output against the main one or any two side by side, and for identical shadows
+  how many distinct outputs there are out of N+1. Shadows are edited in the
+  step's Shadows section and in the Page resources panel (human-only; a save by
+  an agent keeps them); `GET /api/workflows/{id}/runs/{run_id}/step-shadows`
+  returns the comparison. The workflow-level `shadow` and its lanes are gone: a
+  workflow that had one now carries one shadow on each of its Agent steps with
+  the same overrides (migration 296, which also adds `step_shadow_runs`). Runs
+  recorded by the former shadow stay listed. An export written before this
+  change carries a `shadow` key that an import now ignores.
 - Orchestration: an integration whose only conflicts are doc-citation line
   numbers no longer goes back to the worker (KT-1669). The integration takes the
   target's side. Every candidate, conflicted or not, is re-anchored across all
@@ -161,6 +277,118 @@ Release notes for 0.9.3 and earlier are available in the
   at 12 generations (`KRONN_WORKFLOW_MEDIA_JOBS_PER_RUN`, at most 100), on top of
   six per step, and a dry-run Test no longer bills. A reference that matches
   nothing gets the one scope refusal (KT-1605, #502).
+- UI: a cleaner header, with the bell on the right next to the help button
+  (KT-1684). The bell leaves the main tabs and its panel gets two tabs: « In
+  progress » (what the bell showed so far) and « Notifications », with an unread
+  counter. A stopped backend is ONE red System entry (« Local service unreachable
+  since 0:42 — reconnecting… », with Retry, then « Back after 1 min 12 »); the bell
+  turns red with a « ! » meanwhile (a steady red under reduced motion), and the
+  panel opens on Notifications by itself after about 10 s, then closes by itself
+  when the backend is back. In progress shows the last known state greyed, « as of
+  hh:mm ». Other 5xx are orange entries grouped by status, method and route, that
+  can be acknowledged and copied (the message is the one the server already
+  redacted); they no longer stack as toasts (at most one short « see in the bell »).
+  Resolved entries stay in the history for the session, with « clear all ». Each tab
+  has All / Discussions / Automations / Kronn filters with counts (All groups the
+  list in three sections, the last filter is remembered per tab, red alerts stay
+  pinned). The BackendStatus banner is gone.
+- Projects: the global « Scan » button is replaced by « Detect repositories » next
+  to « New project ». It lists the repositories found (checked by default) and adds
+  only the ones you keep; « Hide » keeps one from coming back. The hidden list is
+  stored in the scan config (`hidden_repos`) and `POST /api/projects/scan/hide`
+  adds to it.
+
+### Changed
+
+- Settings > Agents: one « Can act in Kronn » switch per model, inside its card
+  (KT-1687, follow-up of KT-1600). The loose LiteLLM / NVIDIA « Outils Kronn »
+  block between the sections is gone; the switch lives on the Ollama card and on
+  each external API connection card, with a plain help text (en / fr / es / zh).
+  Rule: LiteLLM and NVIDIA have no agent-level switch any more — a run that names
+  no connection follows the switch of that provider's default connection
+  (`sync_runtime_config`), and `POST /api/config/agent-tools` now refuses them
+  like `Custom`. An agent-level « off » set under KT-1600 is carried onto the
+  default connection at startup when that connection has no setting of its own
+  (`carry_agent_tools_off`), so no choice is lost; a switch already set on the
+  connection wins. No schema change.
+- Workflow authoring: `workflow_step_schema` serves a lean contract by default
+  (KT-1681). The full one sat 18 estimated tokens under the 32 768-token MLX
+  window, so the next step type would have overflowed it; the lean one leaves
+  about 8 000. Per step type it carries the required fields and the names of the
+  optional ones, and the authoring doctrine whole. `step_type` returns one type's
+  whole contract (notes, runtime rules, example); `section` returns
+  `template_vars`, `data_pipeline_contract` or `authoring_doctrine`. The MCP
+  bridge and `GET /api/workflows/step-schema` take the same two arguments.
+
+- **KT-1854 — The backend builds as five layered crates, with size and memory gates in CI.** The backend is a Cargo workspace of five crates (`kronn-l0` to `kronn-l3` and the `kronn` server), because the instrumented test build of the single crate of about 875 000 lines needed 17 to 21 GB and was killed on the 16 GB CI runner. The CI build job now takes about 16 minutes where it was cancelled at 40; the peak memory of one compilation is 5.76 GB against a cap of 7 GB. Two CI gates keep it that way: a crate over 200 000 lines is refused before any compilation (`crate_size.py`), and a crate whose compilation peaks over 7 GB is refused after the instrumented build (`rustc_memory.py`). Source files did not move. Server builds, the Docker image and the Makefile now name the package (`-p kronn`); a bare `cargo clippy` or `cargo test` in `backend/` covers all five crates (every crate is a default member), and `make typegen` exports the bindings of every crate. The server refuses to start when a hook between layers has no provider, and a change to a crate manifest or a layer root runs the Windows build on the pull request. See `docs/architecture/backend-crates.md`.
+- **KT-1686 — Every app-wide banner is a notice of the bell; "Protect your secrets" in plain words.** The update pill, the locked key, the unreadable credentials, the config set aside, the failed reset, the key-beside-data and the refused-token notices are standing entries of the bell's Notifications tab, with an unread dot and a link to the place that fixes them; nothing renders above the menu any more. Urgent notices open the bell once and are announced to screen readers. The advice about the secret key is worded without technical terms, can be snoozed with Later (one week), and Settings > Recovery writes a recovery phrase for the owner (shown once, copied, stored when confirmed, cancellable); once the phrase is stored the key leaves `config.toml` without waiting for a restart, under the same rule as at start (a vault also holds it and it reads every encrypted column); if the file cannot be rewritten the copy stays and Settings keeps saying so; the advice is not repeated once a phrase protects the key in use, and Settings no longer asks to create a phrase that exists. A locked key links to Settings > Recovery, which also offers to start with a new key. A refused connection token no longer appears a second time in the activity overview under "needs a decision" nor raises the waiting-on-you count.
+- **KT-1713, KT-1749, KT-1758 — Task-worker fallbacks never pick an agent the launch would refuse, and return to the declared worker.** Codex is never chosen as a task-worker fallback (its sandbox cannot write the linked worktree's git directory); the next link is tried, and the stop line is posted in the parent room when nothing can take over. The selection also skips Gemini CLI, Kiro, Copilot CLI, OpenCode and Vibe for a task worker, and builds an HTTP link (Ollama, LiteLLM, NVIDIA) as a discussion agent. A move to a fallback lasts as long as the quota window: a resume, or the quota sweep, hands the execution back to the declared worker and the room says so. A fallback that is mid-turn is never cancelled by that return, and a fallback dispatch waiting more than 5 minutes is announced in the room with its reason. A task-worker refusal that waiting cannot change fails that dispatch and moves to the next link, transient runtime deferrals are bounded at 10, and a transient stop is worded as unavailable. Every task-worker line in the room starts with "Task worker execution <id>:".
+- **KT-1705, KT-1760 — Citation re-anchoring places a uniquely defined `#symbol` by its definition, after following the Git diff.** A citation whose `#symbol` the merged file defines once is placed by that definition at integration, whatever the distance; the 20-line window stays for several definitions, and a refusal lists every candidate line. A citation of a mention of the symbol (a call site) is moved by the Git diff when a base maps the cited lines, instead of being moved to the definition; the unique definition places only what the diff cannot, and it is the fallback when the diff fails.
+- **KT-1731 — A shadow merge is refused when its verdict is empty, unsupported or unresolvable.** A point needs a stated agreement, a kept point must cite evidence that resolves (an existing `path:line` or a step output), and a point marked verified with an unresolved citation is refused. An evidence path that leaves the working directory is refused from its text, so the refusal does not reveal whether an outside file exists. A refused merge keeps the principal's output and notes why.
+
+### Fixed
+
+- **KT-1933 — A local model accepts prompts up to the window its run really gets.** The size check before a discussion message or a workflow step assumed 32 000 tokens for every Ollama model without an override, and refused prompts the run would have served (a 100 KB review prompt on a model with a 262 144-token window). It now asks the same resolution as the run: the model's own window bounded by this machine's memory, then the per-model override, then the env cap. The refusal names where the limit comes from. In Settings the override reads as an optional cap.
+- **KT-1944 — The cost a runtime reports is kept everywhere.** LiteLLM states a response's cost in the `x-litellm-response-cost` header, which was never read: every LiteLLM run had an unknown cost. The header is now read by the HTTP agent, for discussions, workflows, Quick Prompts and audits alike. A discussion reply also keeps the cost an ACP or HTTP run reported, as a workflow step does.
+- **KT-1940 — A workflow step shows the cost its agent reported.** A step kept its tokens but dropped the cost an ACP or HTTP runtime reported, so the step and shadow recap showed no cost whenever no rate was known for the model.
+- **KT-1954 — A room's principal can tick its own post-integration check.** `task_update_dod` named the agent without the session it joined the room with, so the rule that reserves a live check to the principal refused every agent, the principal included: an autoCode lot stopped as blocked right after its first integration. The tick now carries the identity the execution tools send (the joined session, or the room's own agent during its turn) and is proven the same way. A worker, a session of another room and a bridge with no identity are still refused. Agents already running reload their MCP bridge to get it. Reviewed by two models, which found three ways a bridge token could pass for the principal; all closed: the session a token names in a planning actor authorises nothing, the joined-session proof holds only for a grant that runs in the parent room and not in the worker's, and the gate refuses a request body that is not a JSON object (a struct also reads from an array, which crossed the gate unseen).
+- **KT-1962 — A worker cannot pass for its principal on the execution tools.** Prepare, launch, status, resume, cancel, reassign and review took the caller's identity from the request body (a joined session, or the running turn of the room's agent), which any agent of the project can read: a worker could approve its own delivery, drop its validation gates, cancel or relaunch an execution by naming its principal. Deliver, worker commit and offer acceptance trusted the worker's declared identity the same way, so another lane's worker could deliver or commit in its place. For an agent Kronn launched, the launch's own bridge token now decides the role on all ten routes; any other grant gets the answer of an unknown execution and changes nothing. When the worker is a CLI session of the principal's own room, the session a token names as the principal's must be one that launch joined or resumed itself, and a token joins a room again only as a session it holds (an invite and a session id read in the room no longer hand out that session's resume credential). A host CLI and the web UI are unaffected. Agents already running keep working: the check is on the server. Reviewed by two models over two rounds.
+- **KT-1963 — An agent cannot end or move another room's session.** `peer-leave` and `peer-join` accepted any session of the token's project, so a worker could mark its principal's session as left (its notices and authorship stopped) or pull it into its own room. A token now ends or moves a session only when that session runs in the grant's own room.
+- **KT-1967 — A workflow export masks the secrets typed in an Exec step.** The export masked API headers, queries, bodies and notify URLs, and left the command, arguments and stdin of an Exec step, its setup command, the JSON a step carries, the variables handed to a Quick Prompt or a sub-workflow and a notify body template as typed. They are now masked by the same rules as a Quick Exec line and listed among the redacted fields; a `{{reference}}` is kept. So are the inline command and the variables of a collect source, the fallback of a transform field and a value shaped like a key typed into an API path; a JSON body with a value under a secret's name (`{"api_key": "…"}`) and what a command reads from `--password-stdin` are masked although nothing in their shape says secret.
+- **KT-1964 — A task worker no longer escapes the trust level of the room that delegated to it.** With a Trusted or Full instance and a room set back to Standard, a worker launched from that room ran in a fresh room with no setting, so it took the instance level: its Quick Exec lines were approved and its validations widened without anyone being asked. A worker's room is now held to the level a human gave the delegating room when that level is lower (never raised by it), lowering a room takes back what its workers were granted, and a scope request is decided at the level of the launch that files it, so a room an agent just opened lends it nothing.
+- **KT-1971 — A room granted many projects starts its Claude Code agent.** Every project granted to a room adds a fixed block of protection rules to the settings Kronn hands to Claude Code (about 5 KB read-only, 30 to 70 KB when open for editing), and the whole was refused above 96 KiB: a room granted every project of an instance, or a few projects for editing, answered « the room's required checkout rules need 262052 bytes » and its agent never started, whatever the length of the discussion. Above 96 KiB the same rules are now handed over in a private file the agent cannot rewrite. The real ceiling is Claude Code's own sandbox, measured at about thirty read-only projects or eight open for editing: a room granted more no longer refuses to start, it opens the projects that fit (those granted for editing first) and tells the agent which ones stayed closed and what the human can do. A project left out is closed whole to the agent's shell, so its `.env` files cannot be read from there. No rule is dropped or shortened. An API extraction's fallback value is now masked in exports like the other literals (found by the same review). Cutting the cost of a project and showing the ceiling in the scope UI is KT-1974.
+- **KT-1946 — A shadow row says what it runs.** On a step with shadows, the principal row names its Quick Prompt, its version and how many skills it loads, and each shadow row says what differs: another prompt, another version of a skill, a skill dropped or replaced, or « same prompt and skills ». The comparison of a run prints names and versions (« PR review v8 ») where it printed ids, and the shadow editor lists the skills the shadow really loads when it runs another Quick Prompt. Editing prompt and skills from the row, adding a skill to a shadow and its reasoning effort come next.
+- **KT-1977 — Playwright works again from an agent on macOS.** Since the Kronn data directory is hidden from agents, every agent runs inside a macOS sandbox, and a browser started by one of its MCP servers crashed: Chrome cannot start its own sandbox inside another one (« sandbox initialization failed », then « Target crashed »). A launch Kronn encloses now tells the Playwright server to start its browser without Chrome's inner sandbox; a browser started anywhere else keeps it. Chrome DevTools has no such switch and stays broken from an enclosed agent until the browser servers run outside the enclosure (planned for 0.15.5).
+- **KT-1975 — The catalogue no longer launches servers at `@latest`.** Ten servers (Playwright, Chrome DevTools, Context7, Supabase, Azure, Neon, Tavily, Redis, CloudWatch, AWS API) followed whatever their publisher released: a Playwright release of 18 November asked for a browser build nobody had, and the tool stopped on every instance. Each now names a version, a test refuses a floating one, and installed servers follow at the next start. The Playwright card gives the command that installs the matching browser.
+- **KT-1978 — The agent card says what its access switch does.** The closed card showed « Restricted » with no explanation until « Edit » was opened; the row now names the setting and says what the agent can or cannot do.
+- **KT-1981 — An install run by an agent ends with working tools.** A project registered through the API or the interface gets Kronn's server in its agent configuration files at once; it used to wait for a backend restart or a first discussion, so a CLI opened by hand in a fresh project had no Kronn tools. `./kronn start` run without a terminal takes the recommended choice of its menus instead of asking forever. `docs/install-by-agent.md` lists the commands that replace the setup wizard and how to check the result.
+- **KT-1960 — A shadow merge is published when the agents work in a worktree a step created.** The merge guard looked every `path:line` up in the project checkout only: on a pull-request review, whose `setup` step checks the pull request out in a worktree beside the checkout, every citation of the reviewed code was « missing » and the merge was always refused. A citation is now also looked up in the linked worktrees of the project's repository that an Exec step of the run printed as its output, and nowhere else. The guard no longer tells whether the target of a link that leaves the tree exists, refuses a line of a file that may hold secrets, and counts lines in files up to 2 MiB.
+- **KT-1948 — The run total counts every execution.** The header of a run showed the tokens of its steps and no cost: a run with two shadows and a merge read 17 635 tokens when it had spent 116 151 and about 3 $. It now adds the shadows' tokens and shows the summed cost of the steps, the shadows and the merges, preceded by « ≥ » when an execution gave no cost. The run lists keep the steps' tokens only.
+- **KT-1957 — Run lists and statistics count the shadows too.** The run list, the workflow card's last run, the token total and the top 5 workflows showed the steps' tokens only, so a run with shadows was under-reported everywhere but in its own header. Each run now stores what its shadows spent (existing runs are filled on upgrade) and these views show steps plus shadows, still without reading a run's step results.
+- **KT-1947 — A merge is no longer refused for a mark the main execution's point did not earn.** The merge pass marked points of the main execution as verified on that execution's own word, and the whole merge was refused, on every real run, after the pass was paid. Such a point stays, without the mark and with the reason; a point only a shadow raised is still refused, and so is an evidence that does not exist. After a refused or failed merge, the main execution's row shows its own tokens instead of the step's total.
+- **KT-1945 — The merged result table adds up.** A point of the result counts for every execution that found it, not only the first one named: a shadow that confirms four points no longer reads « Kept: 0 ». Each row is « raised = in the result + left out », what a shadow found alone is highlighted, the « Duplicates » column is gone, and a sentence sums the result up. The interface says « merge » where it said « condense ».
+- **KT-1943 — Each execution of a shadow comparison is named with its agent and model.** « Principal », « shadow », « shadow-2 » are followed by the agent and the model that answered, in the headers, the diff columns, both pick lists of the pair comparison and the merged result. The merge table opens with the points each execution raised, so a row of zeros kept no longer reads as an execution that did not run.
+- **KT-1941 — The shadow comparison ignores the order of JSON fields.** Two models write the same fields in different orders; the comparison showed nearly every line as changed. Keys are now sorted at every depth before outputs are compared and shown; lists keep their order.
+- **A shadow merge whose report cannot be saved says so.** The save ignored its error, so a merge could look like it never ran; the error is logged with the run and the step, and a line marks the start of each merge.
+- **KT-1931 — A post-integration criterion can be ticked from Kronn.** Ticking a criterion that is checked live after integration asks for its proof in the plan panel and on the Planning page, and sends it with the tick; the button stays off while the proof is empty and Cancel sends nothing. The Planning page no longer shows the criterion ticked when the server refused it. The rule on who may tick is unchanged once the execution is over: a human, or the principal of the room that ran the task.
+- A task worker that bumps a dependency is no longer delivered uncompiled: before
+  the lane's first build, Kronn fetches the crates (and npm packages) its lock
+  files reference and the host cache lacks, outside the worker's sandbox, from
+  crates.io / the npm registry only. A lock naming a git dependency, another
+  registry or a tarball URL is refused whole and fetches nothing; the worker
+  gets no network of its own. Each fetch is journalled on the execution
+  (`dependency_fetch`). The lock files are parsed (TOML, YAML) rather than
+  scanned, and the fetch runs in a private scratch project under Kronn's data
+  directory with a cleared environment, so nothing the worker wrote (a
+  `.cargo/config.toml`, a `[patch]`, an `.npmrc`, a workspace registry) and no
+  host registry setting or token reaches it; leftovers are swept at startup
+  (KT-1649).
+- Windows: Kronn could not start after an upgrade with a pending migration ("Access denied (os error 5)"), and scheduled backups failed. The backup copy was flushed through a read-only handle, which Windows refuses; it is now opened for writing first, and the Windows CI job runs the test (KT-1625, #509).
+
+- An interrupted task execution no longer stays stuck on "recovery decision
+  already consumed": it can always resume or deliver, and a resume never
+  consumes the decision of a newer interruption (KT-1537, #492).
+- Importing an Artifact or a workflow whose step pins a version of a custom
+  skill the file carries (`custom-x@1`) no longer fails with "this version
+  does not exist" on a Kronn that never had the skill: the pin is checked
+  once the import has created it (#273, #274).
+- A custom skill a JsonData step lists by id (say, per-repository skills
+  that an Exec script loads through the API) is now exported with the
+  workflow or Artifact, and the imported payload names the created copy.
+  Before, the file left it out and the script failed on the other Kronn
+  with "skills absent" (#273, #274).
+
+- **KT-1719 — A worker can run git-based tests: a throwaway repository under the agent's `TMPDIR` is exempt from the git guard.** The guard refused `checkout`, `switch`, `reset` and `stash` in every main checkout, test fixtures included, so 37 `core::docs_citations` tests failed inside a task worker. A repository whose top lies under the agent's own `$TMPDIR` is now exempt; a `$TMPDIR` that is `/`, the home folder or a folder above it exempts nothing, and every real checkout stays guarded.
+- **KT-1732 — Cancelling a workflow run stops its step shadows.** A stopped shadow ends `Interrupted` and writes nothing afterwards.
+- **KT-1743 — A provider edge error that clears by itself no longer ends a turn.** A Cloudflare "Attention Required" challenge, a 403 from the API edge or a Cloudflare 52x is retried on the same agent after 1, 3 then 6 minutes, and the room (the worker room for a task worker) says what happens next. A real credential loss (401, `authentication_error`, an expired token), a hard quota or a long report that merely quotes "403" keeps the failure path; once the retries are spent the failure settles as before, with its cause.
+- **KT-1746 — Kronn no longer grows the global git config.** Older versions appended a `safe.directory` entry on every workflow run and the tests did the same (34 727 entries, 3.1 MB, `git rev-parse` about 76 ms instead of about 19 ms). The only writer is now `ensure_safe_directory`, Docker only and never a duplicate, and tests run on a scratch global config. `kronn --clean-git-config` lists the temp-dir, vanished-worktree and duplicate entries, prints the entry count and the `git rev-parse` time, and removes them after a backup (`<file>.kronn-backup-<epoch>`) and a `y` answer.
+- **KT-1787 — An MCP refresh keeps the API spec of a hybrid plugin (GitHub #559).** After a refresh, GitHub and Atlassian (MCP server plus REST API) lost their `api_spec` until the next restart, so every ApiCall, CollectApiData and Quick API step on them failed.
+- **KT-1795, KT-1802 — DelegateSubtasks integrates into its own run's worktree, settles on the target and reports its cost honestly.** The step's integrations no longer count the run waiting on it, nor a parent run sharing its worktree, as a busy holder of the target; every other integration path keeps the strict check. A subtask is settled when its task is done or awaits only the merge of its integration into the step's target. `cost_usd` is set only when every agent reply carries a cost; otherwise it is `null` and `cost_unknown_reason` says why.
+- **KT-1806, KT-1809 — A run that ends no longer removes a worktree that holds work.** Whatever its status, a run keeps a worktree with uncommitted work, unpushed commits, a nested worktree or submodule work, and says what it kept and where; a kept branch is recorded once. A worktree with initialised submodules is removed only after a fresh inspection finds it clean, and the reclaim of stale Interrupted worktrees follows the same inspection.
+- **KT-1819 — An HTML save of a Page is refused when the Page moved on, and open Pages read only what changed.** `PUT /api/pages/{id}/html` accepts `base_revision_id`; when it is not the current HTML revision the save is refused with HTTP 409 (`error_code: "conflict"`, with `current_revision_id`) and nothing is written. The editor keeps the draft, reads the Page's detail alone and offers taking the new HTML or saving over it once that read has landed. An open view asks `GET /api/pages/{id}/data?since=<data_revision>&revision=<id>` and receives only the datasets changed since, or the full state when the ledger cannot account for every revision. A reload never takes the view back to a Page the user left, and the HTML draft is never changed by a publication. The history hint no longer widens the Artifact side panel.
+- **KT-1832 — A CLI detection sweep that dies, is discarded or stores nothing no longer breaks the next caller.** A caller whose own sweep left nothing fresh used to loop back into a start and panic; it now serves the cached list (even expired), or joins a sweep another caller runs, or answers with an empty list. A sweep that stored nothing is started again after a growing, capped pause, and a sweep cancelled with its runtime no longer blocks the next caller.
+- **KT-1701 — The agent picker popover opens above modals.** The interface uses one z-index scale.
+- **KT-1709 — The "Projets servis" scope control of workflows is styled with the wizard classes and `--kr-` tokens.**
 
 ### Security
 
@@ -234,6 +462,13 @@ Release notes for 0.9.3 and earlier are available in the
   worktrees) resolve through directory file descriptors with `O_NOFOLLOW`, so a
   parent folder swapped for a link after the check never lets a write leave
   the project; Windows keeps the check-then-write by path (KT-1595).
+- An exported Artifact no longer carries its data. Each dataset keeps its
+  name, kind, schema and limits, without its snapshot or its time-series
+  points, so sharing the file shares the page, not what it published (API
+  answers, names, links), nor when it last published. The export does not
+  load those values either. A file exported before keeps importing with its
+  values, and importing it again reuses the pages it already created.
+  Project repository resources are unchanged (#273).
 
 ### Fixed
 
@@ -254,6 +489,15 @@ Release notes for 0.9.3 and earlier are available in the
 - An interrupted task execution no longer stays stuck on "recovery decision
   already consumed": it can always resume or deliver, and a resume never
   consumes the decision of a newer interruption (KT-1537, #492).
+- Importing an Artifact or a workflow whose step pins a version of a custom
+  skill the file carries (`custom-x@1`) no longer fails with "this version
+  does not exist" on a Kronn that never had the skill: the pin is checked
+  once the import has created it (#273).
+- A custom skill a JsonData step lists by id (say, per-repository skills
+  that an Exec script loads through the API) is now exported with the
+  workflow or Artifact, and the imported payload names the created copy.
+  Before, the file left it out and the script failed on the other Kronn
+  with "skills absent" (#273).
 
 ## [0.15.2] - 2026-11-08
 
@@ -671,6 +915,15 @@ Release notes for 0.9.3 and earlier are available in the
   for RUSTSEC-2026-0436: 0.37 panics or allocates without bound on a malformed
   CFB/OLE2 file (a legacy `.xls`), and Kronn reads untrusted spreadsheets in
   context files.
+- A « Décision (IA) » workflow step (KT-1367). It asks the decision model set
+  on the Ollama card typed questions (yes/no, choice, score) about a previous
+  output, in one local call of under a second, and branches the run through
+  the existing conditions: each answer becomes a signal such as `ship_yes` or
+  `route_economy`, and an answer the model is not sure of emits
+  `low_confidence` instead, to hand to a stronger agent or a Gate. No agent
+  tokens. The step stays greyed out, and a workflow using it is refused at
+  launch, while no decision model is configured. Default confidence thresholds
+  come from a measured bench (docs/research/decision-step-bench-2026-10-21.md).
 
 ## [0.15.1] - 2026-10-22
 

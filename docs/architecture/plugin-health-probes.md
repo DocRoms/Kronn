@@ -73,15 +73,18 @@ wizard test) and after each readiness probe:
 
 The row surfaces as `McpConfigDisplay.auth_failure`: the card shows the
 `TokenRefusedNotice` with an update action, the list row a badge, the API
-access health reads `token_refused`, and `AuthFailureBanner` (dashboard layout)
-lists every refused connection. A failed ApiCall output starts with one plain
+access health reads `token_refused`, and the bell's Notifications tab lists
+every refused connection (`useAuthFailureNotices`). A failed ApiCall output starts with one plain
 sentence (`Connection "<label>" (<plugin>) refused the token (HTTP 401): … —
 update the token in Settings → APIs.`) and ends with `[SIGNAL: auth_refused]`;
 a `CollectApiData` step repeats it with the `N of M sources` count. The run page
 (`RunDetail`) keys its run-level notice on that signal.
 
-Not covered: a token's *known expiry date* — connections store none, so an
-expiring token is only caught by the call (or probe) that gets refused.
+A token's *known expiry date* is not stored, so an expiring token is caught by
+the call or probe that gets refused. Since KT-1692 that probe also runs by itself
+(at start, daily, on demand) for every connection that has a test endpoint — see
+`docs/operations/external-api-connections.md`, "Token checks of API plugin
+connections".
 
 ## Rescan report
 

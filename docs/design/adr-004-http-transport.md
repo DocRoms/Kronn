@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:9697-9700#resolve_chat_codec] (call site)
+[src: file: backend/src/agents/runner.rs:9696-9699#resolve_chat_codec] (call site)
 
 ### Pre-dispatch capability gate
 
@@ -49,7 +49,7 @@ named-connection model Custom connections use (`external_api_connections`,
 KT-339), but keep their own dedicated `AgentType` — so their fixed UI color
 (`AGENT_COLORS.LiteLlm` / `.Nvidia`) and their per-agent-type concurrency
 limit (`agent_concurrency_limits`'s `REMOTE` array) are untouched by this
-work. [src: file: backend/src/agents/runner.rs:3542-3594#agent_concurrency_limits]
+work. [src: file: backend/src/agents/runner.rs:3463-3515#agent_concurrency_limits]
 [src: file: frontend/src/lib/constants.ts:10-24#AGENT_COLORS] Their credential is resolved
 through `credential_slug` → `TokensConfig.active_key_for`, the same
 indirection every named connection already uses.
@@ -123,17 +123,17 @@ and immediate pre-dispatch checks use its `http:<connection-id>` target and
 effective model. The guard remains caller-owned; centralizing it
 at the runner boundary is a possible follow-up once overlapping runner work is
 integrated. [src: file: backend/src/api/discussions/orchestration.rs:66-132#checked_launch_connection]
-(summary: [src: file: backend/src/api/discussions/orchestration.rs:710-718#checked_launch_connection],
-participant round: [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection],
-synthesis: [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection])
+(summary: [src: file: backend/src/api/discussions/orchestration.rs:644-652#checked_launch_connection],
+participant round: [src: file: backend/src/api/discussions/orchestration.rs:748-756#checked_launch_connection],
+synthesis: [src: file: backend/src/api/discussions/orchestration.rs:983-991#checked_launch_connection])
 Workflow Agent steps: the connection resolver
-[src: file: backend/src/workflows/steps.rs:1171-1211#resolve_step_connection],
+[src: file: backend/src/workflows/steps.rs:1180-1220#resolve_step_connection],
 the run-start check
-[src: file: backend/src/workflows/runner.rs:1967-2015#resolve_step_connection],
+[src: file: backend/src/workflows/runner.rs:2123-2171#resolve_step_connection],
 the check immediately before dispatch
 [src: file: backend/src/workflows/steps.rs:412-424#preflight_workflow_launch]
 and the preflight on the `http:<connection-id>` target and effective model
-[src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1222-1275#preflight_workflow_launch]
 
 ## Sources
 

@@ -29,9 +29,9 @@ saves only: its tests already ran on the pull request. The backend
 observer reports a fallback restore as `partial`, excluded from exact hot
 history, so the 10-minute SLO statistics stay honest.
 [src: file: .github/workflows/ci-test.yml:107-121#cache-backend-hot]
-[src: file: .github/workflows/ci-test.yml:248-267#mark-backend-cache]
-[src: file: .github/workflows/ci-test.yml:284-296#cache-backend-hot]
-[src: file: .github/workflows/ci-test.yml:463-496#cache-clippy]
+[src: file: .github/workflows/ci-test.yml:263-282#mark-backend-cache]
+[src: file: .github/workflows/ci-test.yml:292-304#cache-backend-hot]
+[src: file: .github/workflows/ci-test.yml:473-506#cache-clippy]
 [src: file: scripts/ci/backend_ci_slo.mjs:96-104#effectiveMeasurementMode]
 [src: file: scripts/ci/backend_ci_slo.mjs:179-185#comparableRuns]
 
