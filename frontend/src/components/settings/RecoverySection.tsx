@@ -12,8 +12,11 @@ import { triggerDownload } from '../../lib/downloadBlob';
 import type { ToastFn } from '../../hooks/useToast';
 import { KeyRound, Copy, Download, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { RecoveryRestorePanel } from '../RecoveryRestorePanel';
+import { StartNewKeyPanel } from '../StartNewKeyPanel';
 import type { RecoveryStatus } from '../../types/generated';
 import { clearCredentialLabel } from '../../lib/clearCredentials';
+import { dropNotice } from '../../lib/notifications';
+import { generateRecoveryPhrase } from '../../lib/recoveryPhrase';
 import '../../pages/SettingsPage.css';
 
 interface RecoverySectionProps {
@@ -58,6 +61,44 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
   const canSave = passphrase.length >= MIN_PASSPHRASE_LEN && passphrase === confirm && !saving
     && (!needsCurrent || current.length > 0);
 
+  // KT-1686 — the one-step flow: Kronn writes the phrase, the owner stores it
+  // and says so. Held in component state only, like the recovery code.
+  const [generated, setGenerated] = useState<string | null>(null);
+  const storeGenerated = async () => {
+    if (!generated || saving) return;
+    setSaving(true);
+    try {
+      const res = await configApi.setRecovery(generated);
+      setRecoveryCode(res.recovery_code);
+      setConfigured(true);
+      setStatus(s => (s ? { ...s, configured: true, matches_key: true } : s));
+      setGenerated(null);
+      dropNotice('key:beside-data');
+      toast(t('settings.recovery.saved'), 'success');
+    } catch (e) {
+      // The answer can be lost after the backend stored the phrase: say what
+      // is true now, not only that the call failed.
+      const now = await configApi.getRecoveryStatus().catch(() => null);
+      if (now?.configured && now.matches_key) {
+        setConfigured(true);
+        setStatus(now);
+        setGenerated(null);
+        dropNotice('key:beside-data');
+        toast(t('settings.recovery.codeNotShown'), 'error');
+      } else {
+        toast(e instanceof Error ? e.message : String(e), 'error');
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+  const copyGenerated = () => {
+    if (!generated) return;
+    navigator.clipboard.writeText(generated)
+      .then(() => toast(t('common.copied'), 'success'))
+      .catch(() => toast(t('settings.recovery.copyFailed'), 'error'));
+  };
+
   const save = async () => {
     if (!canSave) return;
     setSaving(true);
@@ -71,6 +112,9 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
       setConfigured(true);
       setStatus(s => (s ? { ...s, matches_key: true, recovery_other_key: false, recovery_unverified: false, recovery_damaged: false } : s));
       setReplaceUnverified(false);
+      // The advice of the bell is answered, and a phrase Kronn wrote is void.
+      setGenerated(null);
+      dropNotice('key:beside-data');
       setPassphrase('');
       setConfirm('');
       setCurrent('');
@@ -136,6 +180,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
         {status?.key_locked && (
           <RecoveryRestorePanel toast={toast} t={t} mode="restore" initiallyOpen onRestored={() => window.location.reload()} />
         )}
+        {status?.key_locked && <StartNewKeyPanel t={t} onDone={() => window.location.reload()} />}
         {status && !status.key_locked && status.configured && !status.matches_key && (
           <div className="set-expose-warn" data-testid="recovery-mismatch">
             <AlertTriangle size={13} />
@@ -181,7 +226,40 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
         {status && !status.key_locked && status.config_holds_key && (
           <div className="set-expose-warn" data-testid="recovery-key-beside-data">
             <AlertTriangle size={13} />
-            <span>{t('keyLocked.keyBesideData')}</span>
+            <div className="flex-col gap-3">
+              <span className="font-semibold">{t('notif.protect.title')}</span>
+              <span data-testid="recovery-key-beside-data-body">
+                {t(configured && status.matches_key ? 'settings.recovery.phraseActive' : 'notif.protect.body')}
+              </span>
+              {!configured && generated === null && (
+                <div>
+                  <button className="set-action-btn" onClick={() => setGenerated(generateRecoveryPhrase())} data-testid="recovery-generate">
+                    {t('notif.protect.create')}
+                  </button>
+                </div>
+              )}
+              {generated !== null && (
+                <div className="flex-col gap-3" data-testid="recovery-generated">
+                  <span className="set-hint-xs">{t('settings.recovery.generatedHint')}</span>
+                  <code data-testid="recovery-generated-phrase">{generated}</code>
+                  <div className="flex-row gap-4">
+                    <button className="set-action-btn" onClick={copyGenerated} data-testid="recovery-generated-copy">
+                      <Copy size={12} /> {t('common.copy')}
+                    </button>
+                    <button className="set-action-btn" disabled={saving} onClick={storeGenerated} data-testid="recovery-generated-stored">
+                      {t('settings.recovery.generatedStored')}
+                    </button>
+                    <button className="set-action-btn" disabled={saving} onClick={() => setGenerated(null)} data-testid="recovery-generated-cancel">
+                      {t('common.cancel')}
+                    </button>
+                  </div>
+                </div>
+              )}
+              <details data-testid="recovery-key-beside-data-details">
+                <summary>{t('settings.recovery.learnMore')}</summary>
+                <span className="set-hint-xs">{t('keyLocked.keyBesideData')}</span>
+              </details>
+            </div>
           </div>
         )}
         {status && (status.clear_credentials ?? []).length > 0 && (

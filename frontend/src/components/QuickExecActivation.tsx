@@ -3,7 +3,7 @@
 // they already are: the room that created it, a Page action, a workflow step.
 // Activation is the human's only: it names the line that was read, and the
 // server refuses it if the line changed since.
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 import { quickExecs as quickExecsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
@@ -141,6 +141,8 @@ export interface PendingActivation {
   program: string;
   command: string;
   args: string[];
+  /** KT-1695 — the workflow steps that use it, when it is listed with them. */
+  steps?: string[];
 }
 
 /** An Exec line of a workflow step waiting for a human: activated in the
@@ -148,6 +150,152 @@ export interface PendingActivation {
 export interface PendingStepLine {
   workflowId: string;
   step: string;
+}
+
+interface ActivateAllProps {
+  items: PendingActivation[];
+  /** Called once the Quick Execs are activated, so the caller refreshes what it shows. */
+  onActivated?: () => void;
+  /** Called when a line was refused (it changed since), so the caller reads the new line. */
+  onRefresh?: () => void;
+  /** The caller is already activating something: nothing else is started. */
+  disabled?: boolean;
+  /** The title of the surface: the button sits on its row, on the right, and
+   * the confirmation opens right under it. Without one, the button heads the
+   * block on a row of its own. */
+  heading?: ReactNode;
+}
+
+/** KT-1695 — « Activate all (N) »: one confirmation for every Quick Exec that
+ * waits. Each command is shown (collapsed), and one checkbox per distinct
+ * program carries the wording of a single activation. Confirming activates
+ * each line through the same human-only endpoint as the per-card button: the
+ * line shown is the line sent, and a line that changed since is refused. */
+export function ActivateAllQuickExecs({ items, onActivated, onRefresh, disabled = false, heading }: ActivateAllProps) {
+  const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
+  const [running, setRunning] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
+  const programs = useMemo(() => [...new Set(items.map(item => item.program))], [items]);
+  if (items.length < 2 && errors.length === 0 && !heading) return null;
+
+  const allTicked = programs.every(program => ticked.has(program));
+  const toggle = (program: string) => setTicked(current => {
+    const next = new Set(current);
+    if (next.has(program)) next.delete(program);
+    else next.add(program);
+    return next;
+  });
+
+  const confirm = async () => {
+    if (!allTicked || running || disabled) return;
+    setRunning(true);
+    setErrors([]);
+    const failed: string[] = [];
+    let activated = 0;
+    // One after the other: each line is its own human activation, and the
+    // server settles each against the line that was read.
+    for (const item of items) {
+      try {
+        await quickExecsApi.activate(item.id, { command: item.command, args: item.args });
+        activated += 1;
+      } catch (cause) {
+        failed.push(`${item.name}: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }
+    setErrors(failed);
+    setRunning(false);
+    if (failed.length === 0) {
+      setOpen(false);
+      setTicked(new Set());
+    }
+    if (activated > 0) onActivated?.();
+    else onRefresh?.();
+  };
+
+  return (
+    <div className="qe-activate-all" data-testid="qe-activate-all" data-headed={heading ? 'true' : undefined}>
+      {(heading || (!open && items.length >= 2)) && (
+        <div className="qe-activate-all__head" data-testid="qe-activate-all-head">
+          {heading}
+          {!open && items.length >= 2 && (
+            <button
+              type="button"
+              className="qe-activation-btn"
+              data-kind="primary"
+              disabled={disabled}
+              onClick={() => setOpen(true)}
+            >
+              {t('qeActivateAll.button', items.length)}
+            </button>
+          )}
+        </div>
+      )}
+      {open && (
+        <section
+          className="qe-activate-all__confirm"
+          data-testid="qe-activate-all-confirm"
+          aria-label={t('qeActivateAll.title', items.length)}
+        >
+          <p className="qe-activation-card__title">
+            <AlertTriangle size={12} aria-hidden="true" />
+            <strong>{t('qeActivateAll.title', items.length)}</strong>
+          </p>
+          <ul className="qe-activate-all__list">
+            {items.map(item => (
+              <li key={item.id} className="qe-activate-all__item">
+                <details>
+                  <summary>
+                    <strong>{item.name}</strong>
+                    <span>{' — '}{t('qeActivation.receives', item.program)}</span>
+                    {item.steps && item.steps.length > 0 && (
+                      <span>{' — '}{t('qeActivation.usedBy', item.steps.join(', '))}</span>
+                    )}
+                  </summary>
+                  <pre className="qe-command">{commandLine(item.command, item.args)}</pre>
+                </details>
+              </li>
+            ))}
+          </ul>
+          {programs.map(program => (
+            <label key={program} className="qe-activate-all__check">
+              <input
+                type="checkbox"
+                checked={ticked.has(program)}
+                disabled={running}
+                onChange={() => toggle(program)}
+              />
+              <span>{t('exec.unmodelledApprove', program)}</span>
+            </label>
+          ))}
+          <div className="qe-activation-card__actions">
+            <button
+              type="button"
+              className="qe-activation-btn"
+              data-kind="primary"
+              disabled={!allTicked || running || disabled}
+              onClick={() => { void confirm(); }}
+            >
+              {t('qeActivateAll.confirm', items.length)}
+            </button>
+            <button
+              type="button"
+              className="qe-activation-btn"
+              data-kind="secondary"
+              disabled={running}
+              onClick={() => { setOpen(false); setErrors([]); }}
+            >
+              {t('qeActivateAll.cancel')}
+            </button>
+          </div>
+        </section>
+      )}
+      {errors.map(message => (
+        <p key={message} role="alert" className="qe-pending-activation__error">{message}</p>
+      ))}
+    </div>
+  );
 }
 
 interface NoticeProps {
@@ -187,11 +335,20 @@ export function PendingActivationNotice({ items, steps = [], onActivated, onRefr
 
   return (
     <div className="qe-pending-activation" data-testid="qe-pending-activation" role="status">
+      <ActivateAllQuickExecs
+        items={items}
+        disabled={busy !== null}
+        onActivated={onActivated}
+        onRefresh={onRefresh}
+      />
       {items.map(item => (
         <div key={item.id} className="qe-pending-activation__item">
           <AlertTriangle size={12} aria-hidden="true" />
           <strong>{t('qeActivation.pending', item.name)}</strong>
           <span>{' — '}{t('qeActivation.receives', item.program)}</span>
+          {item.steps && item.steps.length > 0 && (
+            <span>{' — '}{t('qeActivation.usedBy', item.steps.join(', '))}</span>
+          )}
           <pre className="qe-command">{commandLine(item.command, item.args)}</pre>
           <button
             type="button"

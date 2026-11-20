@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { discussionPath, planningTaskPath } from '../lib/routes';
 import { newTabClickProps } from '../lib/newTabNavigation';
 import {
@@ -39,6 +39,7 @@ import type {
   PlanningTaskSummary,
   Project,
 } from '../types/generated';
+import { DodEvidencePrompt } from '../components/DodEvidencePrompt';
 import './DiscussionsPage.css';
 import './PlanningPage.css';
 import { LoadingState } from '../components/LoadingState';
@@ -647,9 +648,12 @@ function PlanningPageView({
                       saving={saving}
                       onNavigateDiscussion={onNavigateDiscussion}
                       onOpenTask={selectTask}
-                      onToggleDod={async (dodId, completed) => {
+                      onToggleDod={async (dodId, completed, evidence) => {
                         try {
-                          const refreshed = await planning.updateDod(detail.id, dodId, { completed });
+                          const refreshed = await planning.updateDod(detail.id, dodId, {
+                            completed,
+                            ...(evidence ? { evidence } : {}),
+                          });
                           setDetail(refreshed);
                           setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
                         } catch (cause) {
@@ -823,7 +827,7 @@ interface DetailProps {
   discussions: Discussion[];
   saving: boolean;
   onSave: (patch: Parameters<typeof planning.update>[1]) => Promise<void>;
-  onToggleDod: (dodId: string, completed: boolean) => Promise<void>;
+  onToggleDod: (dodId: string, completed: boolean, evidence?: string) => Promise<void>;
   onCreateSubtask: (title: string) => Promise<void>;
   onAddBlocker: (blockerTaskId: string) => Promise<void>;
   onRemoveBlocker: (blockerTaskId: string) => Promise<void>;
@@ -860,8 +864,10 @@ function PlanningDetailForm({
       id: item.id,
       sentence: item.sentence,
       completed: item.completed,
+      verification: item.verification,
     })),
   );
+  const [evidenceIndex, setEvidenceIndex] = useState<number | null>(null);
   const [links, setLinks] = useState(
     task.links.map(link => ({ label: link.label, url: link.url })),
   );
@@ -965,11 +971,20 @@ function PlanningDetailForm({
       <section className="planning-detail-dod">
         <h3>{t('planning.definitionOfDone')}</h3>
         {definitionOfDone.map((item, index) => (
-          <div className="planning-edit-row" key={index}>
+          <Fragment key={index}>
+          <div className="planning-edit-row">
             <button
               type="button"
+              aria-label={item.completed
+                ? t('planning.uncheckDod', item.sentence)
+                : t('planning.checkDod', item.sentence)}
               onClick={() => {
                 const completed = !item.completed;
+                // The server refuses a post-integration tick without its proof.
+                if (completed && item.id && item.verification === 'post_integration') {
+                  setEvidenceIndex(index);
+                  return;
+                }
                 const definition_of_done = definitionOfDone.map((candidate, candidateIndex) => ({
                   ...candidate,
                   completed: candidateIndex === index ? completed : candidate.completed,
@@ -999,13 +1014,32 @@ function PlanningDetailForm({
               <X size={12} />
             </button>
           </div>
+          {evidenceIndex === index && !item.completed && (
+            <DodEvidencePrompt
+              sentence={item.sentence}
+              busy={saving}
+              onCancel={() => setEvidenceIndex(null)}
+              onConfirm={async evidence => {
+                try {
+                  await onToggleDod(item.id, true, evidence);
+                } catch {
+                  return; // the caller already told the user
+                }
+                setEvidenceIndex(null);
+                setDefinitionOfDone(items => items.map((candidate, candidateIndex) =>
+                  candidateIndex === index ? { ...candidate, completed: true } : candidate
+                ));
+              }}
+            />
+          )}
+          </Fragment>
         ))}
         <button
           type="button"
           className="planning-add-row"
           onClick={() => setDefinitionOfDone(items => [
             ...items,
-            { id: '', sentence: '', completed: false },
+            { id: '', sentence: '', completed: false, verification: 'worker' },
           ])}
         >
           <Plus size={12} /> {t('planning.addDod')}

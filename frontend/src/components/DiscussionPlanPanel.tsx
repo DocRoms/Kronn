@@ -59,6 +59,7 @@ import type {
   TaskExecutionDetail,
 } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
+import { DodEvidencePrompt } from './DodEvidencePrompt';
 import './DiscussionToolPanel.css';
 import './DiscussionPlanPanel.css';
 import { awaitingMergeTitle, shortBranch } from '../lib/awaitingMerge';
@@ -111,6 +112,7 @@ export function DiscussionPlanPanel({
   );
   const [detailLoading, setDetailLoading] = useState(false);
   const [dodSavingIndex, setDodSavingIndex] = useState<number | null>(null);
+  const [dodEvidenceIndex, setDodEvidenceIndex] = useState<number | null>(null);
   const [campaign, setCampaign] = useState<CampaignView | null>(null);
   const [executionLinks, setExecutionLinks] = useState<ExecutionDiscussionLink[]>([]);
   const [executionDetail, setExecutionDetail] = useState<TaskExecutionDetail | null>(null);
@@ -524,15 +526,22 @@ export function DiscussionPlanPanel({
     }
   };
 
-  const toggleDod = async (index: number) => {
+  const toggleDod = async (index: number, evidence?: string) => {
     if (!selectedTask || dodSavingIndex !== null) return;
     const item = selectedTask.definition_of_done[index];
     if (!item) return;
+    // The server refuses a post-integration tick without its proof.
+    if (!item.completed && item.verification === 'post_integration' && !evidence) {
+      setDodEvidenceIndex(index);
+      return;
+    }
     setDodSavingIndex(index);
     try {
       const updated = await planning.updateDod(selectedTask.id, item.id, {
         completed: !item.completed,
+        ...(evidence ? { evidence } : {}),
       });
+      setDodEvidenceIndex(null);
       setSelectedTask(updated);
       await refresh();
     } catch (cause) {
@@ -1311,7 +1320,7 @@ export function DiscussionPlanPanel({
                   {selectedTask.definition_of_done.filter(item => item.completed).length}
                   /{selectedTask.definition_of_done.length}
                 </strong>
-                {selectedTask.definition_of_done.map((item, index) => (
+                {selectedTask.definition_of_done.flatMap((item, index) => [
                   <button
                     type="button"
                     key={item.id}
@@ -1328,8 +1337,17 @@ export function DiscussionPlanPanel({
                         ? <Check size={11} />
                         : <Circle size={11} />}
                     {item.sentence}
-                  </button>
-                ))}
+                  </button>,
+                  dodEvidenceIndex === index && !item.completed && (
+                    <DodEvidencePrompt
+                      key={`${item.id}-evidence`}
+                      sentence={item.sentence}
+                      busy={dodSavingIndex !== null}
+                      onConfirm={evidence => void toggleDod(index, evidence)}
+                      onCancel={() => setDodEvidenceIndex(null)}
+                    />
+                  ),
+                ])}
               </div>
             )}
           </section>

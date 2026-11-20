@@ -5,6 +5,7 @@ import {
   actionLabelKey,
   activityLinkPath,
   formatDuration,
+  splitOutageDuration,
   humanizeType,
   isAnythingRunning,
   openActivityLink,
@@ -78,6 +79,14 @@ describe('formatting', () => {
     [0, '0s'], [59_000, '59s'], [60_000, '1m 00s'], [4 * 60_000 + 12_000, '4m 12s'],
     [63 * 60_000, '1h 03m'], [49 * 3_600_000, '2d 01h'], [-5_000, '0s'],
   ])('reads %i ms as %s', (ms, text) => { expect(formatDuration(ms)).toBe(text); });
+
+  it.each([
+    [0, 'sec', 0, ''], [10_000, 'sec', 10, ''], [59_999, 'sec', 59, ''],
+    [60_000, 'min', 1, '00'], [72_000, 'min', 1, '12'], [59 * 60_000 + 5_000, 'min', 59, '05'],
+    [3_600_000, 'hour', 1, '00'], [2 * 3_600_000 + 5 * 60_000, 'hour', 2, '05'], [-5_000, 'sec', 0, ''],
+  ])('splits an outage of %i ms as %s (%i, "%s"), never as a clock', (ms, unit, first, second) => {
+    expect(splitOutageDuration(ms)).toEqual({ unit, first, second });
+  });
 
   it('names a row type the locales do not know', () => {
     expect(humanizeType('media_job')).toBe('Media job');

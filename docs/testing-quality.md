@@ -46,8 +46,8 @@ Run from the repository root unless a working directory is shown.
 | Version surfaces | `make check-version` | Every manifest, README, site and the first changelog release agree |
 | Diff hygiene | `make check-diff` (`scripts/check-diff.sh`: `git diff --check` from the merge base with `origin/main`, plus staged and unstaged changes; CI job `diff-hygiene`) | No whitespace errors or conflict markers |
 | Rust formatting | `cd backend && cargo fmt --all -- --check` | Clean |
-| Rust lint | `cd backend && cargo clippy --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
-| Backend tests | `make test-backend` (`cd backend && cargo nextest run --workspace`: library, binary and integration tests, one process per test, with CI's runner and `backend/.config/nextest.toml`, then `cargo test --doc`) | Entire Rust suite passes |
+| Rust lint | `cd backend && cargo clippy --workspace --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
+| Backend tests | `make test-backend` (`cd backend && cargo nextest run --workspace`: library, binary and integration tests, one process per test, with CI's runner and `backend/.config/nextest.toml`, then `cargo test --workspace --doc`) | Entire Rust suite passes |
 | Backend coverage | `make test-backend-cov` (`cargo llvm-cov nextest` with CI's 83 % floors, then `scripts/check-keymgmt-coverage.sh`) | Both floors hold |
 | Python helpers | `make test-python` | Entire helper suite passes |
 | Shell | `make test-shell` | Entire bats suite passes |
@@ -64,7 +64,7 @@ Run from the repository root unless a working directory is shown.
 `make test-backend-lib` runs the library unit tests only: a quick loop, not
 evidence for the gate. The release gate above is CI's: a local or orchestration
 integration validation is `cargo fmt --check`, `cargo clippy` and targeted lib
-tests (`cargo test --lib <filter>`, 3.3 min against ~20 min for the full local
+tests (`cargo test --workspace --lib <filter>`, 3.3 min against ~20 min for the full local
 `cargo test`, KT-1630 audit); a full-suite validation is flagged `full_suite_ci_owned`
 (see [task orchestration](guides/task-orchestration.md#default-validations-fmt--clippy--targeted-lib-tests)). `export_bindings` is skipped locally (the default
 nextest profile filters it) so the ts-rs bindings stay untouched; CI's `ci`
@@ -108,8 +108,8 @@ zero-warning Oxlint gate passes. The `with_conn` safety scanner also reads
 standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
-`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:155-195#find_violations]`
-`[src: file: .github/workflows/ci-test.yml:519-523#with_conn]`
+`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:162-202#find_violations]`
+`[src: file: .github/workflows/ci-test.yml:535-539#with_conn]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
 a termination signal can arrive between the fork and that assignment, leaving
@@ -192,6 +192,8 @@ from that archive (`--partition slice:N/3`, `NEXTEST_PROFILE=ci`), and
 `test-backend` merges their coverage profiles against the archived binaries,
 enforces the 83 % floors and the key-management per-file floors on the whole
 suite, then replays the ts-rs export tests for the generated-type drift check.
+Both reports pass `--workspace`: a report of the top crate alone leaves the
+lower crates out, and the floors would be judged on a fraction of the backend.
 An extracted test binary no longer sits under the checkout, so the shards and
 the replay set `KRONN_TEMPLATES_DIR` to the repository's `templates/`.
 Merging the profiles of separate archive extractions gives the same report as
@@ -211,8 +213,12 @@ restore from the exact key or a same-OS fallback prefix; only `push` runs on
 directories and writes a versioned marker (`.kronn-backend-cache-v3`) when a
 complete bounded cache exists. Profraw files, the nextest store and other
 transient trees are never archived.
-[src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot] [src: file: .github/workflows/ci-test.yml:243-276#mark-backend-cache]
-[src: file: .github/workflows/ci-test.yml:208-241#archive] [src: file: .github/workflows/ci-test.yml:278-329#test-backend-shard] [src: file: .github/workflows/ci-test.yml:359-437#test-backend] [src: file: scripts/ci/backend_ci_slo.mjs:46-62#collapseBackendJobs]
+The archive build compiles the crates of this repository one at a time
+(`RUSTC_WORKSPACE_WRAPPER`, a file lock; dependencies stay parallel), so two
+of them never share a hosted runner's 16 GB, and records the peak memory of
+each compilation.
+[src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot] [src: file: .github/workflows/ci-test.yml:243-284#mark-backend-cache]
+[src: file: .github/workflows/ci-test.yml:208-243#archive] [src: file: .github/workflows/ci-test.yml:278-329#test-backend-shard] [src: file: .github/workflows/ci-test.yml:359-437#test-backend] [src: file: scripts/ci/backend_ci_slo.mjs:46-62#collapseBackendJobs] [src: file: scripts/ci/rustc_one_at_a_time.sh:19-30#flock]
 
 The clippy, e2e dev-profile, release and portability caches follow the same
 restore-on-pull-request, save-on-main model: Actions scopes a cache created by
@@ -231,8 +237,8 @@ aggregates accept those skips only for a push. A save runs only on
 `success()`: a half-built tree saved under the exact key would be restored
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
-[src: file: .github/workflows/ci-test.yml:226-236#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:762-789#cache-e2e-dev]
-[src: file: .github/workflows/ci-build.yml:238-279#cache-portability] [src: file: .github/workflows/ci-build.yml:315-340#cache-release]
+[src: file: .github/workflows/ci-test.yml:230-242#archive] [src: file: .github/workflows/ci-test.yml:466-501#cache-clippy] [src: file: .github/workflows/ci-test.yml:794-821#cache-e2e-dev]
+[src: file: .github/workflows/ci-build.yml:238-279#cache-portability] [src: file: .github/workflows/ci-build.yml:321-346#cache-release]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when a hot
@@ -249,9 +255,9 @@ statistics use only successful same-branch pull-request runs whose job records
 a verified restored compiled cache. The v3 key cannot restore the former
 debug layout, so the first run is an explicit warmup.
 [src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:166-191#main] [src: file: scripts/ci/backend_ci_slo.mjs:100-104#effectiveMeasurementMode] [src: file: scripts/ci/backend_ci_slo.mjs:83-94#comparableSuccessfulHotRuns]
-[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1034-1071#backend-ci-performance]
+[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1055-1092#backend-ci-performance]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:625-632#SLO]
+[src: file: .github/workflows/ci-test.yml:657-664#SLO]
 
 Each shard fails its artifact step when nextest does not produce the expected
 JUnit report, then uploads it as `backend-junit-N` (N = 1 to 3). nextest writes its
@@ -276,7 +282,7 @@ for seconds, classname, name in sorted(cases, reverse=True)[:10]:
 PY
 ```
 
-[src: file: .github/workflows/ci-test.yml:366-377#junit]
+[src: file: .github/workflows/ci-test.yml:381-392#junit]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -339,8 +345,24 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:91#timeout-minutes] [src: file: .github/workflows/ci-test.yml:386#timeout-minutes] [src: file: .github/workflows/ci-test.yml:745#timeout-minutes] [src: file: .github/workflows/ci-build.yml:230-234#timeout-minutes] [src: file: .github/workflows/ci-build.yml:331#timeout-minutes]
-[src: file: .github/workflows/ci-test.yml:971-1013#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
+[src: file: .github/workflows/ci-test.yml:95#timeout-minutes] [src: file: .github/workflows/ci-test.yml:401#timeout-minutes] [src: file: .github/workflows/ci-test.yml:778#timeout-minutes] [src: file: .github/workflows/ci-build.yml:234-238#timeout-minutes] [src: file: .github/workflows/ci-build.yml:337#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:1000-1042#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
+
+## Crate size
+
+The backend is five crates (`docs/architecture/backend-crates.md`) because the
+memory one compilation needs follows the size of its crate. Two gates keep it
+so:
+
+- `backend/scripts/ci/crate_size.py` fails the quality job when a crate
+  exceeds 200 000 lines, tests included. Run it locally with
+  `python3 backend/scripts/ci/crate_size.py`; it prints every crate's size.
+- `backend/scripts/ci/rustc_memory.py` fails `test-backend-build` when the
+  compilation of one crate peaked over 7 GB, as measured by the rustc wrapper
+  during the instrumented build. A cache hit compiles nothing and passes.
+
+A failing gate is fixed by moving modules to another crate or adding a layer
+crate, not by raising the limit.
 
 ## Test placement
 
@@ -427,13 +449,13 @@ from a dedicated output directory.
 - `frontend/src/hooks/__tests__/useWebSocket.test.ts` pins first connect,
   reconnect resync, pong deadlines, half-open close, backoff reset, stale socket
   callbacks and unmount cleanup.
-- `frontend/src/components/__tests__/BackendStatus.test.tsx` pins fast outage
+- `frontend/src/hooks/__tests__/useBackendMonitor.test.tsx` pins fast outage
   recovery plus `online` and tab-visibility probes without healthy-state noise.
 - `frontend/src/pages/__tests__/DiscussionsPage.test.tsx` pins the reconnecting
   explanation, active-room resync, interrupted-run cleanup and pre-receipt send
   rollback.
-- `frontend/e2e/specs/ws-reconnect.spec.ts` proves the global outage indicator
-  appears and clears in a real browser.
+- `frontend/e2e/specs/ws-reconnect.spec.ts` proves the bell's outage alert and
+  its single Notifications entry appear and clear in a real browser.
 - `frontend/e2e/specs/disc-send-receipt-resilience.spec.ts` proves a failed
   pre-receipt send restores the exact draft and removes the optimistic message.
 
@@ -507,7 +529,7 @@ process ownership and creates a flaky global side effect.
 ```bash
 cd frontend
 pnpm vitest run src/hooks/__tests__/useWebSocket.test.ts
-pnpm vitest run src/components/__tests__/BackendStatus.test.tsx
+pnpm vitest run src/hooks/__tests__/useBackendMonitor.test.tsx
 pnpm vitest run src/pages/__tests__/DiscussionsPage.test.tsx
 pnpm playwright test e2e/specs/ws-reconnect.spec.ts \
   e2e/specs/disc-send-receipt-resilience.spec.ts

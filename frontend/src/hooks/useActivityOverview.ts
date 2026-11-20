@@ -16,6 +16,8 @@ import type { ActivityOverview } from '../types/generated';
 export function useActivityOverview() {
   const [overview, setOverview] = useState<ActivityOverview | null>(null);
   const [failed, setFailed] = useState(false);
+  /** When the overview shown was last read: the "as of" of a view greyed by an outage. */
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const alive = useRef(true);
 
   const refetch = useCallback(async () => {
@@ -25,6 +27,7 @@ export function useActivityOverview() {
       // Same rows: keep the object, so a quiet poll renders nothing.
       setOverview(previous => (sameActivity(previous, next) ? previous : next));
       setFailed(false);
+      setUpdatedAt(Date.now());
     } catch {
       if (alive.current) setFailed(true);
     }
@@ -52,5 +55,5 @@ export function useActivityOverview() {
     return () => clearInterval(interval);
   }, [refetch, busy]);
 
-  return { overview, failed, refetch };
+  return { overview, failed, updatedAt, refetch };
 }

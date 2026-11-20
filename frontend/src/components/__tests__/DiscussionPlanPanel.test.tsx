@@ -690,6 +690,38 @@ describe('DiscussionPlanPanel', () => {
     expect(await screen.findByText(/planning\.definitionOfDone · 1\/1/)).toBeInTheDocument();
   });
 
+  it('asks for the proof of a post-integration criterion and sends it with the tick (KT-1931)', async () => {
+    const item = { id: 'dod-live', sentence: 'Seen on a live run', completed: false, position: 0, verification: 'post_integration' as const };
+    const initial = detail({ definition_of_done: [item] });
+    const updated = detail({ definition_of_done: [{ ...item, completed: true, evidence: 'run 42 ended green' }] });
+    mocks.get.mockResolvedValueOnce(initial).mockResolvedValue(updated);
+    mocks.updateDod.mockResolvedValue(updated);
+    const { container } = render(
+      <DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />,
+    );
+    await screen.findByText('planning.progress:0/1');
+    fireEvent.click(container.querySelector('.plan-task-open') as HTMLElement);
+    const dod = await screen.findByLabelText('planning.checkDod:Seen on a live run');
+
+    fireEvent.click(dod);
+    fireEvent.click(screen.getByRole('button', { name: 'common.cancel' }));
+    expect(screen.queryByTestId('dod-evidence-prompt')).not.toBeInTheDocument();
+    expect(mocks.updateDod).not.toHaveBeenCalled();
+
+    fireEvent.click(dod);
+    const confirm = screen.getByRole('button', { name: 'planning.dodEvidenceConfirm' });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText('planning.dodEvidencePlaceholder'), { target: { value: ' run 42 ended green ' } });
+    fireEvent.click(confirm);
+    await waitFor(() => expect(mocks.updateDod).toHaveBeenCalledWith(
+      'task-1',
+      'dod-live',
+      { completed: true, evidence: 'run 42 ended green' },
+    ));
+    expect(await screen.findByText(/planning\.definitionOfDone · 1\/1/)).toBeInTheDocument();
+    expect(screen.queryByTestId('dod-evidence-prompt')).not.toBeInTheDocument();
+  });
+
   it('expands and collapses the bounded current and actionable task lists', async () => {
     const blockedCurrent = relation({
       id: 'current-blocked',

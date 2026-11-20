@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { getNotifications } from '../lib/notifications';
 import { render, screen, waitFor, fireEvent, act, cleanup } from '@testing-library/react';
 import { RouterProvider } from 'react-router/dom';
 import { createAppRouter } from '../router';
@@ -49,9 +50,6 @@ vi.mock('../pages/StandaloneDiscussionMosaic', () => ({
   ),
 }));
 
-// The banners around the dashboard poll the backend; inert here.
-vi.mock('../components/UpdateBanner', () => ({ UpdateBanner: () => null }));
-vi.mock('../components/BackendStatus', () => ({ BackendStatus: () => null }));
 
 // Mock the API
 vi.mock('../lib/api', () => ({
@@ -65,9 +63,9 @@ vi.mock('../lib/api', () => ({
     getLanguage: vi.fn(),
     getRecoveryStatus: vi.fn().mockResolvedValue({ key_locked: true }),
   },
-  // UpdateBanner is rendered inside Dashboard via App's tree and calls
+  // The update notice (useSystemNotices) is read around the Dashboard and calls
   // version.check on mount. The Dashboard component is itself mocked
-  // above so it never actually mounts UpdateBanner, BUT in the real
+  // above so it never actually mounts it, BUT in the real
   // App tree (e.g. when the lazy import resolves before mocks take
   // effect in the test runner) the import chain still asks for
   // `version`. Mocking it as a never-resolving promise keeps things
@@ -181,7 +179,7 @@ describe('App', () => {
     renderApp();
     fireEvent.click(await screen.findByText('Reset'));
     await waitFor(() =>
-      expect(screen.getByTestId('reset-error').textContent).toContain('not the stored keys'),
+      expect(getNotifications().notices.find(n => n.kind === 'reset_error')?.args?.[0]).toContain('not the stored keys'),
     );
   });
 
@@ -199,7 +197,7 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
   });
 
-  it('shows a config.toml set aside at start on the dashboard (C5-02)', async () => {
+  it('reports a config.toml set aside at start to the bell (C5-02)', async () => {
     vi.mocked(configApi.getRecoveryStatus).mockResolvedValueOnce({
       key_locked: false,
       config_set_aside: 'config.toml could not be read and was kept as config.toml.corrupt.1',
@@ -207,7 +205,7 @@ describe('App', () => {
     vi.mocked(setupApi.getStatus).mockResolvedValue({ is_first_run: false, current_step: 'Complete', agents_detected: [], scan_paths_set: true, scan_paths_explored: [], config_set_aside: null, repos_detected: [], default_scan_path: '/home' });
     renderApp();
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByTestId('config-set-aside-banner')).toHaveTextContent('config.toml.corrupt.1'));
+    await waitFor(() => expect(getNotifications().notices.find(n => n.kind === 'config_set_aside')?.args?.[0]).toContain('config.toml.corrupt.1'));
   });
 
   it('renders the last known setup state while refreshing it in the background', async () => {
