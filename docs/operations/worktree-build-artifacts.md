@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:7362-7419#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:7421-7517#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:7249-7266#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:7646-7712#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:7370-7427#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:7429-7525#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:7257-7274#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:7654-7720#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -481,11 +481,11 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_env.rs:1324-1366#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1153#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1780#first_build_args]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1159-1171#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1786-1798#first_build_args]
 [src: file: backend/src/core/project_toolchains.rs:609#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:11583-11614#warm_failure_notice]
+[src: file: backend/src/api/orchestration.rs:11662-11693#warm_failure_notice]
 
 ## Seed and lane agree on the C flags (KT-1742)
 
@@ -913,10 +913,10 @@ project, read each `lane_warm_start` (`seed.aligned`, `crates`,
 `first_build.outcome`, `duration_ms`, build_jobs, host load) and look for
 `.kronn-warm.json` in the lane target.
 
-[src: file: backend/src/core/task_worker_lane_warm.rs:59-59#DEFAULT_FIRST_BUILD_TIMEOUT]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1153#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:965#warm_units]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1792#first_build_pending]
+[src: file: backend/src/core/task_worker_lane_warm.rs:56-60#DEFAULT_FIRST_BUILD_TIMEOUT]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1159-1171#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:980-982#warm_units]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1807-1810#first_build_pending]
 [src: file: backend/src/core/task_worker_root_marks.rs:68-68#root_key]
 [src: file: backend/src/core/task_worker_root_marks.rs:131-131#cached_failure]
 [src: file: backend/src/core/task_worker_seed_align.rs:275-275#align_seed]
@@ -1002,6 +1002,62 @@ load, not a performance guarantee.
 [src: file: backend/src/api/orchestration.rs:11346-11356]
 [src: file: backend/src/core/task_worker_lane_warm.rs:872]
 [src: file: frontend/src/components/settings/WorkersSection.tsx:63#WorkersSection]
+
+## A lane whose validations start no build is not warmed (KT-1980)
+
+On 2026-11-20 a fix touching only `frontend/src`, gated by front-end commands
+(tsc, oxlint, lint-i18n, three vitest files), spent 33 minutes in
+`Provisioning` (seed clone 969 s, first build 284 s, the seed rebuilt in 656 s)
+and grew its lane target to 32 GB, then needed 10 minutes of work. The warm-up
+built what no gate of that task would ever run.
+
+**The rule.** The execution's validations are its principal's statement of what
+the delivery is checked with; a worker cannot change them, so it can neither
+obtain nor avoid the skip. Generic, no project's path or command is named:
+
+1. An execution with **no validation** is warmed as before: the intent is unknown.
+2. An execution with at least one validation is **not warmed** (no seed
+   alignment, no seed clone, no first build) when none of its validations can
+   start a build of a warm unit. A validation can when, once an `rtk` or
+   `rtk proxy` wrapper is removed, its binary is `cargo` or `make`, or a binary
+   of the project's declared first-build command (`cd …`, `VAR=value` prefixes
+   and chained commands are read through); a build binary named further on the
+   line (`pnpm exec cargo …`) counts too.
+3. **When in doubt, warm.** A binary the rule does not know warms the lane. It
+   knows the front-end tooling (`pnpm`, `npm`, `npx`, `yarn`, `bun`, `node`,
+   `tsc`, `vitest`, `jest`, `eslint`, `oxlint`, `prettier`, `biome`,
+   `playwright`), `git`, `gh` and the probes (`echo`, `true`, `false`, `sleep`),
+   by bare name only: a repository path may do anything. Shells and script
+   interpreters (`sh`, `python3`) are deliberately unknown.
+
+**What is recorded.** A skipped warm-up is a `lane_warm_start` record whose seed
+and first build are `not_applicable` / `skipped` with a reason naming the
+warm-skip rule and the validations it read, plus `skipped_by_validations` (those
+validations and the build binaries). The lane is still provisioned and
+smoke-checked; its layout, sandbox and the build gate are unchanged. The
+`Provisioning → Working` checkpoint then dispatches the worker, whose Rust
+capability (toolchain record, hence brief) says that its target is cold and why.
+After the skip is journalled the validations are read again; if the principal
+replaced them in between, the new set is decided again.
+
+**Gates replaced later.** On a lane the rule left cold, replacing the validations
+(`task_exec_reassign` with `validations`) with one that can start a build is
+**refused**, with the reason (it would compile from nothing and run into its
+timeout in silence); gates that start no build still swap. To add a backend gate,
+relaunch the task with it so its lane is warmed.
+
+**Limit.** A known front-end binary running a package script that itself calls
+Cargo (`pnpm tauri build`) is not detected: the rule reads binaries, not scripts.
+
+[src: file: backend/src/core/task_worker_warm_skip.rs:102#decide]
+[src: file: backend/src/core/task_worker_warm_skip.rs:149#warm_reason]
+[src: file: backend/src/core/task_worker_warm_skip.rs:33#NON_BUILDING_BINARIES]
+[src: file: backend/src/core/task_worker_warm_skip.rs:81#cold_target_note]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1845#warm_worktree]
+[src: file: backend/src/core/task_worker_lane_warm.rs:507#skipped_by_validations]
+[src: file: backend/src/api/orchestration.rs:11547#warm_lane_for_validations]
+[src: file: backend/src/api/orchestration.rs:11748#record_toolchain_smoke_check_on]
+[src: file: backend/src/db/orchestration.rs:7791#refusal_for]
 
 ## Maintenance command
 

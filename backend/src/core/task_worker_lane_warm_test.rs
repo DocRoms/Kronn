@@ -1086,6 +1086,7 @@ fn the_warm_start_record_roundtrips_as_json() {
         provision_ms: Some(7),
         seed_ms: Some(13),
         crates: Vec::new(),
+        skipped_by_validations: None,
     };
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["seed"]["outcome"], "cloned");
@@ -1136,6 +1137,7 @@ fn timed(first_build: FirstBuild, queued_ms: u64) -> WarmStartRecord {
         provision_ms: Some(11),
         seed_ms: Some(35),
         crates: Vec::new(),
+        skipped_by_validations: None,
     }
 }
 

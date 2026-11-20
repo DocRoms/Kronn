@@ -7716,6 +7716,8 @@ pub struct ValidationsReplacement {
 /// without relaunching it, and journal the swap with the actor and the reason.
 ///
 /// Refused when the swap would be unsafe or meaningless:
+///   • a lane the warm-skip rule left cold (KT-1980) and a new gate that starts
+///     a build — it would run cold into its timeout;
 ///   • a terminal execution — its history is closed;
 ///   • `Integrating` / `Validating` / `Applying` — the integration saga read the
 ///     run's gates when it started, so a swap now would not be the set it runs;
@@ -7773,6 +7775,28 @@ pub fn replace_execution_validations(
                 validations: validations.to_vec(),
                 changed: false,
             });
+        }
+        // KT-1980 — a lane the warm-skip rule left cold cannot take a gate that
+        // starts a build: it would compile from nothing and run into its timeout
+        // in silence. Refused, with why; warming it here is the launch's job.
+        if let Some(skip) = latest_lane_warm_start(conn, exec_id)
+            .ok()
+            .flatten()
+            .and_then(|record| record.skipped_by_validations)
+        {
+            let commands: Vec<String> = validations
+                .iter()
+                .map(|spec| spec.command.clone())
+                .collect();
+            if let Some(why) = skip.refusal_for(&commands) {
+                bail!(
+                    "this execution's lane was not warmed ({}); {why}: on that cold lane it \
+                     would compile everything from nothing and run into its timeout. Keep \
+                     gates that start no build, or relaunch the task with these validations \
+                     so its lane is warmed",
+                    skip.reason
+                );
+            }
         }
         let now = Utc::now().to_rfc3339();
         let updated = conn.execute(

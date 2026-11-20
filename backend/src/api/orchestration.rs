@@ -3081,16 +3081,21 @@ async fn finish_native_provisioning(
         .await;
         // KT-1250 — the lane target is seeded from a warm one and its first build
         // runs here, under the host's cap, so the worker starts warm.
-        let warm = record_lane_warm_start(
+        // KT-1980 — unless the execution's validations (principal-owned) start no
+        // build: then the lane stays cold and the record says why.
+        let warm = warm_lane_for_validations(
             db,
             &prepared.execution.id,
             prepared.execution.attempt_no,
             &sub_disc_id,
             &worktree_path,
-            worker_probe_runner(&prepared.repo_path, &worktree_path),
+            &prepared.repo_path,
             warm_cancel,
         )
         .await;
+        let cold = warm
+            .as_ref()
+            .and_then(|record| record.skipped_by_validations.clone());
         // KT-1736 — a first build that failed or timed out hands the worker a cold
         // lane (tens of minutes before its first test): say so in its room, with
         // the cause, instead of leaving it to find out.
@@ -3120,11 +3125,12 @@ async fn finish_native_provisioning(
             ));
         }
         let smoke_check = std::time::Instant::now();
-        let capabilities = record_toolchain_smoke_check(
+        let capabilities = record_toolchain_smoke_check_on(
             db,
             &prepared.execution.id,
             &worktree_path,
             worker_probe_runner(&prepared.repo_path, &worktree_path),
+            cold.as_ref(),
         )
         .await;
         record_warming_step(
@@ -11510,25 +11516,96 @@ pub async fn record_dependency_fetch(
     }
 }
 
+/// The commands of the execution's validations (its run's, principal-owned), or
+/// none when they cannot be read — which warms the lane: when in doubt, warm.
+async fn execution_validation_commands(db: &Database, exec_id: &str) -> Vec<String> {
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        let Some(execution) = crate::db::orchestration::get_task_execution(conn, &id)? else {
+            return Ok(Vec::new());
+        };
+        Ok(
+            crate::db::orchestration::get_orchestration_run(conn, &execution.orchestration_run_id)?
+                .map(|run| run.validations.into_iter().map(|spec| spec.command).collect())
+                .unwrap_or_default(),
+        )
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(execution_id = %exec_id, "validations not read, the lane is warmed: {error}");
+        Vec::new()
+    })
+}
+
+/// How many times a skipped warm-up re-reads validations that changed under it.
+const WARM_SKIP_RECHECKS: usize = 3;
+
+/// KT-1980 — warm the lane unless the execution's validations start no build.
+/// A skip is journalled, then the validations are read again: a principal who
+/// replaced them before the skip was on record (the amendment is only refused
+/// once it is) gets a decision on the new set, which warms when it needs to.
+async fn warm_lane_for_validations(
+    db: &Database,
+    exec_id: &str,
+    attempt_no: u32,
+    room_id: &str,
+    worktree: &std::path::Path,
+    repo_path: &str,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Option<crate::core::task_worker_lane_warm::WarmStartRecord> {
+    let mut validations = execution_validation_commands(db, exec_id).await;
+    let mut rechecks = 0;
+    loop {
+        let record = record_lane_warm_start(
+            db,
+            exec_id,
+            attempt_no,
+            room_id,
+            worktree,
+            &validations,
+            worker_probe_runner(repo_path, worktree),
+            cancel.clone(),
+        )
+        .await;
+        if !record
+            .as_ref()
+            .is_some_and(|record| record.skipped_by_validations.is_some())
+            || rechecks == WARM_SKIP_RECHECKS
+        {
+            return record;
+        }
+        let current = execution_validation_commands(db, exec_id).await;
+        if current == validations {
+            return record;
+        }
+        validations = current;
+        rechecks += 1;
+    }
+}
+
 /// Start a Claude task worker's lane warm (KT-1250): seed its Cargo target with
 /// a copy-on-write clone of a warm one, then run its first build under the
 /// host's concurrency cap, saying so in the worker's room when it has to queue.
 /// Journalled on the execution; never raised — a lane that stays cold only
 /// costs the worker its own compile time.
+#[allow(clippy::too_many_arguments)]
 pub async fn record_lane_warm_start(
     db: &Database,
     exec_id: &str,
     attempt_no: u32,
     room_id: &str,
     worktree: &std::path::Path,
+    validations: &[String],
     runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Option<crate::core::task_worker_lane_warm::WarmStartRecord> {
     let (queued_tx, mut queued_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
     let path = worktree.to_path_buf();
+    let validations = validations.to_vec();
     let warm = tokio::task::spawn_blocking(move || {
         crate::core::task_worker_lane_warm::warm_worktree(
             &path,
+            &validations,
             runner.as_ref(),
             &cancel,
             |ahead| {
@@ -11662,8 +11739,21 @@ pub async fn record_toolchain_smoke_check(
     worktree: &std::path::Path,
     runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
 ) -> ToolchainCapabilities {
+    record_toolchain_smoke_check_on(db, exec_id, worktree, runner, None).await
+}
+
+/// [`record_toolchain_smoke_check`] for a lane the warm-skip rule left cold
+/// (KT-1980): the Rust capability says the target is cold and why, in the record
+/// and so in the brief, so the worker does not start a backend build by accident.
+pub async fn record_toolchain_smoke_check_on(
+    db: &Database,
+    exec_id: &str,
+    worktree: &std::path::Path,
+    runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
+    cold: Option<&crate::core::task_worker_warm_skip::WarmSkip>,
+) -> ToolchainCapabilities {
     let path = worktree.to_path_buf();
-    let capabilities = tokio::task::spawn_blocking(move || {
+    let mut capabilities = tokio::task::spawn_blocking(move || {
         let loopback = crate::agents::runner::claude_task_worker_allows_loopback_binding(&path);
         crate::core::task_worker_env::check_worktree(&path, loopback, runner.as_ref())
     })
@@ -11671,6 +11761,15 @@ pub async fn record_toolchain_smoke_check(
     .unwrap_or_else(|error| {
         ToolchainCapabilities::unverified(&format!("the smoke check did not complete: {error}"))
     });
+    if let Some(skip) = cold {
+        let note = skip.cold_target_note();
+        let reason = &mut capabilities.rust_tests.reason;
+        *reason = if reason.trim().is_empty() {
+            note
+        } else {
+            format!("{reason}. {note}")
+        };
+    }
     let exec_id = exec_id.to_string();
     let record = capabilities.clone();
     if let Err(error) = db

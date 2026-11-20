@@ -12030,6 +12030,7 @@ async fn the_warm_start_seed_and_first_build_duration_are_recorded_on_the_execut
         1,
         "warm-room",
         &worktree,
+        &[],
         std::sync::Arc::new(FixedRunner(true)),
         tokio_util::sync::CancellationToken::new(),
     )
@@ -33250,4 +33251,315 @@ fn manifest_claims_require_exact_dod_coverage_and_evidence() {
     assert!(validate_manifest_claims(&dod, None, &unproved)
         .unwrap_err()
         .contains("has no non-empty evidence"));
+}
+
+// ─── KT-1980 — warm_skip: a lane whose validations start no build is not warmed ──
+
+/// A runner that records every probe it is given and succeeds: what the launch
+/// asked to run, so a test can prove no build command was among it.
+#[derive(Default)]
+struct RecordingRunner {
+    probes: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingRunner {
+    /// The recorded probes that build or test something (anything but a probe
+    /// of a tool's presence).
+    fn builds(&self) -> Vec<String> {
+        self.probes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                let program = words.first().copied().unwrap_or_default();
+                let program = program.rsplit('/').next().unwrap_or(program);
+                words.contains(&"--no-run")
+                    || program == "make"
+                    || (program == "cargo"
+                        && !words.contains(&"--version")
+                        && words
+                            .get(1)
+                            .is_some_and(|sub| ["build", "test", "check", "run"].contains(sub)))
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+impl crate::core::task_worker_env::ProbeRunner for RecordingRunner {
+    fn run(
+        &self,
+        probe: &crate::core::task_worker_env::ProbeCommand,
+    ) -> crate::core::task_worker_env::ProbeOutcome {
+        self.probes
+            .lock()
+            .unwrap()
+            .push(format!("{} {}", probe.program, probe.args.join(" ")));
+        crate::core::task_worker_env::ProbeOutcome {
+            success: true,
+            detail: String::new(),
+        }
+    }
+}
+
+fn warm_skip_gates(commands: &[&str]) -> Vec<ValidationSpec> {
+    commands
+        .iter()
+        .map(|command| ValidationSpec {
+            command: command.to_string(),
+            quick_exec_id: None,
+            timeout_secs: None,
+        })
+        .collect()
+}
+
+/// [`launch_with_cargo_crate`] with the principal's validations; also returns
+/// the execution's worktree.
+async fn warm_skip_launch(
+    db: &Database,
+    repo: &Path,
+    runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
+    key: &str,
+    validations: &[&str],
+) -> (TaskExecution, std::path::PathBuf) {
+    add_cargo_crate(repo);
+    register_probe_runner(repo, runner);
+    let (task_ref, parent_id, _pid) = seed(db, repo).await;
+    let launched = tokio::time::timeout(
+        Duration::from_secs(15),
+        provision_single_task_execution_with_validations(
+            db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(key.into()),
+            },
+            warm_skip_gates(validations),
+        ),
+    )
+    .await
+    .expect("the launch returned without waiting for a warm-up")
+    .expect("provision");
+    let (worktree, _branch) =
+        worktree::task_worktree_layout(repo, &task_ref, exec_short(&launched.id)).unwrap();
+    (launched, worktree)
+}
+
+const WARM_SKIP_FRONT: [&str; 3] = [
+    "pnpm --dir frontend exec tsc -b --pretty false",
+    "rtk pnpm --dir frontend exec oxlint",
+    "pnpm --dir frontend exec vitest run src/a.test.ts",
+];
+
+#[tokio::test]
+async fn warm_skip_front_only_validations_dispatch_the_worker_with_no_build_and_a_cold_notice() {
+    use crate::core::task_worker_lane_warm::{FirstBuild, SeedOutcome};
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let runner = std::sync::Arc::new(RecordingRunner::default());
+    let (launched, worktree) = warm_skip_launch(
+        &db,
+        repo.path(),
+        runner.clone(),
+        "warm-skip-front",
+        &WARM_SKIP_FRONT,
+    )
+    .await;
+
+    wait_for_status(&db, &launched.id, TaskExecutionStatus::Working).await;
+    let sub = launched.sub_discussion_id.clone().expect("child room");
+    assert_eq!(dispatch_rows(&db, &sub).await, 1, "dispatched once");
+    assert_eq!(
+        transition_count(&db, &launched.id, "Provisioning", "Working").await,
+        1
+    );
+    assert_eq!(
+        runner.builds(),
+        Vec::<String>::new(),
+        "no build command ran"
+    );
+
+    let record = warm_start_of(&db, &launched.id)
+        .await
+        .expect("the skip is journalled as a lane_warm_start record");
+    let skip = record
+        .skipped_by_validations
+        .clone()
+        .expect("the record says the rule skipped the warm-up");
+    assert_eq!(
+        skip.validations,
+        WARM_SKIP_FRONT.map(String::from).to_vec(),
+        "the validations the rule read"
+    );
+    match &record.seed {
+        SeedOutcome::NotApplicable { reason } => {
+            assert!(
+                reason.contains(crate::core::task_worker_warm_skip::RULE),
+                "{reason}"
+            );
+            for command in WARM_SKIP_FRONT {
+                assert!(reason.contains(command), "{reason}");
+            }
+        }
+        other => panic!("no seed alignment nor clone, got {other:?}"),
+    }
+    assert!(
+        matches!(record.first_build, FirstBuild::Skipped { .. }),
+        "{record:?}"
+    );
+    assert!(record.crates.is_empty(), "no root was aligned or built");
+    let lane =
+        crate::core::task_worker_env::WorkerLane::for_worktree(&worktree.canonicalize().unwrap())
+            .unwrap();
+    assert!(
+        !lane.cargo_target_dir.join("debug").exists(),
+        "the lane target was neither seeded nor built"
+    );
+
+    // The worker is told its Rust target is cold, in its capability record and
+    // in its brief.
+    let id = launched.id.clone();
+    let capabilities = db
+        .with_conn(move |conn| crate::db::orchestration::latest_toolchain_capabilities(conn, &id))
+        .await
+        .unwrap()
+        .expect("capability record");
+    assert!(
+        capabilities
+            .rust_tests
+            .reason
+            .contains("RUST TARGET IS COLD"),
+        "{}",
+        capabilities.rust_tests.reason
+    );
+    let brief = messages_of(&db, &sub)
+        .await
+        .into_iter()
+        .find(|message| message.id.starts_with("orch-brief:"))
+        .expect("brief");
+    assert!(
+        brief.content.contains("RUST TARGET IS COLD"),
+        "{}",
+        brief.content
+    );
+    assert!(
+        brief
+            .content
+            .contains(crate::core::task_worker_warm_skip::RULE),
+        "the brief says why"
+    );
+}
+
+#[tokio::test]
+async fn warm_skip_gates_that_may_build_warm_the_lane_exactly_as_before() {
+    use crate::core::task_worker_lane_warm::FirstBuild;
+    let cases: [(&str, Vec<&str>); 5] = [
+        ("none", vec![]),
+        ("cargo", vec![WARM_SKIP_FRONT[0], "cargo test --lib"]),
+        ("make", vec!["make check"]),
+        ("rtk-cargo", vec!["rtk proxy cargo clippy --all-targets"]),
+        (
+            "unknown",
+            vec![WARM_SKIP_FRONT[0], "python3 scripts/check.py"],
+        ),
+    ];
+    for (name, validations) in cases {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let runner = HeldFirstBuild::succeeding();
+        let _release = ReleaseOnDrop(runner.clone());
+        let (launched, _) = warm_skip_launch(
+            &db,
+            repo.path(),
+            runner.clone(),
+            &format!("warm-skip-{name}"),
+            &validations,
+        )
+        .await;
+        assert_eq!(launched.status, TaskExecutionStatus::Provisioning, "{name}");
+        wait_until("the first build starts", || runner.started() == 1).await;
+        runner.release();
+        wait_for_status(&db, &launched.id, TaskExecutionStatus::Working).await;
+        let record = warm_start_of(&db, &launched.id)
+            .await
+            .expect("the warm start is journalled");
+        assert!(
+            record.skipped_by_validations.is_none(),
+            "{name}: {record:?}"
+        );
+        assert!(
+            matches!(record.first_build, FirstBuild::Succeeded { .. }),
+            "{name}: {record:?}"
+        );
+        assert_eq!(runner.started(), 1, "{name}: one first build");
+    }
+}
+
+#[tokio::test]
+async fn warm_skip_a_cold_lane_refuses_a_later_gate_that_needs_a_build() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let runner = std::sync::Arc::new(RecordingRunner::default());
+    let (launched, _) = warm_skip_launch(
+        &db,
+        repo.path(),
+        runner,
+        "warm-skip-amend",
+        &WARM_SKIP_FRONT,
+    )
+    .await;
+    wait_for_status(&db, &launched.id, TaskExecutionStatus::Working).await;
+
+    for gate in [
+        "cargo test --lib",
+        "rtk cargo nextest run",
+        "make check",
+        "python3 run.py",
+    ] {
+        let (code, refusal) = replace_execution_validations(
+            &db,
+            &launched.id,
+            warm_skip_gates(&[WARM_SKIP_FRONT[0], gate]),
+            "add a backend gate",
+            backend_actor(),
+        )
+        .await
+        .expect_err("a gate that needs a build cannot land on a cold lane");
+        assert_eq!(code, ApiErrorCode::Conflict, "{gate}");
+        assert!(refusal.contains("was not warmed"), "{refusal}");
+        assert!(refusal.contains(gate), "{refusal}");
+    }
+    let id = launched.id.clone();
+    let unchanged = db
+        .with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?.unwrap();
+            crate::db::orchestration::get_orchestration_run(conn, &execution.orchestration_run_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unchanged
+            .validations
+            .iter()
+            .map(|spec| spec.command.as_str())
+            .collect::<Vec<_>>(),
+        WARM_SKIP_FRONT.to_vec(),
+        "a refused swap writes nothing"
+    );
+
+    // Gates that start no build still swap.
+    let replaced = replace_execution_validations(
+        &db,
+        &launched.id,
+        warm_skip_gates(&["pnpm --dir frontend lint:i18n"]),
+        "narrow the front gates",
+        backend_actor(),
+    )
+    .await
+    .expect("a front gate runs on a cold lane");
+    assert!(replaced.changed);
 }

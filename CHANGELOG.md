@@ -11,6 +11,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Changed
+
+- Orchestration: a lane whose validations start no build is no longer warmed
+  (KT-1980). When a launch declares at least one validation and none of them
+  can start a build (`cargo`, `make` or the project's declared first-build
+  binary), Kronn skips the seed alignment, the seed clone and the first build,
+  so a front-only task reaches its worker without the 30-minute, 30 GB Rust
+  warm-up. Unknown binaries, shells and interpreters still warm the lane, and a
+  launch with no validation warms as before. The skip is journalled with its
+  reason, the worker's brief says the Rust target is cold, and adding a gate
+  that needs a build to such a lane is refused: relaunch instead. See
+  `docs/operations/worktree-build-artifacts.md`.
+
 ## [0.15.3] - 2026-11-19
 
 ### Added
