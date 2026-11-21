@@ -1349,3 +1349,115 @@ fn the_stop_notice_reads_in_the_room_language() {
         stop_notice(&AgentType::ClaudeCode, Trigger::Outage, "why")
     );
 }
+
+// ─── KT-1991 — a generic task worker never moves to an HTTP model ─────────
+
+fn generic_worker() -> TurnNeeds {
+    TurnNeeds {
+        write_access: true,
+        task_worker: true,
+        shell: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn an_http_agent_has_no_shell_and_the_gap_says_so_in_the_room_words() {
+    for http in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
+        assert!(!capabilities(&http).shell, "{http:?}");
+        // Workspace writes are no shell: Kronn executes them for the model.
+        assert!(capabilities(&http).write_access, "{http:?}");
+        assert_eq!(
+            capability_gap(&http, &generic_worker()),
+            Some("it has no shell to build, run the tests or commit"),
+            "{http:?}"
+        );
+        // A prelocalised worker does not ask for a shell: still served.
+        let prelocalised = TurnNeeds {
+            shell: false,
+            ..generic_worker()
+        };
+        assert_eq!(capability_gap(&http, &prelocalised), None, "{http:?}");
+    }
+    for cli in [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::OpenCode,
+        AgentType::GeminiCli,
+        AgentType::Kiro,
+        AgentType::Vibe,
+        AgentType::CopilotCli,
+    ] {
+        assert!(capabilities(&cli).shell, "{cli:?}");
+    }
+    assert_eq!(
+        capability_gap(&AgentType::ClaudeCode, &generic_worker()),
+        None
+    );
+    // A room turn or a workflow step asks for no shell.
+    assert!(!TurnNeeds::default().shell);
+}
+
+#[test]
+fn a_generic_worker_whose_chain_holds_only_an_http_link_stops_and_says_why() {
+    let config = agents(&[(AgentType::ClaudeCode, vec![link(AgentType::LiteLlm)])]);
+    match pick(
+        &config,
+        &AgentType::ClaudeCode,
+        &AgentType::ClaudeCode,
+        &everyone(),
+        &generic_worker(),
+        &never_cooling,
+    ) {
+        Selection::Stop { why } => assert_eq!(
+            why,
+            "No fallback could take over from Claude Code: LiteLLM cannot take this turn: \
+             it has no shell to build, run the tests or commit."
+        ),
+        other => panic!("{other:?}"),
+    }
+    let line = stop_notice(
+        &AgentType::ClaudeCode,
+        Trigger::RateLimit,
+        "LiteLLM cannot take this turn: it has no shell to build, run the tests or commit",
+    );
+    assert!(line.contains("rate limited → no fallback"), "{line}");
+}
+
+#[test]
+fn a_generic_worker_skips_the_http_link_of_a_mixed_chain_for_the_cli_link() {
+    // Codex is the origin, as Claude Code is the only CLI a task worker can
+    // fall back to (KT-1749).
+    let config = agents(&[(
+        AgentType::Codex,
+        vec![link(AgentType::LiteLlm), link(AgentType::ClaudeCode)],
+    )]);
+    assert_eq!(
+        pick(
+            &config,
+            &AgentType::Codex,
+            &AgentType::Codex,
+            &everyone(),
+            &generic_worker(),
+            &never_cooling,
+        ),
+        Selection::Switch(link(AgentType::ClaudeCode)),
+        "LiteLLM has no shell: the walk goes on to Claude Code"
+    );
+    // A prelocalised worker takes the first link, as before.
+    let prelocalised = TurnNeeds {
+        shell: false,
+        ..generic_worker()
+    };
+    assert_eq!(
+        pick(
+            &config,
+            &AgentType::Codex,
+            &AgentType::Codex,
+            &everyone(),
+            &prelocalised,
+            &never_cooling,
+        ),
+        Selection::Switch(link(AgentType::LiteLlm))
+    );
+}

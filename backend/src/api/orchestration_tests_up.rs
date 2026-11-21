@@ -18418,6 +18418,8 @@ async fn a_chain_link_refused_at_spawn_hands_the_worker_to_the_next_link_without
     let was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    // KT-1991 — an HTTP link only takes a prelocalised execution.
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
     let state = quota_test_state(&db);
     let limits = default_dispatch_limits(&state).await;
     {

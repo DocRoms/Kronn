@@ -4653,6 +4653,15 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              campaign `token_budget` stops it). Omitted, it takes Settings > Workers (default 5), which \
              prepare reports as `default_max_review_rounds`. Anything else, and any argument \
              the tool does not declare, is refused.\n\n\
+             **Worker fallback** — `quota_fallback_agents` (launch) governs QUOTA refusals \
+             only. A rate limit, an outage or an authentication failure follows the agent's \
+             own fallback chain (Settings > Agents), even when the launch named no \
+             `quota_fallback_agents`. That chain never moves a `generic` worker to an HTTP \
+             model (LiteLLM, NVIDIA, Ollama): it has no shell to build, run the tests or \
+             commit. When no link can take it, the worker stays where it is and both rooms \
+             say why. Only a `scoped` worker continues on an HTTP link. An HTTP agent you \
+             name yourself in `quota_fallback_agents` is still taken on a quota refusal: \
+             name CLI agents there for a `generic` worker.\n\n\
              **Validations** — `[{command, quick_exec_id?, timeout_secs?}]` are YOUR mechanical \
              gates: Kronn runs them on the candidate at integration, after review, and never \
              reads them from the worker's manifest. They are NOT run by a shell. Each `command` \

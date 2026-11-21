@@ -2,6 +2,7 @@
 //! the linked worktree's git dir), and a fallback taken for a quota window is
 //! temporary: the first resume after the window goes back to the declared worker.
 
+use super::agent_fallback_runs::prelocalise;
 use super::*;
 use crate::api::discussions::agent_fallback::worker_after_quota_among;
 use crate::core::agent_fallback as fallback;
@@ -49,6 +50,19 @@ async fn the_economy_worker() -> (
         .await
         .remove(0);
     let job = dispatch_of(&db, was.dispatch_job_id.clone().unwrap()).await;
+    (repo, db, was, job)
+}
+
+/// KT-1991 — a generic worker never moves to an HTTP link: the tests of a move
+/// onto one start from a prelocalised execution.
+async fn the_prelocalised_economy_worker() -> (
+    tempfile::TempDir,
+    std::sync::Arc<Database>,
+    TaskExecution,
+    crate::db::agent_dispatch::AgentDispatchJob,
+) {
+    let (repo, db, was, job) = the_economy_worker().await;
+    let was = prelocalise(&db, &was.id).await;
     (repo, db, was, job)
 }
 
@@ -120,7 +134,7 @@ async fn codex_is_refused_as_a_task_worker_fallback_and_the_room_says_why() {
 
 #[tokio::test]
 async fn a_resume_after_the_fallback_window_goes_back_to_the_declared_worker_and_says_so() {
-    let (_repo, db, was, job) = the_economy_worker().await;
+    let (_repo, db, was, job) = the_prelocalised_economy_worker().await;
     let state = state_with_chain(&db, link(AgentType::Ollama));
     assert!(
         worker_after_quota_among(&state, &job, CLAUDE_LIMIT, Some(usable()))
@@ -181,7 +195,7 @@ async fn a_resume_after_the_fallback_window_goes_back_to_the_declared_worker_and
 
 #[tokio::test]
 async fn a_resume_while_the_fallback_window_is_open_stays_on_the_fallback() {
-    let (_repo, db, was, job) = the_economy_worker().await;
+    let (_repo, db, was, job) = the_prelocalised_economy_worker().await;
     let state = state_with_chain(&db, link(AgentType::Ollama));
     assert!(
         worker_after_quota_among(&state, &job, CLAUDE_LIMIT, Some(usable()))
@@ -271,7 +285,7 @@ async fn a_native_acp_agent_is_never_picked_for_a_worker_and_both_rooms_say_why(
 
 #[tokio::test]
 async fn the_walk_goes_past_a_refused_agent_to_an_http_link_built_as_a_discussion_agent() {
-    let (_repo, db, was, job) = the_economy_worker().await;
+    let (_repo, db, was, job) = the_prelocalised_economy_worker().await;
     let mut config = crate::core::config::default_config();
     config.agents.claude_code.fallback_chain =
         vec![link(AgentType::GeminiCli), link(AgentType::Ollama)];
