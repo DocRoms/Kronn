@@ -21,8 +21,9 @@
 //!   here); the discussion's / step's override replaces the first link, an
 //!   empty override is "no fallback";
 //! * a link on cooldown, not installed, or lacking something the turn needs (MCP
-//!   tools, workspace writes, image input, a long context) is skipped, and the
-//!   walk goes on; there is no "paid" rule: enabling a fallback is the consent;
+//!   tools, workspace writes, a shell, image input, a long context) is skipped,
+//!   and the walk goes on; there is no "paid" rule: enabling a fallback is the
+//!   consent;
 //! * nothing usable ends in a clear message, not a silent stop.
 //!
 //! The same TIER is kept (economy stays economy): a fallback carries the tier of
@@ -210,6 +211,10 @@ pub struct TurnNeeds {
     pub write_access: bool,
     /// A task worker must also perform Git writes in a linked worktree.
     pub task_worker: bool,
+    /// KT-1991 — a shell on the host: build, run the tests, use Git. A task
+    /// worker with no prelocalised scope (`worker_scope`) needs one; an HTTP
+    /// agent has none, whatever workspace writes Kronn executes for it.
+    pub shell: bool,
     /// Image attachments to read.
     pub image_input: bool,
     /// A transcript past [`LONG_CONTEXT_CHARS`].
@@ -221,13 +226,15 @@ pub struct TurnNeeds {
 pub struct Capabilities {
     pub mcp_tools: bool,
     pub write_access: bool,
+    pub shell: bool,
     pub image_input: bool,
     pub long_context: bool,
 }
 
 /// `docs/architecture/http-agent-capabilities.md`: a CLI agent runs as a local
 /// process with a filesystem, a shell and the MCP bridge; an HTTP agent only has
-/// the tools Kronn executes for it (workspace writes included, no MCP). An image
+/// the tools Kronn executes for it (workspace writes included, no MCP, no shell:
+/// it cannot build, test or commit). An image
 /// reaches a CLI agent as a path it opens itself; an HTTP model sees it only when
 /// that model is known to (`agents/vision.rs` treats "unknown" as "no"), so an
 /// HTTP agent is not counted on for images. A local Ollama window is capped.
@@ -236,10 +243,15 @@ pub fn capabilities(agent: &AgentType) -> Capabilities {
     Capabilities {
         mcp_tools: !http,
         write_access: !matches!(agent, AgentType::Custom),
+        shell: !http,
         image_input: !http,
         long_context: !matches!(agent, AgentType::Ollama),
     }
 }
+
+/// KT-1991 — the gap a room reads when a task worker would land on an HTTP
+/// model (« LiteLLM cannot take this turn: it has no shell … »).
+pub const NO_SHELL: &str = "it has no shell to build, run the tests or commit";
 
 /// The first thing `needs` asks that `agent` cannot give.
 pub fn capability_gap(agent: &AgentType, needs: &TurnNeeds) -> Option<&'static str> {
@@ -252,6 +264,9 @@ pub fn capability_gap(agent: &AgentType, needs: &TurnNeeds) -> Option<&'static s
     }
     if needs.write_access && !has.write_access {
         return Some("it cannot write in the worktree");
+    }
+    if needs.shell && !has.shell {
+        return Some(NO_SHELL);
     }
     if needs.image_input && !has.image_input {
         return Some("it cannot be counted on to read images");

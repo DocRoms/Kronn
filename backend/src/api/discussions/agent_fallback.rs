@@ -177,6 +177,12 @@ async fn plan(
         Surface::Worker { .. } => TurnNeeds {
             write_access: true,
             task_worker: true,
+            // KT-1991 — a generic worker builds, tests and commits: it never
+            // moves to an HTTP model. Only a prelocalised edit can be served by
+            // one, as it is launched on one in the first place.
+            shell: execution
+                .as_ref()
+                .is_some_and(|execution| execution.worker_scope.is_none()),
             ..Default::default()
         },
         Surface::Room => TurnNeeds {
@@ -284,7 +290,10 @@ pub(super) fn system_notice(
 ///
 /// A task worker's QUOTA refusal is left to the caller: its settlement and the
 /// campaign's own opt-in (`quota_fallback`) come first, and the chain is asked
-/// from there through [`worker_after_quota`].
+/// from there through [`worker_after_quota`]. Any other trigger (a rate limit,
+/// an outage, an authentication failure) follows the agent's chain at once.
+/// KT-1991 — on every path a task worker without a prelocalised scope asks for
+/// a shell, so its chain never moves it to an HTTP model.
 pub async fn intercept_failed_turn(
     state: &AppState,
     job: &AgentDispatchJob,

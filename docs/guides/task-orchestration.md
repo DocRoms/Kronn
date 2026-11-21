@@ -226,7 +226,7 @@ Kronn derives one fixed-layout report; replay does not produce another.
 [src: file: backend/src/api/orchestration.rs:12160#has_room_publication]
 [src: file: backend/src/api/orchestration.rs:12197-12221#parent_milestones]
 [src: file: backend/src/api/orchestration.rs:10115-10139#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration_tests_up.rs:22184-22294#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration_tests_up.rs:22186-22296#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -669,8 +669,25 @@ durable child discussion that the runtime will actually execute.
 refuses a turn for a quota, a rate limit or a missing login and its agent has a
 fallback configured, Kronn reassigns the execution to that fallback in the same
 child room and worktree, and the parent room says « Task worker execution
-<id>: … → continued with … ». Two rules:
+<id>: … → continued with … ». Which refusal follows which setting:
 
+- A **quota** refusal first looks at the launch's own opt-in,
+  `quota_fallback_agents` (or the campaign's allowed agents), then at the
+  agent's chain.
+- A **rate limit**, an **outage** or an **authentication failure** follows the
+  agent's chain (Settings > Agents) at once, even when the launch named no
+  `quota_fallback_agents`.
+
+Three rules:
+
+- A generic worker (no `worker_scope`) never moves to an HTTP model (LiteLLM,
+  NVIDIA, Ollama) through the chain (KT-1991). Such a model has no shell, so it
+  can neither build, run the tests nor commit. The chain skips it, and when no
+  link is left the execution keeps its worker and status, and both rooms read
+  « … cannot take this turn: it has no shell to build, run the tests or commit ».
+  Only a prelocalised (`scoped`) worker continues on an HTTP link. An HTTP agent
+  you name in `quota_fallback_agents` is your own choice and is still taken on a
+  quota refusal, so name CLI agents there for a generic worker.
 - Codex is never chosen for it: its sandbox cannot write the linked worktree's
   git directory, so it could not merge the target, commit or deliver. The room
   names this reason when no other fallback can take over, and you reassign
