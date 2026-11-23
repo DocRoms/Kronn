@@ -926,6 +926,10 @@ async fn provider_fallback_among(
             // execution back and forth forever.
             let refused =
                 crate::db::orchestration::execution_refused_providers(conn, &execution.id, now)?;
+            // KT-2000 — the chain's shell rule (KT-1991), from the same
+            // capability: a generic worker builds, tests and commits, so it is
+            // never moved to an agent without a shell, named or merely allowed.
+            let needs_shell = execution.worker_scope.is_none();
             let mut usable = Vec::new();
             for candidate in candidates {
                 let provider = crate::db::orchestration::agent_type_to_db(candidate);
@@ -942,6 +946,9 @@ async fn provider_fallback_among(
                 // KT-1749 — never an alternative the launch would refuse
                 // (native ACP route, typed-delivery capability).
                 if crate::core::agent_fallback::task_worker_launch_refusal(candidate).is_some() {
+                    continue;
+                }
+                if needs_shell && !crate::core::agent_fallback::capabilities(candidate).shell {
                     continue;
                 }
                 usable.push(candidate.clone());
@@ -2025,6 +2032,9 @@ async fn settle_worker_launch_refusal(
         .collect();
     let detail = stop.detail(&detail);
     let mut moved_to: Option<String> = None;
+    // KT-2000 — the chain's own reason when it took nothing (« … it has no
+    // shell … »): the stop notice carries it.
+    let mut chain_stop: Option<String> = None;
     if worker.is_fallback {
         let available = match available {
             Some(available) => available,
@@ -2057,11 +2067,11 @@ async fn settle_worker_launch_refusal(
             )
             .await
             {
-                Ok(true) => {
+                Ok(super::agent_fallback::LaunchChain::Moved) => {
                     state.agent_dispatch_notify.notify_waiters();
                     return true;
                 }
-                Ok(false) => {}
+                Ok(super::agent_fallback::LaunchChain::NoLink { why }) => chain_stop = why,
                 Err(error) if crate::api::orchestration::is_execution_moved_on(&error) => {
                     return execution_moved_on_since_refusal(state, job);
                 }
@@ -2127,24 +2137,31 @@ async fn settle_worker_launch_refusal(
             .await;
         }
         None => {
+            let (fr_chain, en_chain) = match chain_stop.as_deref() {
+                Some(why) => (
+                    format!("\n\nChaîne de repli : {why}"),
+                    format!("\n\nFallback chain: {why}"),
+                ),
+                None => (String::new(), String::new()),
+            };
             let (fr, en) = if refused {
                 (
                     format!(
-                        "**Worker non démarré — `{agent}` refusé au lancement**\n\nLe dispatch `{dispatch}` de l'exécution `{execution}` n'a pas pu démarrer sur `{agent}` : {detail}\n\nCette cause ne change pas en attendant et aucun lien de repli utilisable ne reste : Kronn n'a pas relancé le dispatch et ne le fera pas seul. Réaffecte l'exécution à un worker compatible ({hint}) ou annule-la.",
+                        "**Worker non démarré — `{agent}` refusé au lancement**\n\nLe dispatch `{dispatch}` de l'exécution `{execution}` n'a pas pu démarrer sur `{agent}` : {detail}{fr_chain}\n\nCette cause ne change pas en attendant et aucun lien de repli utilisable ne reste : Kronn n'a pas relancé le dispatch et ne le fera pas seul. Réaffecte l'exécution à un worker compatible ({hint}) ou annule-la.",
                         hint = compatible_workers_hint(agent, true)
                     ),
                     format!(
-                        "**Worker not started — `{agent}` refused at launch**\n\nDispatch `{dispatch}` of execution `{execution}` could not start on `{agent}`: {detail}\n\nWaiting does not change that and no usable fallback link is left: Kronn did not retry the dispatch and will not do it on its own. Reassign the execution to a compatible worker ({hint}) or cancel it.",
+                        "**Worker not started — `{agent}` refused at launch**\n\nDispatch `{dispatch}` of execution `{execution}` could not start on `{agent}`: {detail}{en_chain}\n\nWaiting does not change that and no usable fallback link is left: Kronn did not retry the dispatch and will not do it on its own. Reassign the execution to a compatible worker ({hint}) or cancel it.",
                         hint = compatible_workers_hint(agent, false)
                     ),
                 )
             } else {
                 (
                     format!(
-                        "**Worker non démarré — `{agent}` indisponible**\n\nLe dispatch `{dispatch}` de l'exécution `{execution}` n'a pas pu démarrer sur `{agent}` : {detail}\n\nAucun lien de repli utilisable ne reste : Kronn a cessé de relancer le dispatch et ne le fera pas seul. Réaffecte l'exécution à un autre worker ou annule-la."
+                        "**Worker non démarré — `{agent}` indisponible**\n\nLe dispatch `{dispatch}` de l'exécution `{execution}` n'a pas pu démarrer sur `{agent}` : {detail}{fr_chain}\n\nAucun lien de repli utilisable ne reste : Kronn a cessé de relancer le dispatch et ne le fera pas seul. Réaffecte l'exécution à un autre worker ou annule-la."
                     ),
                     format!(
-                        "**Worker not started — `{agent}` unavailable**\n\nDispatch `{dispatch}` of execution `{execution}` could not start on `{agent}`: {detail}\n\nNo usable fallback link is left: Kronn stopped retrying the dispatch and will not do it on its own. Reassign the execution to another worker or cancel it."
+                        "**Worker not started — `{agent}` unavailable**\n\nDispatch `{dispatch}` of execution `{execution}` could not start on `{agent}`: {detail}{en_chain}\n\nNo usable fallback link is left: Kronn stopped retrying the dispatch and will not do it on its own. Reassign the execution to another worker or cancel it."
                     ),
                 )
             };

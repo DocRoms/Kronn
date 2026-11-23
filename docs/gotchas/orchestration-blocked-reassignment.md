@@ -46,7 +46,7 @@ CLI target reuses the pre-existing generic "not-Interrupted → Interrupted,
 then open a fresh `cli_reassignment` offer" path unchanged — no per-status
 branch was needed there.
 [src: file: backend/src/api/orchestration.rs:14764-14782#Provisioning]
-[src: file: backend/src/api/orchestration.rs:16152-16170#cli_reassignment]
+[src: file: backend/src/api/orchestration.rs:16167-16185#cli_reassignment]
 
 Regression coverage, and exactly what each layer proves:
 
@@ -69,14 +69,14 @@ Regression coverage, and exactly what each layer proves:
   cancellation. Every execution field must equal the pre-call snapshot and
   the old offer must remain `pending`. This proves checkpoint rollback at the
   CLI-origin restoration boundary, not a later API failure after cancellation.
-  [src: file: backend/src/api/orchestration_tests_up.rs:28877-28970#native_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_through_dispatch]
-  [src: file: backend/src/api/orchestration_tests_up.rs:29085-29170#native_reassignment_from_blocked_awaiting_acceptance_rolls_back_when_child_room_vanished]
+  [src: file: backend/src/api/orchestration_tests_up.rs:29171-29264#native_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_through_dispatch]
+  [src: file: backend/src/api/orchestration_tests_up.rs:29379-29464#native_reassignment_from_blocked_awaiting_acceptance_rolls_back_when_child_room_vanished]
 - API-layer `task_exec_reassign` (CLI target): the same fixture redirected to
   a different joined CLI session opens a genuinely fresh offer (distinct id,
   correct target session) after the `Blocked`→`Provisioning`→`Interrupted`
   checkpoint sequence, the OLD offer's late accept is refused, and accepting
   the NEW offer reaches `Working`.
-  [src: file: backend/src/api/orchestration_tests_up.rs:28979-29079#cli_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_with_a_fresh_offer]
+  [src: file: backend/src/api/orchestration_tests_up.rs:29273-29373#cli_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_with_a_fresh_offer]
 
 None of this is a proof of concurrent-call idempotence for the API handlers —
 the "second call loses the CAS" coverage is a sequential DB-layer race check

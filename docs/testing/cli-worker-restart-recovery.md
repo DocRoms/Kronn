@@ -10,7 +10,7 @@ directly to the CLI. A bridge reload therefore resumes the principal room instea
 of the child.
 [src: file: backend/src/api/orchestration.rs:7884-7904#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:8029-8033#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:19117-19118#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:19132-19133#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6445-6480#call_task_exec_accept_worker_offer]
 
 The terminal return path remains compatibility code for offers accepted by older

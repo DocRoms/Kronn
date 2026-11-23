@@ -15771,6 +15771,21 @@ pub async fn reassign_native_execution_for_dispatch(
             .into());
         }
     }
+    // KT-2000 — the boundary every Kronn-made quota fallback ends at: a
+    // generic worker builds, tests and commits, so Kronn never moves it on its
+    // own to an agent without a shell, whichever selector chose that agent. An
+    // explicit choice, by a person or by the principal (`Human`), stays
+    // possible; a quota return hands back the worker the execution declared.
+    if matches!(cause, ReassignCause::QuotaFallback { .. })
+        && execution.worker_scope.is_none()
+        && !crate::core::agent_fallback::capabilities(&selection.target.agent_type).shell
+    {
+        bail!(
+            "quota fallback refused: {} cannot take a generic task worker: {}",
+            crate::core::agent_fallback::display_name(&selection.target.agent_type),
+            crate::core::agent_fallback::NO_SHELL
+        );
+    }
     if cause.is_quota_return() {
         // Same check as the one inside the reassignment transaction (which
         // stays authoritative), run first so a return that is already stale
