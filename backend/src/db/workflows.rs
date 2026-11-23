@@ -1232,6 +1232,8 @@ pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
     // same transaction (the trigger drops its setting on every path that
     // deletes it).
     crate::db::trust::delete_and_withdraw(conn, "Kronn (the workflow was deleted)", |conn| {
+        // KT-1990: the Artifacts made from its runs go with the runs.
+        crate::db::step_artifacts::delete(conn, crate::db::step_artifacts::RunScope::Workflow(id))?;
         conn.execute("DELETE FROM workflows WHERE id = ?1", params![id])?;
         Ok(())
     })
@@ -2671,19 +2673,40 @@ pub fn set_in_flight_step_activity(
     Ok(affected > 0)
 }
 
-/// Delete a single run.
-pub fn delete_run(conn: &Connection, run_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM workflow_runs WHERE id = ?1", params![run_id])?;
-    Ok(())
+/// Delete a single run, with the Artifacts a person made from its executions
+/// (KT-1990). Returns how many Artifacts went with it.
+pub fn delete_run(conn: &Connection, run_id: &str) -> Result<usize> {
+    use crate::db::step_artifacts::{self, RunScope};
+    in_transaction(conn, |conn| {
+        let artifacts = step_artifacts::delete(conn, RunScope::Run(run_id))?;
+        conn.execute("DELETE FROM workflow_runs WHERE id = ?1", params![run_id])?;
+        Ok(artifacts)
+    })
 }
 
-/// Delete all runs for a workflow.
-pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM workflow_runs WHERE workflow_id = ?1",
-        params![workflow_id],
-    )?;
-    Ok(())
+/// Delete all runs for a workflow, with the Artifacts made from them
+/// (KT-1990). Returns how many Artifacts went with them.
+pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<usize> {
+    use crate::db::step_artifacts::{self, RunScope};
+    in_transaction(conn, |conn| {
+        let artifacts = step_artifacts::delete(conn, RunScope::Workflow(workflow_id))?;
+        conn.execute(
+            "DELETE FROM workflow_runs WHERE workflow_id = ?1",
+            params![workflow_id],
+        )?;
+        Ok(artifacts)
+    })
+}
+
+/// `work` in one transaction: the caller's when it holds one, else its own.
+fn in_transaction<T>(conn: &Connection, work: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    if !conn.is_autocommit() {
+        return work(conn);
+    }
+    let tx = conn.unchecked_transaction()?;
+    let out = work(&tx)?;
+    tx.commit()?;
+    Ok(out)
 }
 
 /// The latest run of every workflow, as the five fields the workflow list

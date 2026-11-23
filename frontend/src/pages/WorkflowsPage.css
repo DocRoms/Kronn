@@ -8479,6 +8479,15 @@
 .wf-shadow-exec-field dd { margin: 0; font-family: var(--kr-font-mono); overflow-wrap: anywhere; font-weight: 600; }
 .wf-shadow-exec-metrics { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 6px 0 0; color: var(--kr-text-secondary); }
 .wf-shadow-exec-metrics b { color: var(--kr-text-primary); font-weight: 650; }
+/* KT-1990 — an Artifact from each execution's HTML, and the step's renders in a mosaic */
+.wf-shadow-exec-artifact { margin: 6px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.wf-shadow-artifact { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.wf-shadow-artifact-btn, .wf-shadow-artifact-open { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--kr-accent-border); border-radius: var(--kr-r-sm); background: var(--kr-accent-bg); color: var(--kr-accent); font-size: var(--kr-fs-xs); font-weight: 600; text-decoration: none; cursor: pointer; }
+.wf-shadow-artifact-btn:hover:not(:disabled), .wf-shadow-artifact-open:hover { border-color: var(--kr-accent); }
+.wf-shadow-artifact-btn:disabled { opacity: 0.6; cursor: progress; }
+.wf-shadow-artifact-none { font-size: var(--kr-fs-xs); }
+.wf-shadow-artifact-error { color: var(--kr-error); font-size: var(--kr-fs-xs); overflow-wrap: anywhere; }
+.wf-shadow-artifact-mosaic { margin: 4px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .wf-shadow-merge { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--kr-border-subtle); }
 .wf-shadow-merge-result { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--kr-accent-border); border-radius: var(--kr-r-sm); background: var(--kr-accent-bg); font-size: var(--kr-fs-xs); min-width: 0; }
 .wf-shadow-merge-result[data-status="rejected"], .wf-shadow-merge-result[data-status="failed"] { border-color: var(--kr-error); background: var(--kr-bg-surface); }

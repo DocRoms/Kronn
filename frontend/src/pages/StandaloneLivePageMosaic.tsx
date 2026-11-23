@@ -128,7 +128,9 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
     return <section className="standalone-live-page-mosaic-state" role="status">{t('pages.standaloneLoading')}</section>;
   }
 
-  return (
+  return (<>
+    {/* KT-1990 — a tile names what it shows: the renders of a step's executions look alike. */}
+    <h2 className="standalone-live-page-mosaic-caption" title={detail.title} data-testid="standalone-live-page-mosaic-caption">{detail.title}</h2>
     <div className={frameHeight ? "standalone-live-page-mosaic-frame-shell is-content-sized" : "standalone-live-page-mosaic-frame-shell"}>
       {actionUnavailable && (
         <p className="standalone-live-page-mosaic-action-error" role="alert">
@@ -155,7 +157,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
         onHeightChange={setActionCardHeight}
       />
     </div>
-  );
+  </>);
 }
 
 export function StandaloneLivePageMosaic({

@@ -149,6 +149,7 @@ const exec = (shadowId: string | null, extra: Partial<ShadowExecution> = {}): Sh
   duration_ms: 1000,
   cost_usd: 0.1,
   model: 'opus',
+  html: 'none',
   ...extra,
 });
 

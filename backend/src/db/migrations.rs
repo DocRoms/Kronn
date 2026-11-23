@@ -1100,6 +1100,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "301_workflow_runs_shadow_tokens",
         include_str!("sql/301_workflow_runs_shadow_tokens.sql"),
     ),
+    (
+        "302_step_execution_artifacts",
+        include_str!("sql/302_step_execution_artifacts.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole

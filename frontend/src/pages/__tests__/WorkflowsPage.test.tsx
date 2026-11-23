@@ -35,6 +35,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   autoDisabled: vi.fn(),
   reenable: vi.fn(),
   stepShadows: vi.fn(),
+  stepArtifactCount: vi.fn(),
 }));
 
 // The one place the default resolved values live: applied once when the mock is
@@ -50,6 +51,7 @@ const applyWorkflowsApiDefaults = vi.hoisted(() => () => {
   mockWorkflowsApi.autoDisabled.mockResolvedValue([]);
   mockWorkflowsApi.reenable.mockResolvedValue([]);
   mockWorkflowsApi.stepShadows.mockResolvedValue([]);
+  mockWorkflowsApi.stepArtifactCount.mockResolvedValue({ count: 0 });
 });
 applyWorkflowsApiDefaults();
 
@@ -1879,6 +1881,162 @@ describe('WorkflowsPage', () => {
       .toHaveTextContent('a run is still in flight');
     // The card is still there: nothing may look deleted that was not.
     expect(screen.getByTestId('wf-delete-wf-busy')).toBeInTheDocument();
+  });
+});
+
+// ── KT-1990 — the library Artifacts made from runs go with them ─────────────
+// Each confirmation counts them, apart from the run's own working files.
+describe('deleting runs or a workflow counts the library Artifacts made from them (KT-1990)', () => {
+  const summary: WorkflowSummary = {
+    id: 'wf-games', name: 'Games', project_id: null, project_name: null, trigger_type: 'manual',
+    step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0, enabled: true, pinned: false,
+    last_run: null, created_at: '2026-01-01T00:00:00Z',
+  };
+  const workflow = {
+    id: 'wf-games', name: 'Games', project_id: null, trigger: { type: 'Manual' },
+    steps: [{ name: 'jeu', agent: 'ClaudeCode', prompt_template: 'Make a game', mode: { type: 'Normal' } }],
+    actions: [], safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },
+    workspace_config: null, concurrency_limit: null, enabled: true,
+    created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+  } as unknown as Workflow;
+  const run = {
+    id: 'run-7', workflow_id: 'wf-games', status: 'Success', trigger_context: null, step_results: [],
+    tokens_used: 0, shadow_tokens_used: 0, workspace_path: null, started_at: '2026-11-21T10:00:00Z',
+    finished_at: '2026-11-21T10:01:00Z', run_type: 'linear', produced_branches: [],
+  };
+
+  const openDetail = async (runId: string | null = null, toast?: (msg: string, type?: 'success' | 'error' | 'info') => void) => {
+    mockWorkflowsApi.list.mockResolvedValue([summary]);
+    mockWorkflowsApi.get.mockResolvedValue(workflow);
+    mockWorkflowsApi.listRuns.mockResolvedValue([run]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(1);
+    mockWorkflowsApi.getRun.mockResolvedValue(run);
+    await wrap(
+      <WorkflowsPage
+        projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
+        selection={{ tab: 'workflows', resourceId: 'wf-games', runId }} toast={toast}
+      />,
+    );
+    await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-games'));
+  };
+
+  it('deleting one run states how many Artifacts go with it', async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    mockWorkflowsApi.stepArtifactCount.mockResolvedValue({ count: 3 });
+    await openDetail('run-7');
+    const button = await screen.findByTitle('Supprimer ce run');
+    await act(async () => { fireEvent.click(button); });
+    await waitFor(() => expect(confirm).toHaveBeenCalled());
+    expect(mockWorkflowsApi.stepArtifactCount).toHaveBeenCalledWith('wf-games', 'run-7');
+    const text = String((confirm.mock.calls[0] as unknown[])[0]);
+    expect(text).toContain('fichiers de travail');
+    expect(text).toContain('3 Artifact(s) de la bibliothèque');
+    // Refused: nothing deleted.
+    expect(mockWorkflowsApi.deleteRun).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('deleting a run with no Artifact adds no sentence about Artifacts', async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    mockWorkflowsApi.stepArtifactCount.mockResolvedValue({ count: 0 });
+    await openDetail('run-7');
+    await act(async () => { fireEvent.click(await screen.findByTitle('Supprimer ce run')); });
+    await waitFor(() => expect(confirm).toHaveBeenCalled());
+    const text = String((confirm.mock.calls[0] as unknown[])[0]);
+    expect(text).toContain('fichiers de travail');
+    expect(text).not.toMatch(/Artifact/);
+    vi.unstubAllGlobals();
+  });
+
+  it('deleting every run states how many Artifacts go with them', async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirm);
+    mockWorkflowsApi.stepArtifactCount.mockResolvedValue({ count: 5 });
+    mockWorkflowsApi.deleteAllRuns.mockResolvedValue(undefined);
+    await openDetail();
+    await act(async () => { fireEvent.click(await screen.findByText('Tout supprimer')); });
+    await waitFor(() => expect(mockWorkflowsApi.deleteAllRuns).toHaveBeenCalledWith('wf-games'));
+    expect(mockWorkflowsApi.stepArtifactCount).toHaveBeenCalledWith('wf-games');
+    const text = String((confirm.mock.calls[0] as unknown[])[0]);
+    expect(text).toContain('5 Artifact(s) de la bibliothèque');
+    vi.unstubAllGlobals();
+  });
+
+  // KT-1999 — a second click while the count is read asks nothing more and
+  // deletes nothing more: one delete of runs at a time.
+  it('a second click on a run delete while the count is read starts no second delete', async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirm);
+    let answer: (count: { count: number }) => void = () => {};
+    mockWorkflowsApi.stepArtifactCount.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
+    mockWorkflowsApi.deleteRun.mockResolvedValue(undefined);
+    mockWorkflowsApi.deleteAllRuns.mockResolvedValue(undefined);
+    await openDetail('run-7');
+    const button = await screen.findByTitle('Supprimer ce run');
+    await act(async () => { fireEvent.click(button); });
+    await act(async () => { fireEvent.click(button); });
+    await act(async () => { fireEvent.click(screen.getByText('Tout supprimer')); });
+    expect(mockWorkflowsApi.stepArtifactCount).toHaveBeenCalledTimes(1);
+    await act(async () => { answer({ count: 1 }); });
+    await waitFor(() => expect(mockWorkflowsApi.deleteRun).toHaveBeenCalledWith('wf-games', 'run-7'));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(mockWorkflowsApi.deleteRun).toHaveBeenCalledTimes(1);
+    expect(mockWorkflowsApi.deleteAllRuns).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  // KT-1999 — a refused delete (a run already deleted elsewhere answers
+  // `Run not found`) says why and reads the runs again, so a run that is gone
+  // leaves the list instead of keeping a button that does nothing.
+  it('a refused run delete shows its message and reads the runs again', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const toast = vi.fn();
+    mockWorkflowsApi.deleteRun.mockRejectedValue(new Error('Run not found'));
+    await openDetail('run-7', toast);
+    const button = await screen.findByTitle('Supprimer ce run');
+    await waitFor(() => expect(mockWorkflowsApi.listRuns).toHaveBeenCalled());
+    const reads = mockWorkflowsApi.get.mock.calls.length;
+    const runReads = mockWorkflowsApi.listRuns.mock.calls.length;
+    const listReads = mockWorkflowsApi.list.mock.calls.length;
+    await act(async () => { fireEvent.click(button); });
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('Run not found', 'error'));
+    await waitFor(() => expect(mockWorkflowsApi.listRuns.mock.calls.length).toBeGreaterThan(runReads));
+    expect(mockWorkflowsApi.get.mock.calls.length).toBeGreaterThan(reads);
+    expect(mockWorkflowsApi.list.mock.calls.length).toBeGreaterThan(listReads);
+    vi.unstubAllGlobals();
+  });
+
+  it('a refused delete of every run shows its message and reads the runs again', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const toast = vi.fn();
+    mockWorkflowsApi.deleteAllRuns.mockRejectedValue(new Error('Run not found'));
+    await openDetail(null, toast);
+    const button = await screen.findByText('Tout supprimer');
+    await waitFor(() => expect(mockWorkflowsApi.listRuns).toHaveBeenCalled());
+    const reads = mockWorkflowsApi.get.mock.calls.length;
+    const runReads = mockWorkflowsApi.listRuns.mock.calls.length;
+    const listReads = mockWorkflowsApi.list.mock.calls.length;
+    await act(async () => { fireEvent.click(button); });
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('Run not found', 'error'));
+    await waitFor(() => expect(mockWorkflowsApi.listRuns.mock.calls.length).toBeGreaterThan(runReads));
+    expect(mockWorkflowsApi.get.mock.calls.length).toBeGreaterThan(reads);
+    expect(mockWorkflowsApi.list.mock.calls.length).toBeGreaterThan(listReads);
+    vi.unstubAllGlobals();
+  });
+
+  it('deleting the workflow states its runs and the Artifacts made from them before the second click', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([summary]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(4);
+    mockWorkflowsApi.stepArtifactCount.mockResolvedValue({ count: 2 });
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    const deleteBtn = screen.getByTestId('wf-delete-wf-games');
+    await act(async () => { fireEvent.click(deleteBtn); });
+    await waitFor(() => expect(
+      screen.getByText('4 exécution(s) et 2 Artifact(s) de la bibliothèque supprimés avec lui ; leurs discussions restent'),
+    ).toBeInTheDocument());
+    expect(mockWorkflowsApi.delete).not.toHaveBeenCalled();
   });
 });
 

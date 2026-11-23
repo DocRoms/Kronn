@@ -64,6 +64,7 @@ vi.mock('../../lib/api', () => ({
     exportArtifact: vi.fn(), previewImport: vi.fn(), importArtifact: vi.fn(),
     defaultTodo: vi.fn(() => Promise.resolve({ state: 'installed', page_id: null, workflow_ids: [], own_page_id: null })),
     installDefaultTodo: vi.fn(),
+    runFolders: vi.fn(() => Promise.resolve([])), deleteRunFolder: vi.fn(),
   },
   // The card reads a workflow's Agent steps (KT-1025); none here.
   workflows: { triggerStream: vi.fn(), get: vi.fn(() => Promise.resolve({ steps: [] })) },
@@ -2477,6 +2478,97 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
 
       fireEvent.click(getCanonicalPageRow('Other Page'));
       expect(await screen.findByRole('button', { name: 'pages.runAllWorkflowsOne:1' })).toBeInTheDocument();
+    });
+  });
+
+  describe('run folders (KT-1990)', () => {
+    const render1: LivePage = { ...page, id: 'render-main', title: 'Jeux · jeu · main', slug: 'jeux-jeu-main' };
+    const render2: LivePage = { ...page, id: 'render-qwen', title: 'Jeux · jeu · Qwen', slug: 'jeux-jeu-qwen' };
+    const link = (pageId: string, shadowId: string, label: string, model: string) => ({
+      page_id: pageId, run_id: 'run-7', result_index: 0, step_name: 'jeu', shadow_id: shadowId, label, model,
+      created_at: '2026-11-21T00:00:00Z',
+    });
+    const folder = (links: ReturnType<typeof link>[]) => ({
+      run_id: 'run-7', workflow_id: 'wf', workflow_name: 'Jeux', run_number: 4, run_started_at: '2026-11-21T00:00:00Z',
+      artifacts: links,
+    });
+
+    beforeEach(() => {
+      vi.mocked(pagesApi.list).mockResolvedValue([page, render1, render2]);
+      vi.mocked(pagesApi.runFolders).mockResolvedValue([folder([
+        link('render-main', '', 'main', 'opus'), link('render-qwen', 'qwen', 'Qwen', 'qwen3'),
+      ])]);
+    });
+
+    it('groups a run\'s renders in one folder, labelled by execution and model, out of the project tree', async () => {
+      render(<PagesPage />);
+      const folderNode = await screen.findByTestId('artifact-run-folder-run-7');
+      expect(within(folderNode).getByText('pages.runFolders.folder:Jeux,4')).toBeInTheDocument();
+      const projects = document.querySelector('.disc-sidebar-projects') as HTMLElement;
+      expect(within(projects).queryByLabelText('pages.open:Jeux · jeu · main')).toBeNull();
+      expect(within(projects).getByLabelText('pages.open:Adobe Signals')).toBeInTheDocument();
+
+      fireEvent.click(within(folderNode).getByText('pages.runFolders.folder:Jeux,4'));
+      const rows = within(folderNode).getAllByRole('button', { name: /^pages\.open:Jeux/ });
+      // The main execution reads the localised « main » label.
+      expect(rows.map(row => row.querySelector('.disc-item-title-text')?.textContent))
+        .toEqual(['wf.shadow.compare.main · opus', 'Qwen · qwen3']);
+    });
+
+    it('deleting one Artifact of the folder deletes it and the folder no longer lists it', async () => {
+      vi.stubGlobal('confirm', vi.fn(() => true));
+      render(<PagesPage />);
+      const folderNode = await screen.findByTestId('artifact-run-folder-run-7');
+      fireEvent.click(within(folderNode).getByText('pages.runFolders.folder:Jeux,4'));
+      // The server drops the link with the Artifact: the next read has one left.
+      vi.mocked(pagesApi.list).mockResolvedValue([page, render1]);
+      vi.mocked(pagesApi.runFolders).mockResolvedValue([folder([link('render-main', '', 'main', 'opus')])]);
+      fireEvent.click(within(folderNode).getByRole('button', { name: 'collection.moreActions · Jeux · jeu · Qwen' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'pages.delete' }));
+      await waitFor(() => expect(pagesApi.delete).toHaveBeenCalledWith('render-qwen'));
+      await waitFor(() => expect(within(screen.getByTestId('artifact-run-folder-run-7')).queryByText('Qwen · qwen3')).toBeNull());
+      expect(within(screen.getByTestId('artifact-run-folder-run-7')).getByText('wf.shadow.compare.main · opus')).toBeInTheDocument();
+    });
+
+    it('« Delete the folder » asks first, deletes the run\'s Artifacts and keeps the rest', async () => {
+      const confirm = vi.fn(() => true);
+      vi.stubGlobal('confirm', confirm);
+      vi.mocked(pagesApi.deleteRunFolder).mockResolvedValue({ count: 2 });
+      render(<PagesPage />);
+      await screen.findByTestId('artifact-run-folder-run-7');
+      vi.mocked(pagesApi.list).mockResolvedValue([page]);
+      vi.mocked(pagesApi.runFolders).mockResolvedValue([]);
+      fireEvent.click(screen.getByTestId('artifact-run-folder-menu-run-7'));
+      fireEvent.click(screen.getByTestId('artifact-run-folder-delete-run-7'));
+      expect(confirm).toHaveBeenCalledWith('pages.runFolders.deleteConfirm:2,pages.runFolders.folder:Jeux,4');
+      await waitFor(() => expect(pagesApi.deleteRunFolder).toHaveBeenCalledWith('run-7'));
+      await waitFor(() => expect(screen.queryByTestId('artifact-run-folder-run-7')).toBeNull());
+      expect(getCanonicalPageRow('Adobe Signals')).toBeInTheDocument();
+    });
+
+    // KT-1999 — a search opens the run folders, as it opens the project groups:
+    // what it counts on the folder's badge is what it shows.
+    it('opens the run folders while the search holds a query, and closes them again after', async () => {
+      render(<PagesPage />);
+      const folderNode = await screen.findByTestId('artifact-run-folder-run-7');
+      expect(within(folderNode).queryByText('Qwen · qwen3')).toBeNull();
+      fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: 'Qwen' } });
+      await waitFor(() => expect(within(screen.getByTestId('artifact-run-folder-run-7')).getByText('Qwen · qwen3')).toBeInTheDocument());
+      fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: '' } });
+      await waitFor(() => expect(within(screen.getByTestId('artifact-run-folder-run-7')).queryByText('Qwen · qwen3')).toBeNull());
+    });
+
+    // KT-1999 — the library read that follows the delete reports its own failure.
+    it('shows a failed read of the library after « Delete the folder »', async () => {
+      vi.stubGlobal('confirm', vi.fn(() => true));
+      vi.mocked(pagesApi.deleteRunFolder).mockResolvedValue({ count: 2 });
+      render(<PagesPage />);
+      await screen.findByTestId('artifact-run-folder-run-7');
+      vi.mocked(pagesApi.list).mockRejectedValue(new Error('The library is unreachable'));
+      fireEvent.click(screen.getByTestId('artifact-run-folder-menu-run-7'));
+      fireEvent.click(screen.getByTestId('artifact-run-folder-delete-run-7'));
+      await waitFor(() => expect(pagesApi.deleteRunFolder).toHaveBeenCalledWith('run-7'));
+      expect(await screen.findByText('The library is unreachable')).toBeInTheDocument();
     });
   });
 });

@@ -50,6 +50,9 @@ pub const REFERENCING_COLUMNS: &[(&str, &str)] = &[
     ("discussion_questions", "resume_run_id"),
     // Room messages attributed to one of the run's steps.
     ("workflow_step_room_activities", "run_id"),
+    // An Artifact a person made from one of its step executions (KT-1990):
+    // the library folder names the run, and deleting the run deletes it.
+    ("step_execution_artifacts", "run_id"),
 ];
 
 /// Columns whose rows belong to the run itself and go with it (ON DELETE
@@ -622,6 +625,48 @@ mod tests {
             "a long review",
             "a run inside its window keeps it"
         );
+    }
+
+    /// KT-1990 — a run a person made an Artifact from keeps its outputs and its
+    /// row: retention would otherwise delete the run and leave its folder empty.
+    #[test]
+    fn a_run_with_an_artifact_of_its_step_executions_is_never_trimmed_nor_deleted() {
+        let conn = db();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run(&conn, "rendered", "Success", "linear", Some(OLD));
+        run(&conn, "plain", "Success", "linear", Some(OLD));
+        conn.execute_batch(
+            "INSERT INTO live_pages (id, title, slug, current_revision_id, data_revision,
+                                     created_at, updated_at, pinned, archived)
+                 VALUES ('page', 'Jeu', 'jeu', 'rev', 0, '2026-01-02T00:00:00Z',
+                         '2026-01-02T00:00:00Z', 0, 0);
+             INSERT INTO step_execution_artifacts
+                 (page_id, run_id, result_index, step_name, shadow_id, created_at)
+                 VALUES ('page', 'rendered', 0, 'Analyse 🚀', 'qwen', '2026-01-02T00:00:00Z');",
+        )
+        .unwrap();
+        assert_eq!(compact_all(&conn), 1);
+        assert!(!compacted(&conn, "rendered"), "its outputs stay readable");
+        let everywhere = WorkflowScope::Except(Vec::new());
+        let deleted: usize = RunClass::ALL
+            .iter()
+            .map(|class| delete_runs_chunk(&conn, *class, &everywhere, CUTOFF, CHUNK_ROWS).unwrap())
+            .sum();
+        assert_eq!(deleted, 1, "only the plain run goes");
+        let left: Vec<String> = conn
+            .prepare("SELECT id FROM workflow_runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(left, ["rendered"]);
+        let artifacts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM step_execution_artifacts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(artifacts, 1, "the Artifact keeps its link");
     }
 
     #[test]

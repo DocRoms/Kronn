@@ -15,10 +15,10 @@ the usable-agent inputs supplied to the real UI consumers and assert the native
 Quick API and Quick Exec have no agent selector for their own execution. The
 Quick API form persists API plugin/config/endpoint fields and variables, while
 its create request has no agent field. [src: file: frontend/src/components/workflows/QuickApiForm.tsx:220-246#handleSave] [src: file: frontend/src/types/generated.ts:2957#CreateQuickApiRequest] Its direct-run handler sends only
-`{ variables }` to `quickApis.runQa`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1804-1814#handleLaunchQA] [src: file: frontend/src/types/generated.ts:9895-9906#RunQuickApiRequest]
+`{ variables }` to `quickApis.runQa`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1831-1841#handleLaunchQA] [src: file: frontend/src/types/generated.ts:9905-9916#RunQuickApiRequest]
 The Quick Exec form instead persists a command, arguments, timeout, output
 format, and variables; its create request likewise has no agent field. [src: file: frontend/src/components/workflows/QuickExecForm.tsx:46-66] [src: file: frontend/src/types/generated.ts:2959-2963#CreateQuickExecRequest] Its direct-run handler sends only
-`{ variables }` to `quickExecs.run`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1783-1788#handleRunQE] [src: file: frontend/src/types/generated.ts:9927#RunQuickExecRequest]
+`{ variables }` to `quickExecs.run`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1810-1815#handleRunQE] [src: file: frontend/src/types/generated.ts:9932#RunQuickExecRequest]
 Therefore this task makes no QA/QE OpenCode-selection assertion; that absence
 comes from their UI/request/executor contracts, rather than from the `AgentType`
 enum.

@@ -1134,7 +1134,7 @@ atomic save.
 Reads are bounded on the server: `workflow_runs` returns at most 500 lean
 summaries, and `workflow_run_get` truncates step outputs. `task_list`,
 `disc_list` and `disc_search` take `limit` (and `cursor` where offered).
-[src: file: backend/src/db/workflows.rs:1297-1300#MAX_RUNS_UNPAGINATED]
+[src: file: backend/src/db/workflows.rs:1295-1302#MAX_RUNS_UNPAGINATED]
 [src: file: backend/scripts/disc-introspection-mcp.py:8578-8612#call_workflow_runs]
 [src: file: backend/scripts/disc-introspection-mcp.py:4832-4845#call_task_list]
 

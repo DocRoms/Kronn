@@ -21,10 +21,10 @@ prompt context, previous outputs and variables as the main step received them.
 **Only the main output continues the workflow**: a shadow's output never feeds a
 later step (a later step can read a summary of what ran, never an output: see
 [Show the shadows on a Page](#show-the-shadows-on-a-page)).
-[src: file: backend/src/workflows/shadow.rs:502-508#start_for_step]
+[src: file: backend/src/workflows/shadow.rs:506-512#start_for_step]
 
 Only an Agent step can carry shadows, and not one marked **Acts outside Kronn**.
-[src: file: backend/src/workflows/shadow.rs:465#can_run_shadows]
+[src: file: backend/src/workflows/shadow.rs:467-469#can_run_shadows]
 
 Each shadow has:
 
@@ -43,10 +43,10 @@ Each shadow has:
   - **skills**: `skills` swaps a skill by its base id (`custom-x` →
     `custom-x@3`), or drops it with an empty replacement, to measure what a
     skill brings; `quick_prompt_versions` loads a version of a Quick Prompt;
-    [src: file: backend/src/workflows/shadow.rs:313#apply_versions]
+    [src: file: backend/src/workflows/shadow.rs:315-317#apply_versions]
 - **its scope**: `project_ids` (empty means every project) and `sample_every`
   (one run in N gets the shadow, to bound the cost);
-  [src: file: backend/src/workflows/shadow.rs:458#is_sampled]
+  [src: file: backend/src/workflows/shadow.rs:460-462#is_sampled]
 - **a budget**: `max_tokens`, `max_duration_secs`, `max_cost_usd`.
   [src: file: backend/src/models/workflows.rs:205#ShadowBudget]
 
@@ -55,7 +55,7 @@ agent on the same input, to show how many different outputs that agent gives.
 
 What a shadow changes is applied to a copy of the step, never to the step
 itself.
-[src: file: backend/src/workflows/shadow.rs:294#apply_shadow]
+[src: file: backend/src/workflows/shadow.rs:297-298#apply_shadow]
 
 ## Pin the versions your steps load
 
@@ -85,10 +85,10 @@ Only a person sets shadows: they start extra executions, so an agent's save that
 sets or changes them is refused, and a save that sends the steps back keeps the
 stored ones.
 [src: file: backend/src/api/workflows.rs:2906#AGENT_SHADOW_REFUSAL]
-[src: file: backend/src/workflows/shadow.rs:1111-1113#keep_stored_shadows]
+[src: file: backend/src/workflows/shadow.rs:1115-1117#keep_stored_shadows]
 A save is checked: the ids, the sampling, the overrides, the budgets, and that
 the step is an Agent step that stays inside Kronn.
-[src: file: backend/src/workflows/shadow.rs:956-958#validate]
+[src: file: backend/src/workflows/shadow.rs:960-962#validate]
 A Page's **Quick Prompts and skills** panel also adds a shadow that tests a
 version on a step, changes the version a shadow tests, and removes a shadow.
 
@@ -106,7 +106,7 @@ A shadow never runs such a step, and never a Gate: saving refuses shadows on
 them, and one saved by hand is recorded as *skipped* instead of run. A later step
 marked `external_effect` runs once, in the main path: no GitHub write, no message,
 no publication happens because of a shadow.
-[src: file: backend/src/workflows/shadow.rs:749-751#run_one]
+[src: file: backend/src/workflows/shadow.rs:753-755#run_one]
 
 Two cautions:
 
@@ -123,7 +123,7 @@ A shadow that fails, stalls or spends its budget settles its own result and
 nothing else: the main step keeps its status, its duration and its output, and
 does not wait for the shadow. Each shadow runs in the background, one task per
 shadow, and a crash in it is recorded on its own row.
-[src: file: backend/src/workflows/shadow.rs:558#run_step_shadows]
+[src: file: backend/src/workflows/shadow.rs:562#run_step_shadows]
 
 - the **time budget** is enforced: the shadow is stopped (status *time limit
   reached*) and `max_duration_secs` replaces the workflow's timeout for it, so a
@@ -131,7 +131,7 @@ shadow, and a crash in it is recorded on its own row.
 - the **token and cost budgets** are checked when the shadow ends: one that
   spent more is marked *over budget* with the limit, its output kept;
   `max_tokens` is also handed to an agent that takes a generation cap;
-  [src: file: backend/src/workflows/shadow.rs:890-891#budget_exceeded]
+  [src: file: backend/src/workflows/shadow.rs:894-895#budget_exceeded]
 - a shadow left running by a restart is marked *interrupted*.
   [src: file: backend/src/db/step_shadows.rs:154-156#interrupt_running]
 
@@ -143,7 +143,7 @@ outputs with the run's.
 
 Open a run: for each step that ran shadows, the run view shows the main
 execution beside its shadows.
-[src: file: backend/src/workflows/shadow.rs:1337-1339#comparisons]
+[src: file: backend/src/workflows/shadow.rs:1354-1356#comparisons]
 `GET /api/workflows/{id}/runs/{run_id}/step-shadows` returns the same data.
 
 - **a header per execution** says what differs from the others (agent, model,
@@ -162,6 +162,111 @@ execution beside its shadows.
   [src: file: frontend/src/lib/shadowRuns.ts:184-186#determinism]
 
 While a shadow is still going, the comparison refreshes and shows it as running.
+
+## See the renders side by side (KT-1990)
+
+When a step writes a page (an HTML report, a mini game), a line diff says
+nothing useful. The run view then turns each execution's output into an
+**Artifact**, the same way for the main execution and for every shadow. A
+shadow has no Kronn tool and never makes one itself: Kronn makes it from the
+stored output, on a person's click, so the comparison measures the answer and
+not tool calling.
+
+- **Per execution, « Make an Artifact »** appears when the output holds an HTML
+  document: an `html` or `kronn-doc-preview` fence, or, without such a fence, a
+  bare document from `<!DOCTYPE html>` or `<html>` to `</html>`. Kronn takes the
+  **last** HTML block, makes one Artifact titled
+  `<workflow> · <step> · <execution label>` (the main execution's label is
+  `main`) in the run's project, and opens it in its standalone tab. The button
+  then reads **Open the Artifact**. A closed fence holding a fragment (no
+  `<html>` tag) is taken whole.
+  [src: file: backend/src/workflows/shadow_artifact.rs:295-324#find]
+  [src: file: backend/src/api/step_artifacts.rs:130-133#artifact_title]
+- **Where the document starts and ends (KT-1999).** A page's script may hold
+  `<html>` or `</html>` in a string (a template, a `document.write`); that
+  string never cuts the page.
+  - In a closed fence, the fence is the unit: the document runs from the first
+    `<!DOCTYPE html>` or `<html>` of the fence found outside a script, a style
+    or a comment, to the fence's **last** `</html>`, so a document template in
+    a fragment's script is not taken for the page. A fence with an opening and
+    no `</html>` after it is refused as cut.
+    [src: file: backend/src/workflows/shadow_artifact.rs:210-228#fenced_document]
+  - A bare document is read as a browser reads it: a `<!DOCTYPE html>` or an
+    `<html>` opens a document, the first `</html>` closes it, and nothing inside
+    a `<script>`, a `<style>` or an HTML comment counts as either. Another
+    doctype or `<html>` tag before the close starts the document again there
+    (the earlier one never closed). The last document closed wins; an output
+    that ends inside a document, or inside a script or comment that never
+    closes, is refused as cut.
+    [src: file: backend/src/workflows/shadow_artifact.rs:246-288#bare_document]
+  - In a bare output, a doctype or an `<html>` tag is an opening only when
+    markup follows it (after its `>` and any whitespace, the next character is
+    `<`, or the output ends there): prose naming the tag before, inside or after
+    a page neither opens nor restarts a document. Known limit: a bare
+    `<html>Hello</html>` with no doctype before it is therefore not seen as a
+    document.
+    [src: file: backend/src/workflows/shadow_artifact.rs:172-180#markup_follows]
+- **No HTML, or a cut one, makes nothing.** A document that is cut is refused
+  with the reason: its fence never closes, it opens `<html>` with no `</html>`
+  after it, or the stored output ends with the cut marker
+  (`[output cut at N bytes]`). An output with no HTML document says so, but
+  only in a step where another execution wrote one, complete or cut: in a step
+  that writes a review or an analysis, no execution shows anything about
+  Artifacts.
+  [src: file: frontend/src/lib/stepArtifacts.ts:66-74#stepHasHtml]
+  [src: file: frontend/src/components/workflows/StepArtifactControls.tsx:103-107#stepHasHtml]
+  [src: file: backend/src/workflows/shadow_artifact.rs:28-39#ExecutionHtml]
+  [src: file: backend/src/workflows/shadow.rs:34#CUT_MARKER]
+- **Per step, « Open the renders in a mosaic »** appears when two executions or
+  more have a render. It makes the missing Artifacts and opens the Artifact
+  mosaic: the main execution first, then the shadows in the order they started.
+  Each tile names its Artifact above the page.
+  [src: file: backend/src/api/step_artifacts.rs:292-321#mosaic]
+  [src: file: frontend/src/pages/StandaloneLivePageMosaic.tsx:133#standalone-live-page-mosaic-caption]
+- **One Artifact per execution.** The link Artifact ↔ (run, step result,
+  execution) is stored in `step_execution_artifacts` (migration 302), unique per
+  execution: after a reload the button opens the Artifact already made, never a
+  duplicate. Only this route sets the link, and it is a person's: a caller
+  marked as an agent is refused, and the routes are absent from the bridge
+  tokens.
+  [src: file: backend/src/db/sql/302_step_execution_artifacts.sql:12-24#step_execution_artifacts]
+  [src: file: backend/src/api/step_artifacts.rs:327-342#make_route]
+
+The HTML is copied from the output with no dataset, through the redaction pass an
+agent's message gets when a discussion stores it (`redact_agent_output`), not the
+audit pass: only a real credential is masked, so game code that names a secret
+word (`ball.spin = 0.4;`, `const secret = false;`) and a link's query string
+stay as written, and an Artifact made from an execution holds what one made from
+a discussion preview holds. The Artifact shows what the execution wrote at that
+time.
+[src: file: backend/src/api/step_artifacts.rs:199-206#redact_agent_output]
+[src: file: backend/src/core/redact.rs:790-806#redact_agent_output]
+[src: file: backend/src/db/discussions.rs:2901-2907#mask_agent_output]
+It lives in the
+Artifact library like any other, in a folder of its run (see
+[the Artifacts architecture](../architecture/live-pages.md#run-folders-kt-1990)).
+
+**Deleting the run deletes its Artifacts.** Deleting a run, all the runs of a
+workflow, or the workflow deletes the Artifacts made from those runs, in the same
+transaction. Each confirmation says how many, and tells the run's working files
+(its worktree, the files it produced) from the Artifacts of the library. When
+the runs have no such Artifact, it adds no sentence about Artifacts. The
+workflow delete, shown on one line of the workflow card, counts them in the
+same short sentence as its runs.
+Deleting one Artifact only removes its link: the run view offers the button
+again. Run retention never trims nor deletes a run that has such an Artifact.
+[src: file: backend/src/db/workflows.rs:2678-2685#delete_run]
+[src: file: backend/src/db/run_retention.rs:55#step_execution_artifacts]
+[src: file: frontend/src/lib/stepArtifacts.ts:92-101#artifactsSentence]
+[src: file: frontend/src/lib/stepArtifacts.ts:113-119#workflowDeleteImpact]
+
+What each output keeps, so you know what a render can hold: a shadow keeps at
+most 1 000 000 bytes of output and marks a longer one cut, which is then
+refused; the main execution's output is the step result of the run, stored
+whole with no cap of its own (the run view grades a heavy one, see
+[heavy step outputs](../operations/workflow-heavy-outputs.md)).
+[src: file: backend/src/workflows/shadow.rs:32#MAX_STORED_OUTPUT_BYTES]
+[src: file: backend/src/workflows/steps.rs:970#with_runtime_notices]
 
 ## Merge the shadows into the step's output
 
@@ -307,7 +412,7 @@ loads and the one each of its shadows tests.
 
 Either way that shadow stops testing it; the other shadows keep theirs. Promotion
 is a person's decision too: the route has no agent access.
-[src: file: backend/src/workflows/shadow.rs:1173#promote]
+[src: file: backend/src/workflows/shadow.rs:1177#promote]
 [src: file: backend/src/api/workflows.rs:2885#promote_shadow]
 
 ## From the workflow-level shadow
@@ -319,9 +424,9 @@ of a flat shadow is named `shadow`, a lane keeps its id, label, projects,
 sampling, skills, prompt and budget, and an agent set for a named step goes to
 that step. The role (`witness`, `contributor`) is gone. The migration moves only
 the stored shadow: the steps are left as they were.
-[src: file: backend/src/workflows/shadow.rs:1376#legacy_shadow_to_steps]
-[src: file: backend/src/workflows/shadow.rs:1376#migrate_workflow_shadows]
-[src: file: backend/src/db/workflows.rs:2987-2990#split_shadows]
+[src: file: backend/src/workflows/shadow.rs:1401#legacy_shadow_to_steps]
+[src: file: backend/src/workflows/shadow.rs:1401#migrate_workflow_shadows]
+[src: file: backend/src/db/workflows.rs:3010-3013#split_shadows]
 
 Runs the former shadow recorded stay in the run list with a **Shadow** badge.
 An export written before this change carries a `shadow` key that an import now
@@ -338,6 +443,8 @@ ignores.
   long shadow can spend more than its budget before it is marked.
 - A step carries at most eight shadows.
 - Only Agent steps carry shadows.
+- **An Artifact of an execution is made by a person**, one execution or one
+  step at a time: no option publishes every execution of a step on its own.
 
 See also: [the Kronn way](the-kronn-way.md) and the
 [glossary](../glossary.md) entries *Step shadow*, *Shadow run* and *Page
