@@ -605,6 +605,37 @@ fn added_lines_only(text: &str, before: &HashSet<[u8; 32]>) -> String {
     out
 }
 
+/// The commit the worktree shares with its remote default branch
+/// (`origin/HEAD`), if any. A line a document holds at that commit is already
+/// upstream: a step that rebases or merges it in did not write it.
+fn upstream_base(worktree: &Path) -> Option<String> {
+    let output = crate::core::cmd::project_git_cmd()
+        .args(["merge-base", "HEAD", "refs/remotes/origin/HEAD"])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// Fingerprints of the lines `relative` holds at commit `base`. `None` when the
+/// document does not exist there or cannot be read (non-UTF-8 name included).
+fn lines_at_commit(worktree: &Path, base: &str, relative: &Path) -> Option<HashSet<[u8; 32]>> {
+    let name = relative.to_str()?.replace('\\', "/");
+    let output = crate::core::cmd::project_git_cmd()
+        .args(["cat-file", "blob", &format!("{base}:{name}")])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > MAX_AUDIT_BUFFER_BYTES {
+        return None;
+    }
+    Some(line_fingerprints(document_text(&output.stdout).as_ref()))
+}
+
 const MAX_AUDIT_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
 struct DocumentRead {
@@ -830,6 +861,10 @@ pub async fn audit_docs_writes(
     let paths = tokio::task::spawn_blocking(move || document_paths(&root))
         .await
         .map_err(|e| format!("Document enumeration interrupted: {e}"))??;
+    let root = worktree.to_path_buf();
+    let upstream = tokio::task::spawn_blocking(move || upstream_base(&root))
+        .await
+        .unwrap_or(None);
     for path in paths {
         let absolute = worktree.join(&path);
         let document = tokio::task::spawn_blocking(move || read_document(&absolute, true))
@@ -862,11 +897,31 @@ pub async fn audit_docs_writes(
         };
         let content = document_text(&bytes);
         // Only the lines the step added are inspected: a line the document
-        // already held is not the step's doing.
+        // already held, or holds upstream (brought by a rebase), is not the
+        // step's doing. A document too large to fingerprint before the step
+        // is inspected whole.
+        let upstream_lines = match &upstream {
+            Some(base) if previous.is_none_or(|file| file.lines.is_some()) => {
+                let (root, base, relative) = (worktree.to_path_buf(), base.clone(), path.clone());
+                tokio::task::spawn_blocking(move || lines_at_commit(&root, &base, &relative))
+                    .await
+                    .unwrap_or(None)
+            }
+            _ => None,
+        };
+        let known = match (previous.map(|file| file.lines.as_ref()), upstream_lines) {
+            (Some(None), _) => None,
+            (Some(Some(lines)), Some(mut upstream)) => {
+                upstream.extend(lines.iter().copied());
+                Some(std::borrow::Cow::Owned(upstream))
+            }
+            (Some(Some(lines)), None) => Some(std::borrow::Cow::Borrowed(lines)),
+            (None, upstream) => upstream.map(std::borrow::Cow::Owned),
+        };
         let added;
-        let content = match previous.and_then(|file| file.lines.as_ref()) {
+        let content = match known {
             Some(lines) => {
-                added = added_lines_only(content.as_ref(), lines);
+                added = added_lines_only(content.as_ref(), &lines);
                 added.as_str()
             }
             None => content.as_ref(),
@@ -1395,6 +1450,64 @@ mod tests {
         assert_eq!(
             audit.possible_secrets,
             vec![("docs/third-parties.md".to_string(), vec![5])]
+        );
+    }
+
+    // A step that rebases on origin's default branch brings documents and
+    // lines it did not write: they are already upstream and fail nothing
+    // (faux positif du 23/11 sur third-parties.md et video-ads-vast.md).
+    #[tokio::test]
+    async fn audit_ignores_lines_a_rebase_brings_from_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fixture_git(root, &["init", "-q", "-b", "work"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        let path = root.join("docs/third-parties.md");
+        std::fs::write(&path, "# Third parties\n").unwrap();
+        fixture_git(root, &["add", "docs"]);
+        fixture_git(root, &["commit", "-q", "-m", "base"]);
+        let known = "Origin: https://internal.example/v1/some-long-sensitive-value";
+        let entropy = format!("Value {BASE64_TOKEN} here.");
+        std::fs::write(&path, format!("# Third parties\n{known}\n")).unwrap();
+        std::fs::write(root.join("docs/video-ads-vast.md"), format!("{entropy}\n")).unwrap();
+        fixture_git(root, &["add", "docs"]);
+        fixture_git(root, &["commit", "-q", "-m", "upstream"]);
+        fixture_git(root, &["update-ref", "refs/remotes/origin/HEAD", "HEAD"]);
+        fixture_git(root, &["reset", "-q", "--hard", "HEAD~1"]);
+        let mut sensitive = SensitiveSubstrings::new();
+        sensitive.add("some-long-sensitive-value", "application/.env");
+        let before = snapshot_docs(root).await.unwrap();
+
+        // The step rebases: both documents now hold upstream lines.
+        fixture_git(root, &["reset", "-q", "--hard", "refs/remotes/origin/HEAD"]);
+        let audit = audit_docs_writes(root, &sensitive, &before).await.unwrap();
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+        assert!(
+            audit.possible_secrets.is_empty(),
+            "{:?}",
+            audit.possible_secrets
+        );
+
+        // What the step itself adds is still seen, in either document.
+        std::fs::write(
+            &path,
+            format!("# Third parties\n{known}\nCopy: some-long-sensitive-value\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/video-ads-vast.md"),
+            format!("{entropy}\nAlso {HEX_TOKEN}\n"),
+        )
+        .unwrap();
+        let audit = audit_docs_writes(root, &sensitive, &before).await.unwrap();
+        assert_eq!(audit.rejections.len(), 1, "{:?}", audit.rejections);
+        assert!(matches!(
+            audit.rejections[0].1,
+            SecretRejection::SensitiveFileSubstring { line: 3, .. }
+        ));
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/video-ads-vast.md".to_string(), vec![2])]
         );
     }
 
