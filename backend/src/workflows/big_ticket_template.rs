@@ -287,6 +287,7 @@ fn blank_agent_settings() -> AgentSettings {
         reasoning_effort: None,
         max_tokens: None,
         connection_id: None,
+        chrome: None,
     }
 }
 
@@ -444,6 +445,7 @@ fn build_triage_step(agent: AgentType, ticket_ref: &str, reviewer: AgentType) ->
         reasoning_effort: None,
         max_tokens: None,
         connection_id: None,
+        chrome: None,
     });
     s.stall_timeout_secs = Some(900);
     s.retry = agent_retry();

@@ -1926,6 +1926,21 @@ pub struct AgentSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub fallback: Option<Vec<AgentFallback>>,
+    /// The step drives the owner's Chrome through the Claude in Chrome
+    /// extension (`claude --chrome`, tools `mcp__claude-in-chrome__*`): logged-in
+    /// sessions, real network, real console. Claude Code Agent steps only. The
+    /// extension is attached to one browser, so Kronn runs one such step at a
+    /// time across every run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub chrome: Option<bool>,
+}
+
+impl AgentSettings {
+    /// Whether the step asked for the owner's Chrome.
+    pub fn uses_chrome(settings: Option<&Self>) -> bool {
+        settings.and_then(|s| s.chrome).unwrap_or(false)
+    }
 }
 
 /// What a workflow Agent step may call (KT-908). Both lists empty = no tool.

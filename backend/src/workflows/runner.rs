@@ -6188,6 +6188,7 @@ mod tests {
             reasoning_effort: None,
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         let mut r = empty_result();
         apply_step_snapshot(&step, &mut r, None);
@@ -6208,6 +6209,7 @@ mod tests {
             reasoning_effort: None,
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         let mut r2 = empty_result();
         apply_step_snapshot(&step, &mut r2, None);

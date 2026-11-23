@@ -20,6 +20,7 @@ fn step() -> WorkflowStep {
             connection_id: None,
             reasoning_effort: None,
             max_tokens: None,
+            chrome: None,
         }),
         ..WorkflowStep::default()
     }

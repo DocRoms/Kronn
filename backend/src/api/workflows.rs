@@ -757,6 +757,14 @@ pub fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
             .validate(&s.agent)
             .map_err(|error| format!("Step « {} »: {error}", s.name))?;
     }
+    if crate::models::AgentSettings::uses_chrome(s.agent_settings.as_ref())
+        && !(matches!(s.step_type, StepType::Agent) && s.agent == AgentType::ClaudeCode)
+    {
+        return Err(format!(
+            "Step « {} »: `agent_settings.chrome` drives Chrome through Claude Code; it needs a Claude Code Agent step",
+            s.name
+        ));
+    }
     if !s.read_only_repos.is_empty() {
         if !matches!(s.step_type, StepType::Agent)
             || !matches!(s.agent, AgentType::ClaudeCode | AgentType::Codex)
@@ -8595,6 +8603,36 @@ mod tests {
         }
     }
 
+    /// `agent_settings.chrome` is saved on a Claude Code Agent step only: no
+    /// other agent or step type can drive the extension.
+    #[test]
+    fn chrome_is_saved_on_a_claude_code_agent_step_only() {
+        let chrome = |agent: AgentType, step_type: StepType| WorkflowStep {
+            agent,
+            step_type,
+            prompt_template: "recette".into(),
+            agent_settings: Some(crate::models::AgentSettings {
+                chrome: Some(true),
+                ..Default::default()
+            }),
+            ..agent_step("recette")
+        };
+        let claude = validate_step_required_fields(&chrome(AgentType::ClaudeCode, StepType::Agent));
+        assert!(
+            claude
+                .as_ref()
+                .map_or_else(|e| !e.contains("chrome"), |_| true),
+            "{claude:?}"
+        );
+        for refused in [
+            chrome(AgentType::Codex, StepType::Agent),
+            chrome(AgentType::ClaudeCode, StepType::Exec),
+        ] {
+            let error = validate_step_required_fields(&refused).unwrap_err();
+            assert!(error.contains("agent_settings.chrome"), "{error}");
+        }
+    }
+
     #[test]
     fn subwf_graph_detects_direct_and_indirect_cycle() {
         let mut g = std::collections::HashMap::new();
@@ -12421,6 +12459,7 @@ mod tests {
                 cli: cli.iter().map(|name| name.to_string()).collect(),
                 kronn_internal: kronn.iter().map(|name| name.to_string()).collect(),
             }),
+            chrome: None,
         };
         step.agent_settings = Some(tools(&[], &[]));
         validate_step_required_fields(&step).expect("tools: none");

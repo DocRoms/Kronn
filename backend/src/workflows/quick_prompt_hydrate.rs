@@ -173,6 +173,7 @@ pub async fn hydrate_step_from_quick_prompt(
                 reasoning_effort: qp_effort,
                 max_tokens: None,
                 connection_id: qp_connection,
+                chrome: None,
             });
         }
     }
@@ -459,6 +460,7 @@ mod tests {
             reasoning_effort: None,
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
@@ -546,6 +548,7 @@ mod tests {
             reasoning_effort: None,
             max_tokens: None,
             connection_id: Some("conn-on-step".to_string()),
+            chrome: None,
         });
 
         hydrate_step_from_quick_prompt(&mut step, &db, None)
@@ -573,6 +576,7 @@ mod tests {
             reasoning_effort: None,
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
@@ -584,6 +588,7 @@ mod tests {
             reasoning_effort: None,
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
@@ -609,6 +614,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
@@ -636,6 +642,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
@@ -647,6 +654,7 @@ mod tests {
             reasoning_effort: Some("low".to_string()),
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
