@@ -177,6 +177,13 @@ async fn plan(
         Surface::Worker { .. } => TurnNeeds {
             write_access: true,
             task_worker: true,
+            // KT-1991 — a generic worker builds, tests and commits: it never
+            // moves to an HTTP model. Only a prelocalised edit can be served by
+            // one, as it is launched on one in the first place. A worker whose
+            // execution is unknown is read as generic (fail closed).
+            shell: execution
+                .as_ref()
+                .is_none_or(|execution| execution.worker_scope.is_none()),
             ..Default::default()
         },
         Surface::Room => TurnNeeds {
@@ -284,7 +291,10 @@ pub(super) fn system_notice(
 ///
 /// A task worker's QUOTA refusal is left to the caller: its settlement and the
 /// campaign's own opt-in (`quota_fallback`) come first, and the chain is asked
-/// from there through [`worker_after_quota`].
+/// from there through [`worker_after_quota`]. Any other trigger (a rate limit,
+/// an outage, an authentication failure) follows the agent's chain at once.
+/// KT-1991 — on every path a task worker without a prelocalised scope asks for
+/// a shell, so its chain never moves it to an HTTP model.
 pub async fn intercept_failed_turn(
     state: &AppState,
     job: &AgentDispatchJob,
@@ -402,11 +412,29 @@ pub async fn worker_after_quota_among(
     }
 }
 
+/// What the agent's chain did with a task worker refused at launch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LaunchChain {
+    /// The execution moved to the next link.
+    Moved,
+    /// Nothing took it. `why`: the chain's own reason (« No fallback could take
+    /// over from Codex: Ollama cannot take this turn: it has no shell … »),
+    /// when a chain is configured; the caller's stop notice carries it.
+    NoLink { why: Option<String> },
+}
+
+impl LaunchChain {
+    pub fn moved(&self) -> bool {
+        matches!(self, Self::Moved)
+    }
+}
+
 /// KT-1758 — a task worker whose agent was refused at launch for good (a
 /// native ACP agent as a task worker, a missing binary): the agent's chain, the
-/// next link after the one that was refused. `Ok(true)`: the execution moved on.
-/// `Ok(false)`: nothing in the chain can take it (the stop is said in the
-/// caller's own words, in both rooms).
+/// next link after the one that was refused. [`LaunchChain::Moved`]: the
+/// execution moved on. [`LaunchChain::NoLink`]: nothing in the chain can take
+/// it (the stop is said in the caller's own words, in both rooms, with the
+/// chain's reason when there is one).
 ///
 /// `trigger` says which stop it is, which is what the room line says:
 /// [`Trigger::LaunchRefused`] for a refusal, [`Trigger::LaunchUnavailable`] for
@@ -417,20 +445,22 @@ pub async fn worker_after_launch_refusal_among(
     trigger: Trigger,
     reason: &str,
     usable: Option<Vec<AgentType>>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<LaunchChain> {
     debug_assert!(trigger.is_launch_stop());
     let Some(plan) = plan(state, job, trigger, reason, usable).await else {
-        return Ok(false);
+        return Ok(LaunchChain::NoLink { why: None });
     };
     if !matches!(plan.surface, Surface::Worker { .. }) {
-        return Ok(false);
+        return Ok(LaunchChain::NoLink { why: None });
     }
     match &plan.selection {
         Selection::Switch(_) => {
             apply_worker(state, job, &plan).await?;
-            Ok(true)
+            Ok(LaunchChain::Moved)
         }
-        Selection::Stop { .. } => Ok(false),
+        Selection::Stop { why } => Ok(LaunchChain::NoLink {
+            why: Some(why.clone()),
+        }),
     }
 }
 

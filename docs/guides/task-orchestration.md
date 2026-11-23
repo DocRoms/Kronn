@@ -226,7 +226,7 @@ Kronn derives one fixed-layout report; replay does not produce another.
 [src: file: backend/src/api/orchestration.rs:12160#has_room_publication]
 [src: file: backend/src/api/orchestration.rs:12197-12221#parent_milestones]
 [src: file: backend/src/api/orchestration.rs:10115-10139#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration_tests_up.rs:22184-22294#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration_tests_up.rs:22478-22588#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -669,12 +669,52 @@ durable child discussion that the runtime will actually execute.
 refuses a turn for a quota, a rate limit or a missing login and its agent has a
 fallback configured, Kronn reassigns the execution to that fallback in the same
 child room and worktree, and the parent room says « Task worker execution
-<id>: … → continued with … ». Two rules:
+<id>: … → continued with … ». Which refusal follows which setting:
 
-- Codex is never chosen for it: its sandbox cannot write the linked worktree's
-  git directory, so it could not merge the target, commit or deliver. The room
-  names this reason when no other fallback can take over, and you reassign
-  yourself.
+- A **quota** refusal first looks at the launch's own opt-in,
+  `quota_fallback_agents` (or the campaign's allowed agents), then at the
+  agent's chain.
+- A **rate limit**, an **outage** or an **authentication failure** follows the
+  agent's chain (Settings > Agents) at once, even when the launch named no
+  `quota_fallback_agents`.
+
+Three rules:
+
+- A generic worker (no `worker_scope`) never moves to an HTTP model (LiteLLM,
+  NVIDIA, Ollama), whether the chain offers it (KT-1991), the launch names it in
+  `quota_fallback_agents` or the campaign merely allows it (KT-2000). Such a
+  model has no shell, so it can neither build, run the tests nor commit. It is
+  skipped and the next agent is tried: a mixed list gives its CLI agent. Only a
+  prelocalised (`scoped`) worker continues on an HTTP model.
+  [src: file: backend/src/api/discussions/runtime.rs:932#needs_shell]
+  The rule covers the moves Kronn makes on its own, and the reassignment
+  itself refuses such a quota fallback, whichever step chose it. An explicit
+  choice of an HTTP agent for a generic worker, by a person or by the
+  principal (at launch, with `task_exec_reassign` or in the UI), stays
+  possible.
+  [src: file: backend/src/api/orchestration.rs:15779#QuotaFallback]
+  When nothing is left, the worker is not moved, and what follows depends on
+  the path:
+  - a **failed turn** (rate limit, outage, authentication): both rooms read the
+    chain's stop line, « Claude Code: rate limited → no fallback (No fallback
+    could take over from Claude Code: LiteLLM cannot take this turn: it has no
+    shell to build, run the tests or commit.) », then the dispatch fails and
+    the execution is `Interrupted`;
+  - a **quota refusal**: the same stop line when the agent has a chain, then the
+    execution is `Escalated` and the parent room reads « Intervention humaine
+    requise — quota épuisé … ». An HTTP agent skipped in
+    `quota_fallback_agents` is not named there;
+  - a **launch refused, or retries that ran out** (on a worker a fallback had
+    moved): the execution is `Interrupted` and both rooms read « Worker not
+    started — … », the launch's reason, the chain's own reason (« Fallback
+    chain: No fallback could take over from … it has no shell … ») and « No
+    usable fallback link is left ».
+- Codex is never chosen for it by the agent's chain: its sandbox cannot write
+  the linked worktree's git directory, so it could not merge the target, commit
+  or deliver. The room names this reason when no other fallback can take over,
+  and you reassign yourself. `quota_fallback_agents` and the campaign
+  allow-list are an explicit opt-in: a quota refusal does move a worker to
+  Codex when the launch or the campaign lists it.
 - The move lasts as long as the quota window. Once it has ended, resuming the
   execution (or the periodic quota sweep) hands it back to the worker you
   declared, and the room says « … back on its declared worker … » instead of

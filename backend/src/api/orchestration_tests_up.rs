@@ -17292,9 +17292,12 @@ async fn the_original_provider_is_not_a_fallback_even_when_its_refusal_announced
 async fn a_fallback_chain_skips_each_provider_that_has_not_reset_and_the_original() {
     let repo = init_repo();
     let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    // KT-2000 — prelocalised: Ollama, an HTTP model, may only take such a
+    // worker on a quota or launch fallback; a generic one needs a shell.
     let was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
     let state = quota_test_state(&db);
     let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
     let allowed = serde_json::to_string(&available).unwrap();
@@ -17358,9 +17361,12 @@ async fn refusals_of(db: &Database, exec_id: &str) -> Vec<String> {
 async fn two_refusals_without_a_reset_escalate_instead_of_bouncing() {
     let repo = init_repo();
     let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    // KT-2000 — prelocalised: Ollama, an HTTP model, may only take such a
+    // worker on a quota or launch fallback; a generic one needs a shell.
     let was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
     let state = quota_test_state(&db);
     let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
     let allowed = serde_json::to_string(&available).unwrap();
@@ -17445,9 +17451,12 @@ async fn two_refusals_without_a_reset_escalate_instead_of_bouncing() {
 async fn a_refusal_with_a_reset_excludes_its_provider_only_until_the_reset() {
     let repo = init_repo();
     let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    // KT-2000 — prelocalised: Ollama, an HTTP model, may only take such a
+    // worker on a quota or launch fallback; a generic one needs a shell.
     let was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
     let state = quota_test_state(&db);
     let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
     let allowed = serde_json::to_string(&available).unwrap();
@@ -18174,9 +18183,12 @@ async fn claim_when_due(
 async fn a_fallback_refused_at_spawn_fails_fast_and_the_next_link_is_tried() {
     let repo = init_repo();
     let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    // KT-2000 — prelocalised: Ollama, an HTTP model, may only take such a
+    // worker on a quota or launch fallback; a generic one needs a shell.
     let was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
     let state = quota_test_state(&db);
     let limits = default_dispatch_limits(&state).await;
     let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
@@ -18418,6 +18430,8 @@ async fn a_chain_link_refused_at_spawn_hands_the_worker_to_the_next_link_without
     let was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    // KT-1991 — an HTTP link only takes a prelocalised execution.
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
     let state = quota_test_state(&db);
     let limits = default_dispatch_limits(&state).await;
     {
@@ -18841,18 +18855,34 @@ async fn a_late_interrupt_whose_notice_fails_still_parks_the_execution() {
     .is_none());
 }
 
-/// KT-1758 — a fallback worker whose launch kept being unavailable until the
-/// retries ran out, taken over by the chain: the room line says it was
-/// unavailable N times in a row, not that it "cannot be launched as a task
-/// worker" (which is the refusal's wording).
-#[tokio::test]
-async fn the_chain_line_after_exhausted_retries_says_unavailable_not_refused() {
+/// KT-1758 — an execution the campaign's own quota fallback moved from Claude
+/// Code to Codex, whose Codex launch then stays unavailable until the retries
+/// run out. The chain that follows is Codex's own and holds only an HTTP link
+/// (Ollama). `prelocalised`: the execution has a prelocalised scope, so the
+/// HTTP link may take it (KT-1991).
+struct CodexUnavailable {
+    _repo: tempfile::TempDir,
+    db: std::sync::Arc<Database>,
+    /// The execution before it left Claude Code.
+    was: TaskExecution,
+    /// The Codex dispatch whose launch stayed unavailable.
+    dispatch: String,
+    /// The reason the runtime gave at each launch.
+    reason: &'static str,
+    /// How many times in a row it was met.
+    times: u32,
+}
+
+async fn codex_unavailable_until_the_retries_run_out(prelocalised: bool) -> CodexUnavailable {
     use crate::models::AgentFallback;
     let repo = init_repo();
     let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
-    let was = economy_claude_executions(&db, repo.path(), 1)
+    let mut was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    if prelocalised {
+        was = agent_fallback_runs::prelocalise(&db, &was.id).await;
+    }
     let state = quota_test_state(&db);
     let limits = default_dispatch_limits(&state).await;
     {
@@ -18903,6 +18933,7 @@ async fn the_chain_line_after_exhausted_retries_says_unavailable_not_refused() {
     );
     let on_codex = exec_of(&db, &was.id).await;
     assert_eq!(on_codex.worker_agent_type.as_deref(), Some("Codex"));
+    assert_eq!(on_codex.worker_scope, was.worker_scope);
     let dispatch = on_codex.dispatch_job_id.clone().unwrap();
     let bound = crate::api::discussions::runtime::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
     let reason = "Codex app-server spawn failed: connection refused";
@@ -18916,9 +18947,36 @@ async fn the_chain_line_after_exhausted_retries_says_unavailable_not_refused() {
         )
         .await;
     }
+    CodexUnavailable {
+        _repo: repo,
+        db,
+        was,
+        dispatch,
+        reason,
+        times: bound + 1,
+    }
+}
+
+/// KT-1758 — a fallback worker whose launch kept being unavailable until the
+/// retries ran out, taken over by the chain: the room line says it was
+/// unavailable N times in a row, not that it "cannot be launched as a task
+/// worker" (which is the refusal's wording). The execution is prelocalised:
+/// since KT-1991 only such an execution may move to the chain's HTTP link.
+#[tokio::test]
+async fn the_chain_line_after_exhausted_retries_says_unavailable_not_refused() {
+    let CodexUnavailable {
+        db,
+        was,
+        dispatch,
+        reason,
+        times,
+        ..
+    } = codex_unavailable_until_the_retries_run_out(true).await;
 
     let next = exec_of(&db, &was.id).await;
     assert_eq!(next.worker_agent_type.as_deref(), Some("Ollama"));
+    assert_eq!(next.worker_scope, was.worker_scope, "still prelocalised");
+    assert_ne!(next.dispatch_job_id.as_deref(), Some(dispatch.as_str()));
     let line = room_message(
         &db,
         next.parent_discussion_id.clone(),
@@ -18927,7 +18985,7 @@ async fn the_chain_line_after_exhausted_retries_says_unavailable_not_refused() {
     .await
     .expect("the parent room says the chain moved on");
     assert!(
-        line.contains(&format!("unavailable {} times in a row", bound + 1)),
+        line.contains(&format!("unavailable {times} times in a row")),
         "{line}"
     );
     assert!(line.contains(reason), "{line}");
@@ -18935,6 +18993,235 @@ async fn the_chain_line_after_exhausted_retries_says_unavailable_not_refused() {
         !line.contains("cannot be launched as a task worker"),
         "a transient stop is not a refusal: {line}"
     );
+}
+
+/// KT-1991 — the same exhausted retries on a generic execution: the chain's
+/// only link is an HTTP model, which has no shell, so nothing takes the work.
+/// The execution stays on Codex, its failed dispatch is not replaced, it is
+/// parked, and both rooms read that the launch was unavailable N times in a
+/// row, the chain's own reason (the HTTP link has no shell, KT-2000) and that
+/// no usable fallback link is left.
+#[tokio::test]
+async fn a_generic_worker_whose_retries_ran_out_is_parked_when_the_chain_holds_only_an_http_link() {
+    let CodexUnavailable {
+        db,
+        was,
+        dispatch,
+        reason,
+        times,
+        ..
+    } = codex_unavailable_until_the_retries_run_out(false).await;
+    assert!(was.worker_scope.is_none(), "a generic execution");
+
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Codex"));
+    assert_eq!(
+        after.status,
+        TaskExecutionStatus::Interrupted,
+        "parked: nothing runs it any more"
+    );
+    assert_eq!(
+        after.dispatch_job_id.as_deref(),
+        Some(dispatch.as_str()),
+        "no new dispatch"
+    );
+    let failed = dispatch_of(&db, dispatch.clone()).await;
+    assert_eq!(
+        failed.status,
+        crate::db::agent_dispatch::DispatchStatus::Failed
+    );
+    assert!(
+        failed
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("launch_unavailable: ")),
+        "{:?}",
+        failed.last_error
+    );
+    assert!(
+        room_message(
+            &db,
+            after.parent_discussion_id.clone(),
+            format!("agent-fallback:{dispatch}"),
+        )
+        .await
+        .is_none(),
+        "no move is said: none happened"
+    );
+    let child = after.sub_discussion_id.clone().expect("the worker's room");
+    // Each room in its own language: the fixture's parent room is French, the
+    // worker's room English.
+    for (room, id, title, no_link) in [
+        (
+            after.parent_discussion_id.clone(),
+            format!("worker-launch-refused:{dispatch}"),
+            "**Worker non démarré — `Codex` indisponible**",
+            "Aucun lien de repli utilisable ne reste",
+        ),
+        (
+            child,
+            format!("worker-launch-refused-child:{dispatch}"),
+            "**Worker not started — `Codex` unavailable**",
+            "No usable fallback link is left",
+        ),
+    ] {
+        let line = room_message(&db, room, id.clone())
+            .await
+            .unwrap_or_else(|| panic!("{id}: the room is told"));
+        assert!(
+            line.contains(&format!("unavailable {times} times in a row")),
+            "{id}: {line}"
+        );
+        assert!(line.contains(reason), "{id}: {line}");
+        assert!(
+            line.contains(title) && line.contains(no_link),
+            "{id}: {line}"
+        );
+        assert!(
+            line.contains(
+                "No fallback could take over from Codex: Ollama cannot take this turn: \
+                 it has no shell to build, run the tests or commit."
+            ),
+            "{id}: the chain's reason: {line}"
+        );
+        assert!(
+            !line.contains("refusé au lancement")
+                && !line.contains("cannot be launched as a task worker"),
+            "{id}: a transient stop is not a refusal: {line}"
+        );
+    }
+}
+
+/// KT-2000 — a Claude Code execution whose campaign opted into the quota
+/// fallback with `allowed` (and, when not empty, a launch that named its own
+/// `quota_fallback_agents`), refused for its quota. Returns where the quota
+/// step moved it (`None`: nowhere), the execution before and after.
+async fn quota_refusal_among(
+    prelocalised: bool,
+    allowed: &[AgentType],
+    named: &[AgentType],
+) -> (Option<AgentType>, TaskExecution, TaskExecution) {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let mut was = economy_claude_executions(&db, repo.path(), 1)
+        .await
+        .remove(0);
+    if prelocalised {
+        was = agent_fallback_runs::prelocalise(&db, &was.id).await;
+    }
+    let state = quota_test_state(&db);
+    opt_into_fallback_among(&db, &was.id, allowed).await;
+    if !named.is_empty() {
+        let (id, named) = (was.id.clone(), serde_json::to_string(named).unwrap());
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET quota_fallback_agents_json = ?2 \
+                     WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![id, named],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    let available = [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::LiteLlm,
+        AgentType::Ollama,
+    ];
+    let moved = refuse_through_the_fallback(
+        &state,
+        &db,
+        &was.id,
+        chrono::Utc::now() + chrono::Duration::hours(2),
+        &available,
+    )
+    .await;
+    let after = exec_of(&db, &was.id).await;
+    (moved, was, after)
+}
+
+/// KT-2000 — the quota step reads the same shell rule as the agent's chain
+/// (KT-1991): a generic worker is never moved to an HTTP model, whether the
+/// launch named it in `quota_fallback_agents` or the campaign merely allows it.
+/// The step finds no alternative and the execution stays where it is, so the
+/// flow goes on as when none exists (the chain, then the escalation).
+#[tokio::test]
+async fn a_quota_refusal_never_moves_a_generic_worker_to_an_http_alternative() {
+    for (case, allowed, named) in [
+        (
+            "named at launch",
+            vec![AgentType::ClaudeCode, AgentType::Codex, AgentType::LiteLlm],
+            vec![AgentType::LiteLlm],
+        ),
+        (
+            "campaign allow-list",
+            vec![AgentType::ClaudeCode, AgentType::LiteLlm, AgentType::Ollama],
+            vec![],
+        ),
+    ] {
+        let (moved, was, after) = quota_refusal_among(false, &allowed, &named).await;
+        assert!(was.worker_scope.is_none(), "{case}: a generic execution");
+        assert_eq!(moved, None, "{case}");
+        assert_eq!(
+            after.worker_agent_type.as_deref(),
+            Some("ClaudeCode"),
+            "{case}"
+        );
+        assert_eq!(after.dispatch_job_id, was.dispatch_job_id, "{case}");
+    }
+}
+
+/// KT-2000 — the HTTP candidate is skipped, not the list: the CLI agent after
+/// it takes the generic worker.
+#[tokio::test]
+async fn a_quota_refusal_moves_a_generic_worker_past_the_http_alternative_to_the_cli_one() {
+    for (case, allowed, named) in [
+        (
+            "named at launch",
+            vec![AgentType::ClaudeCode, AgentType::LiteLlm, AgentType::Codex],
+            vec![AgentType::LiteLlm, AgentType::Codex],
+        ),
+        (
+            "campaign allow-list",
+            vec![AgentType::ClaudeCode, AgentType::LiteLlm, AgentType::Codex],
+            vec![],
+        ),
+    ] {
+        let (moved, was, after) = quota_refusal_among(false, &allowed, &named).await;
+        assert_eq!(moved, Some(AgentType::Codex), "{case}");
+        assert_eq!(after.worker_agent_type.as_deref(), Some("Codex"), "{case}");
+        assert_ne!(after.dispatch_job_id, was.dispatch_job_id, "{case}");
+    }
+}
+
+/// KT-2000 — a prelocalised worker asks for no shell: its HTTP alternative
+/// still takes it on a quota refusal.
+#[tokio::test]
+async fn a_quota_refusal_still_moves_a_prelocalised_worker_to_an_http_alternative() {
+    for (case, allowed, named) in [
+        (
+            "named at launch",
+            vec![AgentType::ClaudeCode, AgentType::Codex, AgentType::LiteLlm],
+            vec![AgentType::LiteLlm],
+        ),
+        (
+            "campaign allow-list",
+            vec![AgentType::ClaudeCode, AgentType::LiteLlm],
+            vec![],
+        ),
+    ] {
+        let (moved, was, after) = quota_refusal_among(true, &allowed, &named).await;
+        assert!(was.worker_scope.is_some(), "{case}: prelocalised");
+        assert_eq!(moved, Some(AgentType::LiteLlm), "{case}");
+        assert_eq!(
+            after.worker_agent_type.as_deref(),
+            Some("LiteLlm"),
+            "{case}"
+        );
+        assert_eq!(after.worker_scope, was.worker_scope, "{case}");
+    }
 }
 
 /// KT-1758 — a person's choice of a CLI session as the worker ends the
@@ -19198,9 +19485,12 @@ async fn a_transient_missing_binary_after_the_return_or_a_human_choice_is_retrie
 async fn a_fallback_whose_binary_is_missing_moves_on_to_the_next_link() {
     let repo = init_repo();
     let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    // KT-2000 — prelocalised: Ollama, an HTTP model, may only take such a
+    // worker on a quota or launch fallback; a generic one needs a shell.
     let was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
     let state = quota_test_state(&db);
     let limits = default_dispatch_limits(&state).await;
     let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
@@ -19317,9 +19607,12 @@ async fn a_preflight_refusal_reaches_the_next_link_only_when_it_is_a_task_worker
     // A task-worker route refusal, through the same channel, on a fresh worker.
     let repo = init_repo();
     let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    // KT-2000 — prelocalised: Ollama, an HTTP model, may only take such a
+    // worker on a quota or launch fallback; a generic one needs a shell.
     let was = economy_claude_executions(&db, repo.path(), 1)
         .await
         .remove(0);
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
     let state = quota_test_state(&db);
     let limits = default_dispatch_limits(&state).await;
     opt_into_fallback_among(&db, &was.id, &available).await;

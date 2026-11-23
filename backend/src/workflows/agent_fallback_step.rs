@@ -47,6 +47,7 @@ fn needs_of(step: &WorkflowStep, agents: &AgentsConfig) -> TurnNeeds {
         // write; a read-only agent's step is not asked to.
         write_access: agents.full_access_for(&step.agent),
         task_worker: false,
+        shell: false,
         image_input: false,
         long_context: false,
     }

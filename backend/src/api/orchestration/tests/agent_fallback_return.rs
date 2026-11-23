@@ -2,6 +2,7 @@
 //! the linked worktree's git dir), and a fallback taken for a quota window is
 //! temporary: the first resume after the window goes back to the declared worker.
 
+use super::agent_fallback_runs::prelocalise;
 use super::*;
 use crate::api::discussions::agent_fallback::worker_after_quota_among;
 use crate::core::agent_fallback as fallback;
@@ -49,6 +50,19 @@ async fn the_economy_worker() -> (
         .await
         .remove(0);
     let job = dispatch_of(&db, was.dispatch_job_id.clone().unwrap()).await;
+    (repo, db, was, job)
+}
+
+/// KT-1991 — a generic worker never moves to an HTTP link: the tests of a move
+/// onto one start from a prelocalised execution.
+async fn the_prelocalised_economy_worker() -> (
+    tempfile::TempDir,
+    std::sync::Arc<Database>,
+    TaskExecution,
+    crate::db::agent_dispatch::AgentDispatchJob,
+) {
+    let (repo, db, was, job) = the_economy_worker().await;
+    let was = prelocalise(&db, &was.id).await;
     (repo, db, was, job)
 }
 
@@ -120,7 +134,7 @@ async fn codex_is_refused_as_a_task_worker_fallback_and_the_room_says_why() {
 
 #[tokio::test]
 async fn a_resume_after_the_fallback_window_goes_back_to_the_declared_worker_and_says_so() {
-    let (_repo, db, was, job) = the_economy_worker().await;
+    let (_repo, db, was, job) = the_prelocalised_economy_worker().await;
     let state = state_with_chain(&db, link(AgentType::Ollama));
     assert!(
         worker_after_quota_among(&state, &job, CLAUDE_LIMIT, Some(usable()))
@@ -181,7 +195,7 @@ async fn a_resume_after_the_fallback_window_goes_back_to_the_declared_worker_and
 
 #[tokio::test]
 async fn a_resume_while_the_fallback_window_is_open_stays_on_the_fallback() {
-    let (_repo, db, was, job) = the_economy_worker().await;
+    let (_repo, db, was, job) = the_prelocalised_economy_worker().await;
     let state = state_with_chain(&db, link(AgentType::Ollama));
     assert!(
         worker_after_quota_among(&state, &job, CLAUDE_LIMIT, Some(usable()))
@@ -271,7 +285,7 @@ async fn a_native_acp_agent_is_never_picked_for_a_worker_and_both_rooms_say_why(
 
 #[tokio::test]
 async fn the_walk_goes_past_a_refused_agent_to_an_http_link_built_as_a_discussion_agent() {
-    let (_repo, db, was, job) = the_economy_worker().await;
+    let (_repo, db, was, job) = the_prelocalised_economy_worker().await;
     let mut config = crate::core::config::default_config();
     config.agents.claude_code.fallback_chain =
         vec![link(AgentType::GeminiCli), link(AgentType::Ollama)];
@@ -319,6 +333,85 @@ async fn a_refused_reassignment_is_refused_before_anything_moves() {
         exec_of(&db, &was.id).await.worker_agent_type.as_deref(),
         Some("ClaudeCode")
     );
+}
+
+// ─── KT-2000 — the reassignment boundary refuses a Kronn-made move to no shell ─
+
+async fn reassign_to_ollama(
+    state: &AppState,
+    exec_id: &str,
+    cause: crate::api::orchestration::ReassignCause,
+) -> anyhow::Result<crate::api::orchestration::ExecutionRecoveryView> {
+    crate::api::orchestration::reassign_native_execution_as(
+        state,
+        exec_id,
+        crate::models::CampaignWorkerSelection {
+            target: fallback::task_worker_target(&AgentType::Ollama),
+            model: None,
+            profile_id: None,
+        },
+        "test",
+        cause,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_quota_fallback_of_a_generic_worker_to_an_http_agent_is_refused_at_the_boundary() {
+    let (_repo, db, was, _job) = the_economy_worker().await;
+    assert!(was.worker_scope.is_none(), "a generic worker");
+    let state = state_with_chain(&db, link(AgentType::ClaudeCode));
+    let error = reassign_to_ollama(
+        &state,
+        &was.id,
+        crate::api::orchestration::ReassignCause::QuotaFallback { reset_at: None },
+    )
+    .await
+    .err()
+    .expect("Kronn never moves a generic worker to an agent without a shell")
+    .to_string();
+    assert!(error.contains(fallback::NO_SHELL), "{error}");
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(
+        after.worker_agent_type, was.worker_agent_type,
+        "same worker"
+    );
+    assert_eq!(after.worker_target_kind, was.worker_target_kind);
+    assert_eq!(after.dispatch_job_id, was.dispatch_job_id, "same dispatch");
+    assert_eq!(after.status, was.status, "same status");
+}
+
+#[tokio::test]
+async fn a_quota_fallback_of_a_prelocalised_worker_to_an_http_agent_passes_the_boundary() {
+    let (_repo, db, was, _job) = the_prelocalised_economy_worker().await;
+    let state = state_with_chain(&db, link(AgentType::ClaudeCode));
+    reassign_to_ollama(
+        &state,
+        &was.id,
+        crate::api::orchestration::ReassignCause::QuotaFallback { reset_at: None },
+    )
+    .await
+    .expect("a prelocalised edit can be served over HTTP");
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
+    assert_ne!(after.dispatch_job_id, was.dispatch_job_id, "a new dispatch");
+}
+
+#[tokio::test]
+async fn a_person_may_still_move_a_generic_worker_to_an_http_agent() {
+    let (_repo, db, was, _job) = the_economy_worker().await;
+    assert!(was.worker_scope.is_none(), "a generic worker");
+    let state = state_with_chain(&db, link(AgentType::ClaudeCode));
+    reassign_to_ollama(
+        &state,
+        &was.id,
+        crate::api::orchestration::ReassignCause::Human,
+    )
+    .await
+    .expect("a person's choice is theirs, as at launch");
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
+    assert_ne!(after.dispatch_job_id, was.dispatch_job_id, "a new dispatch");
 }
 
 #[tokio::test]
