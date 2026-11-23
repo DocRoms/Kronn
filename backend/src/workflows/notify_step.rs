@@ -29,11 +29,39 @@ const RESPONSE_EXCERPT_LIMIT: usize = 512;
 
 /// A webhook's credentials: its header values, its query values and the
 /// path segments after the first (Slack-style tokens live there).
+/// `path_segments()` yields each segment as serialised (`sec^ret` is
+/// `sec%5Eret` since url 2.5.9): the decoded segment, the token a server
+/// echoes back, is registered too. So is the user info, both as serialised
+/// and decoded: the password always, each form of the user name from
+/// [`MIN_ANYWHERE_LEN`](crate::core::secret_scrub::MIN_ANYWHERE_LEN) bytes
+/// (gated on its own length: `ab%5E%3A` is 8 bytes, decoded 4). Each query
+/// value is registered form-decoded (`query_pairs()`, a `+` read as a space),
+/// as written in the query and percent-decoded, the token as a server
+/// echoes it (`AbC+dEf/ghIJ==`); a pair with no `=` is a value whole
+/// (`?SecretTokenWithoutEquals`), as written, percent-decoded and
+/// form-decoded (`AbC+dEf` read as `AbC dEf`), and a value holding `;` adds
+/// its pieces (`AbC+dEf/ghIJ==;v=1`: the token, not `v=1`; `v=1;token=…`:
+/// the token after the later piece's `=`). A path segment holding `;`
+/// (`AbCdEf123456;v=1`) adds its pieces from 8 bytes. An `Authorization:
+/// Basic` value adds the password and `user:password` it decodes to.
 fn notify_secrets(
     url: &reqwest::Url,
     headers: &std::collections::HashMap<String, String>,
 ) -> crate::core::secret_scrub::SecretSet {
+    use crate::core::secret_scrub::{
+        add_basic_authorization, add_semicolon_pieces, bare_query_tokens, literal_query_values,
+        percent_decode, MIN_ANYWHERE_LEN,
+    };
     let mut set = crate::core::secret_scrub::SecretSet::new();
+    if let Some(password) = url.password() {
+        set.add(password);
+        set.add(&percent_decode(password));
+    }
+    for user in [url.username().to_string(), percent_decode(url.username())] {
+        if user.len() >= MIN_ANYWHERE_LEN {
+            set.add(&user);
+        }
+    }
     for (name, value) in headers {
         if ["content-type", "accept"]
             .iter()
@@ -45,14 +73,29 @@ fn notify_secrets(
         if let Some((_, token)) = value.split_once(' ') {
             set.add(token);
         }
+        add_basic_authorization(&mut set, value);
     }
     for (_, value) in url.query_pairs() {
         set.add(&value);
+        add_semicolon_pieces(&mut set, &value, 0);
+    }
+    for value in literal_query_values(url) {
+        set.add(value);
+        set.add(&percent_decode(value));
+        add_semicolon_pieces(&mut set, value, 0);
+    }
+    for token in bare_query_tokens(url) {
+        set.add(&token);
     }
     for segment in url.path_segments().into_iter().flatten().skip(1) {
-        if segment.len() >= crate::core::secret_scrub::MIN_ANYWHERE_LEN {
+        if segment.len() >= MIN_ANYWHERE_LEN {
             set.add(segment);
+            let decoded = percent_decode(segment);
+            if decoded.len() >= MIN_ANYWHERE_LEN {
+                set.add(&decoded);
+            }
         }
+        add_semicolon_pieces(&mut set, segment, MIN_ANYWHERE_LEN);
     }
     set
 }
@@ -121,9 +164,15 @@ pub async fn execute_notify_step_with_policy(
             )
         }
     };
+    // Built as soon as the URL parses, so every text this step returns goes
+    // through it: the refusals below carry a host, never a path, query or
+    // header value (`assert_public_ip`, `safe_http`'s `Blocked` reasons, a
+    // transport error printed `without_url`), so today they read the same;
+    // the scrub keeps that true if one ever carries more.
+    let secrets = notify_secrets(&parsed_url, &config.headers);
     if enforce_public_ip {
         if let Err(e) = super::api_call_security::assert_public_ip(&parsed_url).await {
-            return fail(step, start, format!("Security: {e}"));
+            return fail(step, start, secrets.scrub(&format!("Security: {e}")));
         }
     }
     // Redacted form for EVERYTHING we persist (output, summary). Webhook
@@ -192,16 +241,23 @@ pub async fn execute_notify_step_with_policy(
     .await
     {
         Ok(r) => r,
-        Err(SendError::Blocked(reason)) => return fail(step, start, format!("Security: {reason}")),
+        Err(SendError::Blocked(reason)) => {
+            return fail(step, start, secrets.scrub(&format!("Security: {reason}")))
+        }
         // SendError's Display never carries the URL, whose path may hold the
         // webhook's secret.
-        Err(error) => return fail(step, start, format!("HTTP request failed: {error}")),
+        Err(error) => {
+            return fail(
+                step,
+                start,
+                secrets.scrub(&format!("HTTP request failed: {error}")),
+            )
+        }
     };
 
     let status = response.status();
     // Scrubbed before the cut, so a secret straddling the limit cannot leave
     // a readable prefix.
-    let secrets = notify_secrets(&parsed_url, &config.headers);
     let excerpt = match response.bytes().await {
         Ok(bytes) => {
             // The whole buffered body: a window cut first could split a
@@ -824,6 +880,336 @@ mod tests {
             "{}",
             out.result.output
         );
+    }
+
+    /// KT-2007 — url 2.5.9 serialises a `^` in the path as `%5E`: the token
+    /// a server echoes back decoded must still be masked.
+    #[tokio::test]
+    async fn notify_masks_a_decoded_path_token_holding_a_caret() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string("bad token Bsec^rettoken99, retry"),
+            )
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook/T0001/Bsec^rettoken99", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        assert!(
+            !out.result.output.contains("rettoken99"),
+            "{}",
+            out.result.output
+        );
+        assert!(
+            out.result.output.contains("bad token"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    /// KT-2007 — a webhook's user info was not registered at all: a 401
+    /// body echoing the password printed it in `response_excerpt`, and the
+    /// user name with it.
+    #[tokio::test]
+    async fn notify_masks_the_webhook_user_info_a_server_echoes() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(
+                "user hookuser42 refused password Pa^ss:word77 (Pa%5Ess%3Aword77)",
+            ))
+            .mount(&server)
+            .await;
+        let hostport = server.uri().replace("http://", "");
+        let step = make_step(NotifyConfig {
+            url: format!("http://hookuser42:Pa^ss:word77@{hostport}/notify"),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        let output = &out.result.output;
+        assert!(output.contains("refused password"), "{output}");
+        for needle in ["word77", "hookuser42"] {
+            assert!(!output.contains(needle), "{needle}: {output}");
+        }
+    }
+
+    /// KT-2007 — `query_pairs()` hands a query value back form-decoded
+    /// (`AbC+dEf/ghIJ==` as `AbC dEf/ghIJ==`): a server echoing the token as
+    /// written in the webhook URL was not masked.
+    #[tokio::test]
+    async fn notify_masks_a_query_token_echoed_as_written() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string("invalid token AbC+dEf/ghIJ== (expired)"),
+            )
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook?token=AbC+dEf/ghIJ==", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        let output = &out.result.output;
+        assert!(output.contains("invalid token"), "{output}");
+        assert!(!output.to_ascii_lowercase().contains("ghij"), "{output}");
+    }
+
+    /// KT-2007 — a bare query token (no `=`) came back from `query_pairs()`
+    /// as a key with an empty value and was registered nowhere: a server
+    /// echoing it, as written or decoded, printed it in the excerpt.
+    #[tokio::test]
+    async fn notify_masks_a_bare_query_token_a_server_echoes() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string(
+                    "invalid token BareSecret%5Etoken99, decoded BareSecret^token99",
+                ),
+            )
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/notify?BareSecret%5Etoken99", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        let output = &out.result.output;
+        assert!(output.contains("invalid token"), "{output}");
+        assert!(output.contains("decoded"), "{output}");
+        assert!(!output.contains("token99"), "{output}");
+    }
+
+    /// KT-2007 — `;` splits no query value: `token=AbC+dEf/ghIJ==;v=1` was
+    /// registered glued to `;v=1`, so the token echoed alone was printed;
+    /// the short later piece `v=1` is not registered.
+    #[tokio::test]
+    async fn notify_masks_a_query_token_before_a_semicolon() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string("invalid token AbC+dEf/ghIJ== (AbC dEf/ghIJ==) with v=1"),
+            )
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook?token=AbC+dEf/ghIJ==;v=1", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        let output = &out.result.output;
+        assert!(output.contains("invalid token"), "{output}");
+        assert!(output.contains("with v=1"), "{output}");
+        assert!(!output.to_ascii_lowercase().contains("ghij"), "{output}");
+    }
+
+    /// Runs a notify step against a server answering 401 with `body`, and
+    /// returns the step's output.
+    async fn notify_output_for_401(
+        path_and_query: &str,
+        headers: HashMap<String, String>,
+        body: &str,
+    ) -> String {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(body.to_string()))
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}{path_and_query}", server.uri()),
+            method: "POST".into(),
+            headers,
+            body_template: "{}".into(),
+        });
+        execute_notify_step_with_policy(&step, &TemplateContext::new(), false)
+            .await
+            .result
+            .output
+    }
+
+    /// KT-2007 — a later `;` piece that is `key=value`
+    /// (`?v=1;token=AbC%5EdEf12345`) was registered whole: the token echoed
+    /// alone, raw or decoded, was printed. The short later piece `w=2` stays.
+    /// (The first piece, `1`, follows the notify rule for a value, no length
+    /// floor, as `?v=1&token=…` already registers it.)
+    #[tokio::test]
+    async fn notify_masks_the_value_of_a_later_key_value_piece() {
+        let output = notify_output_for_401(
+            "/hook?v=1;token=AbC%5EdEf12345;w=2",
+            HashMap::new(),
+            "invalid token AbC%5EdEf12345, decoded AbC^dEf12345, with w=2",
+        )
+        .await;
+        assert!(output.contains("invalid token"), "{output}");
+        assert!(output.contains("with w=2"), "{output}");
+        assert!(!output.contains("dEf12345"), "{output}");
+    }
+
+    /// KT-2007 — a bare query token was registered as written and
+    /// percent-decoded, not form-decoded: a server reading the query as a
+    /// form echoes `AbC dEf/ghIJkl` (the `+` read as a space).
+    #[tokio::test]
+    async fn notify_masks_a_bare_query_token_echoed_form_decoded() {
+        let output = notify_output_for_401(
+            "/notify?AbC+dEf/ghIJkl",
+            HashMap::new(),
+            "invalid token AbC dEf/ghIJkl",
+        )
+        .await;
+        assert!(output.contains("invalid token"), "{output}");
+        assert!(!output.contains("ghIJkl"), "{output}");
+    }
+
+    /// KT-2007 — a path token followed by matrix parameters
+    /// (`/hook/AbCdEf123456;v=1`) was registered glued to `;v=1`: the token
+    /// echoed alone was printed. `v=1` is under 8 bytes and stays.
+    #[tokio::test]
+    async fn notify_masks_a_path_token_before_a_semicolon() {
+        let output = notify_output_for_401(
+            "/hook/AbCdEf123456;v=1;sig=Sig%5Enature99",
+            HashMap::new(),
+            "bad token AbCdEf123456 (sig Sig^nature99) with v=1",
+        )
+        .await;
+        assert!(output.contains("bad token"), "{output}");
+        assert!(output.contains("with v=1"), "{output}");
+        assert!(!output.contains("AbCdEf123456"), "{output}");
+        assert!(!output.contains("nature99"), "{output}");
+    }
+
+    /// KT-2007 — `Authorization: Basic` was registered as the header value
+    /// and its base64 text, not decoded: a 401 echoing the password, or
+    /// `user:password`, printed it. The scheme is matched in any case.
+    #[tokio::test]
+    async fn notify_masks_the_password_of_a_basic_authorization_header() {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode("hookuser:Pa^ssword7");
+        for scheme in ["Basic", "basic"] {
+            let headers =
+                HashMap::from([("Authorization".to_string(), format!("{scheme} {encoded}"))]);
+            let output = notify_output_for_401(
+                "/notify",
+                headers,
+                "invalid password Pa^ssword7 for hookuser:Pa^ssword7",
+            )
+            .await;
+            assert!(output.contains("invalid password"), "{output}");
+            assert!(!output.contains("ssword7"), "{scheme}: {output}");
+        }
+    }
+
+    /// KT-2007 — the send failures and the public-IP refusal now go through
+    /// the webhook's set. They carry a host, never a path, query or header
+    /// value, so with ordinary secrets they read exactly as before.
+    #[tokio::test]
+    async fn notify_failures_read_the_same_through_the_scrub() {
+        let headers = HashMap::from([(
+            "Authorization".to_string(),
+            "Bearer HookBearerToken99".to_string(),
+        )]);
+        let secret_tail = "/services/T0001/Bsec%5Erettoken99?token=QueryToken%5E99";
+        // The public-IP refusal: the same text as the check's own error.
+        let url = format!("http://127.0.0.1:9{secret_tail}");
+        let step = make_step(NotifyConfig {
+            url: url.clone(),
+            method: "POST".into(),
+            headers: headers.clone(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), true).await;
+        let refusal = crate::workflows::api_call_security::assert_public_ip(
+            &reqwest::Url::parse(&url).unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(out.result.output, format!("Security: {refusal}"));
+        // A transport error (nothing listens on that port).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let step = make_step(NotifyConfig {
+            url: format!("http://127.0.0.1:{port}{secret_tail}"),
+            method: "POST".into(),
+            headers,
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        let output = &out.result.output;
+        assert!(output.starts_with("HTTP request failed: "), "{output}");
+        assert!(!output.contains("***"), "{output}");
+        // A `Blocked` reason (a redirect to a non-public address).
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+            )
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}{secret_tail}", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        assert_eq!(
+            out.result.output,
+            "Security: redirect refused: refusing to call a non-public address (169.254.169.254)"
+        );
+    }
+
+    /// KT-2007 — the serialised user name was registered only when the
+    /// decoded one was 8 bytes or more: `ab%5E%3A` (8 bytes, decoded `ab^:`,
+    /// 4) was registered in neither form.
+    #[tokio::test]
+    async fn notify_masks_a_serialised_user_name_on_its_own_length() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("user ab%5E%3A refused"))
+            .mount(&server)
+            .await;
+        let hostport = server.uri().replace("http://", "");
+        let step = make_step(NotifyConfig {
+            url: format!("http://ab%5E%3A@{hostport}/notify"),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        let output = &out.result.output;
+        assert!(output.contains("refused"), "{output}");
+        assert!(!output.contains("ab%5E%3A"), "{output}");
     }
 
     #[tokio::test]

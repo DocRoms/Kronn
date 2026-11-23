@@ -186,6 +186,12 @@ async fn execute_core_gated(
     // so errors, the summary and the success output share one complete set.
     let mut outcome =
         execute_core_unscrubbed(step, plugin, env, ctx, policy, &mut secrets, gate).await;
+    // The output of a failed step only describes the call: it also loses the
+    // path segments of a URL secret (see `diagnostic_secrets`). The data of a
+    // successful one keeps them; its summary was scrubbed with them already.
+    if outcome.result.status != RunStatus::Success {
+        secrets.extend(&url_path_secrets(plugin, env));
+    }
     // Every byte the step hands on (success JSON, summary, error) loses the
     // credentials this call resolved, in every wire form.
     outcome.result.output = secrets.scrub(&outcome.result.output);
@@ -207,15 +213,7 @@ pub fn call_secrets(
     let Some(spec) = plugin.api_spec.as_ref() else {
         return set;
     };
-    let trusted = matches!(plugin.source, McpSource::Registry);
-    for (key, value) in env {
-        // `__token_error__` and friends carry a diagnostic, not a credential.
-        if key.starts_with("__") && key.ends_with("_error__") {
-            continue;
-        }
-        if is_public_config(spec, trusted, key, value) {
-            continue;
-        }
+    for value in masked_env_values(plugin, env) {
         set.add(value);
         add_url_parts(&mut set, value);
     }
@@ -234,28 +232,157 @@ pub fn call_secrets(
     set
 }
 
+/// The env values of this call that are secrets: all of them, except a
+/// diagnostic (`__token_error__` and friends) and public configuration (see
+/// [`is_public_config`]).
+fn masked_env_values<'a>(plugin: &McpServer, env: &'a HashMap<String, String>) -> Vec<&'a str> {
+    let Some(spec) = plugin.api_spec.as_ref() else {
+        return Vec::new();
+    };
+    let trusted = matches!(plugin.source, McpSource::Registry);
+    env.iter()
+        .filter(|(key, _)| !(key.starts_with("__") && key.ends_with("_error__")))
+        .filter(|(key, value)| !is_public_config(spec, trusted, key, value))
+        .map(|(_, value)| value.as_str())
+        .collect()
+}
+
+/// [`call_secrets`] for the text that only describes a call: an HTTP error
+/// excerpt, a transport error, the summary line, the logged error and the
+/// whole output of a step that failed. It adds [`url_path_secrets`]: a
+/// server answering « bad token Bsec^rettoken99 » to a webhook base URL
+/// echoes one path segment alone.
+///
+/// Not for the data a successful call hands to the next step: there a path
+/// segment's word (`services`, `customers`) is ordinary data, and masking it
+/// would rewrite the payload. A 2xx body that echoes a path token alone is
+/// handed on as it is; the remedy is a bare origin in the env value and the
+/// path in the endpoint.
+pub fn diagnostic_secrets(
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+) -> crate::core::secret_scrub::SecretSet {
+    let mut set = call_secrets(plugin, env);
+    set.extend(&url_path_secrets(plugin, env));
+    set
+}
+
+/// The path segments of every masked env value that is a URL with a path (a
+/// webhook URL used as a base URL), serialised as `url` hands them back and
+/// decoded, each form only from
+/// [`MIN_ANYWHERE_LEN`](crate::core::secret_scrub::MIN_ANYWHERE_LEN) bytes on
+/// its own length (`T0001` would mask every such token of an error). A
+/// segment holding `;` (matrix parameters, `AbCdEf123456;v=1`) also adds its
+/// pieces, each from the same 8 bytes (see
+/// [`add_semicolon_pieces`](crate::core::secret_scrub::add_semicolon_pieces)).
+fn url_path_secrets(
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+) -> crate::core::secret_scrub::SecretSet {
+    use crate::core::secret_scrub::{add_semicolon_pieces, percent_decode, MIN_ANYWHERE_LEN};
+    let mut set = crate::core::secret_scrub::SecretSet::new();
+    for value in masked_env_values(plugin, env) {
+        let Ok(url) = Url::parse(value.trim()) else {
+            continue;
+        };
+        for segment in url.path_segments().into_iter().flatten() {
+            for form in [segment.to_string(), percent_decode(segment)] {
+                if form.len() >= MIN_ANYWHERE_LEN {
+                    set.add(&form);
+                }
+            }
+            add_semicolon_pieces(&mut set, segment, MIN_ANYWHERE_LEN);
+        }
+    }
+    set
+}
+
 /// A masked value that parses as a URL (`http:user:SECRET@host`,
 /// `http:host?token=SECRET`) is rewritten by the URL normalisation in the
-/// request line the summary prints (`http://user:SECRET@host/`), so the raw
+/// request line the summary prints (`http://host/?token=SECRET`), so the raw
 /// text no longer matches: its user info, query, fragment and normalised form
-/// are secrets too.
+/// are secrets too. `url` hands those parts back serialised (a `^` or `:` in
+/// a password comes back escaped): each is added decoded as well, the value a
+/// server would echo, and so is each query pair's value, a server echoing one
+/// token rather than the whole query: form-decoded (`query_pairs()`, a `+`
+/// read as a space), as written in the query (`AbC+dEf/ghIJ==`) and
+/// percent-decoded; a pair with no `=` is a value whole (`?a=1&SecretToken`),
+/// also form-decoded (`?AbC+dEf/ghIJkl` read as `AbC dEf/ghIJkl`), and a
+/// value holding `;` adds its pieces (`AbC+dEf/ghIJ==;v=1`, and the value of
+/// a later `key=value` piece, `v=1;token=…`). Every part but the password,
+/// raw or decoded (the whole query, the fragment, the user name, a pair value
+/// or piece), is added only from
+/// [`MIN_ANYWHERE_LEN`](crate::core::secret_scrub::MIN_ANYWHERE_LEN) bytes on
+/// its own length (`?ok`, `#id`, `%7B%7D` decoded to `{}`, `v=1`, a user name
+/// `user`: masked as whole tokens they would break the JSON handed to the
+/// next step); the password is a credential whatever its length. The whole
+/// URL value is still registered, so the request line hides it. The path
+/// segments are left to [`diagnostic_secrets`].
+///
+/// Limits: a part is split on `/`, `&`, `=` and `;` only, so a token glued
+/// to other text by any other character (`,`, `|`, `:`) is masked only with
+/// that text; a part under 8 bytes is not masked alone (the password
+/// excepted); and a non-secret query value of 8 bytes or more
+/// (`?mode=production&token=…`) is masked in the data handed on too, since a
+/// value cannot tell which pair is the credential: keep a bare origin in the
+/// env value and the parameters in the endpoint.
 fn add_url_parts(set: &mut crate::core::secret_scrub::SecretSet, value: &str) {
+    use crate::core::secret_scrub::{
+        add_semicolon_pieces, bare_query_tokens, literal_query_values, percent_decode,
+        MIN_ANYWHERE_LEN,
+    };
     let Ok(url) = Url::parse(value.trim()) else {
         return;
     };
-    for part in [
-        Some(url.username()),
-        url.password(),
-        url.query(),
-        url.fragment(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        set.add(part);
+    if let Some(password) = url.password() {
+        set.add(password);
+        set.add(&percent_decode(password));
+    }
+    // A short user name (`user`) masked as a whole token would rewrite every
+    // `"user"` key of the JSON handed on: each form is gated on its own length.
+    for form in [url.username().to_string(), percent_decode(url.username())] {
+        if form.len() >= MIN_ANYWHERE_LEN {
+            set.add(&form);
+        }
+    }
+    // A short whole query or fragment (`?ok`, `#id`) masked as a whole token
+    // would rewrite every `"id"` key handed on: each form on its own length.
+    for part in [url.query(), url.fragment()].into_iter().flatten() {
+        for form in [part.to_string(), percent_decode(part)] {
+            if form.len() >= MIN_ANYWHERE_LEN {
+                set.add(&form);
+            }
+        }
+    }
+    for token in bare_query_tokens(&url) {
+        if token.len() >= MIN_ANYWHERE_LEN {
+            set.add(&token);
+        }
+    }
+    for (_, pair_value) in url.query_pairs() {
+        if pair_value.len() >= MIN_ANYWHERE_LEN {
+            set.add(&pair_value);
+        }
+        add_semicolon_pieces(set, &pair_value, MIN_ANYWHERE_LEN);
+    }
+    for literal in literal_query_values(&url) {
+        for value in [literal.to_string(), percent_decode(literal)] {
+            if value.len() >= MIN_ANYWHERE_LEN {
+                set.add(&value);
+            }
+        }
+        add_semicolon_pieces(set, literal, MIN_ANYWHERE_LEN);
     }
     if url.has_host() {
         set.add(url.as_str().trim_end_matches('/'));
+        // `build_url` calls `query_pairs_mut()`, which gives a URL with a
+        // fragment and no query an empty one: `https://h/v1#id` is sent and
+        // printed `https://h/v1?#id/items`. Registered in that form too, so
+        // the request line hides the whole value even when its fragment is
+        // too short to be masked alone.
+        let mut built = url.clone();
+        built.query_pairs_mut();
+        set.add(built.as_str().trim_end_matches('/'));
     }
 }
 
@@ -383,7 +510,6 @@ fn auth_env_keys(auth: &ApiAuthKind) -> Vec<&str> {
 }
 
 fn add_resolved_auth(set: &mut crate::core::secret_scrub::SecretSet, auth: &ResolvedAuth) {
-    use base64::Engine as _;
     if let Some(bearer) = &auth.bearer {
         set.add(bearer);
     }
@@ -394,16 +520,7 @@ fn add_resolved_auth(set: &mut crate::core::secret_scrub::SecretSet, auth: &Reso
                 set.add(token);
             }
         }
-        if let Some(encoded) = value.strip_prefix("Basic ") {
-            set.add(encoded);
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(encoded.trim())
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok());
-            if let Some((user, password)) = decoded.as_deref().and_then(|d| d.split_once(':')) {
-                set.add_basic(user, password);
-            }
-        }
+        crate::core::secret_scrub::add_basic_authorization(set, value);
     }
 }
 
@@ -566,10 +683,14 @@ async fn execute_core_unscrubbed(
     };
     // Default headers rendered into `auth` may hold more credentials.
     add_resolved_auth(secrets, &auth);
+    // Error excerpts, transport errors and the summary only describe the
+    // call: they also lose the path segments of a URL secret.
+    let mut diagnostics = secrets.clone();
+    diagnostics.extend(&url_path_secrets(plugin, env));
     let transport = ApiTransport {
         client,
         gate,
-        secrets: secrets.clone(),
+        secrets: diagnostics.clone(),
         pinned_base: if policy.enforce_host_match {
             Url::parse(&resolved_base_url).ok()
         } else {
@@ -636,6 +757,8 @@ async fn execute_core_unscrubbed(
             None => summarize(&extract_out.value, &full_url, method.as_str()),
         },
     };
+    // Scrubbed before it joins the data, which keeps its path-segment words.
+    let summary = diagnostics.scrub(&summary);
 
     // 0.8.5 — emit the canonical Kronn step-output envelope (markers +
     // signal) via `format_step_output`. Pre-fix this site emitted a
@@ -839,7 +962,7 @@ pub async fn execute_api_call_probe(
     .await;
     // The probe parses its raw failure text: it records the connection's
     // auth state (a "Test" that gets a 401 flags it) without annotating.
-    let secrets = call_secrets(plugin, env);
+    let secrets = diagnostic_secrets(plugin, env);
     super::api_auth_failure::track_outcome(state, plugin, config_id, &mut outcome, &secrets, false)
         .await;
     outcome
@@ -901,11 +1024,17 @@ async fn execute_api_call_step_with_db_inner(
     let gate = match crate::core::api_access::enforce(state, &plugin, step, &env, ctx, caller).await
     {
         Ok(gate) => gate,
-        Err(refusal) => return fail(step, start, call_secrets(&plugin, &env).scrub(&refusal)),
+        Err(refusal) => {
+            return fail(
+                step,
+                start,
+                diagnostic_secrets(&plugin, &env).scrub(&refusal),
+            )
+        }
     };
 
     let config_id = step.api_config_id.clone().unwrap_or_default();
-    let secrets = call_secrets(&plugin, &env);
+    let secrets = diagnostic_secrets(&plugin, &env);
     let mut outcome = execute_with_token_refresh(
         step,
         &plugin,
@@ -1969,7 +2098,7 @@ pub async fn execute_watch_poll(
         &caller,
     )
     .await
-    .map_err(|refusal| call_secrets(&plugin, &env).scrub(&refusal))?;
+    .map_err(|refusal| diagnostic_secrets(&plugin, &env).scrub(&refusal))?;
     let config_id = step.api_config_id.clone().unwrap_or_default();
     tracing::debug!(
         workflow_id = %request.workflow.id,
@@ -2031,13 +2160,18 @@ async fn poll_scrubbed(
     let outcome =
         watch_poll_unscrubbed(step, plugin, env, policy, request, gate, &mut secrets).await;
     match outcome {
+        // The body is data the watch hands on: the call set only.
         Ok(response) => Ok(WatchPollResponse {
             status: response.status,
             etag: response.etag.map(|v| secrets.scrub(&v)),
             last_modified: response.last_modified.map(|v| secrets.scrub(&v)),
             body: response.body.map(|v| secrets.scrub(&v)),
         }),
-        Err(error) => Err(secrets.scrub(&error)),
+        // An error only describes the poll (see `diagnostic_secrets`).
+        Err(error) => {
+            secrets.extend(&url_path_secrets(plugin, env));
+            Err(secrets.scrub(&error))
+        }
     }
 }
 
@@ -2169,7 +2303,9 @@ async fn watch_poll_unscrubbed(
             Ok(CappedBody::Whole(bytes)) => bytes,
             _ => Vec::new(),
         };
-        let excerpt = secrets.scrub(&String::from_utf8_lossy(&head));
+        let mut diagnostics = secrets.clone();
+        diagnostics.extend(&url_path_secrets(plugin, env));
+        let excerpt = diagnostics.scrub(&String::from_utf8_lossy(&head));
         return Err(format!(
             "HTTP {} on GET {} — {}",
             status.as_u16(),
@@ -2203,6 +2339,22 @@ async fn watch_poll_unscrubbed(
 }
 
 // ─── Pagination walk ────────────────────────────────────────────────────
+
+/// The two URLs the off-origin `Link: rel="next"` warning logs: through
+/// [`redact_url_query`] (a secret-named query value, the user-info password)
+/// and then the transport's set, the diagnostic one (see
+/// [`diagnostic_secrets`]), so a token in the base URL's path, under a plain
+/// query key or as its user name does not reach the backend log.
+fn off_origin_log_urls(
+    next: &Url,
+    base: &Url,
+    secrets: &crate::core::secret_scrub::SecretSet,
+) -> (String, String) {
+    (
+        secrets.scrub(&redact_url_query(next)),
+        secrets.scrub(&redact_url_query(base)),
+    )
+}
 
 /// Walks paginated responses according to `PaginationSpec` and returns a
 /// single merged `Value`. For `None` / `Auto` we issue one request and
@@ -2437,10 +2589,11 @@ async fn walk_pages(
                     && next.host() == base_url.host()
                     && next.port_or_known_default() == base_url.port_or_known_default();
                 if !same_origin {
+                    let (next, base) = off_origin_log_urls(&next, &base_url, &transport.secrets);
                     tracing::warn!(
                         target: "kronn::invariant",
                         plugin = %plugin_slug, config = %config_id,
-                        next = %redact_url_query(&next), base = %redact_url_query(&base_url),
+                        next = %next, base = %base,
                         "Link rel=next points OFF-ORIGIN — refusing to follow (auth would leak to that host)"
                     );
                     break;
@@ -2755,7 +2908,8 @@ struct ApiTransport {
     client: SafeClient,
     /// Under an access policy, every page and redirect hop is re-decided.
     gate: Option<crate::core::api_access::EndpointGate>,
-    /// Applied to error text before it is truncated.
+    /// Applied to error text before it is truncated: the diagnostic set (see
+    /// [`diagnostic_secrets`]).
     secrets: crate::core::secret_scrub::SecretSet,
     pinned_base: Option<Url>,
 }
@@ -6221,6 +6375,567 @@ mod tests {
         );
     }
 
+    /// KT-2007 — url 2.5.9 sends a raw `^` in a path as `%5E` and keeps `:`:
+    /// a secret holding both, interpolated in the base URL path, is sent in a
+    /// form that is neither raw nor fully escaped. It must not show in the
+    /// output, the summary or the logged error.
+    #[tokio::test]
+    async fn a_base_url_secret_with_a_caret_and_a_colon_is_masked_as_url_sends_it() {
+        let secret = "Kq7xBase^Url:Secret42";
+        for status in [200u16, 500] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({"echo": secret})))
+                .mount(&server)
+                .await;
+            let plugin = mk_plugin(
+                &format!("{}/v1/{{PASSWORD}}", server.uri()),
+                ApiAuthKind::None,
+                vec![mk_endpoint("GET", "/items")],
+            );
+            let env = HashMap::from([("PASSWORD".to_string(), secret.to_string())]);
+            let step = mk_step("/items");
+            let out = execute_api_call_step_core(
+                &step,
+                &plugin,
+                &env,
+                &TemplateContext::new(),
+                SecurityPolicy::allow_loopback_for_tests(),
+            )
+            .await;
+            let leaks = |text: &str| {
+                let folded = text.to_ascii_lowercase();
+                folded.contains("kq7xbase") || folded.contains("secret42")
+            };
+            let result = serde_json::to_string(&out.result).unwrap();
+            assert!(!leaks(&result), "{status}: {result}");
+            if status == 500 {
+                assert_eq!(out.result.status, RunStatus::Failed);
+                let stored = logged_error(&test_app_state(), &step, &out).await;
+                assert!(!leaks(&stored), "{stored}");
+            } else {
+                assert_eq!(out.result.status, RunStatus::Success, "{result}");
+            }
+        }
+    }
+
+    /// KT-2007 — runs `step_path` on a plugin whose base URL is
+    /// `base_template` (`{SERVER}` replaced by the URI of a wiremock
+    /// answering with `echo`, `{HOSTPORT}` by its host and port, for a
+    /// template that writes its own scheme and user info), once with a 200
+    /// and once with a 500, and returns every text the call leaves: the step
+    /// result (output, summary) and the logged error.
+    async fn texts_left_by_call(
+        base_template: &str,
+        step_path: &str,
+        env: &HashMap<String, String>,
+        echo: &str,
+    ) -> Vec<String> {
+        let mut texts = Vec::new();
+        for status in [200u16, 500] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({"echo": echo})))
+                .mount(&server)
+                .await;
+            let uri = server.uri();
+            let plugin = mk_plugin(
+                &base_template
+                    .replace("{SERVER}", &uri)
+                    .replace("{HOSTPORT}", uri.strip_prefix("http://").unwrap_or(&uri)),
+                ApiAuthKind::None,
+                vec![mk_endpoint("GET", "/items")],
+            );
+            let step = mk_step(step_path);
+            let out = execute_api_call_step_core(
+                &step,
+                &plugin,
+                env,
+                &TemplateContext::new(),
+                SecurityPolicy::allow_loopback_for_tests(),
+            )
+            .await;
+            let expected = if status == 200 {
+                RunStatus::Success
+            } else {
+                RunStatus::Failed
+            };
+            let result = serde_json::to_string(&out.result).unwrap();
+            assert_eq!(out.result.status, expected, "{result}");
+            texts.push(result);
+            if status == 500 {
+                texts.push(logged_error(&test_app_state(), &step, &out).await);
+            }
+        }
+        texts
+    }
+
+    /// KT-2007 — `build_url` trims the trailing slashes of the base URL: a
+    /// secret ending in `/` or `//` at the end of it is sent without them,
+    /// and the forms registered with them did not match the request line.
+    #[tokio::test]
+    async fn a_base_url_secret_ending_in_slashes_is_masked_as_it_is_sent() {
+        for secret in ["Kq7xBase^Url:Secret42//", "Kq7xBaseUrlSecret42/"] {
+            let env = HashMap::from([("TOKEN".to_string(), secret.to_string())]);
+            let texts = texts_left_by_call("{SERVER}/v1/{TOKEN}", "/items", &env, secret).await;
+            for text in texts {
+                let folded = text.to_ascii_lowercase();
+                for needle in ["kq7xbase", "secret42"] {
+                    assert!(!folded.contains(needle), "{secret} ({needle}): {text}");
+                }
+            }
+        }
+    }
+
+    /// KT-2007 — `url` sends a password with `@` and `:` escaped
+    /// (`P%40ss!word1`, `p+ss%3Aw0rd99`): neither the raw nor the fully
+    /// escaped form, so the request line printed the password.
+    #[tokio::test]
+    async fn a_base_url_password_is_masked_as_url_sends_it() {
+        for (secret, needle) in [("P@ss!word1", "ss!word1"), ("p+ss:w0rd99", "w0rd99")] {
+            let env = HashMap::from([("PASSWORD".to_string(), secret.to_string())]);
+            let texts = texts_left_by_call(
+                "http://user:{PASSWORD}@{HOSTPORT}/v1",
+                "/items",
+                &env,
+                secret,
+            )
+            .await;
+            for text in texts {
+                assert!(
+                    !text.to_ascii_lowercase().contains(needle),
+                    "{secret}: {text}"
+                );
+            }
+        }
+    }
+
+    /// KT-2007 — the summary printed the query decoded and form-encoded
+    /// again (`?q=AbC+dEf/ghIJ==` came out `?q=AbC+dEf%2FghIJ%3D%3D`), a form
+    /// that was never sent and that no registered form matches. Under a key
+    /// that does not look secret, only the by-value scrub masks it.
+    #[tokio::test]
+    async fn a_query_secret_under_a_plain_key_is_masked_in_the_form_it_was_sent() {
+        let cases: [(&str, &[&str]); 2] = [
+            ("AbC+dEf/ghIJ==", &["ghij"]),
+            (
+                "Abc%20def:ghi",
+                &["abc%20def", "abc+def", "abc def", "def:ghi", "def%3aghi"],
+            ),
+        ];
+        for (secret, needles) in cases {
+            let env = HashMap::from([("KEY".to_string(), secret.to_string())]);
+            let texts =
+                texts_left_by_call("{SERVER}/v1", "/items?q=${ENV.KEY}&page=2", &env, "ok").await;
+            assert!(texts[0].contains("?q=***&page=2"), "{secret}: {}", texts[0]);
+            for text in texts {
+                let folded = text.to_ascii_lowercase();
+                for needle in needles {
+                    assert!(!folded.contains(needle), "{secret} ({needle}): {text}");
+                }
+            }
+        }
+    }
+
+    /// KT-2007 — a server echoing one value of a URL secret's query (not the
+    /// whole query) is masked; a value under 8 bytes is not registered, so
+    /// `1` and the `{}` a short escape decodes to are left to the JSON.
+    #[test]
+    fn each_long_query_value_of_a_url_secret_is_masked_and_short_parts_are_not() {
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "BASE_URL".to_string(),
+            "https://%7B%7D:p%5E1@api.example.com/x?token=Sec^ret88&v=1&%7B%7D#%7B%7D".to_string(),
+        )]);
+        let set = call_secrets(&plugin, &env);
+        assert_eq!(
+            set.scrub(r#"invalid token Sec^ret88 {"v":1,"a":{}} pw p^1"#),
+            r#"invalid token *** {"v":1,"a":{}} pw ***"#
+        );
+    }
+
+    /// KT-2007 — `query_pairs()` hands a URL secret's query value back
+    /// form-decoded (`AbC dEf/ghIJ==`): a server echoing the token as written
+    /// in the env value, `AbC+dEf/ghIJ==`, was not masked.
+    #[test]
+    fn a_query_value_of_a_url_secret_echoed_as_written_is_masked() {
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "BASE_URL".to_string(),
+            "https://api.example.com/x?token=AbC+dEf/ghIJ==&v=1".to_string(),
+        )]);
+        let set = call_secrets(&plugin, &env);
+        assert_eq!(
+            set.scrub(r#"invalid token AbC+dEf/ghIJ== {"v":1}"#),
+            r#"invalid token *** {"v":1}"#
+        );
+    }
+
+    /// KT-2007 — a bare query token of a URL secret (`?a=1&Secret…`, no
+    /// `=`) was registered only inside the whole query: a 401 echoing the
+    /// token alone printed it in the excerpt, the output and the logged error.
+    #[tokio::test]
+    async fn a_bare_query_token_of_a_url_secret_echoed_alone_is_masked() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(json!({"error": "bad token SecretTokenWithoutEquals", "a": 1})),
+            )
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([
+            ("BASE_URL".to_string(), server.uri()),
+            (
+                "HOOK_URL".to_string(),
+                "https://hooks.example.com/notify?a=1&SecretTokenWithoutEquals".to_string(),
+            ),
+        ]);
+        let step = mk_step("/items");
+        let out = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        let result = serde_json::to_string(&out.result).unwrap();
+        assert_eq!(out.result.status, RunStatus::Failed, "{result}");
+        assert!(out.result.output.contains("bad token"), "{result}");
+        assert!(!result.contains("SecretTokenWithoutEquals"), "{result}");
+        let stored = logged_error(&test_app_state(), &step, &out).await;
+        assert!(!stored.contains("SecretTokenWithoutEquals"), "{stored}");
+    }
+
+    /// KT-2007 — a query value of a URL secret followed by `;`
+    /// (`token=AbC+dEf/ghIJ==;v=1`) was registered glued to `;v=1`: the
+    /// token echoed alone was not masked; the short piece `v=1` is not
+    /// registered, so the data keeps it.
+    #[test]
+    fn a_query_token_of_a_url_secret_before_a_semicolon_is_masked() {
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "BASE_URL".to_string(),
+            "https://api.example.com/x?token=AbC+dEf/ghIJ==;v=1&w=2".to_string(),
+        )]);
+        let set = call_secrets(&plugin, &env);
+        assert_eq!(
+            set.scrub(r#"invalid token AbC+dEf/ghIJ== (AbC dEf/ghIJ==) {"q":"v=1"}"#),
+            r#"invalid token *** (***) {"q":"v=1"}"#
+        );
+    }
+
+    /// KT-2007 — a later `;` piece that is `key=value`
+    /// (`?v=1;token=AbCdEf123456`) was registered whole: the token echoed
+    /// alone, raw or decoded, was not masked; `v=1` and `1` stay.
+    #[test]
+    fn a_url_secret_query_token_after_a_semicolon_key_is_masked() {
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "HOOK_URL".to_string(),
+            "https://hooks.example.com/x?v=1;token=AbC%5EdEf123456".to_string(),
+        )]);
+        let set = call_secrets(&plugin, &env);
+        assert_eq!(
+            set.scrub(r#"invalid token AbC%5EdEf123456 (AbC^dEf123456) {"q":"v=1","n":1}"#),
+            r#"invalid token *** (***) {"q":"v=1","n":1}"#
+        );
+    }
+
+    /// KT-2007 — a bare query token of a URL secret was registered as
+    /// written and percent-decoded, not form-decoded: a server reading the
+    /// query as a form echoes `AbC dEf/ghIJkl`.
+    #[test]
+    fn a_url_secret_bare_query_token_echoed_form_decoded_is_masked() {
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "HOOK_URL".to_string(),
+            "https://hooks.example.com/notify?a=1&AbC+dEf/ghIJkl".to_string(),
+        )]);
+        assert_eq!(
+            call_secrets(&plugin, &env).scrub("invalid token AbC dEf/ghIJkl"),
+            "invalid token ***"
+        );
+    }
+
+    /// KT-2007 — a path token of a URL secret followed by matrix parameters
+    /// (`AbCdEf123456;v=1`) was in the diagnostic set glued to `;v=1` only.
+    #[test]
+    fn the_diagnostic_set_splits_a_path_segment_on_semicolons() {
+        let plugin = mk_plugin(
+            "{HOOK_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "HOOK_URL".to_string(),
+            "https://hooks.example.com/hook/AbCdEf123456;v=1;sig=Sig%5Enature99".to_string(),
+        )]);
+        assert_eq!(
+            diagnostic_secrets(&plugin, &env)
+                .scrub("bad token AbCdEf123456 (sig Sig^nature99) with v=1"),
+            "bad token *** (sig ***) with v=1"
+        );
+    }
+
+    /// KT-2007 — the off-origin `Link` warning logged the base URL through
+    /// `redact_url_query` only: a path token, a value under a plain query key
+    /// and the user name reached the backend log.
+    #[test]
+    fn the_off_origin_link_warning_logs_scrubbed_urls() {
+        let plugin = mk_plugin(
+            "https://{USER}@api.example.com/bot{TOKEN}?q={QUERY}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([
+            ("USER".to_string(), "svcaccount7".to_string()),
+            ("TOKEN".to_string(), "123456:AbC^dEfToken".to_string()),
+            ("QUERY".to_string(), "PlainQueryValue99".to_string()),
+        ]);
+        let secrets = diagnostic_secrets(&plugin, &env);
+        let base = Url::parse(
+            "https://svcaccount7@api.example.com/bot123456:AbC^dEfToken?q=PlainQueryValue99",
+        )
+        .unwrap();
+        let next = Url::parse(
+            "https://evil.example.net/bot123456:AbC^dEfToken/next?q=PlainQueryValue99&page=2",
+        )
+        .unwrap();
+        let (next, base) = off_origin_log_urls(&next, &base, &secrets);
+        for logged in [&next, &base] {
+            for needle in ["svcaccount7", "dEfToken", "PlainQueryValue99"] {
+                assert!(!logged.contains(needle), "{needle}: {logged}");
+            }
+        }
+        assert!(next.starts_with("https://evil.example.net/"), "{next}");
+        assert!(next.ends_with("&page=2"), "{next}");
+    }
+
+    /// KT-2007 — the raw query and fragment of a URL secret were registered
+    /// whatever their length: `?ok` or `#id` masked every `"ok"` or `"id"`
+    /// key of the data a successful call hands on. A long query and fragment
+    /// are still masked.
+    #[test]
+    fn a_short_query_or_fragment_of_a_url_secret_leaves_the_json_keys_alone() {
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        for (value, text, expected) in [
+            (
+                "https://h.example.com/v1?ok",
+                r#"{"ok":1,"id":2}"#,
+                r#"{"ok":1,"id":2}"#,
+            ),
+            (
+                "https://h.example.com/v1#id",
+                r#"{"ok":1,"id":2}"#,
+                r#"{"ok":1,"id":2}"#,
+            ),
+            (
+                "https://h.example.com/v1?LongQuery%5E99",
+                r#"{"q":"LongQuery%5E99","d":"LongQuery^99"}"#,
+                r#"{"q":"***","d":"***"}"#,
+            ),
+            (
+                "https://h.example.com/v1#LongFragment99",
+                r#"{"f":"LongFragment99"}"#,
+                r#"{"f":"***"}"#,
+            ),
+        ] {
+            let env = HashMap::from([("HOOK_URL".to_string(), value.to_string())]);
+            assert_eq!(call_secrets(&plugin, &env).scrub(text), expected, "{value}");
+        }
+    }
+
+    /// KT-2007 — with a short query or fragment in the base URL secret, the
+    /// data of a 200 keeps its `ok` and `id` keys, and the request line of
+    /// the summary still hides the whole URL value.
+    #[tokio::test]
+    async fn a_short_query_or_fragment_base_url_keeps_the_data_and_hides_the_url() {
+        for tail in ["/v1?ok", "/v1#id"] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": 1, "id": 2})))
+                .mount(&server)
+                .await;
+            let plugin = mk_plugin(
+                "{BASE_URL}",
+                ApiAuthKind::None,
+                vec![mk_endpoint("GET", "/items")],
+            );
+            let env = HashMap::from([("BASE_URL".to_string(), format!("{}{tail}", server.uri()))]);
+            let out = execute_api_call_step_core(
+                &mk_step("/items"),
+                &plugin,
+                &env,
+                &TemplateContext::new(),
+                SecurityPolicy::allow_loopback_for_tests(),
+            )
+            .await;
+            let result = serde_json::to_string(&out.result).unwrap();
+            assert_eq!(out.result.status, RunStatus::Success, "{result}");
+            let envelope = extract_envelope(&out.result.output);
+            assert_eq!(envelope["data"], json!({"ok": 1, "id": 2}), "{result}");
+            let summary = envelope["summary"].as_str().unwrap_or_default();
+            assert!(summary.starts_with("GET ***/items"), "{tail}: {summary}");
+            assert!(!summary.contains(&server.uri()), "{tail}: {summary}");
+            assert!(!summary.contains(tail), "{tail}: {summary}");
+        }
+    }
+
+    /// KT-2007 — a short user name of a URL secret was masked as a whole
+    /// token, so every `"user"` key of the data was rewritten; a long one
+    /// and the password are still masked.
+    #[test]
+    fn a_short_user_name_of_a_url_secret_leaves_the_json_keys_alone() {
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        for (user, text, expected) in [
+            (
+                "user",
+                r#"{"user":1,"pw":"Pa^ss"}"#,
+                r#"{"user":1,"pw":"***"}"#,
+            ),
+            (
+                "%75ser",
+                r#"{"user":1,"pw":"Pa%5Ess"}"#,
+                r#"{"user":1,"pw":"***"}"#,
+            ),
+            (
+                "Longuser^99",
+                r#"{"user":"Longuser^99","sent":"Longuser%5E99","pw":"Pa^ss"}"#,
+                r#"{"user":"***","sent":"***","pw":"***"}"#,
+            ),
+        ] {
+            let env = HashMap::from([(
+                "BASE_URL".to_string(),
+                format!("https://{user}:Pa^ss@api.example.com/"),
+            )]);
+            assert_eq!(call_secrets(&plugin, &env).scrub(text), expected, "{user}");
+        }
+    }
+
+    /// KT-2007 — the diagnostic set holds the path segments of a URL secret
+    /// from 8 bytes, serialised and decoded; the call set does not.
+    #[test]
+    fn the_diagnostic_set_adds_the_long_path_segments_of_a_url_secret() {
+        let plugin = mk_plugin(
+            "{HOOK_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "HOOK_URL".to_string(),
+            "https://hooks.example.com/services/T0001/Bsec^rettoken99".to_string(),
+        )]);
+        let text = "bad token Bsec^rettoken99 / Bsec%5Erettoken99 for T0001 in services";
+        assert_eq!(
+            diagnostic_secrets(&plugin, &env).scrub(text),
+            "bad token *** / *** for T0001 in ***"
+        );
+        assert_eq!(call_secrets(&plugin, &env).scrub(text), text);
+    }
+
+    /// KT-2007 — a server answering « bad token Bsec^rettoken99 » to a
+    /// webhook base URL echoes one path segment alone: masked in everything
+    /// that describes the call (error excerpt, output of the failed step,
+    /// logged error), while the data of a 200 keeps the words of the path
+    /// (`services`) and a link built on it.
+    #[tokio::test]
+    async fn a_path_token_of_a_url_secret_echoed_alone_is_masked_in_diagnostics_only() {
+        for status in [401u16, 500, 200] {
+            let server = MockServer::start().await;
+            let uri = server.uri();
+            let body = if status == 200 {
+                json!({"kind": "services", "link": format!("{uri}/services/T0001/other")})
+            } else {
+                json!({"error": "bad token Bsec^rettoken99", "sent": "Bsec%5Erettoken99"})
+            };
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            let plugin = mk_plugin(
+                "{HOOK_URL}",
+                ApiAuthKind::None,
+                vec![mk_endpoint("GET", "/items")],
+            );
+            let env = HashMap::from([(
+                "HOOK_URL".to_string(),
+                format!("{uri}/services/T0001/Bsec^rettoken99"),
+            )]);
+            let step = mk_step("/items");
+            let out = execute_api_call_step_core(
+                &step,
+                &plugin,
+                &env,
+                &TemplateContext::new(),
+                SecurityPolicy::allow_loopback_for_tests(),
+            )
+            .await;
+            let result = serde_json::to_string(&out.result).unwrap();
+            assert!(
+                !result.to_ascii_lowercase().contains("rettoken99"),
+                "{status}: {result}"
+            );
+            if status == 200 {
+                assert_eq!(out.result.status, RunStatus::Success, "{result}");
+                let envelope = extract_envelope(&out.result.output);
+                assert_eq!(envelope["data"]["kind"], "services", "{result}");
+                assert_eq!(
+                    envelope["data"]["link"],
+                    format!("{uri}/services/T0001/other"),
+                    "{result}"
+                );
+                let summary = envelope["summary"].as_str().unwrap_or_default();
+                assert!(summary.starts_with("GET ***/items"), "{summary}");
+            } else {
+                assert_eq!(out.result.status, RunStatus::Failed, "{result}");
+                assert!(
+                    out.result.output.contains(&format!("HTTP {status}")),
+                    "{result}"
+                );
+                let stored = logged_error(&test_app_state(), &step, &out).await;
+                assert!(
+                    !stored.to_ascii_lowercase().contains("rettoken99"),
+                    "{stored}"
+                );
+            }
+        }
+    }
+
     /// KT-1249 — a Jira-shaped plugin (`{JIRA_URL}` base URL, Basic auth).
     fn jira_plugin() -> McpServer {
         let mut plugin = mk_plugin(
@@ -6454,6 +7169,26 @@ mod tests {
             assert!(!is_public_config(spec, trusted, "PLAIN", "acme"));
             assert!(!is_public_config(spec, trusted, "TENANT", "acme"));
         }
+    }
+
+    /// KT-2007 — `url` hands a password and a query back serialised: the
+    /// value a server echoes decoded must be masked too.
+    #[test]
+    fn the_decoded_password_and_query_of_a_url_secret_are_masked() {
+        let plugin = mk_plugin(
+            "{BASE_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "BASE_URL".to_string(),
+            "https://bot:Pa^ss:word77@api.example.com/x?Qu^ery'Tok88".to_string(),
+        )]);
+        let set = call_secrets(&plugin, &env);
+        assert_eq!(
+            set.scrub("echo Pa^ss:word77 and Qu^ery'Tok88"),
+            "echo *** and ***"
+        );
     }
 
     #[test]

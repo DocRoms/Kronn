@@ -848,9 +848,102 @@ credential store, wherever it lands, except the public config values (KT-1249:
 masking a base URL rewrote the links of the data handed to the next steps),
 the resolved auth (Basic decoded) and its default headers, and carries it through the success
 output, summaries, errors and the call log. Each value is masked raw,
-URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8
-characters, before truncation; shorter ones only as whole tokens. A
-successful token response is never quoted. Stored text from before this (call
+URL-encoded, hex, base64 and JSON-escaped, and in the forms the `url` crate
+itself gives it written raw in a path (alone and glued inside a segment, whose
+dot segments resolve differently), in a raw query, as a form-encoded query
+value, after a query round trip (`query_pairs()` written back by
+`query_pairs_mut()`, as `strip_query_keys` does on a cross-origin redirect and
+link-header pagination does: `AbC+dEf/ghIJ==` is resent
+`AbC+dEf%2FghIJ%3D%3D`), in a fragment, and in the user info as password, user
+name or the whole user info (KT-2007: url 2.5.9 sends `bot1:Ab^c` as
+`bot1:Ab%5Ec` and a password `P@ss!word1` as `P%40ss!word1`, neither raw nor
+fully escaped), and as a host label (a non-ASCII value is sent in its IDNA
+form `xn--…`; an ASCII value adds nothing), case-insensitively from 8
+characters, before truncation; shorter ones only as whole tokens, a short form
+holding a percent escape also with lower-case hex (`a:b%5Ec` echoed
+`a:b%5ec`). Every form
+is also masked without its trailing slashes (`build_url` trims them off a base
+URL); a value made almost only of slashes (`a///////`) then gives a trimmed
+form of one byte, masked only as a whole token, like any short value. A value
+stored pre-encoded (`Abc%5Edef%3Aghi`) is masked decoded
+too, with its own forms, when the decoded value is 8 bytes or more. A tab or a
+newline inside a value is removed by the parser and every form follows it; the
+one limit left is a form that falls under 8 bytes once they are gone, masked
+then only as a whole token. The 8-byte floor is kept on purpose: it keeps
+short generic text out of the masks applied anywhere in a word.
+
+Two sets come out of a call's values. The call set (`call_secrets`) holds
+everything above and scrubs what a successful call hands on: the data of the
+response, and every text below. The diagnostic set (`diagnostic_secrets`)
+adds the path segments of a masked env value that is a URL with a path (a
+webhook URL used as a base URL), serialised and decoded, each from 8 bytes:
+a server answering « bad token Bsec^rettoken99 » echoes one segment alone. It
+scrubs only what describes a call: an HTTP error excerpt, a transport error,
+the summary line (scrubbed before it joins the data), the logged error, the
+whole output of a failed step, a refused call, a Watch poll error, the auth
+refusal recorded on a connection and a token check's detail. It never
+scrubs the data of a successful response, where a segment's word
+(`services`, `customers`) is ordinary data and its links are built on it.
+Known limit: a 2xx body that echoes a path token alone is handed on as it is;
+the remedy is a bare origin in the env value and the path in the endpoint.
+The assistant conversation guard (`ApiCallSecrets` uplink) keeps the call
+set: a conversation about an API names its path words.
+[src: file: backend/src/workflows/api_call_executor.rs:250-268#diagnostic_secrets]
+[src: file: backend/src/workflows/api_call_executor.rs:270-298#url_path_secrets]
+[src: file: backend/src/workflows/api_call_executor.rs:189-197#url_path_secrets]
+[src: file: backend/src/workflows/api_call_executor.rs:759-761#diagnostics]
+The request line a summary or an error
+prints (`redact_url_query`) is the URL as sent: only the value of a
+secret-named query key and the user-info password become `***`, every other
+byte is kept as `url` serialised it, so a registered form still matches. A
+part `url` hands back serialised is added decoded too, the value a server
+echoes: a URL value's password always, its user name (each form on its own
+length: `user` would rewrite every `"user"` key), query, fragment and
+each query value from 8 bytes (a shorter one, `v=1` or `%7B%7D`, would mask
+every `1` or `{}` of the JSON handed to the next step), its path segments in
+the diagnostic set only, and a webhook's path
+tokens, password and user name (each form of the user name gated on its own
+length). A query value is added form-decoded (`query_pairs()`, a `+` read as a
+space), as written in the URL and percent-decoded (`AbC+dEf/ghIJ==` is echoed
+as written, `url` hands it back as `AbC dEf/ghIJ==`). A pair with no `=`
+(`?a=1&SecretToken`) counts as a value whole (`query_pairs()` hands it back as
+a key with an empty value), and a value holding `;`, which no parser splits,
+also adds its `;`-separated pieces raw and percent-decoded: the first under the
+caller's rule for a value, each later one from 8 bytes
+(`token=AbC+dEf/ghIJ==;v=1` masks the token alone, not `v=1`), and a later
+piece that is itself `key=value` (`v=1;token=AbCdEf123456`) also adds what
+follows its `=`, from 8 bytes. A bare token is added form-decoded too
+(`query_pairs()` hands it back as a key: `?AbC+dEf/ghIJkl` is read
+`AbC dEf/ghIJkl` by a server that parses the query as a form), under the
+caller's rule for a value. A path segment holding `;` (matrix parameters,
+`/hook/AbCdEf123456;v=1`) adds its pieces the same way, every one from 8
+bytes, for a webhook and in the diagnostic set (`literal_query_values`,
+`bare_query_tokens`, `add_semicolon_pieces`). A URL value's whole query and
+fragment are added only from 8 bytes like its other parts (`?ok`, `#id` would
+rewrite every `"ok"` or `"id"` key); the whole URL value is registered as
+written and as `build_url` serialises it (an empty query before a fragment:
+`/v1?#id`), so the request line still hides it. An `Authorization: Basic`
+value, an API call's or a webhook's, adds the password and `user:password` it
+decodes to, the scheme matched in any ASCII case (`add_basic_authorization`).
+The notify step builds its set as soon as the URL parses and scrubs every
+text it returns with it, the send and public-IP failures included (they carry
+a host, never a path, query or header value: the scrub is a guard). The
+off-origin `Link: rel="next"` warning logs the next and base URLs scrubbed by
+the diagnostic set after `redact_url_query` (`off_origin_log_urls`).
+
+Limits of scrubbing a URL value by its parts. A part is split on `/` (path),
+`&` and `=` (query) and `;` (both): a token glued to other text inside one
+component by any other character (`,`, `|`, `:`) is masked only together
+with that text. A non-ASCII value glued inside a host label
+(`https://api-{TENANT}.example.com`) is not covered: Punycode encodes the
+whole label, so the IDNA form of the value alone does not match; only a value
+that is a whole label is. A non-secret query value of 8 bytes or more inside
+a URL value (`?mode=production&token=…`) is masked in the data of a
+successful call too (`production` becomes `***`): scrubbing by value cannot
+tell which pair is the credential; the remedy is the one for the path, a bare
+origin in the env value and the parameters in the endpoint. A part under 8
+bytes (user name, query value, whole query, fragment) is not masked alone,
+the password excepted. A successful token response is never quoted. Stored text from before this (call
 log, run detail and MCP `workflow_run_get`, MCP run status) gets URL
 query/userinfo stripping and the heuristics of `core/redact.rs` only;
 value-based scrubbing of legacy rows is impossible because their credential
@@ -889,20 +982,23 @@ separator once IDNA has run).
 By design, a secret subdomain (`https://<id>.m.pipedream.net`) is public when
 it is the plugin's base URL: a bare origin cannot be told from a tenant name.
 
-A masked value that parses as a URL also masks its user info, query, fragment
-and normalised form (`add_url_parts`): the request line in the summary prints
-`http://user:SECRET@host/` for a pasted `http:user:SECRET@host`, which the raw
-text alone would not match.
+A masked value that parses as a URL also masks its user info, query, each
+long query value, fragment and normalised form (`add_url_parts`; its long
+path segments in diagnostics only, `url_path_secrets`): URL
+normalisation turns a pasted `http:host?token=SECRET` into
+`http://host/?token=SECRET` in the request line, which the raw text alone
+would not match (the password of a pasted `http:user:SECRET@host` is also
+printed `***` by `redact_url_query`).
 
 An auth key is never public, declared or not: Basic user and password, API key,
 bearer, OAuth2 client id and secret, token-exchange credentials and a
 `CliToken` fallback key. Logs and summaries share the same set, so they show
 public config unmasked too.
-[src: file: backend/src/workflows/api_call_executor.rs:232-255#add_url_parts]
-[src: file: backend/src/workflows/api_call_executor.rs:257-292#is_public_config]
-[src: file: backend/src/workflows/api_call_executor.rs:300-314#has_credential_marker]
-[src: file: backend/src/workflows/api_call_executor.rs:316-352#is_credential_free_url]
-[src: file: backend/src/workflows/api_call_executor.rs:354-378#auth_env_keys]
+[src: file: backend/src/workflows/api_call_executor.rs:300-387#add_url_parts]
+[src: file: backend/src/workflows/api_call_executor.rs:389-417#is_public_config]
+[src: file: backend/src/workflows/api_call_executor.rs:432-446#has_credential_marker]
+[src: file: backend/src/workflows/api_call_executor.rs:448-484#is_credential_free_url]
+[src: file: backend/src/workflows/api_call_executor.rs:486-510#auth_env_keys]
 [src: file: backend/src/api/plugin_portability.rs:741-750#without_public_flags]
 
 Every automatic disable is recorded on the workflow (reason, who, when, a

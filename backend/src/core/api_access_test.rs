@@ -541,6 +541,8 @@ fn rules_equal_after_canonicalisation_are_duplicates() {
         ("/users/me", "/users/%6De"),
         ("/pages/a%3ab", "/pages/a%3Ab"),
         ("/pages/caf\u{e9}", "/pages/caf%c3%a9"),
+        ("/pages/a^b", "/pages/a%5Eb"),
+        ("/pages/a^b", "/pages/a%5eb"),
     ] {
         let mut p = policy(ApiAccessRule::All);
         for path in [a, b] {
@@ -556,12 +558,34 @@ fn rules_equal_after_canonicalisation_are_duplicates() {
 }
 
 #[test]
+fn a_stored_caret_rule_blocks_every_spelling_of_its_path() {
+    // A rule stored before url 2.5.9 with a raw `^`, never re-saved: it must
+    // still block the request however the caller spells the caret, or the
+    // request slips through the declared `/pages/{page_id}` under `All`.
+    let mut p = policy(ApiAccessRule::All);
+    p.endpoints.push(ApiEndpointAccess {
+        method: "GET".into(),
+        path: "/pages/a^b".into(),
+        access: ApiAccessRule::Blocked,
+    });
+    for path in ["/pages/a^b", "/pages/a%5Eb", "/pages/a%5eb"] {
+        let err = run(&p, &target("GET", path), &Principal::Human).unwrap_err();
+        assert!(err.contains("blocked"), "{path}: {err}");
+    }
+    assert!(run(&p, &target("GET", "/pages/ab"), &Principal::Human).is_ok());
+}
+
+#[test]
 fn the_canonical_form_is_the_one_the_url_serializer_sends() {
     // Every printable ASCII character but the ones a segment cannot hold
     // or that carry path structure, written raw in a URL path, comes out of
-    // `url` exactly as the canonical form spells it.
-    for byte in 0x00u8..=0x7f {
-        let c = byte as char;
+    // `url` exactly as the canonical form spells it. Every differing
+    // character is reported, not only the first one.
+    // A few non-ASCII characters (two and three UTF-8 bytes, and a
+    // non-breaking space a rule may be pasted with) are checked the same way.
+    let mut mismatches = Vec::new();
+    let non_ascii = ['é', '€', '\u{a0}'];
+    for c in (0x00u8..=0x7f).map(char::from).chain(non_ascii) {
         if matches!(c, '/' | '\\' | '?' | '#' | '%' | '.') {
             continue;
         }
@@ -572,15 +596,28 @@ fn the_canonical_form_is_the_one_the_url_serializer_sends() {
             // `url` drops TAB, CR and LF and escapes the other controls: a
             // rule spelling one raw would name another destination, so it
             // has no canonical form at all.
-            assert_eq!(canonical_segment(&raw), None, "{c:?}: url sends {sent}");
+            if canonical_segment(&raw).is_some() {
+                mismatches.push(format!(
+                    "{c:?}: url sends {sent}, a control must have no canonical form"
+                ));
+            }
             continue;
         }
-        assert_eq!(
-            canonical_segment(&raw),
-            canonical_segment(&sent),
-            "{c:?}: url sends {sent}"
-        );
+        // Both spellings are compared to what is sent, not to each other: a
+        // character `url` leaves raw would otherwise compare a call with
+        // itself, and an escape `url` does not make would go unseen.
+        let (from_raw, from_sent) = (canonical_segment(&raw), canonical_segment(&sent));
+        if from_raw.as_deref() != Some(sent.as_str()) || from_sent.as_deref() != Some(sent.as_str())
+        {
+            mismatches.push(format!(
+                "{c:?}: url sends {sent}, canonical of raw {from_raw:?}, of sent {from_sent:?}"
+            ));
+        }
     }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    assert_eq!(canonical_segment("a^b").as_deref(), Some("a%5Eb"));
+    assert_eq!(canonical_segment("a%5Eb").as_deref(), Some("a%5Eb"));
+    assert_eq!(canonical_segment("a%5eb").as_deref(), Some("a%5Eb"));
     assert_eq!(
         canonical_segment("Annual Report.pdf").as_deref(),
         Some("Annual%20Report.pdf")
@@ -1377,6 +1414,7 @@ mod broker {
             ("\"", "%22"),
             ("<", "%3C"),
             (">", "%3E"),
+            ("^", "%5E"),
             ("`", "%60"),
         ] {
             let rule = blocked_under("/files/{name}", &format!("/files/Annual{raw}Report.pdf"));
