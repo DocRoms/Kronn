@@ -1671,6 +1671,7 @@ async fn execute_foreach(
                             reasoning_effort: None,
                             max_tokens: None,
                             connection_id: None,
+                            chrome: None,
                         })
                     }
                     _ => {}

@@ -1156,6 +1156,7 @@ fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
         reasoning_effort: None,
         max_tokens: None,
         connection_id: None,
+        chrome: None,
     });
     escalated
 }
@@ -1362,6 +1363,13 @@ async fn run_agent_with_timeout(
     // (owned here so it outlives the borrow in AgentStartConfig below).
     let ollama_format = ollama_envelope_format(&step.output_format);
 
+    // One Chrome step at a time across every run: the extension drives one browser.
+    let chrome = crate::models::AgentSettings::uses_chrome(step.agent_settings.as_ref());
+    let _chrome_turn = if chrome {
+        Some(runner::CHROME_LOCK.lock().await)
+    } else {
+        None
+    };
     let result = async {
         let (catalog_skill_ids, repository_skills) =
             step_skills(&step.skill_ids, project_id, run_id)?;
@@ -1372,6 +1380,7 @@ async fn run_agent_with_timeout(
             read_only_repos: &step.read_only_repos,
             read_only_dirs,
             step_tools: step.agent_settings.as_ref().and_then(|s| s.tools.as_ref()),
+            chrome,
             full_access,
             skill_ids: &catalog_skill_ids,
             repository_skills: &repository_skills,
@@ -1932,6 +1941,7 @@ async fn run_multi_agent_debate(
                         .and_then(|settings| settings.connection_id.clone())
                 })
                 .flatten(),
+            chrome: None,
         });
         s
     };
@@ -2392,6 +2402,7 @@ mod tests {
             reasoning_effort: None,
             max_tokens: None,
             connection_id: None,
+            chrome: None,
         });
         let esc = escalation_step(&local);
         assert_eq!(
@@ -2452,6 +2463,7 @@ mod tests {
                 max_tokens: None,
                 connection_id: None,
                 tools: None,
+                chrome: None,
             }),
             ..WorkflowStep::default()
         };
@@ -2534,6 +2546,7 @@ mod tests {
             connection_id: Some("connection-b".into()),
             reasoning_effort: None,
             max_tokens: None,
+            chrome: None,
         });
         let connection_a = connection("connection-a", "model-a");
         let connection_b = connection("connection-b", "model-b");
@@ -2598,6 +2611,7 @@ mod tests {
             connection_id: Some("connection-b".into()),
             reasoning_effort: None,
             max_tokens: None,
+            chrome: None,
         });
 
         let resolved = resolve_step_connection(&step, Some(&db))
@@ -2624,6 +2638,7 @@ mod tests {
             connection_id: Some("deleted-connection".into()),
             reasoning_effort: None,
             max_tokens: None,
+            chrome: None,
         });
 
         let error = resolve_step_connection(&step, Some(&db)).await.unwrap_err();
@@ -2641,6 +2656,7 @@ mod tests {
             connection_id: Some("connection-b".into()),
             reasoning_effort: None,
             max_tokens: None,
+            chrome: None,
         });
         assert_eq!(
             step_model_override(&step, None).as_deref(),
@@ -3505,6 +3521,7 @@ mod http_native_tool_step_tests {
                 reasoning_effort: None,
                 max_tokens: None,
                 connection_id: Some(connection_id.into()),
+                chrome: None,
             }),
             ..WorkflowStep::default()
         }
@@ -3815,6 +3832,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
                 reasoning_effort: None,
                 max_tokens: None,
                 connection_id: None,
+                chrome: None,
             }),
             ..WorkflowStep::default()
         };
@@ -3990,6 +4008,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
                 reasoning_effort: None,
                 max_tokens: None,
                 connection_id: None,
+                chrome: None,
             }),
             ..WorkflowStep::default()
         };
@@ -4087,6 +4106,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
                 reasoning_effort: None,
                 max_tokens: None,
                 connection_id: None,
+                chrome: None,
             }),
             ..WorkflowStep::default()
         };

@@ -3068,6 +3068,11 @@ pub fn render_codex_task_worker_mcp_override(launch: Option<InternalMcpCommand>)
     ))
 }
 
+/// The Claude in Chrome extension is attached to one browser: a workflow step
+/// with `agent_settings.chrome` holds this for its whole launch, so two runs
+/// never drive the same tabs at once.
+pub static CHROME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Configuration for starting an agent process.
 pub struct AgentStartConfig<'a> {
     pub agent_type: &'a AgentType,
@@ -3099,6 +3104,9 @@ pub struct AgentStartConfig<'a> {
     pub room_scope_prompt: &'a str,
     /// KT-908 — the tools a workflow Agent step declared; `None` = unchanged.
     pub step_tools: Option<&'a crate::models::StepTools>,
+    /// The workflow step drives the owner's Chrome (`agent_settings.chrome`):
+    /// Claude Code through its adapter only. The caller holds [`CHROME_LOCK`].
+    pub chrome: bool,
     pub prompt: &'a str,
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
@@ -3282,6 +3290,7 @@ impl<'a> AgentStartConfig<'a> {
             room_checkouts: &[],
             room_scope_prompt: "",
             step_tools: None,
+            chrome: false,
             full_access: false,
             skill_ids: &[],
             repository_skills: &[],
@@ -4567,6 +4576,17 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // start, rather than leaving its bridge on loopback trust.
     let bridge = Some(mint_launch_bridge_token(&config)?);
     let bridge_value = bridge.as_ref().map(|guard| guard.value().to_owned());
+    // Only the Claude adapter knows `--chrome`: any other route would launch
+    // without the browser the step was written for.
+    if config.chrome
+        && !(*config.agent_type == AgentType::ClaudeCode
+            && acp_route == crate::acp::AcpProductionRoute::AdaptedAcp)
+    {
+        return Err(format!(
+            "{:?}: `agent_settings.chrome` needs Claude Code through its adapter; it is not applied by this route",
+            config.agent_type
+        ));
+    }
     match acp_route {
         crate::acp::AcpProductionRoute::NativeAcp => {
             let request = AcpSessionRequest {
@@ -4687,6 +4707,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
                 step_tools: config.step_tools.cloned(),
+                chrome: config.chrome,
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
                 bridge_token: bridge_value.clone(),
                 priority: config.priority,
@@ -5139,6 +5160,8 @@ pub struct AdapterLaunchOptions {
     pub api_key: Option<String>,
     /// KT-908 — a workflow step's declared tools; `None` = today's argv.
     pub step_tools: Option<crate::models::StepTools>,
+    /// Claude only: `--chrome`, and the extension's tools allowed.
+    pub chrome: bool,
     /// `core::github_connection::env_for_launch` for this launch's project.
     pub github_env: Vec<(String, String)>,
     /// The launch's scoped bridge token (layer B); revoked with the launch.
@@ -13938,6 +13961,13 @@ pub fn agent_command(
     )
 }
 
+/// The settings a Claude agent launched by Kronn reads: the project's and the
+/// checkout's local ones, never the user's. A user `~/.claude` carries hooks
+/// that fire on the agent's commands (a `gh pr ready` refused by a personal
+/// gate), skills and agents that shadow the run's own, and a CLAUDE.md written
+/// for interactive sessions: a run would depend on a machine, not on Kronn.
+pub const CLAUDE_SETTING_SOURCES: &str = "project,local";
+
 /// Build a provider command with the stricter policy required by a spawned
 /// task worker. A worktree is an ownership boundary, not a sandbox by itself:
 /// every CLI that offers a global bypass must ignore it for worker runs.
@@ -13992,6 +14022,13 @@ pub fn agent_command_with_task_worker_policy(
             if let Some(effort) = reasoning_effort {
                 args.push("--effort".into());
                 args.push(effort.into());
+            }
+            if !task_worker {
+                // Kronn's launch says what the agent may do; the user's own
+                // `~/.claude` (hooks, skills, agents, CLAUDE.md) does not
+                // follow it into a run. A task worker reads no source at all.
+                args.push("--setting-sources".into());
+                args.push(CLAUDE_SETTING_SOURCES.into());
             }
             if task_worker {
                 // Ignore user/project settings so a previously configured

@@ -1965,6 +1965,7 @@ fn record_step_completion_seeds_ctx_from_the_snapshot() {
         reasoning_effort: None,
         max_tokens: None,
         connection_id: None,
+        chrome: None,
     });
     let mut result = fake_result("reason");
     assert!(

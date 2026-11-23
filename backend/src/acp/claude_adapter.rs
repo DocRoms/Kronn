@@ -41,6 +41,9 @@ use crate::agents::runner::{
     parse_claude_stream_line, AdapterLaunchOptions, SpawnIo, StreamJsonEvent,
 };
 
+/// The Claude in Chrome extension's tools, allowed for a `chrome` step.
+const CHROME_TOOLS: &str = "mcp__claude-in-chrome__*";
+
 pub struct ClaudeAcpAdapter {
     program: String,
     cwd: Mutex<Option<PathBuf>>,
@@ -306,6 +309,8 @@ impl AcpTransport for ClaudeAcpAdapter {
                 "stream-json".into(),
                 "--verbose".into(),
                 "--include-partial-messages".into(),
+                "--setting-sources".into(),
+                crate::agents::runner::CLAUDE_SETTING_SOURCES.into(),
             ]
         });
         args.push(if resuming {
@@ -327,7 +332,13 @@ impl AcpTransport for ClaudeAcpAdapter {
             args.push(self.project_mcp_config.lock().await.clone());
             args.push("--strict-mcp-config".into());
         }
-        let allowed_tools = self.allowed_tools.lock().await.clone();
+        let mut allowed_tools = self.allowed_tools.lock().await.clone();
+        if self.launch.chrome {
+            // The owner's browser through the Claude in Chrome extension; its
+            // MCP server comes with the flag, outside `--strict-mcp-config`.
+            args.push("--chrome".into());
+            allowed_tools.push(CHROME_TOOLS.into());
+        }
         if self.launch.worker_context.is_none() && !allowed_tools.is_empty() {
             args.push("--allowedTools".into());
             args.extend(allowed_tools);
@@ -1129,6 +1140,11 @@ exec sleep 30"#,
         let argv = std::fs::read_to_string(argv_file).unwrap();
         assert!(!argv.contains(secret_marker));
         assert!(argv.contains("--strict-mcp-config"));
+        assert!(
+            argv.contains("--setting-sources")
+                && argv.contains(crate::agents::runner::CLAUDE_SETTING_SOURCES),
+            "the user settings stay out of a discussion turn: {argv}"
+        );
         assert!(argv.contains("--allowedTools"));
         assert!(argv.contains("mcp__project-safe__*"));
         assert_eq!(std::fs::read_to_string(stdin_file).unwrap(), secret_prompt);
@@ -1136,6 +1152,56 @@ exec sleep 30"#,
             std::fs::read_to_string(discussion_file).unwrap().trim(),
             "disc-prod"
         );
+    }
+
+    /// A `chrome` step launches Claude with the owner's browser and its tools
+    /// allowed; any other launch never gets either.
+    #[tokio::test]
+    async fn a_chrome_step_launches_claude_with_the_extension_and_its_tools() {
+        for chrome in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let argv_file = dir.path().join("argv.txt");
+            let fixture = crate::acp::test_support::write_fixture_script(
+                dir.path(),
+                &format!(
+                    r#"printf '%s\n' "$*" > '{}'
+                    cat > /dev/null
+                    printf '%s\n' '{{"type":"result","subtype":"success","usage":{{"input_tokens":1,"output_tokens":2}}}}'"#,
+                    argv_file.display(),
+                ),
+            );
+            let adapter = ClaudeAcpAdapter {
+                program: fixture.to_string_lossy().into_owned(),
+                launch: AdapterLaunchOptions {
+                    chrome,
+                    ..Default::default()
+                },
+                ..ClaudeAcpAdapter::new(
+                    None,
+                    None,
+                    false,
+                    Some("disc-chrome".into()),
+                    AcpSessionScope::new(Some(dir.path().to_path_buf()), "disc-chrome"),
+                )
+            };
+            let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+            host.negotiate(AcpInitialize {
+                protocol_version: 1,
+                cwd: dir.path().to_string_lossy().into_owned(),
+                mcp_servers: vec![],
+            })
+            .await
+            .unwrap();
+            let target = host.create_session().await.unwrap();
+            let (tx, rx) = mpsc::channel(16);
+            host.prompt(&target, "recette", tx).await.unwrap();
+            drain(rx).await;
+
+            let argv = std::fs::read_to_string(argv_file).unwrap();
+            assert_eq!(argv.contains("--chrome"), chrome, "{argv}");
+            assert_eq!(argv.contains(CHROME_TOOLS), chrome, "{argv}");
+            assert!(argv.contains("--strict-mcp-config"), "{argv}");
+        }
     }
 
     const OWN_RUN: &str = "3e7f4d85-af84-4c3b-8a0d-4a5b6c7d8e9f";

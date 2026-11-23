@@ -667,7 +667,15 @@ tools?: StepTools,
  * `Some(empty)`: no fallback for this step; links: they replace the row,
  * then the rows of the fallbacks go on.
  */
-fallback?: Array<AgentFallback>, };
+fallback?: Array<AgentFallback>,
+/**
+ * The step drives the owner's Chrome through the Claude in Chrome
+ * extension (`claude --chrome`, tools `mcp__claude-in-chrome__*`): logged-in
+ * sessions, real network, real console. Claude Code Agent steps only. The
+ * extension is attached to one browser, so Kronn runs one such step at a
+ * time across every run.
+ */
+chrome?: boolean, };
 
 export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
