@@ -301,6 +301,8 @@ const OPEN_ON_PURPOSE: &[(&str, &str)] = &[
     ("DELETE", "/api/skills/{id}"),
     ("DELETE", "/api/user-context/{name}"),
     ("DELETE", "/api/workflow-runs/{run_id}"),
+    // KT-1990: the Artifacts a person made from a run's executions.
+    ("DELETE", "/api/workflow-runs/{run_id}/step-artifacts"),
     ("DELETE", "/api/workflows/{id}"),
     ("DELETE", "/api/workflows/{id}/runs"),
     ("DELETE", "/api/workflows/{id}/runs/{run_id}"),

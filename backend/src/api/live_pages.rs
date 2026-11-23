@@ -896,7 +896,7 @@ pub async fn publish(
     }
 }
 
-fn slugify(title: &str) -> String {
+pub fn slugify(title: &str) -> String {
     let mut slug = String::new();
     let mut separator = false;
     for value in title.to_lowercase().chars() {

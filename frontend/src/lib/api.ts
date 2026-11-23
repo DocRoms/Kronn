@@ -279,6 +279,7 @@ import type {
   LivePageRevision,
   LivePageRevisionSummary,
   LivePageWorkflowLink, LivePageResource, PromoteShadowRequest, StepShadowComparison,
+  StepArtifactCount, StepArtifactFolder, StepArtifactMade, StepArtifactMosaic,
   LivePagesCapability,
   PublishLivePageRequest,
   PublishLivePageResult,
@@ -2966,6 +2967,15 @@ export const workflows = {
   promoteShadow: (id: string, req: PromoteShadowRequest) => api<Workflow>('POST', `/workflows/${id}/shadow/promote`, req),
   /** KT-1459 — per step that ran shadows, the main execution beside what each shadow was and produced. */
   stepShadows: (id: string, runId: string) => api<StepShadowComparison[]>('GET', `/workflows/${id}/runs/${runId}/step-shadows`),
+  /** KT-1990 — the Artifact of one execution of a step (`shadowId` null for the main one): made once, opened after. */
+  makeStepArtifact: (id: string, runId: string, resultIndex: number, shadowId: string | null) =>
+    api<StepArtifactMade>('POST', `/workflows/${id}/runs/${runId}/step-artifacts`, { result_index: resultIndex, shadow_id: shadowId }),
+  /** KT-1990 — the Artifacts of a step's renders, made where missing, main first then shadows in start order. */
+  stepArtifactMosaic: (id: string, runId: string, resultIndex: number) =>
+    api<StepArtifactMosaic>('POST', `/workflows/${id}/runs/${runId}/step-artifacts/mosaic`, { result_index: resultIndex }),
+  /** KT-1990 — how many library Artifacts deleting one run (or every run) takes with it. */
+  stepArtifactCount: (id: string, runId?: string) =>
+    api<StepArtifactCount>('GET', `/workflows/${id}/step-artifacts/count${runId ? `?run_id=${encodeURIComponent(runId)}` : ''}`),
 
   /** Trigger with SSE streaming for real-time progress.
    *  0.6.0 UX pass — accepts optional `variables` payload for workflows
@@ -3281,6 +3291,11 @@ export const pages = {
   update: (id: string, request: UpdateLivePageRequest) =>
     api<LivePageDetail>('PATCH', `/pages/${encodeURIComponent(id)}`, request),
   delete: (id: string) => api<void>('DELETE', `/pages/${encodeURIComponent(id)}`),
+  /** KT-1990 — the run folders of the library: Artifacts made from step executions. */
+  runFolders: () => api<StepArtifactFolder[]>('GET', '/step-artifacts'),
+  /** KT-1990 — « Delete the folder »: the run's Artifacts, the run stays. */
+  deleteRunFolder: (runId: string) =>
+    api<StepArtifactCount>('DELETE', `/workflow-runs/${encodeURIComponent(runId)}/step-artifacts`),
   linkDiscussion: (id: string, request: LinkLivePageDiscussionRequest) =>
     api<LivePageDiscussionLink[]>('POST', `/pages/${encodeURIComponent(id)}/discussions`, request),
   unlinkDiscussion: (id: string, discussionId: string) =>

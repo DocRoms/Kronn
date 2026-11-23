@@ -49,6 +49,7 @@ pub mod api {
     pub mod quick_prompts;
     pub mod shared_runs;
     pub mod signal_catalog;
+    pub mod step_artifacts;
     pub mod strong_confirm;
     pub mod worker_time_limit;
     pub mod workflows;

@@ -10,7 +10,7 @@ click it to mention the object to an agent.
   `data-tour-id="discussion-id-pill"` anchor.
   [src: file: frontend/src/components/ChatHeader.tsx:262] [src: file: frontend/src/components/DiscussionIdPill.tsx:18]
 - Artifact: the same slot holds a `CopyIdPill`.
-  [src: file: frontend/src/pages/PagesPage.tsx:1119]
+  [src: file: frontend/src/pages/PagesPage.tsx:1120]
 - Workflow: `.wf-id-pill` next to the `<h2>` in `WorkflowDetail`.
 
 The required `copyable-ids` guided-tour step therefore opens nothing: the anchor

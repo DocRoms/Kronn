@@ -8,8 +8,10 @@ import {
 } from 'lucide-react';
 import type {
   LivePage, LivePageDatasetUsage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
-  LivePageRevision, LivePageRevisionSummary, LivePageWorkflowLink, Project,
+  LivePageRevision, LivePageRevisionSummary, LivePageWorkflowLink, Project, StepArtifactFolder,
 } from '../types/generated';
+import { ArtifactRunFolders } from '../components/ArtifactRunFolders';
+import { artifactRowLabel, folderLabel, visibleRunFolders } from '../lib/stepArtifacts';
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../lib/api';
 import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
 import { formatBytes, pageHtmlWeight } from '../lib/live-page-weight';
@@ -207,6 +209,8 @@ export function PagesPage({
   const isMobile = useIsMobile();
   const [initialPageNavigation] = useState(readPageNavigation);
   const [pages, setPages] = useState<LivePage[]>([]);
+  // KT-1990 — the Artifacts made from the executions of a run's steps, one folder per run.
+  const [runFolders, setRunFolders] = useState<StepArtifactFolder[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(
     selectedPageId ?? initialSelectedPageId ?? initialPageNavigation.resourceId,
   );
@@ -396,8 +400,13 @@ export function PagesPage({
   const refresh = useCallback(async (selectedOverride?: string | null, incremental = false) => {
     const selectedAtStart = selectedIdRef.current;
     try {
-      const list = await pagesApi.list();
+      const [list, folders] = await Promise.all([
+        pagesApi.list(),
+        // The folders only group what the list holds: a failed read shows no folder, never no library.
+        Promise.resolve().then(() => pagesApi.runFolders()).then(found => found ?? [], () => []),
+      ]);
       setPages(list);
+      setRunFolders(folders);
       const requestedId = requestedPageIdRef.current;
       const requested = requestedId && list.some(page => page.id === requestedId)
         ? requestedId
@@ -857,6 +866,26 @@ export function PagesPage({
     }
   });
 
+  // KT-1990 — « Delete the folder »: the run's Artifacts go, the run stays.
+  const deleteRunFolder = useAsyncGuard(async (folder: StepArtifactFolder): Promise<boolean> => {
+    if (!window.confirm(t('pages.runFolders.deleteConfirm', folder.artifacts.length, folderLabel(folder, t)))) return false;
+    try {
+      await pagesApi.deleteRunFolder(folder.run_id);
+      // Cleared before the read: `refresh` reports its own failure in `error`.
+      setError(null);
+      await refresh(null);
+      return true;
+    } catch (cause) {
+      setError(userError(cause));
+      return false;
+    }
+  });
+  const pagesById = useMemo(() => new Map(pages.map(page => [page.id, page])), [pages]);
+  const runFolderPageIds = useMemo(
+    () => new Set(runFolders.flatMap(folder => folder.artifacts.map(link => link.page_id))),
+    [runFolders],
+  );
+
   const isSectionCollapsed = useCallback(
     (section: string) => !query.trim() && collapsedSections.has(section),
     [collapsedSections, query],
@@ -1124,9 +1153,16 @@ export function PagesPage({
           renderList: ({ visibleItems, getRowProps, canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
             const visibleActive = visibleItems.filter(page => !page.archived);
             const visibleFavorites = canMultiSelect ? [] : visibleActive.filter(page => page.pinned);
+            // KT-1990 — a run's renders live in its folder; selection mode lists them with the others.
+            const inRunFolder = (page: LivePage) => !canMultiSelect && runFolderPageIds.has(page.id);
+            const visibleIds = new Set(visibleItems.map(page => page.id));
+            const folderViews = canMultiSelect
+              ? []
+              : visibleRunFolders(runFolders, pagesById, page => visibleIds.has(page.id));
+            const visibleLoose = visibleActive.filter(page => !inRunFolder(page));
             const visibleRecent = canMultiSelect
               ? []
-              : visibleActive
+              : visibleLoose
                 .filter(page => !page.pinned)
                 .sort(byMostRecentlyUpdated)
                 .slice(0, 10);
@@ -1134,7 +1170,7 @@ export function PagesPage({
             const collapsedInCurrentMode = (section: string) => (
               !canMultiSelect && isSectionCollapsed(section)
             );
-            const row = (page: LivePage, keyPrefix: string) => {
+            const row = (page: LivePage, keyPrefix: string, shown?: { title: string; meta: string }) => {
               const rowProps = getRowProps(page);
               const selected = isMultiSelected(page);
               return <div className="disc-swipe-wrap live-page-row" key={`${keyPrefix}-${page.id}`}>
@@ -1152,7 +1188,7 @@ export function PagesPage({
                     aria-checked={canMultiSelect ? selected : undefined}
                   >
                     {canMultiSelect && <span className="disc-item-selection-box" data-selected={selected} aria-hidden="true">{selected && <CheckSquare2 size={12} />}</span>}
-                    <span className="disc-item-content"><span className="disc-item-title"><span className="disc-item-title-text">{page.title}</span></span><span className="disc-item-meta"><span className="disc-item-meta-summary">{page.slug}</span><HtmlWeightBadge bytes={page.html_size_bytes} variant="list" /></span></span>
+                    <span className="disc-item-content"><span className="disc-item-title"><span className="disc-item-title-text" title={shown ? page.title : undefined}>{shown?.title ?? page.title}</span></span><span className="disc-item-meta"><span className="disc-item-meta-summary">{shown?.meta ?? page.slug}</span><HtmlWeightBadge bytes={page.html_size_bytes} variant="list" /></span></span>
                   </button>
                   {!canMultiSelect && <CollectionRowActions
                     itemName={page.title}
@@ -1208,17 +1244,31 @@ export function PagesPage({
             </div>
           )}
 
-          {visibleActive.length > 0 && (
+          <ArtifactRunFolders
+            views={folderViews}
+            selectedId={selectedId}
+            renderRow={({ link, page }) => row(page, `run-${link.run_id}`, {
+              title: artifactRowLabel(link, t('wf.shadow.compare.main')),
+              meta: link.step_name,
+            })}
+            onDeleteFolder={async folder => Boolean(await deleteRunFolder(folder))}
+            collapsed={isSectionCollapsed('run-folders')}
+            onToggleSection={() => toggleSection('run-folders')}
+            searching={Boolean(query.trim())}
+            t={t}
+          />
+
+          {visibleLoose.length > 0 && (
             <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!collapsedInCurrentMode('projects')}>
               <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('projects')} aria-expanded={!collapsedInCurrentMode('projects')}>
                 <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('projects')} />
                 <FileCode2 size={10} />
-                <span>{t('projects.title')}</span><span className="disc-group-count">{visibleActive.length}</span>
+                <span>{t('projects.title')}</span><span className="disc-group-count">{visibleLoose.length}</span>
               </button>
               {!collapsedInCurrentMode('projects') && (
                 <CollectionProjectTree
                   projects={projects}
-                  items={visibleActive}
+                  items={visibleLoose}
                   getProjectId={page => page.project_id}
                   isItemActive={page => page.id === selectedId}
                   collapsedGroups={canMultiSelect || query.trim() ? new Set() : collapsedSections}

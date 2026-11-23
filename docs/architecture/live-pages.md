@@ -148,7 +148,7 @@ Workflow run when that provenance still exists. A publication that changes no
 dataset at all writes no ledger entry (KT-1819), so the timeline lists data
 updates; the "Synced" time next to it is the Page's `last_published_at`, which
 every successful publication moves, changed or not.
-`[src: file: frontend/src/pages/PagesPage.tsx:876#lastRefreshAt]`
+`[src: file: frontend/src/pages/PagesPage.tsx:904-905#lastRefreshAt]`
 Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
@@ -184,7 +184,10 @@ selected Page above, below, left or right of the other two; four or more Pages
 use a responsive automatic grid. Every tile independently reuses the same
 opaque `sandbox="allow-scripts"` rendering and parent-fed dataset bridge as the
 single standalone Page, so combining reports does not merge their HTML, CSS or
-JavaScript contexts.
+JavaScript contexts. Each tile names its Artifact in a one-line caption above
+the frame (KT-1990); before, the title was only the frame's `title` attribute,
+which a reader does not see.
+[src: file: frontend/src/pages/StandaloneLivePageMosaic.tsx:133#standalone-live-page-mosaic-caption]
 
 A Page may also be linked to one or more Discussions. `created_from` records
 the room where an agent authored the Page; `attached` is an explicit later
@@ -205,6 +208,59 @@ this action.
 [src: file: backend/src/api/live_pages.rs:609-627#source_message_id]
 [src: file: frontend/src/components/DocPreviewArtifact.tsx:22-33#create]
 [src: file: frontend/src/components/DocPreview.tsx:153#DocPreviewArtifact]
+
+### Run folders (KT-1990)
+
+The run view of a workflow makes an Artifact from the HTML an execution of a
+step wrote, the main execution or a shadow (see
+[step shadows](../guides/shadow-runs.md#see-the-renders-side-by-side-kt-1990)).
+Kronn reads the stored output and copies its last complete HTML block; the
+execution never calls a tool for it. `step_execution_artifacts` (migration 302)
+links the Artifact (`page_id`, its key) to the run, the step result index and
+the execution (`shadow_id`, `''` for the main one), unique per execution, with
+the execution's label and model as they were.
+[src: file: backend/src/db/sql/302_step_execution_artifacts.sql:12-24#step_execution_artifacts]
+
+| Route | What it does |
+|---|---|
+| `POST /api/workflows/{id}/runs/{run_id}/step-artifacts` | `{result_index, shadow_id}`: the execution's Artifact, made once (`created: false` when it already had one) |
+| `POST /api/workflows/{id}/runs/{run_id}/step-artifacts/mosaic` | `{result_index}`: the Artifacts of every execution with a render, made where missing, main first then the shadows in start order; refused under two |
+| `GET /api/step-artifacts` | the run folders of the library |
+| `DELETE /api/workflow-runs/{run_id}/step-artifacts` | « Delete the folder »: the run's Artifacts; the run stays |
+| `GET /api/workflows/{id}/step-artifacts/count?run_id=` | how many Artifacts deleting one run, or every run, takes |
+
+The writing routes are human only: they are not bridge-token routes and refuse
+a caller marked as an agent. The comparison (`…/step-shadows`) carries, per
+execution, its HTML state (`html`: `none`, `complete`, `cut_unclosed_fence`,
+`cut_no_closing_tag`, `cut_output`) and the id of its Artifact.
+[src: file: backend/src/api/step_artifacts.rs:183-266#ensure]
+[src: file: backend/src/db/step_artifacts.rs:127-164#list_folders]
+
+**The library** shows one folder per run, `<workflow> · run #N` (run #1 is the
+workflow's oldest run, as the batch folders count; two runs that started at
+the same instant are told apart by their id), between Recent and
+Projects; the Artifacts of a folder are labelled by execution and model and are
+left out of Recent and the project tree (selection mode lists them with the
+others). The header has the batch-folder interaction of the Discussions
+sidebar: the chevron opens it (it opens by itself while it holds the Artifact
+shown, and while the library search holds a query, as the project groups do),
+its « … » menu offers **Open in mosaic** and **Delete the folder**. Its
+count is the rows it lists (search applied, archived Artifacts left out).
+[src: file: frontend/src/components/ArtifactRunFolders.tsx:16-36#ArtifactRunFolders]
+[src: file: frontend/src/components/ArtifactRunFolders.tsx:97#disc-group-count]
+
+**Lifetime.** Deleting one Artifact drops its link (foreign key `ON DELETE
+CASCADE`), and the run view offers the button again. Deleting a run, all the
+runs of a workflow or the workflow deletes their Artifacts in the same
+transaction as the runs; the confirmations count them apart from the run's
+working files. `DELETE /api/workflows/{id}/runs/{run_id}` deletes only a run of
+workflow `id`: a run of another workflow, or an unknown one, answers `Run not
+found` and nothing is deleted.
+[src: file: backend/src/api/workflows.rs:7274-7300#delete_run]
+A link names its run in `run_retention::REFERENCING_COLUMNS`, so retention
+never trims nor deletes such a run.
+[src: file: backend/src/db/step_artifacts.rs:198-207#delete]
+[src: file: backend/src/db/run_retention.rs:55#step_execution_artifacts]
 
 ## Domain model
 
@@ -323,7 +379,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:737-761#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:746-770#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -449,9 +505,9 @@ the HTTP-agent tools, a repository import) is never refused: the last save
 wins, as before.
 `[src: file: backend/src/db/live_pages.rs:569-628#update_live_page_html_from]`
 `[src: file: backend/src/api/live_pages.rs:527-544#update_html_route]`
-`[src: file: frontend/src/pages/PagesPage.tsx:667-677#toggleHtmlEditor]`
-`[src: file: frontend/src/pages/PagesPage.tsx:636-663#persistHtml]`
-`[src: file: frontend/src/pages/PagesPage.tsx:615-632#readConflictingHtml]`
+`[src: file: frontend/src/pages/PagesPage.tsx:674-684#toggleHtmlEditor]`
+`[src: file: frontend/src/pages/PagesPage.tsx:643-670#persistHtml]`
+`[src: file: frontend/src/pages/PagesPage.tsx:622-639#readConflictingHtml]`
 
 ## « Ma Todo », the default board (KT-1030)
 
@@ -1165,7 +1221,7 @@ the full run even when the compact list already contains its id.
 [src: file: backend/src/workflows/collect_api_data_step.rs:604-625#source_id]
 [src: file: backend/src/workflows/collect_api_data_step.rs:1075-1118#missing_required_api_keeps_its_alias_id_and_cause]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1062-1072#focusedRun]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1063-1073#focusedRun]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

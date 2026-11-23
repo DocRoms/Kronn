@@ -100,7 +100,7 @@ its display name and current tier model, and Quick Prompt comparisons persist
 the stable connection identifier. Re-running a comparison keeps the provider
 and reasoning tier while resolving the model currently mapped to that tier, so
 an unavailable or deliberately replaced model is not forced back into a retry.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:125-138#externalConnectionSwitchTarget]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:131-144#externalConnectionSwitchTarget]
 [src: file: backend/src/models/quick.rs:502-506#connection_id]
 [src: file: frontend/src/lib/compareTargets.ts:5-9#CompareTarget]
 [src: file: backend/src/db/workflows.rs:955-1004#connection_tier_model]
@@ -249,7 +249,7 @@ those tokens ahead of the call.
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
   [src: file: backend/src/core/token_checks.rs:316-334#spawn_scheduler]
-  [src: file: backend/src/lib.rs:2266-2268#check_token]
+  [src: file: backend/src/lib.rs:2286-2288#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
   OAuth / token-exchange refresh included), with the 15 s timeout of the

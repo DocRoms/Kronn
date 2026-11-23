@@ -21,13 +21,17 @@ use crate::models::{
 };
 use crate::AppState;
 
+use super::shadow_artifact::ExecutionHtml;
 use super::steps::StepOutcome;
 use super::template::TemplateContext;
 
 pub const MAX_SHADOWS_PER_STEP: usize = 8;
 const MAX_SAMPLE_EVERY: u32 = 1000;
-/// What a shadow keeps of an output: a longer one is cut, and says so.
+/// What a shadow keeps of an output: a longer one is cut, and says so with
+/// [`CUT_MARKER`].
 const MAX_STORED_OUTPUT_BYTES: usize = 1_000_000;
+/// The start of the line that ends an output a shadow kept cut.
+pub const CUT_MARKER: &str = "[output cut at ";
 
 // A run recorded by the workflow-level shadow (KT-1449) carries its variant in
 // its trigger context. No new run takes it, but such a run stays a trial: it
@@ -743,7 +747,7 @@ fn cut(output: String) -> String {
     while !output.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n[output cut at {} bytes]", &output[..end], end)
+    format!("{}\n{CUT_MARKER}{} bytes]", &output[..end], end)
 }
 
 /// One shadow: prepares its copy of the step, runs it under its time budget and
@@ -1260,6 +1264,12 @@ pub struct ShadowExecution {
     /// Why a budget, the time limit or a skip ended the shadow, when one did.
     #[ts(optional)]
     pub stopped: Option<String>,
+    /// Whether the output holds an HTML document an Artifact can be made from
+    /// (KT-1990).
+    pub html: ExecutionHtml,
+    /// The Artifact a person made from this execution, when there is one.
+    #[ts(optional)]
+    pub artifact_id: Option<String>,
 }
 
 /// The main execution of a step and its shadows.
@@ -1295,6 +1305,8 @@ fn main_execution(row: &StepShadowRow, result: Option<&StepResult>) -> ShadowExe
             cost_usd: row.cost_usd,
             model: row.model.clone().or_else(|| row.identity.model.clone()),
             stopped: None,
+            html: ExecutionHtml::of(&row.output),
+            artifact_id: None,
         };
     }
     let (tokens, cost, model) = result
@@ -1305,17 +1317,20 @@ fn main_execution(row: &StepShadowRow, result: Option<&StepResult>) -> ShadowExe
         Some(RunStatus::Running) | Some(RunStatus::Pending) | None => ShadowStatus::Running,
         Some(_) => ShadowStatus::Failed,
     };
+    let output = result.map(|r| r.output.clone()).unwrap_or_default();
     ShadowExecution {
         shadow_id: None,
         label: String::new(),
         status,
         identity: row.identity.clone(),
-        output: result.map(|r| r.output.clone()).unwrap_or_default(),
+        html: ExecutionHtml::of(&output),
+        output,
         tokens_used: tokens,
         duration_ms: result.map(|r| r.duration_ms),
         cost_usd: cost,
         model: model.or_else(|| row.identity.model.clone()),
         stopped: None,
+        artifact_id: None,
     }
 }
 
@@ -1331,6 +1346,8 @@ fn shadow_execution(row: &StepShadowRow) -> ShadowExecution {
         cost_usd: row.cost_usd,
         model: row.model.clone().or_else(|| row.identity.model.clone()),
         stopped: row.stopped.clone(),
+        html: ExecutionHtml::of(&row.output),
+        artifact_id: None,
     }
 }
 
@@ -1368,6 +1385,14 @@ pub fn comparisons(
             .find(|step| step.result_index == merged.result_index)
         {
             step.merge = Some(merged.report);
+        }
+    }
+    let artifacts = crate::db::step_artifacts::for_run(conn, &run.id)?;
+    for step in &mut steps {
+        let index = step.result_index;
+        for execution in std::iter::once(&mut step.main).chain(step.shadows.iter_mut()) {
+            let key = (index, execution.shadow_id.clone().unwrap_or_default());
+            execution.artifact_id = artifacts.get(&key).cloned();
         }
     }
     Ok(steps)

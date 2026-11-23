@@ -4815,6 +4815,11 @@ dropped_unverified: number, };
 export type ExecutionDiscussionLink = { execution_id: string, orchestration_run_id: string, task_id: string, task_reference: string, task_title: string, parent_discussion_id: string, sub_discussion_id: string, status: TaskExecutionStatus, };
 
 /**
+ * What the output of an execution holds, as the run view tells it.
+ */
+export type ExecutionHtml = "none" | "complete" | "cut_unclosed_fence" | "cut_no_closing_tag" | "cut_output";
+
+/**
  * What one execution of a step loaded: what the comparison header sets side
  * by side to say what differs.
  */
@@ -10695,7 +10700,16 @@ model?: string,
 /**
  * Why a budget, the time limit or a skip ended the shadow, when one did.
  */
-stopped?: string, };
+stopped?: string,
+/**
+ * Whether the output holds an HTML document an Artifact can be made from
+ * (KT-1990).
+ */
+html: ExecutionHtml,
+/**
+ * The Artifact a person made from this execution, when there is one.
+ */
+artifact_id?: string, };
 
 /**
  * The optional merge of a step (KT-1544): the main execution and the shadows
@@ -11168,6 +11182,55 @@ total_bytes: number, };
  * `None` for model or effort means the agent's default.
  */
 export type StepAgentOverride = { agent: AgentType, model?: string, reasoning_effort?: string, };
+
+/**
+ * How many Artifacts a delete would take with the runs.
+ */
+export type StepArtifactCount = { count: number, };
+
+/**
+ * The Artifacts of one run, as the library folder shows them.
+ */
+export type StepArtifactFolder = { run_id: string, workflow_id: string, workflow_name: string,
+/**
+ * The run's place among its workflow's runs, the oldest being #1, as the
+ * batch folders of the Discussions sidebar count them.
+ */
+run_number: number, run_started_at: string,
+/**
+ * Step by step in run order; per step the main execution first, then the
+ * shadows in the order they started.
+ */
+artifacts: Array<StepArtifactLink>, };
+
+/**
+ * One execution's Artifact.
+ */
+export type StepArtifactLink = { page_id: string, run_id: string, result_index: number, step_name: string,
+/**
+ * `""` for the main execution.
+ */
+shadow_id: string, label: string, model?: string, created_at: string, };
+
+/**
+ * The Artifact of one execution.
+ */
+export type StepArtifactMade = { page_id: string,
+/**
+ * `false` when the execution already had its Artifact: it was opened, not
+ * made again.
+ */
+created: boolean, };
+
+/**
+ * The Artifacts of a step's executions, in mosaic order: the main execution
+ * first, then the shadows in start order.
+ */
+export type StepArtifactMosaic = { page_ids: Array<string>,
+/**
+ * How many of them this request made.
+ */
+created: number, };
 
 export type StepConditionRule = { contains: string, action: ConditionAction, };
 

@@ -75,6 +75,7 @@ import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { ListControls } from '../components/ListControls';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ConfirmDeleteButton } from '../components/ConfirmDeleteButton';
+import { deleteAllRunsConfirmation, deleteRunConfirmation, workflowDeleteImpact } from '../lib/stepArtifacts';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
 import {
@@ -1134,6 +1135,33 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     } finally {
       setImportingSubmit(false);
     }
+  });
+
+  // KT-1990: the library Artifacts made from the runs go with them, so the
+  // confirmation counts them, apart from the runs' own working files.
+  // KT-1999: one delete of runs at a time; a click while the count is read,
+  // or while a delete runs, asks nothing and deletes nothing. A refused
+  // delete (a run already deleted elsewhere answers `Run not found`) says why
+  // and the runs are read again, so a run that is gone leaves the list.
+  const deleteRuns = useAsyncGuard(async (runId: string | null) => {
+    const workflow = detailWorkflow;
+    if (!workflow) return;
+    const artifacts = await (runId
+      ? workflowsApi.stepArtifactCount(workflow.id, runId)
+      : workflowsApi.stepArtifactCount(workflow.id))
+      .then(answer => answer.count, () => null);
+    const confirmation = runId
+      ? deleteRunConfirmation(t, artifacts)
+      : deleteAllRunsConfirmation(t, detailRunTotal + detailNoOpHidden, artifacts);
+    if (!confirm(confirmation)) return;
+    try {
+      if (runId) await workflowsApi.deleteRun(workflow.id, runId);
+      else await workflowsApi.deleteAllRuns(workflow.id);
+    } catch (e) {
+      if (toastProp) toastProp(userError(e), 'error');
+    }
+    openDetail(workflow.id);
+    refetch();
   });
 
   // The workflow in the address when the page opened: its detail loads once
@@ -3143,7 +3171,9 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                           testId={`wf-delete-${wf.id}`}
                           impact={async () => {
                             const runs = await workflowsApi.countRuns(wf.id);
-                            return runs === 0 ? t('automation.deleteImpactNone') : t('wf.deleteImpact', runs);
+                            const artifacts = runs === 0 ? 0 : await workflowsApi.stepArtifactCount(wf.id)
+                              .then(answer => answer.count, () => null);
+                            return workflowDeleteImpact(t, runs, artifacts);
                           }}
                           impactUnknown={t('automation.deleteImpactUnknown')}
                           onError={message => toastProp?.(message, 'error')}
@@ -3208,18 +3238,8 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                 projects={projects}
                 configLanguage={configLanguage}
                 onNavigatePage={onNavigatePage}
-                onDeleteRun={async (runId) => {
-                  if (!confirm(t('wf.deleteRunConfirm'))) return;
-                  await workflowsApi.deleteRun(detailWorkflow.id, runId);
-                  openDetail(detailWorkflow.id);
-                  refetch();
-                }}
-                onDeleteAllRuns={async () => {
-                  if (!confirm(t('wf.deleteAllRunsConfirm', detailRunTotal + detailNoOpHidden))) return;
-                  await workflowsApi.deleteAllRuns(detailWorkflow.id);
-                  openDetail(detailWorkflow.id);
-                  refetch();
-                }}
+                onDeleteRun={runId => { void deleteRuns(runId); }}
+                onDeleteAllRuns={() => { void deleteRuns(null); }}
                 triggering={triggering === detailWorkflow.id}
                 agentAccess={agentAccess}
                 onNavigateToBatch={onNavigateToBatch}

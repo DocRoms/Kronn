@@ -6,7 +6,7 @@
  * two side by side; and for the shadows identical to the step, how many
  * distinct outputs there are out of N+1.
  */
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { FlaskConical } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { diffLines } from '../../lib/qp-history-diff';
@@ -18,6 +18,7 @@ import {
 } from '../../lib/shadowRuns';
 import type { ShadowExecution, ShadowMergeReport, StepShadowComparison } from '../../types/generated';
 import { useStepShadows } from './useStepShadows';
+import { ExecutionArtifact, StepArtifactMosaic, type StepArtifactContext } from './StepArtifactControls';
 import '../QPHistoryDrawer.css';
 
 const MAX_OUTPUT = 6000;
@@ -45,7 +46,7 @@ function DiffBlock({ left, right, leftLabel, rightLabel, testId }: {
 }
 
 /** What one execution shows: its name, how it ended, what differs, what it spent. */
-function ExecutionHeader({ step, execution, main, differing, label, names, t, testId }: {
+function ExecutionHeader({ step, execution, main, differing, label, names, t, testId, artifact }: {
   step: string;
   execution: ShadowExecution;
   main: ShadowExecution;
@@ -54,6 +55,8 @@ function ExecutionHeader({ step, execution, main, differing, label, names, t, te
   names: IdentityNames;
   t: Translate;
   testId: string;
+  /** KT-1990 — the execution's Artifact, when the view can make one. */
+  artifact?: ReactNode;
 }) {
   const isMain = execution.shadow_id == null;
   return (
@@ -80,6 +83,7 @@ function ExecutionHeader({ step, execution, main, differing, label, names, t, te
           {!isMain && <span className="text-muted">{percent(main.duration_ms, execution.duration_ms)}</span>}</span>
       </p>
       {execution.stopped && <p className="wf-shadow-cmp-note" role="note">{execution.stopped}</p>}
+      {artifact && <p className="wf-shadow-exec-artifact">{artifact}</p>}
     </li>
   );
 }
@@ -203,7 +207,9 @@ function MergeSection({ comparison, merge, t }: { comparison: StepShadowComparis
   );
 }
 
-function StepComparison({ comparison, names, t }: { comparison: StepShadowComparison; names: IdentityNames; t: Translate }) {
+function StepComparison({ comparison, names, t, artifacts }: {
+  comparison: StepShadowComparison; names: IdentityNames; t: Translate; artifacts?: StepArtifactContext;
+}) {
   const { main, shadows, step_name: step } = comparison;
   const executions = useMemo(() => [main, ...shadows], [main, shadows]);
   const mainLabel = t('wf.shadow.compare.main');
@@ -221,6 +227,7 @@ function StepComparison({ comparison, names, t }: { comparison: StepShadowCompar
   return (
     <section className="wf-shadow-cmp-step-block" data-testid={`wf-step-shadow-compare-${step}`} aria-label={t('wf.shadow.compare.stepAria', step)}>
       <h4 className="wf-shadow-cmp-step-title">{step}</h4>
+      {artifacts && <StepArtifactMosaic step={comparison} context={artifacts} t={t} />}
 
       <p className="wf-shadow-identical" data-testid={`wf-shadow-identical-${step}`}>
         <span className="text-muted">{t('wf.shadow.compare.identical')}</span>{' '}
@@ -248,6 +255,15 @@ function StepComparison({ comparison, names, t }: { comparison: StepShadowCompar
             names={names}
             t={t}
             testId="wf-shadow-exec"
+            artifact={artifacts && (
+              <ExecutionArtifact
+                step={comparison}
+                execution={execution}
+                context={artifacts}
+                t={t}
+                testId={`wf-shadow-exec-${step}-${execution.shadow_id ?? 'main'}`}
+              />
+            )}
           />
         ))}
       </ul>
@@ -318,20 +334,49 @@ function StepComparison({ comparison, names, t }: { comparison: StepShadowCompar
 
 /** The run's step shadows; nothing when its steps ran none. */
 export function StepShadowCompare({ workflowId, runId, runStatus }: { workflowId: string; runId: string; runStatus: string }) {
-  return <StepShadowCompareView steps={useStepShadows(workflowId, runId, runStatus)} />;
+  // Keyed by run: a run's view, and a request it has in flight, never serve another.
+  return <StepShadowCompareView key={runId} steps={useStepShadows(workflowId, runId, runStatus)} run={{ workflowId, runId }} />;
 }
 
 const NO_NAMES: IdentityNames = {};
 
-export function StepShadowCompareView({ steps, names = NO_NAMES }: { steps: StepShadowComparison[]; names?: IdentityNames }) {
+export function StepShadowCompareView({ steps, names = NO_NAMES, run }: {
+  steps: StepShadowComparison[];
+  names?: IdentityNames;
+  /** KT-1990 — the run, to make an Artifact from each execution; without it the view only compares. */
+  run?: { workflowId: string; runId: string };
+}) {
   const { t } = useT();
+  const workflowId = run?.workflowId;
+  const runId = run?.runId;
+  // KT-1999 — what was made here shows at once, until the comparison is read
+  // again: from then on the server says which Artifacts exist (one deleted
+  // elsewhere is offered to be made again). What was made belongs to its run:
+  // the view rendered for another run starts empty, and an answer that comes
+  // back for the run it left is not written in it.
+  const [made, setMade] = useState<{ runId?: string; pages: Record<string, string> }>(() => ({ runId, pages: {} }));
+  const [madeSince, setMadeSince] = useState(steps);
+  if (madeSince !== steps || made.runId !== runId) {
+    setMadeSince(steps);
+    setMade({ runId, pages: {} });
+  }
+  const onMade = useCallback((key: string, pageId: string) => setMade(current => (
+    current.runId !== runId || current.pages[key] === pageId
+      ? current
+      : { runId, pages: { ...current.pages, [key]: pageId } }
+  )), [runId]);
+  const madePages = made.pages;
+  const artifacts = useMemo<StepArtifactContext | undefined>(
+    () => workflowId && runId ? { workflowId, runId, made: madePages, onMade } : undefined,
+    [workflowId, runId, madePages, onMade],
+  );
   if (steps.length === 0) return null;
   return (
     <section className="wf-shadow-cmp" data-testid="wf-step-shadow-compare" aria-label={t('wf.shadow.compare.title')}>
       <header className="wf-shadow-cmp-head">
         <strong className="wf-shadow-cmp-title"><FlaskConical size={13} aria-hidden /> {t('wf.shadow.compare.title')}</strong>
       </header>
-      {steps.map(comparison => <StepComparison key={`${comparison.step_name}#${comparison.result_index}`} comparison={comparison} names={names} t={t} />)}
+      {steps.map(comparison => <StepComparison key={`${comparison.step_name}#${comparison.result_index}`} comparison={comparison} names={names} t={t} artifacts={artifacts} />)}
     </section>
   );
 }

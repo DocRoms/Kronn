@@ -2677,7 +2677,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
             />
             <ExecutionVariablesInspector runId={run.id} />
             {/* KT-1459 — the steps of this run that ran shadows, side by side. */}
-            <StepShadowCompareView steps={shadowSteps} names={loadNames} />
+            <StepShadowCompareView key={run.id} steps={shadowSteps} names={loadNames} run={{ workflowId: workflow.id, runId: run.id }} />
             </>)}</WithStepShadows>
             {childBatch && onNavigateToBatch && (
               <button

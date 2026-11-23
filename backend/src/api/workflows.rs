@@ -7253,7 +7253,8 @@ pub async fn get_run(
     }
 }
 
-/// DELETE /api/workflows/:id/runs — Delete all runs for a workflow
+/// DELETE /api/workflows/:id/runs — Delete all runs for a workflow, with the
+/// Artifacts made from their executions (KT-1990).
 pub async fn delete_all_runs(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -7263,22 +7264,37 @@ pub async fn delete_all_runs(
         .with_conn(move |conn| crate::db::workflows::delete_all_runs(conn, &id))
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(())),
+        Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
 
-/// DELETE /api/workflows/:id/runs/:run_id — Delete a single run
+/// DELETE /api/workflows/:id/runs/:run_id — Delete a single run, with the
+/// Artifacts made from its executions (KT-1990).
 pub async fn delete_run(
     State(state): State<AppState>,
-    Path((_id, run_id)): Path<(String, String)>,
+    Path((id, run_id)): Path<(String, String)>,
 ) -> Json<ApiResponse<()>> {
+    // A run of another workflow, or an unknown run, is not found: the path
+    // names the workflow, so nothing outside it is deleted (KT-1999).
     match state
         .db
-        .with_conn(move |conn| crate::db::workflows::delete_run(conn, &run_id))
+        .with_conn(move |conn| {
+            let owned = crate::db::workflows::get_run(conn, &run_id)?
+                .is_some_and(|run| run.workflow_id == id);
+            if !owned {
+                return Ok(false);
+            }
+            crate::db::workflows::delete_run(conn, &run_id)?;
+            Ok(true)
+        })
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(())),
+        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(false) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Run not found",
+        )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }

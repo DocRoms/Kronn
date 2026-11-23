@@ -105,6 +105,9 @@ describe('StandaloneLivePageMosaic', () => {
     const frames = await screen.findAllByTestId('standalone-live-page-mosaic-frame');
     expect(pagesApi.get).toHaveBeenCalledTimes(3);
     expect(frames.map(frame => frame.getAttribute('title'))).toEqual(['Report 1', 'Report 2', 'Report 3']);
+    // KT-1990 — each tile names what it shows, visibly, in the order asked.
+    expect(screen.getAllByTestId('standalone-live-page-mosaic-caption').map(caption => caption.textContent))
+      .toEqual(['Report 1', 'Report 2', 'Report 3']);
     frames.forEach((frame, index) => {
       expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
       expect(frame).not.toHaveAttribute('allow-same-origin');

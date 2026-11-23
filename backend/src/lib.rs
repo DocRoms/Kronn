@@ -1256,6 +1256,24 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/workflows/{id}/runs/{run_id}/step-shadows",
             get(api::workflows::run_step_shadows),
         )
+        // KT-1990 — Artifacts made from a step's executions (human only).
+        .route(
+            "/api/workflows/{id}/runs/{run_id}/step-artifacts",
+            post(api::step_artifacts::make_route),
+        )
+        .route(
+            "/api/workflows/{id}/runs/{run_id}/step-artifacts/mosaic",
+            post(api::step_artifacts::mosaic_route),
+        )
+        .route(
+            "/api/workflows/{id}/step-artifacts/count",
+            get(api::step_artifacts::count_route),
+        )
+        .route("/api/step-artifacts", get(api::step_artifacts::folders))
+        .route(
+            "/api/workflow-runs/{run_id}/step-artifacts",
+            delete(api::step_artifacts::delete_folder),
+        )
         .route(
             "/api/pages/{id}/publications",
             get(api::live_pages::publications),

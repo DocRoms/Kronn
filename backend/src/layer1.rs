@@ -122,6 +122,7 @@ pub mod db {
     pub mod resource_identities;
     pub mod run_retention;
     pub mod shared_runs;
+    pub mod step_artifacts;
     pub mod task_boards;
     pub mod trust;
     pub mod workflow_step_rooms;

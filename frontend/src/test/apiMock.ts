@@ -567,6 +567,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     workflows: {
       promoteShadow: resolve({}),
       stepShadows: resolve([]),
+      makeStepArtifact: resolve({ page_id: 'page-made', created: true }),
+      stepArtifactMosaic: resolve({ page_ids: [], created: 0 }),
+      stepArtifactCount: resolve({ count: 0 }),
       list: resolve([]),
       get: resolve(null),
       unsafeSteps: resolve([]),
@@ -600,6 +603,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
 
     pages: {
       resources: resolve([]),
+      runFolders: resolve([]),
+      deleteRunFolder: resolve({ count: 0 }),
       capability: resolve({ activated: false, activated_at: null }),
       list: resolve([]),
       get: resolve(null),

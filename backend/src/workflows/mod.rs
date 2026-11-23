@@ -24,6 +24,7 @@ pub mod run_effect;
 pub mod run_pins;
 pub mod runner;
 pub mod shadow;
+pub mod shadow_artifact;
 pub mod shadow_merge;
 pub mod shadow_summary;
 pub mod step_agents;
