@@ -207,33 +207,39 @@ pub fn mask_secret(raw: &str) -> String {
     format!("***({} chars)", raw.chars().count())
 }
 
-/// Returns a copy of `url` with every query param whose key matches
-/// [`looks_like_secret_key`] replaced by `"***"`. Call this before
-/// logging a URL or echoing it back to the frontend. Preserves the
-/// rest of the URL verbatim so the caller can still see what endpoint
-/// was hit.
+/// Returns `url` as it is sent, with the password of its user info and the
+/// value of every query pair whose decoded key matches
+/// [`looks_like_secret_key`] replaced by `"***"`. Call this before logging a
+/// URL or echoing it back to the frontend. Every other byte is kept as
+/// `url` serialised it, never decoded and re-encoded: the by-value scrub
+/// registers the forms a secret is sent in, so a form the request never
+/// carried (`+` turned into `%2B`, `/` into `%2F`) would slip past it.
 pub fn redact_url_query(url: &Url) -> String {
-    let mut clone = url.clone();
-    let pairs: Vec<(String, String)> = url
-        .query_pairs()
-        .map(|(k, v)| {
-            let key = k.into_owned();
-            let value = if looks_like_secret_key(&key) {
-                "***".into()
-            } else {
-                v.into_owned()
-            };
-            (key, value)
+    let mut shown = url.clone();
+    if shown.password().is_some() {
+        // Fails only for a URL that cannot hold user info, which has none.
+        let _ = shown.set_password(Some("***"));
+    }
+    let Some(query) = shown.query() else {
+        return shown.to_string();
+    };
+    let masked: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((raw_key, _))
+                if looks_like_secret_key(&crate::core::secret_scrub::percent_decode(
+                    &raw_key.replace('+', " "),
+                )) =>
+            {
+                format!("{raw_key}=***")
+            }
+            _ => pair.to_string(),
         })
         .collect();
-    clone.query_pairs_mut().clear();
-    for (k, v) in &pairs {
-        clone.query_pairs_mut().append_pair(k, v);
-    }
-    // If no query, `query_pairs_mut().clear()` leaves a trailing `?` —
-    // strip it for cleanliness.
-    let s = clone.to_string();
-    s.trim_end_matches('?').to_string()
+    let text = shown.as_str();
+    let end = text.len() - shown.fragment().map_or(0, |fragment| fragment.len() + 1);
+    let start = end - query.len();
+    format!("{}{}{}", &text[..start], masked.join("&"), &text[end..])
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -483,6 +489,55 @@ mod tests {
         assert!(redacted.contains("apikey=***"));
         assert!(redacted.contains("host=euronews.com"));
         assert!(redacted.contains("limit=5"));
+    }
+
+    /// KT-2007 — the query is printed byte for byte as `url` holds it: no
+    /// pair is decoded and form-encoded again (`+`, `/`, `=`, `%20` kept).
+    #[test]
+    fn redact_url_query_prints_the_query_as_sent() {
+        for sent in [
+            "https://h.example/x?q=AbC+dEf/ghIJ==",
+            "https://h.example/x?q=Abc%20def:ghi&b=%2F",
+            "https://h.example/x?flag&q=1",
+            "https://h.example/x?",
+            "https://h.example/x?#frag",
+            "https://h.example/x?a=1#frag?b=2",
+        ] {
+            let url = Url::parse(sent).unwrap();
+            assert_eq!(url.as_str(), sent, "the case is written as url sends it");
+            assert_eq!(redact_url_query(&url), sent);
+        }
+    }
+
+    #[test]
+    fn redact_url_query_masks_only_the_value_of_a_secret_named_key() {
+        let url =
+            Url::parse("https://h.example/x?q=AbC+dEf&api%5Fkey=Sec+ret/1&token&x=1#f").unwrap();
+        assert_eq!(
+            redact_url_query(&url),
+            "https://h.example/x?q=AbC+dEf&api%5Fkey=***&token&x=1#f"
+        );
+    }
+
+    #[test]
+    fn redact_url_query_leaves_a_url_without_query_untouched() {
+        for sent in ["https://h.example/x#frag", "https://h.example/x#a?b=1"] {
+            let url = Url::parse(sent).unwrap();
+            assert_eq!(redact_url_query(&url), sent);
+        }
+    }
+
+    /// The function is the one to call before logging a URL: the password
+    /// of its user info is masked, the user name kept.
+    #[test]
+    fn redact_url_query_masks_the_user_info_password() {
+        let url = Url::parse("https://bot:P@ss!word1@h.example/x?token=abc&q=1").unwrap();
+        assert_eq!(
+            redact_url_query(&url),
+            "https://bot:***@h.example/x?token=***&q=1"
+        );
+        let url = Url::parse("https://bot@h.example/x").unwrap();
+        assert_eq!(redact_url_query(&url), "https://bot@h.example/x");
     }
 
     #[test]

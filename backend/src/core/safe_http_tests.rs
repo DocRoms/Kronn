@@ -392,3 +392,29 @@ async fn a_peer_client_does_not_follow_a_redirect_off_the_peer() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
 }
+
+/// KT-2007 — `strip_query_keys` reads the pairs back and writes them again:
+/// the value it keeps is sent decoded as a form and form-encoded again
+/// (`AbC+dEf/ghIJ==` becomes `AbC+dEf%2FghIJ%3D%3D`), and the scrub must
+/// know that form. (`AbC+dEf/ghIJ==` resent happens to equal its password
+/// form; `AbC+dEf!ghIJ==` resent equals no other form.)
+#[test]
+fn a_secret_kept_by_strip_query_keys_is_masked_in_the_form_it_is_resent() {
+    for (secret, resent) in [
+        ("AbC+dEf/ghIJ==", "AbC+dEf%2FghIJ%3D%3D"),
+        ("AbC+dEf!ghIJ==", "AbC+dEf%21ghIJ%3D%3D"),
+    ] {
+        let mut next = url(&format!(
+            "https://other.example/sink?q={secret}&apikey=k3y&lang=fr"
+        ));
+        strip_query_keys(&mut next, &["apikey".to_string()]);
+        assert_eq!(next.query(), Some(format!("q={resent}&lang=fr").as_str()));
+        let mut set = crate::core::secret_scrub::SecretSet::new();
+        set.add(secret);
+        assert_eq!(
+            set.scrub(next.as_str()),
+            "https://other.example/sink?q=***&lang=fr",
+            "{secret}"
+        );
+    }
+}

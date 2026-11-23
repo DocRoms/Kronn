@@ -197,7 +197,8 @@ pub async fn check_connection_with(
             Default::default(),
         ),
         Ok(env) => {
-            let secrets = crate::workflows::api_call_executor::call_secrets(&server, &env);
+            // The stored detail only describes the probe: the diagnostic set.
+            let secrets = crate::workflows::api_call_executor::diagnostic_secrets(&server, &env);
             let started = Utc::now();
             let probe = crate::api::mcps::probe_api_with_policy(
                 state, &server, &config, &env, true, policy,

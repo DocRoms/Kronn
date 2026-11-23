@@ -11,6 +11,71 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Security
+
+- Dependencies: `cookie` 0.18.3 in the desktop lock file for RUSTSEC-2026-0594
+  (private cookie nonces can repeat in a process that forks; KT-2027). The
+  desktop build does not compile the crate's private-cookie code, and 0.18.3
+  changes nothing else.
+- Dependencies: `url` 2.5.9 for RUSTSEC-2026-0592, a stack overflow in
+  `Url::origin()` on nested `blob:` URLs (KT-2007). `url` 2.5.9 also escapes a
+  caret in a path (`^` is sent as `%5E`), so the API access policy's canonical
+  form now escapes it too: the characters it escapes in a path are space,
+  quote, angle brackets, backtick, caret and braces. `/a^b`, `/a%5Eb` and
+  `/a%5eb` are one destination again, a stored rule written with a raw `^`
+  applies to every spelling without a migration, and a policy holding two
+  spellings is refused at save as two rules. Scrubbing by value follows the
+  same serializer: a secret is also masked in every form `url` sends it in, a
+  path (alone or glued inside a segment), a raw query, a form-encoded query, a
+  query read back and written again (a cross-origin redirect, link-header
+  pagination: `AbC+dEf/ghIJ==` is resent `AbC+dEf%2FghIJ%3D%3D`), a fragment
+  and the user info (password, user name), derived from the crate, so
+  `bot123456:AbC^dEf`, sent as `bot123456:AbC%5EdEf`, and a password
+  `P@ss!word1`, sent as `P%40ss!word1`, no longer show in a step summary or
+  error. Each form is also masked without its trailing slashes (a base URL
+  loses them), and a secret stored pre-encoded (`Abc%5Edef%3Aghi`) is masked
+  decoded too. The request line in a summary or error prints the query as it
+  was sent, with only secret-named values and the user-info password replaced
+  by `***`, instead of decoding and re-encoding it into a form no scrub knew.
+  A part `url` hands back serialised (a URL secret's password, user name,
+  query, fragment and each query value of 8 bytes or more, a webhook's path
+  token and user info) is masked decoded too, as a server would echo it, and
+  each query value also as written in the URL (`AbC+dEf/ghIJ==`, which
+  `url` hands back as `AbC dEf/ghIJ==`); a pair with no `=` (a bare token,
+  `?a=1&SecretToken`) counts as a value, and a value holding `;`, which no
+  parser splits, also masks its pieces (`token=AbC+dEf/ghIJ==;v=1` masks the
+  token alone, a later piece only from 8 bytes). A non-ASCII secret used as a host
+  label is masked in its IDNA form, a short form holding a percent escape
+  also with lower-case hex, and a URL secret's user name only from 8 bytes (a
+  short one, `user`, rewrote every `"user"` key of the data). A second,
+  diagnostic set adds the path segments of a URL secret of 8 bytes or more (a
+  webhook URL used as a base URL), masked in error excerpts, transport errors,
+  summaries, logged errors and the output of a failed step, never in the data
+  of a successful response, where `services` is an ordinary word: a 2xx body
+  echoing a path token alone is handed on as it is, so keep a bare origin in
+  the env value and the path in the endpoint. A later `;` piece that is
+  `key=value` (`?v=1;token=…`) also masks its value from 8 bytes, a bare query
+  token is masked form-decoded too (`AbC+dEf` echoed `AbC dEf`), and a path
+  segment holding `;` (`/hook/AbCdEf123456;v=1`) masks its pieces from 8 bytes,
+  for a webhook and in the diagnostic set. A webhook's `Authorization: Basic`
+  header is decoded to its password and `user:password`, as an API call's
+  already was (one shared function, the scheme in any case), and the notify
+  step's send and public-IP failures go through its set. The off-origin
+  `Link: rel="next"` warning logs the next and base URLs scrubbed by the
+  diagnostic set, not only with secret-named query values masked. A URL
+  secret's whole query and fragment are masked only from 8 bytes (`?ok`, `#id`
+  rewrote every `"ok"` or `"id"` key of the data); the request line still hides
+  the whole value. Limits: a secret whose form falls
+  under 8 bytes once the parser strips its tabs or newlines, or once its
+  trailing slashes are trimmed (`a///////`), is masked only as a whole token.
+  A part of a URL secret is split on `/`, `&`, `=` and `;` only: a token glued
+  to other text by any other character (`,`, `|`, `:`) is masked only with
+  that text. A non-ASCII secret glued inside a host label
+  (`api-{TENANT}.example.com`) is not covered (Punycode encodes the whole
+  label). A non-secret query value of 8 bytes or more inside a URL secret
+  (`?mode=production&token=…`) is masked in the data of a successful call too,
+  and a part under 8 bytes is not masked alone, the password excepted.
+
 ### Changed
 
 - Orchestration: a lane whose validations start no build is no longer warmed

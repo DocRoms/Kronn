@@ -255,7 +255,7 @@ pub fn request_segments(path: &str) -> Option<Vec<String>> {
 /// A segment in the one form requests and rules are compared in: an encoded
 /// unreserved character (`%6D` for `m`) decoded, every other escape kept with
 /// uppercase hex, an ASCII character the URL escapes (space, quote, angle
-/// brackets, backtick, braces, controls) escaped, and a non-ASCII character
+/// brackets, backtick, caret, braces, controls) escaped, and a non-ASCII character
 /// written as its UTF-8 escapes: the form the request URL is sent in. So `/users/%6De` is `/users/me` and `%3a` is `%3A`.
 /// `None` for an escape that could change the path's shape (slash, backslash,
 /// dot), a raw backslash, or a malformed escape.
@@ -297,8 +297,9 @@ pub fn canonical_segment(segment: &str) -> Option<String> {
 
 /// ASCII characters the client's URL serializer (`url`, WHATWG path set)
 /// escapes in a path: a rule must spell them escaped too to be compared.
+/// `url` 2.5.9 added the caret: a raw `^` is sent as `%5E`.
 fn url_path_encodes(c: char) -> bool {
-    matches!(c, ' ' | '"' | '#' | '<' | '>' | '?' | '`' | '{' | '}')
+    matches!(c, ' ' | '"' | '#' | '<' | '>' | '?' | '^' | '`' | '{' | '}')
 }
 
 /// Whether every segment of a rule's path has a canonical form.
