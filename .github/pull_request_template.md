@@ -13,6 +13,7 @@ Closes #
 
 ## For the review
 <!-- Where to look closely, the risky part, what is deliberately out of scope. -->
+<!-- Which agents and projects this covers; anything specific to one agent, provider or machine, and why. -->
 
 ## Screenshots (UI changes)
 **Required** when the diff changes what renders under `frontend/` (components, CSS, on-screen strings): before (`main`) / after (this PR head), each changed screen, light and dark. Otherwise replace this text with **N/A — no UI change**. Rules, location and how to capture: `docs/conventions/pull-requests.md`.
