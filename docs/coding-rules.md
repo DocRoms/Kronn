@@ -10,12 +10,12 @@
 - No emojis in code unless user explicitly requests them.
 - **Comment sparingly — explain *why*, never *what*.** A comment earns its place only if it adds what the code can't say: a non-obvious rationale, a real gotcha, or a ticket ref for a *surprising* decision. Do NOT narrate what the code does, restate the line above, or leave "this is now handled by X — see Y" pointers the code/ticket already makes obvious. Match the file's existing comment density; a clear name beats a paragraph.
 
-Kronn stays generic and cross-agent. A change works for any project a user adds and for every agent Kronn runs (CLI agents and HTTP providers), not only the one you develop with or your own machine.
+**Kronn stays generic and cross-agent.** A change works for any project a user adds and for every agent Kronn runs (CLI agents, Ollama and HTTP providers), not only the one you develop with or your own machine. No provider-only code path.
 
 - Model a capability in agent-neutral terms; each agent adapter maps it to its CLI or API. An agent that cannot provide it is refused with a message that says why, in the UI too.
-- Machine-, project- or toolchain-specific behaviour is a setting (global, with a per-project override and a default that keeps today's behaviour), never hard-coded for one repo, provider or workstation.
+- Machine-, project- or toolchain-specific behaviour is a setting, never hard-coded for one repo, provider, model or workstation: one cross-agent setting whose default keeps today's behaviour, overridable at a narrower scope (project, workflow, room, step, agent) when needed. The narrowest explicit setting wins and no value means inherit, as trust levels do (`docs/architecture/trust-levels.md`).
 - A setting that widens what an agent can reach (a browser session, the network, files outside its worktree, full access, validation access) is human-only: an agent may send it back unchanged, never set or change it.
-- Before review, ask: does it still work on a project that is not Kronn, with a non-Claude agent, under Docker?
+- Before review, ask: does it still work on a project that is not Kronn, with another agent or provider, under Docker?
 
 ## Rust (backend)
 
