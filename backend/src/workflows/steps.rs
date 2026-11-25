@@ -75,6 +75,23 @@ pub fn native_full_access_refusal_for(agent: &AgentType) -> Option<String> {
 /// prompt over its model's limit): the same on every attempt, so never retried
 /// and never a quota wait; an ordinary failure otherwise, so `on_failure` still
 /// runs.
+/// A step refused for its connection or key (KT-2055): failed before any
+/// request, marked `preflight_failed` like a connection that cannot resolve.
+fn connection_refusal_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
+    let mut outcome = refusal_outcome(step, format!("preflight_failed:{refusal}"));
+    outcome.result.step_kind = Some("preflight_failed".into());
+    outcome.result.step_agent = Some(step.agent.clone());
+    outcome
+}
+
+/// The connection/key refusal of a step's `multi_agent_review` reviewer.
+pub fn reviewer_refusal(cfg: &crate::models::MultiAgentReviewConfig, refusal: &str) -> String {
+    format!(
+        "multi_agent_review reviewer ({}): {refusal}",
+        crate::agents::agent_display_name(&cfg.reviewer_agent)
+    )
+}
+
 fn refusal_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
     StepOutcome {
         result: StepResult {
@@ -278,6 +295,20 @@ pub async fn execute_step(
         .and_then(|cfg| native_full_access_refusal_for(&cfg.reviewer_agent))
     {
         return refusal_outcome(step, refusal);
+    }
+    // KT-2055 — the dispatch half of the connection/key rule: whatever starts
+    // this step (main run, shadow, merge condenser, fallback link, on_failure,
+    // a resumed run), a gone/keyless/endpoint-less connection or a missing
+    // provider key refuses it here, before any request, in the preflight's
+    // own words. The reviewer is held to it before the author spends a turn.
+    if let Some(refusal) = step_connection_refusal(step, catalog_db, tokens_config).await {
+        return connection_refusal_outcome(step, refusal);
+    }
+    if let Some(cfg) = step.multi_agent_review.as_ref() {
+        let reviewer = reviewer_step_for(step, cfg);
+        if let Some(refusal) = step_connection_refusal(&reviewer, catalog_db, tokens_config).await {
+            return connection_refusal_outcome(step, reviewer_refusal(cfg, &refusal));
+        }
     }
 
     // Build prompt (template render + output-format addendum + triage
@@ -1177,15 +1208,49 @@ fn reviewer_shares_step_connection(step: &WorkflowStep, reviewer_agent: &AgentTy
     *reviewer_agent == step.agent
 }
 
+/// The connection a step names, or `None` when it names none. A blank or
+/// whitespace-only id is no connection (KT-2055), as the shadow picker reads it.
+pub fn step_connection_id(step: &WorkflowStep) -> Option<&str> {
+    step.agent_settings
+        .as_ref()
+        .and_then(|settings| settings.connection_id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// A reviewer turn of `multi_agent_review`: a synthetic step running the
+/// reviewer agent (different family + its own tier), FreeText, no nested
+/// debate / on_result. It names the step's connection only when it runs on
+/// the step's own agent. Shared by the debate, the dispatch rule and the run
+/// preflight, so all three judge the reviewer that actually runs (KT-2055).
+pub fn reviewer_step_for(
+    step: &WorkflowStep,
+    cfg: &crate::models::MultiAgentReviewConfig,
+) -> WorkflowStep {
+    let mut s = step.clone();
+    s.agent = cfg.reviewer_agent.clone();
+    s.multi_agent_review = None;
+    s.on_result = vec![];
+    s.output_format = crate::models::StepOutputFormat::FreeText;
+    s.agent_settings = Some(AgentSettings {
+        fallback: None,
+        tools: None,
+        model: None,
+        tier: cfg.reviewer_tier,
+        reasoning_effort: None,
+        max_tokens: None,
+        connection_id: reviewer_shares_step_connection(step, &cfg.reviewer_agent)
+            .then(|| step_connection_id(step).map(str::to_string))
+            .flatten(),
+    });
+    s
+}
+
 pub async fn resolve_step_connection(
     step: &WorkflowStep,
     catalog_db: Option<&crate::db::Database>,
 ) -> Result<Option<ExternalApiConnection>> {
-    let connection_id = step
-        .agent_settings
-        .as_ref()
-        .and_then(|settings| settings.connection_id.clone());
-    let Some(connection_id) = connection_id else {
+    let Some(connection_id) = step_connection_id(step).map(str::to_string) else {
         return Ok(None);
     };
     let db = catalog_db.ok_or_else(|| {
@@ -1225,11 +1290,11 @@ pub async fn resolve_step_connection(
 /// connection and what is missing.
 pub async fn named_connection_refusal(
     step: &WorkflowStep,
-    catalog_db: &crate::db::Database,
+    catalog_db: Option<&crate::db::Database>,
     tokens: &TokensConfig,
 ) -> Option<String> {
     let name = &step.name;
-    match resolve_step_connection(step, Some(catalog_db)).await {
+    match resolve_step_connection(step, catalog_db).await {
         Ok(None) => Some(format!(
             "'{name}' runs on a named HTTP connection but names no connection: choose one for this step in the workflow"
         )),
@@ -1249,9 +1314,12 @@ pub async fn named_connection_refusal(
 }
 
 /// Why an Agent step cannot start for its connection or its key, or `None`
-/// when nothing about them stops it (KT-2045). The run preflight asks this of
-/// every step whose agent can launch, so a step the run would refuse mid-way
-/// is refused before any step runs:
+/// when nothing about them stops it (KT-2045). One rule, asked twice: by the
+/// run preflight of every step the run will certainly start (read as it will
+/// run, Quick Prompt hydrated), so a step the run would refuse mid-way is
+/// refused before any step runs; and by `execute_step`, before any request,
+/// of every Agent step it starts — shadow, merge condenser, fallback link,
+/// reviewer, `on_failure` step, resumed run (KT-2055):
 /// - `Custom`, or any agent whose step names a connection: the connection
 ///   must exist for this agent, have an endpoint and hold the key its preset
 ///   needs (`named_connection_refusal`);
@@ -1262,21 +1330,28 @@ pub async fn named_connection_refusal(
 /// Any other agent (a CLI) owns its login: `None`, the run never second-guesses it.
 pub async fn step_connection_refusal(
     step: &WorkflowStep,
-    catalog_db: &crate::db::Database,
+    catalog_db: Option<&crate::db::Database>,
     tokens: &TokensConfig,
 ) -> Option<String> {
-    let names_connection = step
-        .agent_settings
-        .as_ref()
-        .is_some_and(|settings| settings.connection_id.is_some());
-    if step.agent == AgentType::Custom || names_connection {
+    if step.agent == AgentType::Custom || step_connection_id(step).is_some() {
         return named_connection_refusal(step, catalog_db, tokens).await;
     }
-    if crate::agents::http_provider_key_missing(&step.agent, tokens)? {
-        let provider = crate::agents::agent_display_name(&step.agent);
+    provider_key_refusal(&step.name, &step.agent, tokens)
+}
+
+/// Why step `step_name` cannot run on `agent` without a named connection: a
+/// native HTTP provider (`LiteLlm`, `Nvidia`) whose preset needs a key with
+/// none set. `None` for any other agent, or when the key is there. Also how a
+/// fallback link is judged, since a link never names a connection (KT-2055).
+pub fn provider_key_refusal(
+    step_name: &str,
+    agent: &AgentType,
+    tokens: &TokensConfig,
+) -> Option<String> {
+    if crate::agents::http_provider_key_missing(agent, tokens)? {
+        let provider = crate::agents::agent_display_name(agent);
         return Some(format!(
-            "'{}' runs on {provider} but no {provider} API key is set: add it in Settings or choose a named connection holding one",
-            step.name
+            "'{step_name}' runs on {provider} but no {provider} API key is set: add it in Settings or choose a named connection holding one"
         ));
     }
     None
@@ -1971,33 +2046,9 @@ async fn run_multi_agent_debate(
     let mut native_tool_calls = Vec::new();
     let mut selected_attempt = None;
 
-    // A reviewer turn: a synthetic step running the reviewer agent (different
-    // family + its own tier), FreeText, no nested debate / on_result.
     let reviewer_shares_the_step_connection =
         reviewer_shares_step_connection(step, &cfg.reviewer_agent);
-    let reviewer_step = {
-        let mut s = step.clone();
-        s.agent = cfg.reviewer_agent.clone();
-        s.multi_agent_review = None;
-        s.on_result = vec![];
-        s.output_format = crate::models::StepOutputFormat::FreeText;
-        s.agent_settings = Some(AgentSettings {
-            fallback: None,
-            tools: None,
-            model: None,
-            tier: cfg.reviewer_tier,
-            reasoning_effort: None,
-            max_tokens: None,
-            connection_id: reviewer_shares_the_step_connection
-                .then(|| {
-                    step.agent_settings
-                        .as_ref()
-                        .and_then(|settings| settings.connection_id.clone())
-                })
-                .flatten(),
-        });
-        s
-    };
+    let reviewer_step = reviewer_step_for(step, cfg);
     // An author turn: the original step's agent (keep its tier) AND its
     // output_format — so on a TypedSchema/Structured step the author re-emits
     // the FULL envelope (the converged manifest must stay valid for the
@@ -3488,6 +3539,10 @@ mod drive_agent_to_output_tests {
 mod attempt_session_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
+#[path = "steps_connection_rule_test.rs"]
+mod connection_rule_tests;
+
+#[cfg(all(test, feature = "full-tests"))]
 mod http_native_tool_step_tests {
     use super::*;
     use crate::agents::tools::{ToolCall, ToolExecutor, ToolOutcome};
@@ -3648,7 +3703,7 @@ mod http_native_tool_step_tests {
         let refusal = |id: &str| {
             let step = named_custom_step(id, None);
             let (db, tokens) = (&db, &tokens);
-            async move { named_connection_refusal(&step, db, tokens).await }
+            async move { named_connection_refusal(&step, Some(db), tokens).await }
         };
 
         let other_agent = refusal("conn-litellm").await.unwrap();

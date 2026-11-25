@@ -161,6 +161,23 @@ pub fn agent_can_launch(
             .any(|known| std::mem::discriminant(known) == std::mem::discriminant(agent))
 }
 
+/// Whether `step`, as it will run, can start here (KT-2055). A step on a named
+/// connection (`Custom`, or a native HTTP provider — `LiteLlm`, `Nvidia` —
+/// naming one) runs over HTTP on that connection: no local binary and no
+/// legacy `lite_llm.base_url` is needed, its connection and key are judged by
+/// `steps::step_connection_refusal`. Any other step: `agent_can_launch`.
+pub fn step_can_launch(
+    step: &WorkflowStep,
+    usable: &[AgentType],
+    agents_config: &AgentsConfig,
+) -> bool {
+    let runs_on_its_connection = step.agent == AgentType::Custom
+        || (crate::db::external_api_connections::legacy_credential_for_agent(&step.agent)
+            .is_some()
+            && super::steps::step_connection_id(step).is_some());
+    runs_on_its_connection || agent_can_launch(&step.agent, usable, agents_config)
+}
+
 /// Refuses a chosen agent that is not installed and enabled.
 pub fn check_available(
     workflow: &Workflow,
@@ -169,11 +186,14 @@ pub fn check_available(
     agents_config: &AgentsConfig,
 ) -> Result<(), String> {
     // A step kept on its own agent is checked by the run preflight as today.
+    // A changed one is judged as it will run, by the preflight's own rule.
     let missing: Vec<String> = resolved
         .iter()
         .filter_map(|(key, choice)| {
             let step = find_step(workflow, key)?;
-            (step.agent != choice.agent && !agent_can_launch(&choice.agent, usable, agents_config))
+            let mut planned = step.clone();
+            apply_to_step(&mut planned, choice);
+            (step.agent != choice.agent && !step_can_launch(&planned, usable, agents_config))
                 .then(|| format!("'{}' → {:?}", step.name, choice.agent))
         })
         .collect();
@@ -526,6 +546,63 @@ mod tests {
         let settings = wf.steps[0].agent_settings.as_ref().unwrap();
         assert_eq!(settings.connection_id.as_deref(), Some("conn-or"));
         assert_eq!(settings.model.as_deref(), Some("z-ai/glm"));
+    }
+
+    // KT-2055: a LiteLlm/Nvidia step naming a connection runs over HTTP on it:
+    // launchable with no local binary and no legacy `lite_llm.base_url`.
+    #[test]
+    fn a_provider_step_naming_a_connection_launches_on_it_without_binary_or_base_url() {
+        let mut config = crate::core::config::default_config().agents;
+        config.lite_llm.base_url = None;
+        for agent in [AgentType::LiteLlm, AgentType::Nvidia] {
+            let mut step = agent_step("jeu", agent.clone());
+            assert!(
+                !step_can_launch(&step, &[], &config),
+                "{agent:?} without a connection needs the agent itself"
+            );
+            step.agent_settings = Some(AgentSettings {
+                connection_id: Some("   ".into()),
+                ..Default::default()
+            });
+            assert!(
+                !step_can_launch(&step, &[], &config),
+                "a blank id is no connection"
+            );
+            step.agent_settings = Some(AgentSettings {
+                connection_id: Some("conn-proxy-2".into()),
+                ..Default::default()
+            });
+            assert!(step_can_launch(&step, &[], &config), "{agent:?}");
+        }
+        // A CLI naming a connection still needs its CLI.
+        let mut cli = agent_step("cli", AgentType::Codex);
+        cli.agent_settings = Some(AgentSettings {
+            connection_id: Some("conn-proxy-2".into()),
+            ..Default::default()
+        });
+        assert!(!step_can_launch(&cli, &[], &config));
+
+        // Launch: a step kept on its connection with another model passes; a
+        // step switched onto LiteLlm loses its connection and needs LiteLlm.
+        let mut kept = agent_step("jeu", AgentType::LiteLlm);
+        kept.agent_settings = Some(AgentSettings {
+            connection_id: Some("conn-proxy-2".into()),
+            ..Default::default()
+        });
+        let wf = workflow(vec![kept, agent_step("autre", AgentType::ClaudeCode)]);
+        let resolved = validate(
+            &wf,
+            &request(&[("jeu", choice(AgentType::LiteLlm, Some("m2"), None))]),
+        )
+        .unwrap();
+        check_available(&wf, &resolved, &[], &config).unwrap();
+        let resolved = validate(
+            &wf,
+            &request(&[("autre", choice(AgentType::LiteLlm, None, None))]),
+        )
+        .unwrap();
+        let error = check_available(&wf, &resolved, &[], &config).unwrap_err();
+        assert!(error.contains("'autre' → LiteLlm"), "{error}");
     }
 
     #[test]

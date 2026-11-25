@@ -3331,13 +3331,29 @@ pub struct ExternalHttpRuntime {
     pub api_key: Option<String>,
 }
 
-crate::debug_without_secrets!(ExternalHttpRuntime {
-    display_name,
-    mention_alias,
-    endpoint,
-    tools_enabled;
-    masked: api_key
-});
+// The key is masked, and so is the endpoint's userinfo (KT-2055): an endpoint
+// may carry `user:pass@`.
+impl std::fmt::Debug for ExternalHttpRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            display_name,
+            mention_alias,
+            endpoint,
+            tools_enabled,
+            api_key,
+        } = self;
+        f.debug_struct("ExternalHttpRuntime")
+            .field("display_name", display_name)
+            .field("mention_alias", mention_alias)
+            .field(
+                "endpoint",
+                &crate::core::redact::mask_url_userinfo(endpoint),
+            )
+            .field("tools_enabled", tools_enabled)
+            .field("api_key", &crate::core::redact::Masked(api_key))
+            .finish()
+    }
+}
 
 /// The key an HTTP run sends: only ever the one belonging to the endpoint it
 /// goes to (KT-2038). On a named connection that is the connection's own
@@ -3352,12 +3368,13 @@ pub(crate) fn resolve_http_connection_key<'a>(
     external_http: Option<&'a ExternalHttpRuntime>,
     tokens: &'a TokensConfig,
 ) -> Option<&'a str> {
+    // A blank key is no key on both arms (KT-2055): nothing is sent.
     match external_http {
         Some(runtime) => runtime.api_key.as_deref(),
         None => crate::db::external_api_connections::legacy_credential_for_agent(agent_type)
-            .and_then(|(slug, _)| tokens.active_key_for(slug))
-            .filter(|key| !key.trim().is_empty()),
+            .and_then(|(slug, _)| tokens.active_key_for(slug)),
     }
+    .filter(|key| !key.trim().is_empty())
 }
 
 /// The executor this HTTP run may use: `config.tools` when the verdict of

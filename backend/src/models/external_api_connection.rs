@@ -6,7 +6,7 @@ use ts_rs::TS;
 /// credential's slug; the value is an `ApiKey` kept in the encrypted
 /// `stored_credentials` table, outside the residual cases listed in
 /// TD-20260901-plaintext-connection-credentials.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ExternalApiConnection {
     pub id: String,
@@ -40,6 +40,53 @@ pub struct ExternalApiConnection {
     /// calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_enabled: Option<bool>,
+}
+
+// Every field as written, except the userinfo of the endpoints (KT-2055): an
+// endpoint may carry `user:pass@`.
+impl std::fmt::Debug for ExternalApiConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            id,
+            display_name,
+            mention_alias,
+            endpoint,
+            credential_slug,
+            origin_preset,
+            economy_model,
+            default_model,
+            reasoning_model,
+            created_at,
+            updated_at,
+            image_model,
+            video_model,
+            media_endpoint,
+            decision_model,
+            tools_enabled,
+        } = self;
+        let masked = |url: &Option<String>| {
+            url.as_deref()
+                .map(|url| crate::core::redact::mask_url_userinfo(url).into_owned())
+        };
+        f.debug_struct("ExternalApiConnection")
+            .field("id", id)
+            .field("display_name", display_name)
+            .field("mention_alias", mention_alias)
+            .field("endpoint", &masked(endpoint))
+            .field("credential_slug", credential_slug)
+            .field("origin_preset", origin_preset)
+            .field("economy_model", economy_model)
+            .field("default_model", default_model)
+            .field("reasoning_model", reasoning_model)
+            .field("created_at", created_at)
+            .field("updated_at", updated_at)
+            .field("image_model", image_model)
+            .field("video_model", video_model)
+            .field("media_endpoint", &masked(media_endpoint))
+            .field("decision_model", decision_model)
+            .field("tools_enabled", tools_enabled)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

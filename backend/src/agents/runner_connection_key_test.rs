@@ -134,6 +134,58 @@ fn connection_key_blank_connection_key_sends_nothing() {
     ));
 }
 
+/// KT-2055: the connection arm holds a blank key to be no key by itself,
+/// whoever built the runtime.
+#[test]
+fn connection_key_blank_key_on_a_built_runtime_sends_nothing() {
+    let tokens = provider_slots();
+    for blank in ["", "   ", "\t\n"] {
+        let runtime = ExternalHttpRuntime {
+            display_name: "Blank".into(),
+            mention_alias: "blank".into(),
+            endpoint: "https://connection.invalid/v1".into(),
+            tools_enabled: None,
+            api_key: Some(blank.into()),
+        };
+        for agent in [AgentType::Custom, AgentType::LiteLlm, AgentType::Nvidia] {
+            assert!(
+                is(
+                    resolve_http_connection_key(&agent, Some(&runtime), &tokens),
+                    None
+                ),
+                "a blank runtime key on {agent:?} must send no key"
+            );
+        }
+    }
+}
+
+/// KT-2055: `Debug` never prints the key nor the userinfo of the endpoint.
+#[test]
+fn connection_debug_masks_the_key_and_the_endpoint_userinfo() {
+    let runtime = ExternalHttpRuntime {
+        display_name: "Proxy".into(),
+        mention_alias: "proxy".into(),
+        endpoint: "https://admin:fake5userinfo6pass@proxy.invalid:4000/v1".into(),
+        tools_enabled: None,
+        api_key: Some(FAKE_OWN.into()),
+    };
+    let printed = format!("{runtime:?}");
+    assert!(!printed.contains("fake5userinfo6pass"), "{printed}");
+    assert!(!printed.contains("admin:"), "{printed}");
+    assert!(!printed.contains(FAKE_OWN), "{printed}");
+    assert!(printed.contains("proxy.invalid:4000/v1"), "{printed}");
+
+    let mut named = connection("proxy", "proxy-slot", ExternalApiConnectionPreset::LiteLlm);
+    named.endpoint = Some("http://admin:fake5userinfo6pass@proxy.invalid/v1".into());
+    named.media_endpoint = Some("https://u:fake5media6pass@media.invalid".into());
+    let printed = format!("{named:?}");
+    for secret in ["fake5userinfo6pass", "fake5media6pass", "admin:"] {
+        assert!(!printed.contains(secret), "{printed}");
+    }
+    assert!(printed.contains("http://***@proxy.invalid/v1"), "{printed}");
+    assert!(printed.contains("media.invalid"), "{printed}");
+}
+
 #[test]
 fn connection_key_connection_with_its_own_key_sends_that_key() {
     let tokens = tokens(vec![

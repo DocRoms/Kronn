@@ -441,3 +441,105 @@ async fn a_steps_own_chain_replaces_the_default_and_an_empty_one_cancels_it() {
         Next::Keep
     ));
 }
+
+// ─── KT-2055: a link the dispatch rule refuses is skipped ───────────────
+
+/// Claude Code falling back along `chain`; NVIDIA keyed or not.
+async fn nvidia_chain(nvidia_key: bool, chain: Vec<AgentFallback>) -> (AppState, AgentsConfig) {
+    let (state, _) = state_with(None);
+    let agents = {
+        let mut config = state.config.write().await;
+        config.agents.claude_code.fallback_chain = chain;
+        fallback::migrate_legacy_chains(&mut config.agents);
+        if nvidia_key {
+            config.tokens.keys.push(crate::models::ApiKey {
+                id: "key-nvidia".into(),
+                name: "fixture".into(),
+                provider: crate::db::external_api_connections::NVIDIA_CREDENTIAL_SLUG.into(),
+                value: "fake-fallback-nvidia-key".into(),
+                active: true,
+            });
+        }
+        config.agents.clone()
+    };
+    (state, agents)
+}
+
+fn with_nvidia() -> Vec<AgentType> {
+    let mut usable = everyone();
+    usable.push(AgentType::Nvidia);
+    usable
+}
+
+const QUOTA: &str = "Provider quota or session limit: You've hit your limit · resets 11:59pm (UTC)";
+
+#[tokio::test]
+async fn a_fallback_link_without_its_provider_key_is_skipped_like_one_that_cannot_launch() {
+    let failed = outcome(RunStatus::Failed, QUOTA);
+    let (state, agents) =
+        nvidia_chain(false, vec![link(AgentType::Nvidia), link(AgentType::Codex)]).await;
+    let (moved, _) = rerun(
+        continue_after_among(
+            &state,
+            &agents,
+            &AgentType::ClaudeCode,
+            &step(),
+            &failed,
+            Some(with_nvidia()),
+        )
+        .await,
+    );
+    assert_eq!(moved.agent, AgentType::Codex, "keyless NVIDIA is skipped");
+
+    // NVIDIA alone: nothing can take over, and the stop says why.
+    let (state, agents) = nvidia_chain(false, vec![link(AgentType::Nvidia)]).await;
+    match continue_after_among(
+        &state,
+        &agents,
+        &AgentType::ClaudeCode,
+        &step(),
+        &failed,
+        Some(with_nvidia()),
+    )
+    .await
+    {
+        Next::Stopped { notice } => {
+            assert!(notice.contains("no NVIDIA API key"), "{notice}");
+        }
+        Next::Keep => panic!("a keyless NVIDIA link must stop the walk, not keep"),
+        Next::Rerun { step, .. } => panic!("a keyless NVIDIA link was taken: {:?}", step.agent),
+    }
+
+    // The same link with its key is taken.
+    let (state, agents) =
+        nvidia_chain(true, vec![link(AgentType::Nvidia), link(AgentType::Codex)]).await;
+    let (moved, _) = rerun(
+        continue_after_among(
+            &state,
+            &agents,
+            &AgentType::ClaudeCode,
+            &step(),
+            &failed,
+            Some(with_nvidia()),
+        )
+        .await,
+    );
+    assert_eq!(moved.agent, AgentType::Nvidia, "a keyed NVIDIA link runs");
+}
+
+#[tokio::test]
+async fn a_waiting_step_is_never_offered_a_link_without_its_provider_key() {
+    let (state, agents) = nvidia_chain(false, vec![link(AgentType::Nvidia)]).await;
+    assert!(
+        link_for_waiting_step_among(&state, &agents, &step(), Some(with_nvidia()))
+            .await
+            .is_none()
+    );
+    let (state, agents) = nvidia_chain(true, vec![link(AgentType::Nvidia)]).await;
+    assert_eq!(
+        link_for_waiting_step_among(&state, &agents, &step(), Some(with_nvidia()))
+            .await
+            .map(|link| link.agent),
+        Some(AgentType::Nvidia)
+    );
+}

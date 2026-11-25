@@ -109,6 +109,17 @@ fn apply(step: &WorkflowStep, link: &crate::models::AgentFallback) -> Result<Wor
     Ok(next)
 }
 
+/// Why a link could not be dispatched for its key (KT-2055): the run's
+/// dispatch rule, `steps::step_connection_refusal`, on the step the link
+/// builds. A link never names a connection, so only its provider key counts.
+fn link_refusal(
+    step: &WorkflowStep,
+    agent: &AgentType,
+    tokens: &crate::models::TokensConfig,
+) -> Option<String> {
+    super::steps::provider_key_refusal(&step.name, agent, tokens)
+}
+
 fn tier_of(step: &WorkflowStep) -> crate::models::ModelTier {
     step.agent_settings
         .as_ref()
@@ -135,10 +146,13 @@ pub async fn start_on_fallback_among(
     if step.step_type != StepType::Agent || step.agent == AgentType::Custom {
         return None;
     }
-    let chain = chain_of(step, agents, &step.agent);
+    let mut chain = chain_of(step, agents, &step.agent);
     if chain.is_empty() {
         return None;
     }
+    // A link the dispatch rule would refuse is never started on (KT-2055).
+    let tokens = state.config.read().await.tokens.clone();
+    chain.retain(|link| link_refusal(step, &link.agent, &tokens).is_none());
     // Cheap exit: nothing is on cooldown, the step starts as written.
     let now = Utc::now();
     let any_cooldown = state
@@ -205,16 +219,14 @@ pub async fn continue_after_among(
     let Some(trigger) = fallback::classify_trigger(&outcome.result.output) else {
         return Next::Keep;
     };
-    if let Some(settings) = step
-        .agent_settings
-        .as_ref()
-        .filter(|settings| settings.connection_id.is_some())
-    {
+    if let (Some(settings), Some(owner)) = (
+        step.agent_settings.as_ref(),
+        super::steps::step_connection_id(step),
+    ) {
         // An explicit per-step override (including off) must win over the card.
         if settings.fallback.is_some() {
             return Next::Keep;
         }
-        let owner = settings.connection_id.as_deref().unwrap();
         let mode = crate::models::FallbackMode::from_tier(tier_of(step));
         if let Some((connection, model)) =
             crate::core::connection_fallback::next_text_target(state, owner, mode).await
@@ -255,6 +267,8 @@ pub async fn continue_after_among(
     let origin = origin.clone();
     let needs = needs_of(step, agents);
     let config = agents.clone();
+    let tokens = state.config.read().await.tokens.clone();
+    let refusing_step = step.clone();
     let selected = state
         .db
         .with_conn(move |conn| {
@@ -266,9 +280,12 @@ pub async fn continue_after_among(
                     .find(|(agent, _)| agent == candidate)
                     .map(|(_, until)| *until)
             };
+            let refused = |agent: &AgentType| link_refusal(&refusing_step, agent, &tokens);
             Ok((
                 until,
-                fallback::select(&config, &chain, &origin, &failing, &usable, &needs, &lookup),
+                fallback::select_refusing(
+                    &config, &chain, &origin, &failing, &usable, &needs, &lookup, &refused,
+                ),
             ))
         })
         .await;
@@ -328,6 +345,8 @@ pub async fn link_for_waiting_step_among(
     let failing = step.agent.clone();
     let declared_tools = step.clone();
     let now = Utc::now();
+    let tokens = state.config.read().await.tokens.clone();
+    let refusing_step = step.clone();
     let selection = state
         .db
         .with_read_conn(move |conn| {
@@ -338,8 +357,9 @@ pub async fn link_for_waiting_step_among(
                     .find(|(agent, _)| agent == candidate)
                     .map(|(_, until)| *until)
             };
-            Ok(fallback::select(
-                &agents, &chain, &failing, &failing, &usable, &needs, &lookup,
+            let refused = |agent: &AgentType| link_refusal(&refusing_step, agent, &tokens);
+            Ok(fallback::select_refusing(
+                &agents, &chain, &failing, &failing, &usable, &needs, &lookup, &refused,
             ))
         })
         .await

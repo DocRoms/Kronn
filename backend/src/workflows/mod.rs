@@ -23,6 +23,7 @@ pub mod quota_wait;
 pub mod readiness;
 pub mod run_effect;
 pub mod run_pins;
+pub mod run_preflight;
 pub mod runner;
 pub mod shadow;
 pub mod shadow_artifact;

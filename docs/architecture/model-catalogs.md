@@ -43,7 +43,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:200-320#migrate_hardcoded_catalog_once]
 [src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
 [src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
-[src: file: backend/src/agents/runner.rs:3656-3675#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3674-3693#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -128,7 +128,7 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5800-5854#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5866-5920#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1948-1957#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1963-1994#select_model]
 
@@ -149,8 +149,8 @@ authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4240-4286#preflight_resolve]
-[src: file: backend/src/workflows/runner.rs:2165-2250#preflight_resolve]
-[src: file: backend/src/workflows/steps.rs:1285-1338#preflight_workflow_launch]
+[src: file: backend/src/workflows/runner.rs:2036-2121#preflight_resolve]
+[src: file: backend/src/workflows/steps.rs:1360-1413#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
 that names a connection uses it; a row on another agent uses none, even when
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3694-3869#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3712-3887#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13960-13977#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:14092-14123#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13977-13994#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14109-14140#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5176-5204#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5194-5222#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
