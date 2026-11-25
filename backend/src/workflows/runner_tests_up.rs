@@ -4704,6 +4704,8 @@ async fn the_step_editor_reads_each_file_state() {
 
 #[path = "runner/tests/gate_guard_runs.rs"]
 mod gate_guard_runs;
+#[path = "runner/tests/http_step_preflight_runs.rs"]
+mod http_step_preflight_runs;
 #[path = "runner/tests/named_connection_preflight_runs.rs"]
 mod named_connection_preflight_runs;
 #[path = "runner/tests/native_full_access_runs.rs"]

@@ -7,7 +7,7 @@ directory. The discussion layer selects the resume identity and delta together;
 A first turn, incomplete checkpoint, missing marker or delta without a size
 saving uses the ordinary bounded full prompt and no resume identity.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
-[src: file: backend/src/agents/runner.rs:4583-4587#acp_resume_id]
+[src: file: backend/src/agents/runner.rs:4584-4588#acp_resume_id]
 
 ## Two boundaries, one completed turn
 

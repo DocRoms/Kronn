@@ -14,7 +14,7 @@
     the `result` usage on the process. The single-envelope `--output-format
     json` was tried first and rejected: the whole reply arrived at the end.
     A run with no `result` event, or with zero tokens, stays unmeasured.
-    `[src: file: backend/src/agents/runner.rs:15749-15757#GeminiStreamAdapter]`
+    `[src: file: backend/src/agents/runner.rs:15750-15758#GeminiStreamAdapter]`
   - Gemini stays unpriced: `TokenCounters::from_agent_report` has no
     `GeminiCli` arm on purpose. The reported usage is summed over every model
     the run used (the CLI routes between a pro and a flash model), while a cost
