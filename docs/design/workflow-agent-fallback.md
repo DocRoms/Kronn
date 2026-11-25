@@ -291,7 +291,7 @@ are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
 [src: file: backend/src/models/workflows.rs:2338-2417#WorkflowAgentProvenance]
-[src: file: backend/src/workflows/steps.rs:1483-1507#WorkflowAgentAttempt]
+[src: file: backend/src/workflows/steps.rs:1481-1505#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:5369-5391#selected_attempt]
 
 Persist an `AgentAttempt` record (table or versioned run JSON) with:

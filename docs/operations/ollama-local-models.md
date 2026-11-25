@@ -878,7 +878,7 @@ without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
   (`decision_connection_unavailable`: gone, not OpenRouter, or its
   `decision_model` changed); the run refuses it the same way. The model is never
   swapped for the configured one.
-  [src: file: backend/src/workflows/readiness.rs:367#decision_connection_unavailable]
+  [src: file: backend/src/workflows/readiness.rs:407#decision_connection_unavailable]
 - **A connection's `decision_model` is wired for OpenRouter only (KT-1697).** The
   owner decided (2026-11-11) to wire connection decision models, not remove them,
   over a contract read from the provider, never assumed. OpenRouter serves its

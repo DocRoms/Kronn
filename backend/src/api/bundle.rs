@@ -390,6 +390,25 @@ async fn create_bundle_as(
             return Json(ApiResponse::err(error));
         }
     }
+    // Every agent / named-connection pair the run would refuse (KT-2032),
+    // checked like a plain save, before anything is inserted.
+    let to_check = std::iter::once(("workflow".to_string(), &wf_to_insert)).chain(
+        req.child_workflows
+            .iter()
+            .zip(prepared_children.iter())
+            .map(|(declared, child)| (format!("child workflow `{}`", declared.bundle_id), child)),
+    );
+    for (label, workflow) in to_check {
+        if let Err(error) = crate::api::workflows::validate_connection_pairs(
+            &state,
+            &workflow.steps,
+            &workflow.on_failure,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("Bundle {label}: {error}")));
+        }
+    }
 
     // SubWorkflow graph guard (cycle / depth / dangling / no-gate). The
     // bundle endpoint otherwise skips this validation entirely; with
@@ -996,5 +1015,104 @@ mod tests {
             found.is_empty(),
             "prefix match must be strict (no plural, no mid-string), got: {found:?}"
         );
+    }
+
+    /// KT-2032: a bundle's step pairs an agent with a named connection the
+    /// run would refuse; it is refused like a plain save, before any insert.
+    fn connection_pair_bundle(child_step: serde_json::Value) -> BundleRequest {
+        serde_json::from_value(json!({
+            "workflow": {
+                "name": "parent", "project_id": null, "trigger": {"type": "Manual"},
+                "steps": [{"name": "ask", "step_type": {"type": "Agent"}, "agent": "ClaudeCode",
+                           "prompt_template": "Answer"}]
+            },
+            "child_workflows": [{
+                "bundle_id": "child-one",
+                "name": "child", "project_id": null, "trigger": {"type": "Manual"},
+                "steps": [child_step]
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn connection_pair_step(name: &str, agent: &str, connection: &str) -> serde_json::Value {
+        json!({"name": name, "step_type": {"type": "Agent"}, "agent": agent,
+               "prompt_template": "Answer", "agent_settings": {"connection_id": connection}})
+    }
+
+    async fn connection_pair_stored(state: &AppState) -> usize {
+        state
+            .db
+            .with_conn(crate::db::workflows::list_workflows)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    #[tokio::test]
+    async fn a_bundle_with_a_mismatched_connection_pair_is_refused_and_inserts_nothing() {
+        use crate::db::external_api_connections::{LEGACY_LITELLM_ID, LEGACY_NVIDIA_ID};
+        let state = bundle_state();
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::external_api_connections::backfill_legacy_config(
+                    conn,
+                    &crate::core::config::default_config(),
+                )
+            })
+            .await
+            .unwrap();
+
+        // A child's step, through an agent's proposal.
+        let Json(refused) = create_bundle(
+            State(state.clone()),
+            Json(connection_pair_bundle(connection_pair_step(
+                "ask",
+                "Custom",
+                LEGACY_LITELLM_ID,
+            ))),
+        )
+        .await;
+        assert!(!refused.success, "bundle saved");
+        let error = refused.error.unwrap_or_default();
+        assert!(error.contains("child workflow `child-one`"), "{error}");
+        assert!(
+            error.contains("use agent LiteLlm for connection external-api-litellm"),
+            "{error}"
+        );
+        assert_eq!(connection_pair_stored(&state).await, 0, "nothing inserted");
+
+        // The parent's rollback shadow, through the wizard's own path.
+        let mut request =
+            connection_pair_bundle(connection_pair_step("ask", "LiteLlm", LEGACY_LITELLM_ID));
+        let mut undo = connection_pair_step("undo", "ClaudeCode", LEGACY_NVIDIA_ID);
+        undo["agent"] = json!("Nvidia");
+        undo["shadows"] = json!([{"id": "argon", "agent": {
+            "agent": "Custom", "model": "gemini-4-argon", "connection_id": LEGACY_NVIDIA_ID}}]);
+        request.workflow.on_failure = serde_json::from_value(json!([undo])).unwrap();
+        let Json(refused) = create_human_bundle(State(state.clone()), Json(request)).await;
+        assert!(!refused.success, "bundle saved");
+        let error = refused.error.unwrap_or_default();
+        assert!(error.contains("Bundle workflow:"), "{error}");
+        assert!(error.contains("shadow `argon`"), "{error}");
+        assert!(
+            error.contains("use agent Nvidia for connection external-api-nvidia"),
+            "{error}"
+        );
+        assert_eq!(connection_pair_stored(&state).await, 0, "nothing inserted");
+
+        // A matching pair saves, parent and child.
+        let Json(saved) = create_bundle(
+            State(state.clone()),
+            Json(connection_pair_bundle(connection_pair_step(
+                "ask",
+                "LiteLlm",
+                LEGACY_LITELLM_ID,
+            ))),
+        )
+        .await;
+        assert!(saved.success, "{:?}", saved.error);
+        assert_eq!(connection_pair_stored(&state).await, 2);
     }
 }

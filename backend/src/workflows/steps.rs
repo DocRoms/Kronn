@@ -1199,9 +1199,7 @@ pub async fn resolve_step_connection(
         .await?
         .ok_or_else(|| anyhow::anyhow!("External API connection {connection_id} was not found"))?;
 
-    if crate::db::external_api_connections::target_for_connection(&connection).agent_type
-        != step.agent
-    {
+    if crate::db::external_api_connections::agent_mismatch(&connection, &step.agent).is_some() {
         anyhow::bail!(
             "External API connection {connection_id} no longer matches agent {:?}",
             step.agent

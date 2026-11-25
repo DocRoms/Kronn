@@ -133,7 +133,7 @@ the run-start check
 the check immediately before dispatch
 [src: file: backend/src/workflows/steps.rs:412-424#preflight_workflow_launch]
 and the preflight on the `http:<connection-id>` target and effective model
-[src: file: backend/src/workflows/steps.rs:1253-1306#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1251-1304#preflight_workflow_launch]
 
 ## Sources
 
