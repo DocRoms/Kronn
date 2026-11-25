@@ -425,6 +425,114 @@ fn python_available() -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
+/// Why a connect to `address` fails, `None` when it goes through.
+fn connect_refusal(address: std::net::SocketAddr) -> Option<String> {
+    std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(5))
+        .err()
+        .map(|error| format!("a connect to {address} is refused ({error})"))
+}
+
+/// Why this process cannot connect to a loopback server it started itself,
+/// `None` when it can. The macOS validation sandbox denies every outbound
+/// connection, loopback included (KT-2036): the dry runs talk to
+/// [`stub_kronn`] that way, so they cannot run there.
+fn loopback_connect_refusal() -> Option<String> {
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) => return Some(format!("no loopback port can be bound ({error})")),
+    };
+    connect_refusal(listener.local_addr().unwrap())
+}
+
+/// Whether a dry run must skip, with the reason printed: no python3, or no
+/// loopback connect (probed once per process).
+fn dry_run_skipped() -> bool {
+    if !python_available() {
+        eprintln!("python3 missing: dry run skipped");
+        return true;
+    }
+    static LOOPBACK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    match LOOPBACK.get_or_init(loopback_connect_refusal) {
+        Some(refusal) => {
+            eprintln!(
+                "loopback connect refused: dry run skipped — {refusal}. The macOS validation \
+                 sandbox denies every outbound connection, loopback included; this dry run \
+                 runs in CI and in the worker's run (docs/gotchas/validations-docker-sandbox.md)"
+            );
+            true
+        }
+        None => false,
+    }
+}
+
+#[test]
+fn the_loopback_probe_reports_a_connect_nothing_accepts() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let refusal = connect_refusal(address).expect("nothing listens there any more");
+    assert!(refusal.contains(&address.to_string()), "{refusal}");
+}
+
+/// Helper of the Seatbelt test below, re-run by it as a child process under a
+/// profile: it reports what the loopback probe says there.
+#[test]
+fn report_the_loopback_probe_for_the_seatbelt_test() {
+    if std::env::var_os("KRONN_REPORT_LOOPBACK_PROBE").is_none() {
+        return;
+    }
+    match loopback_connect_refusal() {
+        None => println!("loopback-probe=allowed"),
+        Some(refusal) => println!("loopback-probe=refused: {refusal}"),
+    }
+}
+
+/// KT-2036: under the validation Seatbelt profile (built by the same helper
+/// the validations use) the probe reports the loopback connect refused, and
+/// under a profile that allows everything it reports it allowed.
+#[cfg(target_os = "macos")] // runs /usr/bin/sandbox-exec, which only macOS has
+#[test]
+fn under_the_validation_seatbelt_profile_the_probe_reports_a_refused_loopback_connect() {
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch_dir = crate::core::task_worker_sandbox::real_path(scratch.path());
+    let module = module_path!()
+        .split_once("::")
+        .map(|(_, path)| path)
+        .unwrap();
+    let helper = format!("{module}::report_the_loopback_probe_for_the_seatbelt_test");
+    let exe = std::env::current_exe().unwrap();
+    let probe_under = |profile: &str| -> Option<String> {
+        let output = Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", profile])
+            .arg(&exe)
+            .args(["--exact", &helper, "--nocapture", "--test-threads=1"])
+            .env("KRONN_REPORT_LOOPBACK_PROBE", "1")
+            .env("TMPDIR", &scratch_dir)
+            .output()
+            .expect("sandbox-exec starts");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("sandbox_apply") {
+            // This process is itself sandboxed: no profile can be applied.
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+
+    let Some(open) = probe_under("(version 1)(allow default)") else {
+        eprintln!("skipped: the Seatbelt profile cannot be applied from this process");
+        return;
+    };
+    assert!(open.contains("loopback-probe=allowed"), "{open}");
+
+    let profile =
+        crate::core::task_worker_sandbox::seatbelt_profile(std::slice::from_ref(&scratch_dir));
+    let confined = probe_under(&profile).expect("the open profile applied, so does this one");
+    assert!(
+        confined.contains("loopback-probe=refused"),
+        "{confined}\n{profile}"
+    );
+}
+
 fn run_script(step: &WorkflowStep, stdin: &str, env: &[(&str, String)]) -> Output {
     let mut command = Command::new("python3");
     command
@@ -469,8 +577,7 @@ fn envelope<T: serde::Serialize>(data: &T) -> String {
 
 #[test]
 fn the_preflight_step_fails_with_the_actionable_message_and_passes_when_ready() {
-    if !python_available() {
-        eprintln!("python3 missing: dry run skipped");
+    if dry_run_skipped() {
         return;
     }
     let template = template(None);
@@ -647,8 +754,7 @@ fn publish(dry: &Dry, can_push: bool, fork_exists: bool) -> (Output, String) {
 #[test]
 #[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
 fn a_maintainer_pushes_the_branch_to_the_repository_and_opens_the_pull_request() {
-    if !python_available() {
-        eprintln!("python3 missing: dry run skipped");
+    if dry_run_skipped() {
         return;
     }
     let dry = dry_run_setup();
@@ -678,8 +784,7 @@ fn a_maintainer_pushes_the_branch_to_the_repository_and_opens_the_pull_request()
 #[test]
 #[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
 fn a_contributor_forks_pushes_to_the_fork_and_opens_the_pull_request_against_the_repository() {
-    if !python_available() {
-        eprintln!("python3 missing: dry run skipped");
+    if dry_run_skipped() {
         return;
     }
     let dry = dry_run_setup();
@@ -720,8 +825,7 @@ fn a_contributor_forks_pushes_to_the_fork_and_opens_the_pull_request_against_the
 #[test]
 #[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
 fn nothing_is_published_before_the_campaign_delivered() {
-    if !python_available() {
-        eprintln!("python3 missing: dry run skipped");
+    if dry_run_skipped() {
         return;
     }
     let dry = dry_run_setup();
@@ -739,8 +843,7 @@ fn nothing_is_published_before_the_campaign_delivered() {
 #[test]
 #[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
 fn a_pull_request_changing_the_ui_is_opened_with_the_required_screenshots_section() {
-    if !python_available() {
-        eprintln!("python3 missing: dry run skipped");
+    if dry_run_skipped() {
         return;
     }
     let dry = dry_run_setup();
@@ -768,8 +871,7 @@ fn a_pull_request_changing_the_ui_is_opened_with_the_required_screenshots_sectio
 #[test]
 #[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
 fn a_pull_request_without_ui_change_says_so_in_its_screenshots_section() {
-    if !python_available() {
-        eprintln!("python3 missing: dry run skipped");
+    if dry_run_skipped() {
         return;
     }
     let dry = dry_run_setup();
