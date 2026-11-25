@@ -679,24 +679,28 @@ async fn http_step_preflight_a_childs_keyless_step_is_refused_before_the_parents
     );
 }
 
-/// A run of `porte` then an NVIDIA step, in a worktree whose `before_run`
-/// hook leaves `marker`.
-async fn run_with_before_run_hook(
+/// A run of `porte` then an NVIDIA step, in a worktree whose `after_create`
+/// and `before_run` hooks leave `after-create` and `before-run` in `markers`.
+/// Returns the run, how many worktrees its repository has after it, and the
+/// statuses its run updates broadcast.
+async fn run_with_hooks(
     id: &str,
     nvidia_key: bool,
-    marker: &std::path::Path,
-) -> WorkflowRun {
+    markers: &std::path::Path,
+) -> (WorkflowRun, usize, Vec<String>) {
     let (state, mut tokens, agents) = test_state_and_configs();
+    let mut updates = state.ws_broadcast.subscribe();
     let project = format!("proj-{id}");
-    let _repo = git_project(&state, &project).await;
+    let repo = git_project(&state, &project).await;
     if nvidia_key {
         tokens.keys.push(api_key(NVIDIA_CREDENTIAL_SLUG));
     }
+    let touch = |name: &str| format!("touch '{}'", markers.join(name).display());
     let mut wf = make_workflow_with_artifacts(Default::default());
     wf.id = format!("wf-{id}");
     wf.project_id = Some(project.clone());
     wf.workspace_config = Some(WorkspaceConfig {
-        hooks: hooks(None, Some(&format!("touch '{}'", marker.display()))),
+        hooks: hooks(Some(&touch("after-create")), Some(&touch("before-run"))),
         require_isolation: true,
         main_tree_read_only: false,
         base_ref: None,
@@ -717,28 +721,136 @@ async fn run_with_before_run_hook(
     )
     .await
     .unwrap();
-    run
+    let worktrees = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .unwrap();
+    let count = String::from_utf8_lossy(&worktrees.stdout)
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count();
+    let mut statuses = Vec::new();
+    while let Ok(message) = updates.try_recv() {
+        if let crate::models::WsMessage::WorkflowRunUpdated { run_id, status, .. } = message {
+            if run_id == run.id {
+                statuses.push(status);
+            }
+        }
+    }
+    (run, count, statuses)
 }
 
 #[tokio::test]
-async fn http_step_preflight_a_refused_run_never_runs_the_before_run_hook() {
-    let markers = tempfile::tempdir().unwrap();
-    let refused_marker = markers.path().join("refused-before-run");
-    let run = run_with_before_run_hook("hook-refused", false, &refused_marker).await;
+async fn http_step_preflight_a_refused_run_creates_no_worktree_and_runs_no_hook() {
+    // KT-2057 — refused before the worktree: no checkout, no `after_create`.
+    let refused = tempfile::tempdir().unwrap();
+    let (run, worktrees, statuses) = run_with_hooks("hook-refused", false, refused.path()).await;
     refused_before_any_step(&run, "jeu");
+    assert!(run.finished_at.is_some(), "a refused run is finished");
+    assert_eq!(
+        statuses,
+        vec!["Failed".to_string()],
+        "its state is broadcast"
+    );
+    assert_eq!(run.workspace_path, None);
+    assert_eq!(worktrees, 1, "only the main checkout");
     assert!(
-        !refused_marker.exists(),
+        !refused.path().join("after-create").exists(),
+        "the after_create hook ran for a refused run"
+    );
+    assert!(
+        !refused.path().join("before-run").exists(),
         "the before_run hook ran for a refused run"
     );
 
-    // The same run with its key starts, and its hook runs.
-    let started_marker = markers.path().join("started-before-run");
-    let run = run_with_before_run_hook("hook-started", true, &started_marker).await;
+    // The same run with its key starts in its worktree, and its hooks run.
+    let started = tempfile::tempdir().unwrap();
+    let (run, worktrees, _) = run_with_hooks("hook-started", true, started.path()).await;
     passed_preflight(&run);
+    assert!(run.workspace_path.is_some());
+    assert_eq!(worktrees, 2);
+    assert!(started.path().join("after-create").exists());
+    assert!(started.path().join("before-run").exists());
+}
+
+#[tokio::test]
+async fn http_step_preflight_a_step_whose_quick_prompt_cannot_load_is_refused_before_any_step_runs()
+{
+    // KT-2057 — it would fail at dispatch in these words, after `porte`.
+    let run = run_after_gate(
+        "qp-missing",
+        vec![qp_step("jeu", "qp-does-not-exist")],
+        Setup {
+            connections: Vec::new(),
+            keys: vec![NVIDIA_CREDENTIAL_SLUG.into()],
+        },
+    )
+    .await;
+    let refusal = refused_before_any_step(&run, "jeu");
     assert!(
-        started_marker.exists(),
-        "the hook runs once the preflight passed"
+        refusal.contains("Quick Prompt(s) that cannot load")
+            && refusal.contains("qp-does-not-exist"),
+        "{refusal}"
     );
+}
+
+/// A `BatchQuickPrompt` step running Quick Prompt `qp` over two items.
+fn batch_step(name: &str, qp: &str) -> WorkflowStep {
+    let mut step = fake_step(name);
+    step.step_type = StepType::BatchQuickPrompt;
+    step.batch_quick_prompt_id = Some(qp.into());
+    step.batch_items_from = Some(r#"["a","b"]"#.into());
+    step
+}
+
+#[tokio::test]
+async fn http_step_preflight_a_batch_whose_items_run_on_a_keyless_connection_is_refused_before_any_step_runs(
+) {
+    // KT-2057 — the items run the QP's agent on the QP's connection.
+    let run = run_after_gate_with(
+        "batch-keyless",
+        vec![batch_step("lot", "qp-batch-keyless")],
+        Setup {
+            connections: vec![connection(
+                "conn-batch-keyless",
+                Some("https://nvidia.invalid/v1"),
+                ExternalApiConnectionPreset::Nvidia,
+            )],
+            keys: vec![NVIDIA_CREDENTIAL_SLUG.into()],
+        },
+        Extras {
+            quick_prompts: vec![quick_prompt("qp-batch-keyless", Some("conn-batch-keyless"))],
+            ..Extras::default()
+        },
+    )
+    .await;
+    let refusal = refused_before_any_step(&run, "lot");
+    assert!(
+        refusal.contains("conn-batch-keyless display") && refusal.contains("no API key"),
+        "{refusal}"
+    );
+
+    // Keyed, the batch passes the preflight.
+    let run = run_after_gate_with(
+        "batch-keyed",
+        vec![batch_step("lot", "qp-batch-keyed")],
+        Setup {
+            connections: vec![connection(
+                "conn-batch-keyed",
+                Some("https://nvidia.invalid/v1"),
+                ExternalApiConnectionPreset::Nvidia,
+            )],
+            keys: vec!["credential-conn-batch-keyed".into()],
+        },
+        Extras {
+            quick_prompts: vec![quick_prompt("qp-batch-keyed", Some("conn-batch-keyed"))],
+            ..Extras::default()
+        },
+    )
+    .await;
+    passed_preflight(&run);
 }
 
 #[tokio::test]
@@ -792,5 +904,220 @@ async fn http_step_dispatch_a_resumed_runs_keyless_step_is_refused_before_any_re
         !refused.output.contains("nvidia.invalid"),
         "{}",
         refused.output
+    );
+}
+
+/// A workflow whose only step starts `child`.
+fn starting(id: &str, child: &str) -> Workflow {
+    let mut start_child = fake_step("lancer");
+    start_child.step_type = StepType::SubWorkflow;
+    start_child.sub_workflow_id = Some(child.into());
+    let mut wf = make_workflow_with_artifacts(Default::default());
+    wf.id = id.into();
+    wf.steps = vec![start_child];
+    wf
+}
+
+async fn insert_workflow(state: &crate::AppState, workflow: Workflow) {
+    state
+        .db
+        .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &workflow))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn http_step_preflight_counts_the_sub_workflow_depth_from_the_runs_own() {
+    // KT-2057 — a run that is itself a child at depth 4 may start one more
+    // level; at depth 5 its child is refused by its step, so not judged here.
+    let (state, _, _) = test_state_and_configs();
+    let mut child = make_workflow_with_artifacts(Default::default());
+    child.id = "wf-depth-child".into();
+    child.steps = vec![http_step("jeu-enfant", AgentType::Nvidia, None)];
+    insert_workflow(&state, child).await;
+    let wf = starting("wf-depth", "wf-depth-child");
+    for (depth, judged) in [(0, true), (4, true), (5, false), (u64::MAX, false)] {
+        let mut run = pending_run(&format!("run-depth-{depth}"), &wf.id);
+        run.trigger_context = Some(serde_json::json!({ "__subwf_depth__": depth }));
+        let planned = crate::workflows::run_preflight::planned_agent_steps(&state, &wf, &run).await;
+        let names: Vec<_> = planned.iter().map(|p| p.step.name.as_str()).collect();
+        assert_eq!(
+            names.contains(&"jeu-enfant"),
+            judged,
+            "depth {depth}: {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_step_preflight_reads_a_childs_references_in_the_childs_project() {
+    // KT-2057 — a child pinned to its own project reads its `ref:prompt:` in
+    // that project, not the parent's namesake; a child with no project runs
+    // in its parent's and reads it there.
+    let (state, _, _) = test_state_and_configs();
+    let projects = tempfile::tempdir().unwrap();
+    for project in ["proj-ref-parent", "proj-ref-child"] {
+        insert_project_at(&state, project, &projects.path().join(project)).await;
+    }
+    for (connection_id, project) in [
+        ("conn-ref-parent", "proj-ref-parent"),
+        ("conn-ref-child", "proj-ref-child"),
+    ] {
+        insert_connection(
+            &state,
+            connection(
+                connection_id,
+                Some("https://nvidia.invalid/v1"),
+                ExternalApiConnectionPreset::Nvidia,
+            ),
+        )
+        .await;
+        let mut prompt = quick_prompt(&format!("qp-{project}"), Some(connection_id));
+        prompt.name = "Shared Prompt".into();
+        prompt.project_id = Some(project.into());
+        state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &prompt))
+            .await
+            .unwrap();
+    }
+    for (child_id, child_project, expected) in [
+        ("wf-ref-pinned", Some("proj-ref-child"), "conn-ref-child"),
+        ("wf-ref-inherits", None, "conn-ref-parent"),
+    ] {
+        let mut child = make_workflow_with_artifacts(Default::default());
+        child.id = child_id.into();
+        child.project_id = child_project.map(str::to_string);
+        child.steps = vec![qp_step("jeu-enfant", "ref:prompt:shared-prompt")];
+        insert_workflow(&state, child).await;
+        let mut wf = starting(&format!("wf-parent-of-{child_id}"), child_id);
+        wf.project_id = Some("proj-ref-parent".into());
+        let mut run = pending_run(&format!("run-parent-of-{child_id}"), &wf.id);
+        run.project_id = wf.project_id.clone();
+
+        let planned = crate::workflows::run_preflight::planned_agent_steps(&state, &wf, &run).await;
+        let step = planned
+            .iter()
+            .find(|p| p.step.name == "jeu-enfant")
+            .expect("the child's step is judged");
+        assert_eq!(step.unloaded, None, "{child_id}");
+        assert_eq!(
+            crate::workflows::steps::step_connection_id(&step.step),
+            Some(expected),
+            "{child_id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_step_preflight_reads_a_childs_references_as_the_run_pinned_them() {
+    // KT-2057 — the child run inherits its parent's pins: a `ref:prompt:`
+    // repointed after the run was pinned is judged on the pinned prompt.
+    let (state, _, _) = test_state_and_configs();
+    let projects = tempfile::tempdir().unwrap();
+    insert_project_at(&state, "proj-pin", &projects.path().join("proj-pin")).await;
+    for connection_id in ["conn-pin-old", "conn-pin-new"] {
+        insert_connection(
+            &state,
+            connection(
+                connection_id,
+                Some("https://nvidia.invalid/v1"),
+                ExternalApiConnectionPreset::Nvidia,
+            ),
+        )
+        .await;
+    }
+    let prompt_on = |id: &str, connection_id: &str| {
+        let mut prompt = quick_prompt(id, Some(connection_id));
+        prompt.name = "Pinned Prompt".into();
+        prompt.project_id = Some("proj-pin".into());
+        prompt
+    };
+    let old = prompt_on("qp-pin-old", "conn-pin-old");
+    let mut retired = old.clone();
+    state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &old))
+        .await
+        .unwrap();
+    let mut child = make_workflow_with_artifacts(Default::default());
+    child.id = "wf-pin-child".into();
+    child.steps = vec![qp_step("jeu-enfant", "ref:prompt:pinned-prompt")];
+    insert_workflow(&state, child).await;
+    let mut wf = starting("wf-pin-parent", "wf-pin-child");
+    wf.project_id = Some("proj-pin".into());
+    let mut run = pending_run("run-pin-parent", &wf.id);
+    run.project_id = wf.project_id.clone();
+    insert_wf_and_run(&state, &wf, &run).await;
+    let (pinned_wf, pinned_run) = (wf.clone(), run.clone());
+    state
+        .db
+        .with_conn(move |conn| {
+            crate::workflows::run_pins::pin_or_load(conn, &pinned_wf, &pinned_run)
+        })
+        .await
+        .unwrap()
+        .expect("pinned");
+
+    // The slug moves to a new prompt on another connection.
+    retired.name = "Retired Prompt".into();
+    let new = prompt_on("qp-pin-new", "conn-pin-new");
+    state
+        .db
+        .with_conn(move |conn| {
+            crate::db::quick_prompts::update_quick_prompt(conn, &retired)?;
+            crate::db::quick_prompts::insert_quick_prompt(conn, &new)
+        })
+        .await
+        .unwrap();
+
+    let mut live = pending_run("run-pin-live", &wf.id);
+    live.project_id = wf.project_id.clone();
+    for (run, expected) in [(&run, "conn-pin-old"), (&live, "conn-pin-new")] {
+        let planned = crate::workflows::run_preflight::planned_agent_steps(&state, &wf, run).await;
+        let step = planned
+            .iter()
+            .find(|p| p.step.name == "jeu-enfant")
+            .expect("the child's step is judged");
+        assert_eq!(step.unloaded, None, "{}", run.id);
+        assert_eq!(
+            crate::workflows::steps::step_connection_id(&step.step),
+            Some(expected),
+            "{}",
+            run.id
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_step_preflight_a_childs_step_whose_quick_prompt_cannot_load_is_refused_before_the_parents_first_step(
+) {
+    // KT-2057 — read with this run's pins, which the child run inherits: it
+    // would fail mid-run, after the parent's first steps.
+    let mut start_child = fake_step("lancer");
+    start_child.step_type = StepType::SubWorkflow;
+    start_child.sub_workflow_id = Some("wf-enfant-qp-gone".into());
+    let mut child = make_workflow_with_artifacts(Default::default());
+    child.id = "wf-enfant-qp-gone".into();
+    child.name = "enfant".into();
+    child.steps = vec![qp_step("jeu-enfant", "qp-child-gone")];
+    let run = run_after_gate_with(
+        "child-qp-gone",
+        vec![start_child],
+        Setup {
+            connections: Vec::new(),
+            keys: vec![NVIDIA_CREDENTIAL_SLUG.into()],
+        },
+        Extras {
+            children: vec![child],
+            ..Extras::default()
+        },
+    )
+    .await;
+    let refusal = refused_before_any_step(&run, "jeu-enfant");
+    assert!(
+        refusal.contains("sub-workflow `enfant` (step 'lancer')")
+            && refusal.contains("qp-child-gone"),
+        "{refusal}"
     );
 }

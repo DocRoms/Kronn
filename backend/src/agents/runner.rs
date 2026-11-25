@@ -3331,8 +3331,8 @@ pub struct ExternalHttpRuntime {
     pub api_key: Option<String>,
 }
 
-// The key is masked, and so is the endpoint's userinfo (KT-2055): an endpoint
-// may carry `user:pass@`.
+// The key is masked, and so are the endpoint's userinfo, query and fragment
+// (KT-2055, KT-2057): an endpoint may carry `user:pass@` or `?api_key=`.
 impl std::fmt::Debug for ExternalHttpRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
@@ -3347,7 +3347,7 @@ impl std::fmt::Debug for ExternalHttpRuntime {
             .field("mention_alias", mention_alias)
             .field(
                 "endpoint",
-                &crate::core::redact::mask_url_userinfo(endpoint),
+                &crate::core::redact::mask_endpoint_secrets(endpoint),
             )
             .field("tools_enabled", tools_enabled)
             .field("api_key", &crate::core::redact::Masked(api_key))

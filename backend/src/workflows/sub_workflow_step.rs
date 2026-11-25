@@ -366,7 +366,7 @@ async fn prepare_child(
 
     // Runtime depth backstop (save-validation caps statically; this guards a
     // hand-edited JSON or a workflow edited after a reference was created).
-    let child_depth = current_depth + 1;
+    let child_depth = current_depth.saturating_add(1);
     if child_depth_exceeds(current_depth) {
         return Err(fail(step, start, format!(
             "Sub-workflow depth limit ({MAX_SUBWORKFLOW_DEPTH}) exceeded at `{target}` — refusing to recurse further."
@@ -1897,8 +1897,9 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
 /// True when recursing one level below `current_depth` would exceed the cap.
 /// Pure (the executor itself needs `AppState`, so this carries the rule for
 /// unit testing). Runtime backstop to the save-time static depth check.
-fn child_depth_exceeds(current_depth: usize) -> bool {
-    current_depth + 1 > MAX_SUBWORKFLOW_DEPTH
+/// Saturating: the depth comes from the run's trigger context.
+pub(crate) fn child_depth_exceeds(current_depth: usize) -> bool {
+    current_depth.saturating_add(1) > MAX_SUBWORKFLOW_DEPTH
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -2327,6 +2328,8 @@ mod tests {
         assert!(!child_depth_exceeds(MAX_SUBWORKFLOW_DEPTH - 1)); // child == cap, allowed
         assert!(child_depth_exceeds(MAX_SUBWORKFLOW_DEPTH)); // child == cap+1, refused
         assert!(child_depth_exceeds(MAX_SUBWORKFLOW_DEPTH + 5));
+        // KT-2057 — a trigger context carrying `u64::MAX` neither panics nor wraps to 0.
+        assert!(child_depth_exceeds(usize::MAX));
     }
 
     // ── Phase 3b — foreach helpers ──────────────────────────────────────

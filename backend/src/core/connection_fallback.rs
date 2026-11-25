@@ -310,7 +310,11 @@ pub async fn next_text_target(
             let tokens = &state.config.read().await.tokens;
             let runtime = crate::http_transport::external_http_runtime(&connection, tokens);
             if let (Some(model), Some(runtime)) = (model, runtime) {
-                if !runtime.endpoint.trim().is_empty() {
+                // KT-2057 — a link missing the key its preset needs is skipped,
+                // as a step on that connection is refused (`named_connection_refusal`).
+                let keyed =
+                    runtime.api_key.is_some() || !connection.origin_preset.requires_credential();
+                if keyed && !runtime.endpoint.trim().is_empty() {
                     return Some((connection, model));
                 }
             }

@@ -285,6 +285,68 @@ fn validate_item_repo_paths(items: &[serde_json::Value]) -> Result<(), String> {
     Ok(())
 }
 
+/// The Quick Prompt a batch step runs: its run's pinned revision, approved
+/// for execution. The error is the step's failure, word for word.
+pub(crate) async fn load_batch_quick_prompt(
+    state: &AppState,
+    qp_id: &str,
+    run_id: &str,
+) -> Result<QuickPrompt, String> {
+    let qp_lookup = qp_id.to_string();
+    let pinned_run = run_id.to_string();
+    let qp = match state
+        .db
+        .with_conn(move |conn| {
+            crate::workflows::run_pins::quick_prompt_for(conn, Some(&pinned_run), &qp_lookup)
+        })
+        .await
+    {
+        Ok(Err(reason)) => return Err(reason),
+        Ok(Ok(Some(q))) => q,
+        Ok(Ok(None)) => return Err(format!("Quick prompt '{}' not found", qp_id)),
+        Err(e) => return Err(format!("DB error loading QP: {}", e)),
+    };
+    let approval_prompt = qp.clone();
+    state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                conn,
+                &approval_prompt,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+        .map_err(|error| format!("QuickPrompt preflight failed: {error}"))?;
+    Ok(qp)
+}
+
+/// KT-2057 — the step one item of `step`'s batch runs, as the run preflight
+/// and the pre-spawn check judge it: the QP's agent, on the QP's connection
+/// and model (a workflow batch keeps the QP's agent, `connection_for_batch_item`).
+pub(crate) fn batch_item_step(step: &WorkflowStep, qp: &QuickPrompt) -> WorkflowStep {
+    let settings = qp.agent_settings.as_ref();
+    let mut item = step.clone();
+    item.step_type = StepType::Agent;
+    item.agent = qp.agent.clone();
+    item.quick_prompt_id = None;
+    item.multi_agent_review = None;
+    item.agent_settings = Some(AgentSettings {
+        fallback: None,
+        tools: None,
+        model: settings.and_then(|s| s.model.clone()),
+        tier: Some(qp.tier),
+        reasoning_effort: settings.and_then(|s| s.reasoning_effort.clone()),
+        max_tokens: None,
+        connection_id: crate::db::workflows::connection_for_batch_item(
+            &qp.agent,
+            qp.connection_id.as_deref(),
+            None,
+        ),
+    });
+    item
+}
+
 pub async fn execute_batch_quick_prompt_step(
     step: &WorkflowStep,
     parent_run_id: &str,
@@ -378,37 +440,18 @@ async fn execute_batch_quick_prompt_step_with_budget(
     }
 
     // ── Load the Quick Prompt ───────────────────────────────────────────
-    let qp_lookup = qp_id.clone();
-    let pinned_run = parent_run_id.to_string();
-    let qp = match state
-        .db
-        .with_conn(move |conn| {
-            crate::workflows::run_pins::quick_prompt_for(conn, Some(&pinned_run), &qp_lookup)
-        })
-        .await
-    {
-        Ok(Err(reason)) => return fail(step, start, reason),
-        Ok(Ok(Some(q))) => q,
-        Ok(Ok(None)) => return fail(step, start, format!("Quick prompt '{}' not found", qp_id)),
-        Err(e) => return fail(step, start, format!("DB error loading QP: {}", e)),
+    let qp = match load_batch_quick_prompt(&state, &qp_id, parent_run_id).await {
+        Ok(qp) => qp,
+        Err(reason) => return fail(step, start, reason),
     };
-    let approval_prompt = qp.clone();
-    if let Err(error) = state
-        .db
-        .with_read_conn(move |conn| {
-            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
-                conn,
-                &approval_prompt,
-            )
-            .map_err(anyhow::Error::msg)
-        })
-        .await
+    // KT-2057 — refused before any item starts, in the words a step on the
+    // items' connection is refused with.
+    let tokens = state.config.read().await.tokens.clone();
+    if let Some(refusal) =
+        super::steps::step_connection_refusal(&batch_item_step(step, &qp), Some(&state.db), &tokens)
+            .await
     {
-        return fail(
-            step,
-            start,
-            format!("QuickPrompt preflight failed: {error}"),
-        );
+        return fail(step, start, format!("preflight_failed:{refusal}"));
     }
 
     // ── Safety: Isolated mode requires a project_id (git repo to worktree) ──
@@ -2210,6 +2253,78 @@ mod tests {
 
         assert_eq!(outcome.result.status, RunStatus::Failed);
         assert!(outcome.result.output.contains("fire-and-forget is unsafe"));
+        let parent = parent_run_id.clone();
+        let child_count: i64 = state
+            .db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id = ?1",
+                    [parent],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(child_count, 0);
+    }
+
+    // KT-2057 — a resumed run has no preflight: the step itself refuses a
+    // batch whose items would run on a keyless connection, before any item.
+    #[tokio::test]
+    async fn a_batch_on_a_keyless_connection_fails_before_creating_children() {
+        let state = e2e_state();
+        let now = chrono::Utc::now();
+        let connection = crate::models::ExternalApiConnection {
+            id: "conn-batch-or".into(),
+            display_name: "Batch OpenRouter".into(),
+            mention_alias: "batch-or".into(),
+            endpoint: Some("https://openrouter.invalid/api/v1".into()),
+            credential_slug: "credential-conn-batch-or".into(),
+            origin_preset: crate::models::ExternalApiConnectionPreset::OpenRouter,
+            economy_model: None,
+            default_model: Some("vendor/model".into()),
+            reasoning_model: None,
+            created_at: now,
+            updated_at: now,
+            image_model: None,
+            video_model: None,
+            decision_model: None,
+            tools_enabled: None,
+            media_endpoint: None,
+        };
+        state
+            .db
+            .with_conn(move |conn| crate::db::external_api_connections::insert(conn, &connection))
+            .await
+            .unwrap();
+        let mut qp = seed_qp(&state).await;
+        qp.agent = AgentType::Custom;
+        qp.connection_id = Some("conn-batch-or".into());
+        let updated = qp.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::update_quick_prompt(conn, &updated))
+            .await
+            .unwrap();
+        let parent_run_id = seed_parent_run(&state).await;
+        let step = batch_step(&qp.id, true);
+
+        let outcome = execute_batch_quick_prompt_step(
+            &step,
+            &parent_run_id,
+            state.clone(),
+            &TemplateContext::new(),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        let output = &outcome.result.output;
+        assert!(
+            output.starts_with("preflight_failed:")
+                && output.contains("Batch OpenRouter")
+                && output.contains("no API key"),
+            "{output}"
+        );
         let parent = parent_run_id.clone();
         let child_count: i64 = state
             .db

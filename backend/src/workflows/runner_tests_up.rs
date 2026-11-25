@@ -4826,6 +4826,15 @@ async fn project_linked_fire_and_forget_batch_runs_without_parent_worktree() {
     fanout.batch_wait_for_completion = Some(false);
     fanout.batch_workspace_mode = Some("Direct".into());
     workflow.steps = vec![fanout];
+    // The preflight judges the agent the batch's items run (KT-2057): a test
+    // ACP route stands in for it, whatever the host has installed.
+    let repo_path = repo.path().to_string_lossy().into_owned();
+    let work_dir =
+        crate::agents::runner::resolve_agent_work_dir(Some(&repo_path), &repo_path).unwrap();
+    let _route = crate::agents::runner::test_acp_routes::route(
+        &work_dir,
+        std::sync::Arc::new(AnsweringTurn),
+    );
 
     let mut run = pending_run("run-fanout", &workflow.id);
     insert_wf_and_run(&state, &workflow, &run).await;

@@ -962,23 +962,56 @@ fn redact_for_audit_artifact_text(input: &str) -> (String, usize) {
 static URL_IN_TEXT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)\bhttps?://[^\s"'<>`\\]+"#).expect("static URL regex"));
 
-/// `url` with its userinfo (`user:pass@`) replaced by `***@`, any scheme, for
-/// a `Debug` print of an endpoint (KT-2055). A URL without one is unchanged.
-pub fn mask_url_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
-    let Some(scheme_end) = url.find("://") else {
+/// An endpoint for a `Debug` print (KT-2055, KT-2057): its userinfo, query and
+/// fragment masked. Endpoints are stored as typed (no URL check at save), so
+/// the text is read as written, not parsed. Only a leading `scheme://` is kept
+/// as is; from the first `?` or `#` the rest is masked (`?api_key=…`,
+/// `#access_token=…`), and everything before the last `@` ahead of it is
+/// userinfo (`user:pass@host`, `https:/u:p@host`, `https:\\u:p@host`). An `@`
+/// past that `?` / `#` leaves it ambiguous (`?user=a@b&key=…`, or a `?` in a
+/// password), so nothing after the scheme is printed. A path holding an `@` is
+/// masked with it: a debug print may say less, never more.
+pub fn mask_endpoint_secrets(url: &str) -> std::borrow::Cow<'_, str> {
+    const MASK: &str = "***";
+    let scheme_end = url
+        .find("://")
+        .filter(|end| {
+            url[..*end].starts_with(|c: char| c.is_ascii_alphabetic())
+                && url[..*end]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        })
+        .map_or(0, |end| end + 3);
+    let query = url[scheme_end..].find(['?', '#']).map(|at| scheme_end + at);
+    let userinfo_end = url.rfind('@');
+    if userinfo_end.is_none() && query.is_none() {
         return std::borrow::Cow::Borrowed(url);
-    };
-    let authority_start = scheme_end + 3;
-    let rest = &url[authority_start..];
-    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
-    match authority.rfind('@') {
-        Some(at) => std::borrow::Cow::Owned(format!(
-            "{}***@{}",
-            &url[..authority_start],
-            &rest[at + 1..]
-        )),
-        None => std::borrow::Cow::Borrowed(url),
     }
+    let mut masked = String::with_capacity(url.len());
+    masked.push_str(&url[..scheme_end]);
+    if userinfo_end
+        .zip(query)
+        .is_some_and(|(at, query)| at > query)
+    {
+        masked.push_str(MASK);
+        return std::borrow::Cow::Owned(masked);
+    }
+    let host = match userinfo_end {
+        Some(at) => {
+            masked.push_str(MASK);
+            masked.push('@');
+            at + 1
+        }
+        None => scheme_end,
+    };
+    match query {
+        Some(query) => {
+            masked.push_str(&url[host..=query]);
+            masked.push_str(MASK);
+        }
+        None => masked.push_str(&url[host..]),
+    }
+    std::borrow::Cow::Owned(masked)
 }
 
 /// Drops the query string and userinfo of every URL in `text`: both may
