@@ -3320,7 +3320,7 @@ impl<'a> AgentStartConfig<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ExternalHttpRuntime {
     pub display_name: String,
     pub mention_alias: String,
@@ -3330,6 +3330,14 @@ pub struct ExternalHttpRuntime {
     pub tools_enabled: Option<bool>,
     pub api_key: Option<String>,
 }
+
+crate::debug_without_secrets!(ExternalHttpRuntime {
+    display_name,
+    mention_alias,
+    endpoint,
+    tools_enabled;
+    masked: api_key
+});
 
 /// The key an HTTP run sends: only ever the one belonging to the endpoint it
 /// goes to (KT-2038). On a named connection that is the connection's own

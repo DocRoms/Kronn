@@ -530,6 +530,21 @@ where
     (kept, total)
 }
 
+/// The text of a drained stream, for extraction. KT-2039: a stream cut at the
+/// cap (`total` above what was kept) ends mid-line, and a token cut below its
+/// pattern's minimum length is no longer recognised by the redaction: that
+/// last partial line is dropped. The artifact still keeps every byte.
+fn whole_lines(kept: &[u8], total: u64) -> String {
+    let whole = if total > kept.len() as u64 {
+        kept.iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(&kept[..0], |end| &kept[..=end])
+    } else {
+        kept
+    };
+    String::from_utf8_lossy(whole).into_owned()
+}
+
 enum Outcome {
     Exited(std::process::ExitStatus),
     TimedOut,
@@ -727,8 +742,8 @@ async fn run_with(
     };
     let exit_code = exit.and_then(|status| status.code());
 
-    let stdout_text = String::from_utf8_lossy(&stdout_kept).into_owned();
-    let stderr_text = String::from_utf8_lossy(&stderr_kept).into_owned();
+    let stdout_text = whole_lines(&stdout_kept, stdout_total);
+    let stderr_text = whole_lines(&stderr_kept, stderr_total);
     let extracted = summarise(
         spec.summariser,
         &stdout_text,
@@ -833,7 +848,7 @@ pub fn summarise(
                     .strip_prefix("test ")
                     .and_then(|name| name.strip_suffix(" ... FAILED"))
                 {
-                    push_capped(&mut failed_tests, name.trim().to_string(), MAX_FAILED_TESTS);
+                    push_capped(&mut failed_tests, redact(name.trim()), MAX_FAILED_TESTS);
                 }
             }
             if status != QuickExecStatus::Passed {
@@ -854,7 +869,7 @@ pub fn summarise(
                             Diagnostic {
                                 path,
                                 line: line_no,
-                                message,
+                                message: redact(&message),
                             },
                             MAX_DIAGNOSTICS,
                         );
@@ -872,7 +887,7 @@ pub fn summarise(
                         Diagnostic {
                             path,
                             line: line_no,
-                            message: message.trim_start_matches("): ").trim().to_string(),
+                            message: redact(message.trim_start_matches("): ").trim()),
                         },
                         MAX_DIAGNOSTICS,
                     );
@@ -884,7 +899,8 @@ pub fn summarise(
                 let trimmed = line.trim_start();
                 for marker in ["FAIL ", "× ", "✗ "] {
                     if let Some(name) = trimmed.strip_prefix(marker) {
-                        push_capped(&mut failed_tests, name.trim().to_string(), MAX_FAILED_TESTS);
+                        // A vitest name is free text.
+                        push_capped(&mut failed_tests, redact(name.trim()), MAX_FAILED_TESTS);
                         break;
                     }
                 }
@@ -937,7 +953,12 @@ pub fn summarise(
                 lines.push("… (the rest is in the artifact)".to_string());
             }
             if !tail.is_empty() {
-                lines.push(cap_bytes_keeping_end(&tail.join("\n"), TAIL_MAX_BYTES));
+                // Redacted before the cut, which keeps the end: cut right after
+                // a secret's name, the value left behind is no assignment.
+                lines.push(cap_bytes_keeping_end(
+                    &redact(&tail.join("\n")),
+                    TAIL_MAX_BYTES,
+                ));
             }
         }
     }
@@ -974,13 +995,23 @@ pub fn summarise(
             diagnostic.message
         ));
     }
-    let summary = truncate_on_char_boundary(summary, SUMMARY_MAX_BYTES);
+    // KT-2039 — the one choke point: the summary is stored as a validation's
+    // output, sent to the worker's and the principal's rooms, returned by Quick
+    // Exec and posted by agent resume jobs, so it leaves here redacted whole
+    // (failing names, a collector's stderr, every line). The parts cut above
+    // were redacted before their cut; this pass is before the last one.
+    let summary = truncate_on_char_boundary(redact(&summary), SUMMARY_MAX_BYTES);
 
     Extracted {
         summary,
         failed_tests,
         diagnostics,
     }
+}
+
+/// The redaction every text that leaves [`summarise`] goes through.
+fn redact(text: &str) -> String {
+    crate::core::redact::redact_stored_text(text)
 }
 
 /// What the generic summary keeps of a red run's first error lines, and of its

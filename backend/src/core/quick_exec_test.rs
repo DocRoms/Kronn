@@ -867,6 +867,269 @@ fn a_green_vitest_summary_is_unchanged() {
     assert_eq!(extracted.summary, "Passed\n");
 }
 
+// ── KT-2039: no secret shape leaves a red test run ──────────────────
+
+/// The shapes `redact_stored_text` used to miss, as a failing test prints
+/// them, each with the fake secret it carries.
+const KT_2039_SHAPES: &[(&str, &str)] = &[
+    (
+        r#"runtime: ExternalHttpRuntime { model: "m", api_key: Some("Fake1Some2Value3Abc") }"#,
+        "Fake1Some2Value3Abc",
+    ),
+    (
+        "config: Config {\n    model: \"m\",\n    password: Some(\n        \"Fake4Pretty5Value6\",\n    ),\n}",
+        "Fake4Pretty5Value6",
+    ),
+    (
+        "headers: { 'x-api-key': 'Fake7Quoted8Key9', accept: 'application/json' }",
+        "Fake7Quoted8Key9",
+    ),
+    (
+        r#"key: ApiKey { id: "k1", provider: "nvidia", value: "nvapi-Fake0Nvidia1Key2Value3Abcdef4", active: true }"#,
+        "Fake0Nvidia1Key2",
+    ),
+    (
+        "could not reach rediss://default:Fake5Redis6Pass@cache.internal:6380/0",
+        "Fake5Redis6Pass",
+    ),
+];
+
+fn assert_no_kt_2039_secret(extracted: &Extracted, secret: &str, shape: &str) {
+    let summary = &extracted.summary;
+    assert!(
+        !summary.contains(secret),
+        "{secret} leaked from {shape:?}: {summary}"
+    );
+    assert!(
+        summary.contains("***REDACTED***"),
+        "the shape must be kept, masked, not cut away: {summary}"
+    );
+    for name in &extracted.failed_tests {
+        assert!(!name.contains(secret), "{secret} leaked in a name: {name}");
+    }
+}
+
+#[test]
+fn a_red_cargo_test_run_stores_no_kt_2039_secret() {
+    for (shape, secret) in KT_2039_SHAPES {
+        let extracted = summarise(
+            Summariser::CargoTest,
+            &red_cargo_test_run(1, shape),
+            "",
+            QuickExecStatus::Failed,
+            true,
+        );
+        assert_no_kt_2039_secret(&extracted, secret, shape);
+        assert!(
+            extracted
+                .summary
+                .contains("panicked at src/core/preflight.rs:100:9"),
+            "{}",
+            extracted.summary
+        );
+    }
+}
+
+/// The same shapes in what a failing test printed on its stdout, in the
+/// `assert_eq!` sides of its panic, and under `cargo nextest`.
+#[test]
+fn a_red_cargo_test_run_masks_the_shapes_in_captured_output_and_assertions() {
+    for (shape, secret) in KT_2039_SHAPES {
+        let stdout = format!(
+            "\nrunning 1 test\ntest kt::case ... FAILED\n\nfailures:\n\n\
+             ---- kt::case stdout ----\n\
+             {shape}\n\
+             thread 'kt::case' panicked at src/kt.rs:3:5:\n\
+             assertion `left == right` failed\n\
+             \x20 left: {shape}\n\
+             \x20right: None\n\n\
+             failures:\n    kt::case\n\n\
+             test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        );
+        let extracted = summarise(
+            Summariser::CargoTest,
+            &stdout,
+            "",
+            QuickExecStatus::Failed,
+            true,
+        );
+        assert_no_kt_2039_secret(&extracted, secret, shape);
+
+        let nextest = format!(
+            "thread 'kt::case' panicked at src/kt.rs:3:5:\n{shape}\n\nerror: test run failed\n"
+        );
+        let extracted = summarise(
+            Summariser::CargoTest,
+            "",
+            &nextest,
+            QuickExecStatus::Failed,
+            true,
+        );
+        assert_no_kt_2039_secret(&extracted, secret, shape);
+    }
+}
+
+#[test]
+fn a_red_vitest_run_stores_no_kt_2039_secret() {
+    for (shape, secret) in KT_2039_SHAPES {
+        let extracted = summarise(
+            Summariser::Vitest,
+            &red_vitest_run(shape),
+            "",
+            QuickExecStatus::Failed,
+            true,
+        );
+        assert_no_kt_2039_secret(&extracted, secret, shape);
+        assert!(
+            extracted
+                .summary
+                .contains("AssertionError: expected 3 to be 4"),
+            "{}",
+            extracted.summary
+        );
+    }
+}
+
+/// A vitest test name is free text, and so is a Generic tail and a collector's
+/// stderr: the summary is redacted whole, and so are the failing names.
+#[test]
+fn every_part_of_a_summary_is_redacted() {
+    let name_secret = "ghp_Fake0123456789abcdefghijABCDEFGHIJ";
+    let vitest = format!(
+        " FAIL  src/a.test.ts > posts with token={name_secret}\n\
+         \x20Test Files  1 failed (1)\n"
+    );
+    let extracted = summarise(
+        Summariser::Vitest,
+        &vitest,
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        !extracted.summary.contains("Fake0123456789"),
+        "{}",
+        extracted.summary
+    );
+    assert_eq!(extracted.failed_tests.len(), 1);
+    assert!(
+        !extracted.failed_tests[0].contains("Fake0123456789"),
+        "{:?}",
+        extracted.failed_tests
+    );
+
+    let cargo = format!("test kt::{name_secret} ... FAILED\n");
+    let extracted = summarise(
+        Summariser::CargoTest,
+        &cargo,
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        !extracted.summary.contains("Fake0123456789"),
+        "{}",
+        extracted.summary
+    );
+
+    for (shape, secret) in KT_2039_SHAPES {
+        let stdout = format!("starting\n{shape}\ndone\n");
+        let extracted = summarise(
+            Summariser::Generic,
+            &stdout,
+            "",
+            QuickExecStatus::Passed,
+            true,
+        );
+        assert!(
+            !extracted.summary.contains(secret),
+            "{secret} leaked from the generic tail: {}",
+            extracted.summary
+        );
+
+        let extracted = summarise(
+            Summariser::Collected,
+            "{}",
+            shape,
+            QuickExecStatus::Failed,
+            true,
+        );
+        assert!(
+            !extracted.summary.contains(secret),
+            "{secret} leaked from collected stderr: {}",
+            extracted.summary
+        );
+    }
+}
+
+/// The generic tail keeps the END of its lines: cut right after a secret's
+/// name, the value left behind is no assignment any more, so the tail is
+/// redacted before it is cut.
+#[test]
+fn the_generic_tail_is_redacted_before_its_cut() {
+    let first = "auth failed: password=Fake9Tail0Value1";
+    let at = first.find("Fake9").unwrap();
+    let mut lines = vec![first.to_string()];
+    for index in 0..18 {
+        lines.push(format!("filler {index:02} {}", "x".repeat(80)));
+    }
+    let used: usize = lines.iter().map(|line| line.len() + 1).sum();
+    // The twentieth line is sized so that the cap cuts the first one right
+    // before its value.
+    lines.push("y".repeat(TAIL_MAX_BYTES + at - used));
+    let stdout = lines.join("\n");
+    assert_eq!(stdout.len() - TAIL_MAX_BYTES, at);
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        "",
+        QuickExecStatus::Passed,
+        true,
+    );
+    assert!(
+        !extracted.summary.contains("Fake9Tail0Value1"),
+        "{}",
+        extracted.summary
+    );
+}
+
+/// A stream cut at the cap ends mid-line: a token cut below its pattern's
+/// minimum length is no longer recognised, so that line is dropped before
+/// extraction rather than summarised.
+#[tokio::test]
+async fn a_stream_cut_at_the_cap_drops_its_last_partial_line() {
+    let token = "ghp_Fake0123456789abcdefghijABCDEFGHIJ";
+    let stream = format!("first line\nthread panicked: bad credential {token}\nlast\n");
+    // Keeps `ghp_Fake012`, shorter than the 30 characters the GitHub shape needs.
+    let cap = stream.find(token).unwrap() + 11;
+    let (kept, total) = drain_capped(stream.as_bytes(), cap).await;
+    assert_eq!(kept.len(), cap);
+    let text = whole_lines(&kept, total);
+    assert_eq!(text, "first line\n");
+    let extracted = summarise(
+        Summariser::Generic,
+        &text,
+        "",
+        QuickExecStatus::Failed,
+        false,
+    );
+    assert!(
+        !extracted.summary.contains("ghp_Fake"),
+        "{}",
+        extracted.summary
+    );
+
+    // A stream kept whole is read as it is, its last line included.
+    let (kept, total) = drain_capped(stream.as_bytes(), 1 << 20).await;
+    assert_eq!(whole_lines(&kept, total), stream);
+    let unterminated = "no newline at the end";
+    let (kept, total) = drain_capped(unterminated.as_bytes(), 1 << 20).await;
+    assert_eq!(whole_lines(&kept, total), unterminated);
+    // A capped stream of a single line keeps nothing of it.
+    let (kept, total) = drain_capped(unterminated.as_bytes(), 5).await;
+    assert_eq!(whole_lines(&kept, total), "");
+}
+
 // ── idempotency key ─────────────────────────────────────────────────
 
 #[test]

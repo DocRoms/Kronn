@@ -944,12 +944,14 @@ impl LinkedRepo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TokenOverride {
     pub provider: String,
     pub token: String,
 }
+
+crate::debug_without_secrets!(TokenOverride { provider; masked: token });
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]

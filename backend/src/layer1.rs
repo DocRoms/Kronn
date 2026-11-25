@@ -128,6 +128,7 @@ pub mod db {
     pub mod workflow_step_rooms;
     pub mod workflows;
 }
+pub use kronn_l0::debug_without_secrets;
 pub use kronn_l0::delivery;
 pub mod http_transport;
 pub use kronn_l0::models;

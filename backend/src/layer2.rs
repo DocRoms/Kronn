@@ -95,6 +95,7 @@ pub mod db {
     pub mod step_shadows;
     pub mod worker_offers;
 }
+pub use kronn_l1::debug_without_secrets;
 pub use kronn_l1::delivery;
 pub use kronn_l1::http_transport;
 pub use kronn_l1::models;

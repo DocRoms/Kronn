@@ -109,6 +109,7 @@ pub mod db {
     #[cfg(all(test, feature = "full-tests"))]
     pub mod upgrade_fixture_tests;
 }
+pub use kronn_l3::debug_without_secrets;
 pub use kronn_l3::delivery;
 pub use kronn_l3::http_transport;
 pub use kronn_l3::models;

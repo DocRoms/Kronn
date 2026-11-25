@@ -36,7 +36,7 @@ pub struct ConnectionView {
 
 /// Create/update payload. `api_key` is write-only and tri-state: `None` keeps
 /// the stored credential, `Some("")` clears it, `Some(value)` replaces it.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct UpsertConnectionRequest {
     pub display_name: String,
     pub mention_alias: String,
@@ -73,10 +73,27 @@ pub struct UpsertConnectionRequest {
     pub confirm_unreachable_models: bool,
 }
 
+crate::debug_without_secrets!(UpsertConnectionRequest {
+    display_name,
+    mention_alias,
+    endpoint,
+    origin_preset,
+    economy_model,
+    default_model,
+    reasoning_model,
+    image_model,
+    video_model,
+    decision_model,
+    tools_enabled,
+    media_endpoint,
+    confirm_unreachable_models;
+    masked: api_key
+});
+
 /// A non-persisting probe for a saved connection or the form currently being
 /// edited. `api_key` is write-only; omitting it for a saved connection reuses
 /// its stored credential without returning it to the browser.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct TestConnectionRequest {
     pub endpoint: Option<String>,
     #[serde(default)]
@@ -104,6 +121,16 @@ pub struct TestConnectionRequest {
     #[serde(default)]
     pub progress_id: Option<String>,
 }
+
+crate::debug_without_secrets!(TestConnectionRequest {
+    endpoint,
+    connection_id,
+    origin_preset,
+    models,
+    tier_models,
+    progress_id;
+    masked: api_key
+});
 
 /// How far a connection test's model sweep has got.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]

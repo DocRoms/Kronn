@@ -30,7 +30,7 @@ use crate::models::{ApiAuthKind, TokenExchangeBodyFormat};
 /// re-mint slightly ahead of the provider's real expiry, avoiding races
 /// where the token is valid when we check but expired when the API receives
 /// the request. 30s is plenty for network drift.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CachedToken {
     pub access_token: String,
     pub refresh_at: Instant,
@@ -46,6 +46,8 @@ pub struct CachedToken {
     /// forces a re-mint on the next call.
     pub cred_fp: u64,
 }
+
+crate::debug_without_secrets!(CachedToken { refresh_at, cred_fp; masked: access_token });
 
 const SAFETY_MARGIN: Duration = Duration::from_secs(30);
 

@@ -7,7 +7,7 @@ use ts_rs::TS;
 
 // ─── App config ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -811,7 +811,7 @@ pub fn parse_review_rounds_arg(value: &serde_json::Value) -> Result<u32, String>
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ServerConfig {
     pub host: String,
@@ -1213,7 +1213,7 @@ pub fn default_ui_language() -> String {
 
 // ─── Tokens / API keys ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TokensConfig {
     /// Legacy fields — kept for backward compat when reading old config.toml
@@ -1248,7 +1248,7 @@ impl TokensConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ApiKey {
     pub id: String,
@@ -1258,6 +1258,36 @@ pub struct ApiKey {
     pub value: String,
     pub active: bool,
 }
+
+// KT-2039: a failing test's `{:?}` of a key is stored and posted to rooms.
+crate::debug_without_secrets!(ApiKey { id, name, provider, active; masked: value });
+crate::debug_without_secrets!(TokensConfig {
+    keys,
+    disabled_overrides;
+    masked: anthropic, openai, google
+});
+crate::debug_without_secrets!(SaveApiKeyRequest { id, name, provider; masked: value });
+crate::debug_without_secrets!(ServerConfig {
+    host,
+    port,
+    domain,
+    auth_enabled,
+    auth_locked,
+    auth_token_session_only,
+    auth_strict_localhost,
+    p2p_enabled;
+    masked: auth_token, failure_notify_url;
+    ..
+});
+crate::debug_without_secrets!(AppConfig {
+    server,
+    tokens,
+    agents,
+    language,
+    ui_language;
+    masked: encryption_secret, secret_themes;
+    ..
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1269,7 +1299,7 @@ pub struct ApiKeyDisplay {
     pub active: bool,
 }
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct SaveApiKeyRequest {
     pub id: Option<String>,

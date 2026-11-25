@@ -54,8 +54,8 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:1783-1829#ModelTier]
-[src: file: backend/src/agents/runner.rs:3648-3682#resolve_model_flag]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:1817-1863#ModelTier]
+[src: file: backend/src/agents/runner.rs:3656-3690#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
 
@@ -70,7 +70,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:1941-2016#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:1975-2050#AgentDetection]
 
 ## Policy and precedence
 
@@ -119,7 +119,7 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:3986-3987#start_agent_with_config]
+contract. [src: file: backend/src/agents/runner.rs:3994-3995#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
 [src: file: backend/src/api/discussions/orchestration.rs:1272-1412#detect_agent_error_hint]
 

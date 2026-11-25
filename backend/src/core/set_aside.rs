@@ -47,7 +47,7 @@ const MAX_FILE: u64 = 4 * 1024 * 1024;
 const MAX_BOUND_FILE: u64 = 64 * 1024 * 1024;
 
 /// A credential a config text carries in clear.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClearCredential {
     /// `provider_key` or `auth_token`, as in `stored_credentials`, or
     /// [`KIND_CONFIG_SECRET`].
@@ -57,6 +57,8 @@ pub struct ClearCredential {
     pub provider: String,
     pub value: String,
 }
+
+crate::debug_without_secrets!(ClearCredential { kind, name, provider; masked: value });
 
 /// Why a set-aside file may not be deleted. The code is what the UI maps to a
 /// sentence.

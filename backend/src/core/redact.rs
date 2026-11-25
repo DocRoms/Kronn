@@ -23,7 +23,13 @@ struct Pattern {
     re: Regex,
     replacement: &'static str,
     gate: Gate,
+    /// A match this says to leave is left as written, whatever the caller
+    /// (KT-2039: the call that wraps a value another pattern already masked).
+    leave: Option<LeaveMatch>,
 }
+
+/// See [`Pattern::leave`]: reads the match and the text it was found in.
+type LeaveMatch = fn(&regex_lite::Captures<'_>, &str) -> bool;
 
 /// A cheap test that runs before a pattern's regex: most text holds no secret,
 /// and `regex_lite` (a plain NFA simulation) is slow on it, so text that cannot
@@ -47,10 +53,18 @@ enum Gate {
     /// quoted-value pattern also needs its quote right after the `:`/`=`, past
     /// optional whitespace; `None` for the one that takes a bare value.
     Assignment(Option<u8>),
-    /// As [`Gate::Assignment`], for a quoted object key (`"NAME": "value"`): the
-    /// name is followed by its closing quote (escaped or not) before the `:`.
-    /// Carries the quote the value opens with (`"` or the `\` of `\"`).
-    JsonKey(u8),
+    /// As [`Gate::Assignment`], for a value wrapped in a call (`Some("…")`,
+    /// `Secret::new('…')`, KT-2039): the first byte past the `:`/`=` that is not
+    /// up to a space opens an identifier.
+    WrappedAssignment,
+    /// As [`Gate::Assignment`], for a quoted object key (`"NAME": "value"`,
+    /// `'NAME': 'value'`): the name is followed by its closing quote (escaped or
+    /// not) before the `:`. Carries the quote of the key, then the quote the
+    /// value opens with (`"`, `'` or the `\` of `\"`).
+    QuotedKey(u8, u8),
+    /// A `://` followed, before any whitespace, by a `:` and then an `@`: the
+    /// userinfo of a URL of any scheme (KT-2039).
+    UserInfo,
 }
 
 impl Gate {
@@ -61,10 +75,49 @@ impl Gate {
                 let lowered = text.to_ascii_lowercase();
                 needles.iter().any(|needle| lowered.contains(needle))
             }
-            Gate::Assignment(quote) => assignment_gate(text, quote, false),
-            Gate::JsonKey(quote) => assignment_gate(text, Some(quote), true),
+            Gate::Assignment(quote) => {
+                assignment_gate(text, quote.map_or(Opener::Any, Opener::Quote), None)
+            }
+            Gate::WrappedAssignment => assignment_gate(text, Opener::Call, None),
+            Gate::QuotedKey(key, quote) => assignment_gate(text, Opener::Quote(quote), Some(key)),
+            Gate::UserInfo => userinfo_gate(text),
         }
     }
+
+    /// The literals every text this gate admits contains, for
+    /// [`Prefilter::literals`]; `None` when the gate is not of that shape.
+    fn literals(self) -> Option<&'static [&'static str]> {
+        match self {
+            Gate::Contains(needles) | Gate::ContainsAsciiCi(needles) => Some(needles),
+            Gate::UserInfo => Some(&["://"]),
+            Gate::Assignment(_) | Gate::WrappedAssignment | Gate::QuotedKey(..) => None,
+        }
+    }
+}
+
+/// ASCII whitespace: the `\s` of `regex_lite`.
+fn is_regex_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// Gate of [`Gate::UserInfo`].
+fn userinfo_gate(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(at) = text[from..].find("://") {
+        let start = from + at + 3;
+        let mut colon = false;
+        for byte in &bytes[start..] {
+            match *byte {
+                b':' => colon = true,
+                b'@' if colon => return true,
+                byte if is_regex_space(byte) => break,
+                _ => {}
+            }
+        }
+        from = start;
+    }
+    false
 }
 
 /// One pass over a text that turns it away for a whole list of patterns at
@@ -99,7 +152,7 @@ impl Prefilter {
     fn literals(gates: impl Iterator<Item = Gate>) -> Self {
         let mut slots = vec![0u64; 1 << 10];
         for gate in gates {
-            let (Gate::Contains(needles) | Gate::ContainsAsciiCi(needles)) = gate else {
+            let Some(needles) = gate.literals() else {
                 return Prefilter::Open;
             };
             for needle in needles {
@@ -204,6 +257,15 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
             "amqp://",
             "amqps://",
         ]),
+    ),
+    // KT-2039 — the same for any other scheme (`rediss://`, `mssql://`,
+    // `jdbc:sqlserver://`, `ftp://`), with or without a user (`redis://:pwd@`).
+    // Neither part takes a `/`, which userinfo never holds unescaped: an `@`
+    // further down a path (`https://host:443/@scope/pkg`) is no password.
+    (
+        r"(?i)\b([a-z][a-z0-9+.-]*)://([^:@\s/]*):([^@\s/]+)@",
+        "$1://$2:***REDACTED***@",
+        Gate::UserInfo,
     ),
     // Bearer / token tokens that appear bare on a line (logs without
     // explicit header). Same shape as FE but tightened to avoid common
@@ -320,6 +382,12 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
         "kbt_***REDACTED***",
         Gate::Contains(&["kbt_"]),
     ),
+    // NVIDIA API keys (`nvapi-` and 64 characters, KT-2039).
+    (
+        r"\bnvapi-[A-Za-z0-9_-]{20,}",
+        "nvapi-***REDACTED***",
+        Gate::Contains(&["nvapi-"]),
+    ),
 ];
 
 static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
@@ -331,6 +399,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
                     re,
                     replacement: repl,
                     gate: *gate,
+                    leave: None,
                 })
                 .map_err(|e| {
                     tracing::warn!(pattern = %src, error = %e, "core::redact: invalid pattern skipped");
@@ -396,7 +465,9 @@ fn apply_patterns_guarded(
             let Some(matched) = captures.get(0) else {
                 continue;
             };
-            if guard.is_some_and(|guard| !guard(&captures, &out)) {
+            if guard.is_some_and(|guard| !guard(&captures, &out))
+                || pat.leave.is_some_and(|leave| leave(&captures, &out))
+            {
                 continue;
             }
             next.push_str(&out[copied..matched.start()]);
@@ -451,9 +522,9 @@ pub fn looks_like_secret(input: &str) -> bool {
             .any(|pat| pat.gate.admits(input) && pat.re.is_match(input))
 }
 
-/// The four catch-all-line patterns that open [`RAW_PATTERNS`]; every pattern
+/// The five catch-all-line patterns that open [`RAW_PATTERNS`]; every pattern
 /// after them is a vendor token shape.
-const CATCH_ALL_PATTERNS: usize = 4;
+const CATCH_ALL_PATTERNS: usize = 5;
 
 /// The vendor token shapes of [`RAW_PATTERNS`] as they are looked for in a KEY NAME
 /// (KT-1528), DERIVED from it mechanically: the same body and the same minimum
@@ -585,6 +656,16 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\[\\s\\S]|[^'\\\\])+)'");
     let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\[\\s\\S]|[^`\\\\])+)`");
     let quoted_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
+    // KT-2039 — a quoted value wrapped in a call, as `{:?}` prints an
+    // `Option<String>` (`api_key: Some("…")`) and `{:#?}` across lines
+    // (`password: Some(\n    "…",\n)`), or as code builds a secret type
+    // (`token = Secret::new('…')`). The call is kept; the bare pattern below then
+    // leaves it alone ([`call_of_a_masked_value`]).
+    let call = r"[a-z_][a-z0-9_]*(?:::[a-z_][a-z0-9_]*)*\(\s*";
+    let wrapped_dq = format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call})"((?:\\[\s\S]|[^"\\])+)""#);
+    let wrapped_sq = format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call})'((?:\\[\s\S]|[^'\\])+)'"#);
+    let wrapped_escaped =
+        format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call}\\")((?:[^\\"]|\\[^"])+)(\\")"#);
     // A quoted value cut before its closing quote: the closed shapes above ran
     // first, so no closing quote is left to find — mask to the end of the text.
     // A lone backslash ending the text is part of the value (`\\?`); the quote
@@ -606,26 +687,35 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     // by its quote before the `:`, which the shapes above never read.
     let json_key_dq = format!(r#"(?i)("{name}"\s*:\s*)"((?:\\[\s\S]|[^"\\])+)""#);
     let json_key_escaped = format!(r#"(?i)(\\"{name}\\"\s*:\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
+    // KT-2039 — the same with single quotes, as Node's `util.inspect` prints an
+    // object (`{ 'x-api-key': '…' }`) and Python a dict.
+    let json_key_sq = format!(r#"(?i)('{name}'\s*:\s*)'((?:\\[\s\S]|[^'\\])+)'"#);
+    let leave_call: Option<LeaveMatch> = Some(call_of_a_masked_value);
     [
-        (quoted_dq, "$1\"***REDACTED***\"", Gate::Assignment(Some(b'"'))),
-        (quoted_sq, "$1'***REDACTED***'", Gate::Assignment(Some(b'\''))),
-        (quoted_bt, "$1`***REDACTED***`", Gate::Assignment(Some(b'`'))),
-        (quoted_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\'))),
-        (truncated_dq, "$1\"***REDACTED***", Gate::Assignment(Some(b'"'))),
-        (truncated_sq, "$1'***REDACTED***", Gate::Assignment(Some(b'\''))),
-        (truncated_bt, "$1`***REDACTED***", Gate::Assignment(Some(b'`'))),
-        (truncated_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\'))),
-        (unquoted, "$1***REDACTED***", Gate::Assignment(None)),
-        (json_key_dq, "$1\"***REDACTED***\"", Gate::JsonKey(b'"')),
-        (json_key_escaped, "$1***REDACTED***$3", Gate::JsonKey(b'\\')),
+        (quoted_dq, "$1\"***REDACTED***\"", Gate::Assignment(Some(b'"')), None),
+        (quoted_sq, "$1'***REDACTED***'", Gate::Assignment(Some(b'\'')), None),
+        (quoted_bt, "$1`***REDACTED***`", Gate::Assignment(Some(b'`')), None),
+        (quoted_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\')), None),
+        (wrapped_dq, "$1\"***REDACTED***\"", Gate::WrappedAssignment, None),
+        (wrapped_sq, "$1'***REDACTED***'", Gate::WrappedAssignment, None),
+        (wrapped_escaped, "$1***REDACTED***$3", Gate::WrappedAssignment, None),
+        (truncated_dq, "$1\"***REDACTED***", Gate::Assignment(Some(b'"')), None),
+        (truncated_sq, "$1'***REDACTED***", Gate::Assignment(Some(b'\'')), None),
+        (truncated_bt, "$1`***REDACTED***", Gate::Assignment(Some(b'`')), None),
+        (truncated_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\')), None),
+        (unquoted, "$1***REDACTED***", Gate::Assignment(None), leave_call),
+        (json_key_dq, "$1\"***REDACTED***\"", Gate::QuotedKey(b'"', b'"'), None),
+        (json_key_escaped, "$1***REDACTED***$3", Gate::QuotedKey(b'"', b'\\'), None),
+        (json_key_sq, "$1'***REDACTED***'", Gate::QuotedKey(b'\'', b'\''), None),
     ]
     .into_iter()
-    .filter_map(|(src, repl, gate)| {
+    .filter_map(|(src, repl, gate, leave)| {
         Regex::new(&src)
             .map(|re| Pattern {
                 re,
                 replacement: repl,
                 gate,
+                leave,
             })
             .map_err(|e| {
                 tracing::warn!(pattern = %src, error = %e, "core::redact: invalid assignment pattern skipped");
@@ -634,6 +724,46 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     })
     .collect()
 });
+
+/// KT-2039 — whether a bare-value match (group 2) is only the call that wraps
+/// a quoted value the wrapped patterns already masked (`Some(` before
+/// `"***REDACTED***"`, or `Some(\"***REDACTED***` inside a printed string): it
+/// is then left as written, so the mask reads `api_key: Some("***REDACTED***")`
+/// rather than swallowing the `Some(`. A call whose value is not masked yet (cut
+/// before its closing quote) is masked as before.
+fn call_of_a_masked_value(captures: &regex_lite::Captures<'_>, text: &str) -> bool {
+    const MASKED: &[&str] = &[
+        "\"***REDACTED***\"",
+        "'***REDACTED***'",
+        "`***REDACTED***`",
+        "\\\"***REDACTED***\\\"",
+    ];
+    let (Some(value), Some(matched)) = (captures.get(2), captures.get(0)) else {
+        return false;
+    };
+    let (call, masked_inside) = match value.as_str().strip_suffix("\\\"***REDACTED***") {
+        Some(call) => (call, text[matched.end()..].starts_with("\\\"")),
+        None => (value.as_str(), false),
+    };
+    let Some(path) = call.trim_end_matches(is_regex_space_char).strip_suffix('(') else {
+        return false;
+    };
+    let is_call = path.split("::").all(|part| {
+        part.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    });
+    if !is_call {
+        return false;
+    }
+    let rest = text[matched.end()..].trim_start_matches(is_regex_space_char);
+    masked_inside || MASKED.iter().any(|masked| rest.starts_with(masked))
+}
+
+fn is_regex_space_char(c: char) -> bool {
+    u8::try_from(c).is_ok_and(is_regex_space)
+}
 
 /// Lowercase spellings of every name in [`ASSIGNMENT_NAMES`], with `[_-]?`
 /// expanded to its three readings (`api[_-]?key` → `apikey`, `api_key`,
@@ -671,8 +801,10 @@ static ASSIGNMENT_TAILS: LazyLock<Option<Vec<Vec<u8>>>> = LazyLock::new(|| {
 /// check. `\s` is ASCII whitespace; any byte up to a space over-approximates it.
 ///
 /// A quoted-value pattern reads its opening `quote` right after `[:=]\s*`, so
-/// the first byte past the `:`/`=` that is not up to a space must be that quote.
-fn assignment_gate(text: &str, quote: Option<u8>, quoted_key: bool) -> bool {
+/// the first byte past the `:`/`=` that is not up to a space must be that quote;
+/// a wrapped-value pattern reads the identifier of its call there. A quoted-key
+/// pattern has the key's closing quote (`key_quote`) right before the `:`.
+fn assignment_gate(text: &str, opener: Opener, key_quote: Option<u8>) -> bool {
     let Some(tails) = ASSIGNMENT_TAILS.as_ref() else {
         return true;
     };
@@ -681,11 +813,14 @@ fn assignment_gate(text: &str, quote: Option<u8>, quoted_key: bool) -> bool {
         if *byte != b':' && *byte != b'=' {
             return false;
         }
-        if let Some(quote) = quote {
-            let opens = bytes[index + 1..].iter().find(|byte| **byte > b' ');
-            if opens != Some(&quote) {
-                return false;
-            }
+        let opens = bytes[index + 1..].iter().find(|byte| **byte > b' ');
+        let opens_right = match opener {
+            Opener::Any => true,
+            Opener::Quote(quote) => opens == Some(&quote),
+            Opener::Call => opens.is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_'),
+        };
+        if !opens_right {
+            return false;
         }
         let before = &bytes[..index];
         let end = before
@@ -693,15 +828,26 @@ fn assignment_gate(text: &str, quote: Option<u8>, quoted_key: bool) -> bool {
             .rposition(|byte| *byte > b' ')
             .map_or(0, |last| last + 1);
         let mut before = &before[..end];
-        if quoted_key {
+        if let Some(key_quote) = key_quote {
             // `NAME"` or `NAME\"`: the key's closing quote, escaped or not.
-            let Some(unquoted) = before.strip_suffix(b"\"") else {
+            let Some(unquoted) = before.strip_suffix(&[key_quote]) else {
                 return false;
             };
             before = unquoted.strip_suffix(b"\\").unwrap_or(unquoted);
         }
         ends_with_secret_word(before, tails)
     })
+}
+
+/// What [`assignment_gate`] expects right after the `:`/`=`, past whitespace.
+#[derive(Clone, Copy)]
+enum Opener {
+    /// Anything: the bare-value pattern.
+    Any,
+    /// This quote (or the `\` of `\"`).
+    Quote(u8),
+    /// An identifier opening the call that wraps the value (KT-2039).
+    Call,
 }
 
 /// Redact for a Kronn AUDIT ARTIFACT (`docs/tech-debt/TD-*.md`,
@@ -1018,9 +1164,23 @@ fn value_is_credential(name: &str, value: &str, quoted: bool) -> bool {
 /// The name in the text that opens a match (`  "GEMINI_API_KEY": "`,
 /// `export GITHUB_TOKEN=`, `password: `): the word before the separator.
 fn name_before_value(prefix: &str) -> &str {
-    let prefix = prefix.trim_end_matches(|c: char| {
-        c.is_whitespace() || matches!(c, ':' | '=' | '"' | '\'' | '`' | '\\')
-    });
+    let separators = |text: &str| -> usize {
+        text.trim_end_matches(|c: char| {
+            c.is_whitespace() || matches!(c, ':' | '=' | '"' | '\'' | '`' | '\\')
+        })
+        .len()
+    };
+    let mut prefix = &prefix[..separators(prefix)];
+    // KT-2039: `api_key: Some(`, `token = Secret::new(`: the call that wraps the
+    // value is not the name.
+    if let Some(open) = prefix.strip_suffix('(') {
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut call = open.trim_end_matches(word);
+        while let Some(path) = call.strip_suffix("::") {
+            call = path.trim_end_matches(word);
+        }
+        prefix = &call[..separators(call)];
+    }
     let start = prefix
         .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
         .map_or(0, |at| at + 1);
@@ -1196,6 +1356,83 @@ fn redact_json_aware_with(
 
 fn encode_json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"***REDACTED***\"".to_string())
+}
+
+/// KT-2039 — a secret field as `Debug` prints it: `"***REDACTED***"` in place
+/// of a value (an empty one stays `""`, so "cleared" still reads apart from
+/// "set"), `None` and `Some(…)` kept, a map's keys kept and its values masked.
+/// Used by [`debug_without_secrets!`](crate::debug_without_secrets).
+pub struct Masked<'a, T: ?Sized>(pub &'a T);
+
+/// A value [`Masked`] knows how to print without its secret.
+pub trait MaskedDebug {
+    fn fmt_masked(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+}
+
+impl MaskedDebug for String {
+    fn fmt_masked(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_empty() {
+            "\"\""
+        } else {
+            "\"***REDACTED***\""
+        })
+    }
+}
+
+impl<T: MaskedDebug> MaskedDebug for Option<T> {
+    fn fmt_masked(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            None => f.write_str("None"),
+            Some(value) => f.debug_tuple("Some").field(&Masked(value)).finish(),
+        }
+    }
+}
+
+impl<K: std::fmt::Debug, V: MaskedDebug, S> MaskedDebug for std::collections::HashMap<K, V, S> {
+    fn fmt_masked(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(self.iter().map(|(key, value)| (key, Masked(value))))
+            .finish()
+    }
+}
+
+impl<T: ?Sized + MaskedDebug> std::fmt::Debug for Masked<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt_masked(f)
+    }
+}
+
+/// KT-2039 — `Debug` for a struct that holds a credential, printing every field
+/// but its secrets ([`Masked`]): a failing test prints `{:?}` / `{:#?}` of what
+/// it compared, and that output is stored and posted to rooms.
+///
+/// `Type { a, b; masked: secret }` names every field: one added later and left
+/// out does not compile. `Type { a; masked: secret; .. }`, for a large struct,
+/// prints only the named fields and elides the rest — never an unnamed secret.
+#[macro_export]
+macro_rules! debug_without_secrets {
+    ($ty:ident { $($field:ident),* $(,)? ; masked: $($secret:ident),+ $(,)? }) => {
+        impl ::std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                let $ty { $($field,)* $($secret,)+ } = self;
+                f.debug_struct(stringify!($ty))
+                    $(.field(stringify!($field), $field))*
+                    $(.field(stringify!($secret), &$crate::core::redact::Masked($secret)))+
+                    .finish()
+            }
+        }
+    };
+    ($ty:ident { $($field:ident),* $(,)? ; masked: $($secret:ident),+ $(,)? ; .. }) => {
+        impl ::std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                let $ty { $($field,)* $($secret,)+ .. } = self;
+                f.debug_struct(stringify!($ty))
+                    $(.field(stringify!($field), $field))*
+                    $(.field(stringify!($secret), &$crate::core::redact::Masked($secret)))+
+                    .finish_non_exhaustive()
+            }
+        }
+    };
 }
 
 /// What a TOML parse error says, fit for a log, a notice or an API response:
@@ -2692,7 +2929,9 @@ mod tests {
         );
         assert_eq!(NAME_TOKEN_REGEXES.len(), name_token_shapes().count());
         // Mechanical: no anchor is left, and every body is the vendor's own.
-        for (shape, (src, _, _)) in name_token_shapes().zip(RAW_PATTERNS.iter().skip(4)) {
+        for (shape, (src, _, _)) in
+            name_token_shapes().zip(RAW_PATTERNS.iter().skip(CATCH_ALL_PATTERNS))
+        {
             assert!(
                 !shape.starts_with(r"\b") && !shape.ends_with(r"\b"),
                 "{shape}"
@@ -2717,6 +2956,7 @@ mod tests {
             "npm_abcdefghijklmnopqrstuvwxyz0123456789",
             "hf_abcdefghijklmnopqrstuvwxyz0123456789",
             "kbt_abcdefghijklmnopqrstuvwx",
+            "nvapi-abcdefghijklmnopqrstuvwxyz0123456789",
         ];
         assert_eq!(samples.len(), name_token_shapes().count());
         for sample in samples {
@@ -2823,6 +3063,10 @@ mod tests {
         let mut out = input.to_string();
         let mut count = 0usize;
         for pat in patterns {
+            // A match the pattern says to leave is no gate: it is left here too.
+            let left = |captures: &regex_lite::Captures<'_>| {
+                pat.leave.is_some_and(|leave| leave(captures, &out))
+            };
             let changed = pat
                 .re
                 .captures_iter(&out)
@@ -2832,13 +3076,24 @@ mod tests {
                     };
                     let mut replacement = String::new();
                     captures.expand(pat.replacement, &mut replacement);
-                    replacement != matched.as_str()
+                    replacement != matched.as_str() && !left(captures)
                 })
                 .count();
             if changed == 0 {
                 continue;
             }
-            out = pat.re.replace_all(&out, pat.replacement).to_string();
+            out = pat
+                .re
+                .replace_all(&out, |captures: &regex_lite::Captures<'_>| {
+                    let mut replacement = String::new();
+                    if left(captures) {
+                        replacement.push_str(&captures[0]);
+                    } else {
+                        captures.expand(pat.replacement, &mut replacement);
+                    }
+                    replacement
+                })
+                .to_string();
             count = count.saturating_add(changed);
         }
         if out == input {
@@ -2868,7 +3123,7 @@ mod tests {
             RAW_PATTERNS.len(),
             "a pattern failed to compile"
         );
-        assert_eq!(ASSIGNMENT.len(), 11);
+        assert_eq!(ASSIGNMENT.len(), 15);
         assert!(
             matches!(&*VENDOR_PREFILTER, Prefilter::Triples(_)),
             "a gate literal shorter than three bytes turns the vendor prefilter off"
@@ -2964,6 +3219,14 @@ mod tests {
             r#"token: \"Ab3xZ9"#,
             r#"Authorization: Bearer \"Ab3xZ9Qw7Lm2Ns5Pt8Rv\""#,
             r#"{"password":"a\"b"}"#,
+            // KT-2039
+            r#"api_key: Some("Fake1Some2Value3Abc")"#,
+            "password: Some(\n    \"Fake4Pretty5Value6\",\n)",
+            r#"token = Secret::new(\"Fake1Some2\")"#,
+            "{ 'x-api-key': 'Fake7Quoted8Key9' }",
+            "nvapi-Fake0Nvidia1Key2Value3Abcdef4",
+            "rediss://default:Fake5Redis6Pass@cache.internal",
+            "redis://:Fake5Redis6Pass@cache.internal",
         ] {
             let matching: Vec<_> = every_pattern()
                 .filter(|pat| pat.re.is_match(sample))
@@ -3088,35 +3351,45 @@ mod tests {
 
     #[test]
     fn quoted_assignment_patterns_wait_for_their_own_quote() {
-        // ASSIGNMENT is ordered: double quote, single quote, backtick, escaped, the same four cut
-        // before their closing quote, bare, then the two quoted-key shapes (KT-1656).
+        // ASSIGNMENT is ordered: double quote, single quote, backtick, escaped, the
+        // three wrapped in a call (KT-2039), the four quoted ones cut before their
+        // closing quote, bare, then the three quoted-key shapes (KT-1656, KT-2039).
         let admitted = |text: &str| -> Vec<bool> {
             ASSIGNMENT.iter().map(|pat| pat.gate.admits(text)).collect()
         };
+        let (t, f) = (true, false);
         // The quote sits before the name, not after the `:`: only the bare
         // value pattern has anything to do.
         assert_eq!(
             admitted("curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com"),
-            [false, false, false, false, false, false, false, false, true, false, false]
+            [f, f, f, f, f, f, f, f, f, f, f, t, f, f, f]
         );
         assert_eq!(
             admitted("password: \"hunter2\""),
-            [true, false, false, false, true, false, false, false, true, false, false]
+            [t, f, f, f, f, f, f, t, f, f, f, t, f, f, f]
         );
         assert_eq!(
             admitted("token =\n  'hunter2'"),
-            [false, true, false, false, false, true, false, false, true, false, false]
+            [f, t, f, f, f, f, f, f, t, f, f, t, f, f, f]
         );
         assert_eq!(
             admitted("secret=`hunter2`"),
-            [false, false, true, false, false, false, true, false, true, false, false]
+            [f, f, t, f, f, f, f, f, f, t, f, t, f, f, f]
         );
         assert_eq!(
             admitted(r#"token: \"hunter2\""#),
-            [false, false, false, true, false, false, false, true, true, false, false]
+            [f, f, f, t, f, f, f, f, f, f, t, t, f, f, f]
+        );
+        assert_eq!(
+            admitted(r#"api_key: Some("hunter2")"#),
+            [f, f, f, f, t, t, t, f, f, f, f, t, f, f, f]
+        );
+        assert_eq!(
+            admitted("{ 'x-api-key': 'hunter2' }"),
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, t]
         );
         // No assignment at all: nothing runs, whatever quotes the text holds.
-        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 11]);
+        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 15]);
         // Each pattern that is turned away really has no match to make.
         for text in [
             "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com",
@@ -3124,11 +3397,224 @@ mod tests {
             "token =\n  'hunter2'",
             "secret=`hunter2`",
             r#"token: \"hunter2\""#,
+            r#"api_key: Some("hunter2")"#,
+            "{ 'x-api-key': 'hunter2' }",
         ] {
             for pat in ASSIGNMENT.iter().filter(|pat| !pat.gate.admits(text)) {
                 assert!(!pat.re.is_match(text), "{} on {text:?}", pat.re.as_str());
             }
         }
+    }
+
+    // ── KT-2039: the shapes a red test run prints ─────────────────────
+    //
+    // Every value below is fake.
+
+    /// Asserts `secret` is gone from `redact_stored_text(raw)`, that the output
+    /// keeps `kept`, and that a second pass changes nothing.
+    fn assert_stored_masks(raw: &str, secret: &str, kept: &str) {
+        let out = redact_stored_text(raw);
+        assert!(!out.contains(secret), "{secret} leaked: {raw:?} -> {out:?}");
+        assert!(out.contains("***REDACTED***"), "{raw:?} -> {out:?}");
+        assert!(out.contains(kept), "{kept:?} lost: {raw:?} -> {out:?}");
+        assert_eq!(redact_stored_text(&out), out, "idempotent on {raw:?}");
+    }
+
+    #[test]
+    fn a_secret_wrapped_in_some_is_masked() {
+        for (raw, secret, kept) in [
+            (
+                r#"api_key: Some("Fake1Some2Value3Abc")"#,
+                "Fake1Some2Value3Abc",
+                "api_key: Some(",
+            ),
+            (
+                r#"ExternalHttpRuntime { model: "m", api_key: Some("Fake1Some2Value3Abc"), base: None }"#,
+                "Fake1Some2Value3Abc",
+                r#"model: "m""#,
+            ),
+            (
+                "password = Secret::new('fake-hunter2')",
+                "fake-hunter2",
+                "Secret::new(",
+            ),
+            (
+                "token: Some( \"Fake1Some2Value3Abc\" )",
+                "Fake1Some2Value3Abc",
+                "token: Some(",
+            ),
+            // Inside a `{:?}`-printed string, where the quotes are escaped.
+            (
+                r#"left: "Cfg { token: Some(\"Fake1Some2Value3Abc\") }""#,
+                "Fake1Some2Value3Abc",
+                "left: ",
+            ),
+        ] {
+            assert_stored_masks(raw, secret, kept);
+        }
+    }
+
+    #[test]
+    fn a_secret_wrapped_in_some_is_masked_across_lines_as_pretty_debug_prints_it() {
+        let raw = "Runtime {\n    model: \"m\",\n    password: Some(\n        \"Fake4Pretty5Value6\",\n    ),\n    retries: 3,\n}";
+        assert_stored_masks(raw, "Fake4Pretty5Value6", "retries: 3");
+        let crlf = raw.replace('\n', "\r\n");
+        assert_stored_masks(&crlf, "Fake4Pretty5Value6", "retries: 3");
+    }
+
+    #[test]
+    fn a_stored_agent_output_masks_a_wrapped_credential_too() {
+        let out = redact_agent_output(r#"api_key: Some("Fake1Some2Value3Abc")"#);
+        assert!(!out.contains("Fake1Some2Value3Abc"), "{out}");
+        // …and keeps a wrapped placeholder.
+        let placeholder = r#"api_key: Some("<your-api-key>")"#;
+        assert_eq!(redact_agent_output(placeholder), placeholder);
+    }
+
+    #[test]
+    fn a_single_quoted_key_is_masked() {
+        for (raw, secret, kept) in [
+            (
+                "{ 'x-api-key': 'Fake7Quoted8Key9', accept: 'application/json' }",
+                "Fake7Quoted8Key9",
+                "accept: 'application/json'",
+            ),
+            (
+                "headers: {\n  'Authorization-Token': 'Fake7Quoted8Key9',\n  'content-type': 'text/plain'\n}",
+                "Fake7Quoted8Key9",
+                "'content-type': 'text/plain'",
+            ),
+            (
+                "{'password': 'fake-hunter2'}",
+                "fake-hunter2",
+                "'password': '",
+            ),
+        ] {
+            assert_stored_masks(raw, secret, kept);
+        }
+    }
+
+    #[test]
+    fn an_nvidia_key_is_masked_by_its_vendor_shape() {
+        let key = "nvapi-Fake0Nvidia1Key2Value3Abcdef4_xyz-5";
+        for raw in [
+            format!(
+                "ApiKey {{ id: \"k1\", provider: \"nvidia\", value: \"{key}\", active: true }}"
+            ),
+            format!("NVIDIA {key}"),
+            format!("[{key}]"),
+        ] {
+            for out in [redact_secrets(&raw), redact_stored_text(&raw)] {
+                assert!(!out.contains("Fake0Nvidia1Key2"), "{raw:?} -> {out:?}");
+                assert!(out.contains("nvapi-***REDACTED***"), "{raw:?} -> {out:?}");
+            }
+            assert!(looks_like_secret(&raw), "{raw:?}");
+        }
+        // A word that merely starts the same way is no key.
+        assert_eq!(redact_secrets("the nvapi-docs page"), "the nvapi-docs page");
+    }
+
+    #[test]
+    fn userinfo_of_any_scheme_is_masked_and_the_host_kept() {
+        for (raw, secret, kept) in [
+            (
+                "could not reach rediss://default:Fake5Redis6Pass@cache.internal:6380/0",
+                "Fake5Redis6Pass",
+                "rediss://default:***REDACTED***@cache.internal:6380/0",
+            ),
+            (
+                "mssql://sa:Fake5Mssql6Pass@db.internal:1433/app",
+                "Fake5Mssql6Pass",
+                "mssql://sa:***REDACTED***@db.internal:1433/app",
+            ),
+            (
+                "jdbc:sqlserver://app:Fake5Jdbc6Pass@db.internal",
+                "Fake5Jdbc6Pass",
+                "@db.internal",
+            ),
+            (
+                "ftp://deploy:Fake5Ftp6Pass@files.internal/x",
+                "Fake5Ftp6Pass",
+                "ftp://deploy:***REDACTED***@files.internal/x",
+            ),
+            // Redis' own form: no user, only a password.
+            (
+                "redis://:Fake5Redis6Pass@cache.internal:6379",
+                "Fake5Redis6Pass",
+                "@cache.internal:6379",
+            ),
+            (
+                "clickhouse+native://u:Fake5Ch6Pass@ch.internal",
+                "Fake5Ch6Pass",
+                "@ch.internal",
+            ),
+        ] {
+            assert_stored_masks(raw, secret, kept);
+            assert!(!redact_secrets(raw).contains(secret), "{raw:?}");
+        }
+        // No userinfo: left as written.
+        for plain in [
+            "see https://example.com:8080/docs and ftp://files.internal/x",
+            "jdbc:sqlserver://db.internal:1433;databaseName=app",
+            "ssh://git@github.com/o/r.git",
+        ] {
+            assert_eq!(redact_stored_text(plain), plain);
+        }
+    }
+
+    #[test]
+    fn a_kronn_api_key_does_not_print_its_value_through_debug() {
+        let key = crate::models::ApiKey {
+            id: "k1".into(),
+            name: "NVIDIA".into(),
+            provider: "nvidia".into(),
+            value: "FakeDebug0Secret1Value2".into(),
+            active: true,
+        };
+        let config = crate::models::TokensConfig {
+            anthropic: Some("FakeDebug0Secret1Legacy".into()),
+            openai: None,
+            google: None,
+            keys: vec![key.clone()],
+            disabled_overrides: Vec::new(),
+        };
+        for printed in [
+            format!("{key:?}"),
+            format!("{key:#?}"),
+            format!("{:?}", Some(&key)),
+            format!("{config:?}"),
+        ] {
+            assert!(!printed.contains("FakeDebug0Secret1"), "{printed}");
+            assert!(printed.contains("***REDACTED***"), "{printed}");
+            // What tells one key from another is still there.
+            for kept in ["k1", "NVIDIA", "nvidia", "active: true"] {
+                assert!(printed.contains(kept), "{kept} lost: {printed}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_kt_2039_shapes_keep_a_json_document_valid() {
+        let document = serde_json::json!({
+            "stdout": "api_key: Some(\"Fake1Some2Value3Abc\")\n{ 'x-api-key': 'Fake7Quoted8Key9' }",
+            "url": "rediss://default:Fake5Redis6Pass@cache.internal:6380/0",
+            "key": "nvapi-Fake0Nvidia1Key2Value3Abcdef4",
+        })
+        .to_string();
+        let out = redact_stored_text(&document);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("still JSON");
+        for secret in [
+            "Fake1Some2Value3Abc",
+            "Fake7Quoted8Key9",
+            "Fake5Redis6Pass",
+            "Fake0Nvidia1Key2",
+        ] {
+            assert!(!out.contains(secret), "{secret} leaked: {out}");
+        }
+        assert_eq!(
+            parsed["url"],
+            "rediss://default:***REDACTED***@cache.internal:6380/0"
+        );
     }
 
     mod gate_equivalence {
@@ -3156,6 +3642,13 @@ mod tests {
             "Basic ",
             "postgres://u:p@h",
             "redis://",
+            "rediss://u:p@h",
+            "Some(",
+            "Secret::new(",
+            "'x-api-key': '",
+            "'",
+            "(",
+            "nvapi-",
             "sk-",
             "p8e-",
             "AIza",

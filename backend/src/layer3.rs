@@ -55,6 +55,7 @@ pub mod db {
     pub mod live_page_actions;
     pub mod message_ingest;
 }
+pub use kronn_l2::debug_without_secrets;
 pub use kronn_l2::delivery;
 pub use kronn_l2::http_transport;
 pub use kronn_l2::models;

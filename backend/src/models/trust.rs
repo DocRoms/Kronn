@@ -252,7 +252,7 @@ pub struct TrustProofView {
 
 /// A proof of the strong confirmation: the authenticator's current code, or a
 /// recovery code. Needed to disable the confirmation or renew its recovery codes.
-#[derive(Debug, Clone, Default, Deserialize, TS)]
+#[derive(Clone, Default, Deserialize, TS)]
 #[ts(export)]
 pub struct TrustProofRequest {
     #[serde(default)]
@@ -265,7 +265,7 @@ pub struct TrustProofRequest {
 }
 
 /// The first code of an authenticator, to confirm the enrolment.
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct ConfirmTrustProofRequest {
     pub code: String,
@@ -275,7 +275,7 @@ pub struct ConfirmTrustProofRequest {
 }
 
 /// The seed an authenticator app takes, shown once at enrolment.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TrustEnrolment {
     /// The base32 key, for a manual entry.
@@ -283,6 +283,11 @@ pub struct TrustEnrolment {
     /// The `otpauth://` URI a QR code carries.
     pub uri: String,
 }
+
+// KT-2039: none of these prints its secret (the URI carries the seed).
+crate::debug_without_secrets!(TrustProofRequest { ; masked: proof, admin_secret });
+crate::debug_without_secrets!(ConfirmTrustProofRequest { ; masked: code, admin_secret });
+crate::debug_without_secrets!(TrustEnrolment { ; masked: secret, uri });
 
 /// Ten single-use recovery codes, shown once: only their digests are kept.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
