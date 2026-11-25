@@ -874,6 +874,32 @@ pub fn select(
     needs: &TurnNeeds,
     cooling: &dyn Fn(&AgentType) -> Option<DateTime<Utc>>,
 ) -> Selection {
+    select_refusing(
+        agents,
+        chain,
+        origin,
+        failing,
+        usable,
+        needs,
+        cooling,
+        &|_| None,
+    )
+}
+
+/// [`select`], where `refused` says why a link cannot be dispatched for its
+/// connection or key (KT-2055): such a link is skipped like one that cannot
+/// launch, with that reason.
+#[allow(clippy::too_many_arguments)]
+pub fn select_refusing(
+    agents: &AgentsConfig,
+    chain: &[AgentFallback],
+    origin: &AgentType,
+    failing: &AgentType,
+    usable: &[AgentType],
+    needs: &TurnNeeds,
+    cooling: &dyn Fn(&AgentType) -> Option<DateTime<Utc>>,
+    refused: &dyn Fn(&AgentType) -> Option<String>,
+) -> Selection {
     if let Err(error) = validate_chain(agents, None, None, chain) {
         return Selection::Stop {
             why: error.to_string(),
@@ -904,6 +930,10 @@ pub fn select(
         }
         if !crate::workflows::step_agents::agent_can_launch(&link.agent, usable, agents) {
             skipped.push(format!("{name} is not installed or not enabled"));
+            continue;
+        }
+        if let Some(why) = refused(&link.agent) {
+            skipped.push(format!("{name} cannot be called: {why}"));
             continue;
         }
         if agents.full_access_for(&link.agent) && !agents.full_access_for(origin) {

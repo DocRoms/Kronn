@@ -19,8 +19,8 @@ The workflow envelope defines `data`, `status`, and `summary`, requires only
 `data` and `status`, and omits `additionalProperties`. It embeds the author's
 schema unchanged. The existing regression fixture also contains an object
 with an optional string field and no `additionalProperties` restriction.
-[src: file: backend/src/workflows/steps.rs:1117-1140#ollama_envelope_format]
-[src: file: backend/src/workflows/steps.rs:1117-1155#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:1148-1171#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:1148-1186#ollama_envelope_format]
 
 Inference from that code and the official contract: this envelope is invalid
 under OpenAI strict mode, independently of whether a proxy accepts it.
@@ -42,8 +42,8 @@ their actual type to the authored string type.
 
 Ollama still receives the same envelope through its native `format` field,
 with a non-streaming request. No change to its decoding schema is required.
-[src: file: backend/src/agents/runner.rs:8332-8386#build_ollama_chat_body]
-[src: file: backend/src/workflows/steps.rs:1117-1125#ollama_envelope_format]
+[src: file: backend/src/agents/runner.rs:8350-8404#build_ollama_chat_body]
+[src: file: backend/src/workflows/steps.rs:1148-1156#ollama_envelope_format]
 
 ## Guarantees and regression coverage
 
@@ -53,8 +53,8 @@ the envelope, validates `data`, attempts repair, and applies `on_invalid`.
 That local validator supports a subset of JSON Schema; it is not a replacement
 for full provider-enforced validation. For example, it does not enforce
 `additionalProperties` or resolve `$ref`.
-[src: file: backend/src/workflows/steps.rs:556-579#validate_envelope_against_schema]
-[src: file: backend/src/workflows/steps.rs:781-799#on_invalid]
+[src: file: backend/src/workflows/steps.rs:587-610#validate_envelope_against_schema]
+[src: file: backend/src/workflows/steps.rs:812-830#on_invalid]
 [src: file: backend/src/workflows/template.rs:1355-1375#validate_envelope_against_schema]
 
 Body regressions cover explicit `strict: false`, preservation of nested optional
@@ -63,7 +63,7 @@ absence of `response_format` when no schema is supplied. The workflow regression
 passes the actual envelope to both request builders and checks the unchanged
 Ollama `format` and the non-strict OpenAI schema.
 [src: file: backend/src/agents/chat_codec.rs:502-567#build_openai_chat_body]
-[src: file: backend/src/workflows/steps.rs:2395-2433#build_openai_chat_body]
+[src: file: backend/src/workflows/steps.rs:2480-2518#build_openai_chat_body]
 
 Schema errors still do not trigger the KT-709 unsupported-feature fallback;
 the existing refusal regressions exercise that distinction.

@@ -1873,6 +1873,225 @@ async fn execute_run_body(
         }
     }
 
+    // Pre-flight: validate every Agent step's agent is actually installed
+    // (or runtime-available) before we start. Without this the run fails
+    // mid-execution at the spawn site with a confusing subprocess error
+    // ("vibe: command not found" or worse), wasting work that's been done
+    // by earlier steps. Mirrors the same guard added to the multi-agent
+    // debate orchestrator. We skip this on resume — the workflow is
+    // already partway through and the user may have intentionally
+    // uninstalled an agent that's only used in skipped branches.
+    //
+    // KT-2055: it runs before the `before_run` hook (a refused run has run
+    // nothing), reads each step as it will run (Quick Prompt hydrated) and
+    // covers every agent the run will certainly start whose failure fails
+    // it: the `multi_agent_review` reviewers and the sub-workflows' steps.
+    // What it cannot see — a resumed run, shadows, fallback links,
+    // `on_failure` — is refused by the same rule at dispatch (`execute_step`).
+    if !is_resume {
+        let planned = super::run_preflight::planned_agent_steps(&state, workflow, &run.id).await;
+        if !planned.is_empty() {
+            let detections = crate::agents::detect_all_cached(false).await;
+            let usable: Vec<crate::models::AgentType> = detections
+                .iter()
+                .filter(|d| (d.installed || d.runtime_available) && d.enabled)
+                .map(|d| d.agent_type.clone())
+                .collect();
+            // A test ACP route stands in for the agent binary; without this the
+            // preflight would depend on what the host happens to have installed.
+            #[cfg(any(test, feature = "test-support"))]
+            let routed = crate::agents::runner::resolve_agent_work_dir(Some(&work_dir), &work_dir)
+                .is_ok_and(|dir| crate::agents::runner::test_acp_routes::is_routed(&dir));
+            #[cfg(not(any(test, feature = "test-support")))]
+            let routed = false;
+            let mut missing: Vec<String> = Vec::new();
+            // KT-2030: `Custom` is a named HTTP connection, never an installed
+            // agent; its step can start when its connection can be called.
+            // KT-2045: any step naming a connection, and a native HTTP
+            // provider step on its own key, is held to the same rule.
+            // KT-2055: a LiteLlm/Nvidia step naming a connection runs on it,
+            // with no local binary or legacy base_url.
+            let mut unusable_connections: Vec<String> = Vec::new();
+            for planned_step in &planned {
+                if routed {
+                    continue;
+                }
+                let step = &planned_step.step;
+                if !super::step_agents::step_can_launch(step, &usable, agents_config) {
+                    missing.push(
+                        planned_step.describe(format!("'{}' needs {:?}", step.name, step.agent)),
+                    );
+                    continue;
+                }
+                // A Quick Prompt that does not load fails its step at
+                // dispatch, in its own words: its connection is unknown here.
+                if !planned_step.hydrated {
+                    continue;
+                }
+                if let Some(refusal) =
+                    super::steps::step_connection_refusal(step, Some(&state.db), tokens_config)
+                        .await
+                {
+                    unusable_connections.push(planned_step.describe(refusal));
+                }
+                if let Some(cfg) = step.multi_agent_review.as_ref() {
+                    let reviewer = super::steps::reviewer_step_for(step, cfg);
+                    if let Some(refusal) = super::steps::step_connection_refusal(
+                        &reviewer,
+                        Some(&state.db),
+                        tokens_config,
+                    )
+                    .await
+                    {
+                        unusable_connections.push(
+                            planned_step.describe(super::steps::reviewer_refusal(cfg, &refusal)),
+                        );
+                    }
+                }
+            }
+            if !missing.is_empty() || !unusable_connections.is_empty() {
+                let mut reasons = Vec::new();
+                if !missing.is_empty() {
+                    reasons.push(format!(
+                        "agent(s) not installed/enabled: {}. Install or enable them in Config before running this workflow.",
+                        missing.join(", ")
+                    ));
+                }
+                if !unusable_connections.is_empty() {
+                    reasons.push(format!(
+                        "HTTP connection(s) or provider key(s) not usable: {}.",
+                        unusable_connections.join("; ")
+                    ));
+                }
+                let msg = format!("Workflow refuses to start — {}", reasons.join(" "));
+                run.status = RunStatus::Failed;
+                run.step_results.push(StepResult {
+                    step_name: "__preflight__".to_string(),
+                    status: RunStatus::Failed,
+                    output: msg.clone(),
+                    tokens_used: Some(0),
+                    duration_ms: 0,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("Preflight".into()),
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    agent_provenance: None,
+                    native_tool_calls: Box::default(),
+                    step_agent: None,
+                    step_model: None,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
+                    output_bytes: None,
+                });
+                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                let db_p = db.clone();
+                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                    .await?;
+                emit(RunEvent::RunError { error: msg });
+                return Ok(());
+            }
+
+            // Resolve every statically reachable Agent step before the first
+            // one starts. Dynamic branches are checked again immediately
+            // before dispatch by `execute_step`. A native agent without full
+            // access has no catalogue to read: its step fails on that reason.
+            // Each step as it will run; a sub-workflow resolves its own steps
+            // when it starts.
+            let mut catalog_failures = Vec::new();
+            for step in planned
+                .iter()
+                .filter(|planned_step| planned_step.within.is_none())
+                .map(|planned_step| &planned_step.step)
+                .filter(|step| super::steps::native_full_access_refusal_for(&step.agent).is_none())
+            {
+                let tier = step
+                    .agent_settings
+                    .as_ref()
+                    .and_then(|settings| settings.tier)
+                    .unwrap_or_default();
+                let connection = match resolve_step_connection(step, Some(&state.db)).await {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        catalog_failures.push((
+                            step.name.clone(),
+                            serde_json::json!({
+                                "error": "connection_resolution_failed",
+                                "detail": error.to_string(),
+                            }),
+                        ));
+                        continue;
+                    }
+                };
+                let runtime_target_id = connection.as_ref().map(|connection| {
+                    crate::db::model_catalog::http_runtime_target_id(&connection.id)
+                });
+                let model = step_model_override(step, connection.as_ref());
+                let resolution = crate::core::model_catalog::preflight_resolve(
+                    &state.db,
+                    runtime_target_id.as_deref(),
+                    step.agent.clone(),
+                    tier,
+                    model.as_deref(),
+                    Some(&agents_config.model_tiers),
+                );
+                #[cfg(any(test, feature = "test-support"))]
+                let resolution =
+                    crate::core::model_catalog::test_routed_discovery(routed, resolution);
+                if let Err(failure) = resolution.await {
+                    catalog_failures.push((
+                        step.name.clone(),
+                        serde_json::to_value(failure).unwrap_or_default(),
+                    ));
+                }
+            }
+            if !catalog_failures.is_empty() {
+                let msg = format!(
+                    "preflight_failed:{}",
+                    serde_json::to_string(&catalog_failures).unwrap_or_default()
+                );
+                run.status = RunStatus::Failed;
+                run.step_results.push(StepResult {
+                    step_name: "__preflight__".to_string(),
+                    status: RunStatus::Failed,
+                    output: msg.clone(),
+                    tokens_used: Some(0),
+                    duration_ms: 0,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("preflight_failed".into()),
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    agent_provenance: None,
+                    native_tool_calls: Box::default(),
+                    step_agent: None,
+                    step_model: None,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
+                    output_bytes: None,
+                });
+                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                let db_p = db.clone();
+                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                    .await?;
+                emit(RunEvent::RunError { error: msg });
+                return Ok(());
+            }
+        }
+    }
+
     // Run before_run hook — but not on resume, the hook already fired
     // before the pause and re-firing it would re-run setup actions
     // (npm install, env preparation, etc.) the operator didn't ask for.
@@ -2064,198 +2283,6 @@ async fn execute_run_body(
     // counters and verdicts the agent wrote in prior iterations so the
     // first step after the pause sees them through `{{state.<k>}}`.
     ctx.seed_state(&run.state);
-
-    // Pre-flight: validate every Agent step's agent is actually installed
-    // (or runtime-available) before we start. Without this the run fails
-    // mid-execution at the spawn site with a confusing subprocess error
-    // ("vibe: command not found" or worse), wasting work that's been done
-    // by earlier steps. Mirrors the same guard added to the multi-agent
-    // debate orchestrator. We skip this on resume — the workflow is
-    // already partway through and the user may have intentionally
-    // uninstalled an agent that's only used in skipped branches.
-    if !is_resume {
-        let agent_steps: Vec<&str> = workflow
-            .steps
-            .iter()
-            .filter(|s| matches!(s.step_type, StepType::Agent))
-            .map(|s| s.name.as_str())
-            .collect();
-        if !agent_steps.is_empty() {
-            let detections = crate::agents::detect_all_cached(false).await;
-            let usable: Vec<crate::models::AgentType> = detections
-                .iter()
-                .filter(|d| (d.installed || d.runtime_available) && d.enabled)
-                .map(|d| d.agent_type.clone())
-                .collect();
-            // A test ACP route stands in for the agent binary; without this the
-            // preflight would depend on what the host happens to have installed.
-            #[cfg(any(test, feature = "test-support"))]
-            let routed = crate::agents::runner::resolve_agent_work_dir(Some(&work_dir), &work_dir)
-                .is_ok_and(|dir| crate::agents::runner::test_acp_routes::is_routed(&dir));
-            #[cfg(not(any(test, feature = "test-support")))]
-            let routed = false;
-            let mut missing: Vec<(String, String)> = Vec::new();
-            // KT-2030: `Custom` is a named HTTP connection, never an installed
-            // agent; its step can start when its connection can be called.
-            // KT-2045: any step naming a connection, and a native HTTP
-            // provider step on its own key, is held to the same rule.
-            let mut unusable_connections: Vec<String> = Vec::new();
-            for step in workflow
-                .steps
-                .iter()
-                .filter(|s| matches!(s.step_type, StepType::Agent))
-            {
-                if routed {
-                    continue;
-                }
-                let launchable = step.agent == crate::models::AgentType::Custom
-                    || super::step_agents::agent_can_launch(&step.agent, &usable, agents_config);
-                if !launchable {
-                    missing.push((step.name.clone(), format!("{:?}", step.agent)));
-                } else if let Some(refusal) =
-                    super::steps::step_connection_refusal(step, &state.db, tokens_config).await
-                {
-                    unusable_connections.push(refusal);
-                }
-            }
-            if !missing.is_empty() || !unusable_connections.is_empty() {
-                let mut reasons = Vec::new();
-                if !missing.is_empty() {
-                    reasons.push(format!(
-                        "agent(s) not installed/enabled: {}. Install or enable them in Config before running this workflow.",
-                        missing.iter().map(|(n, a)| format!("'{}' needs {}", n, a)).collect::<Vec<_>>().join(", ")
-                    ));
-                }
-                if !unusable_connections.is_empty() {
-                    reasons.push(format!(
-                        "HTTP connection(s) or provider key(s) not usable: {}.",
-                        unusable_connections.join("; ")
-                    ));
-                }
-                let msg = format!("Workflow refuses to start — {}", reasons.join(" "));
-                run.status = RunStatus::Failed;
-                run.step_results.push(StepResult {
-                    step_name: "__preflight__".to_string(),
-                    status: RunStatus::Failed,
-                    output: msg.clone(),
-                    tokens_used: Some(0),
-                    duration_ms: 0,
-                    started_at: None,
-                    condition_result: None,
-                    envelope_detected: None,
-                    step_kind: Some("Preflight".into()),
-                    step_api_plugin_slug: None,
-                    step_api_endpoint_path: None,
-                    is_rollback: false,
-                    child_run_id: None,
-                    agent_provenance: None,
-                    native_tool_calls: Box::default(),
-                    step_agent: None,
-                    step_model: None,
-                    cached_prompt_tokens: None,
-                    cache_write_prompt_tokens: None,
-                    last_activity: None,
-                    quota_wait: None,
-                    terminal_stop: None,
-                    output_bytes: None,
-                });
-                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
-                let db_p = db.clone();
-                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
-                    .await?;
-                emit(RunEvent::RunError { error: msg });
-                return Ok(());
-            }
-
-            // Resolve every statically reachable Agent step before the first
-            // one starts. Dynamic branches are checked again immediately
-            // before dispatch by `execute_step`. A native agent without full
-            // access has no catalogue to read: its step fails on that reason.
-            let mut catalog_failures = Vec::new();
-            for step in workflow.steps.iter().filter(|step| {
-                matches!(step.step_type, StepType::Agent)
-                    && super::steps::native_full_access_refusal_for(&step.agent).is_none()
-            }) {
-                let tier = step
-                    .agent_settings
-                    .as_ref()
-                    .and_then(|settings| settings.tier)
-                    .unwrap_or_default();
-                let connection = match resolve_step_connection(step, Some(&state.db)).await {
-                    Ok(connection) => connection,
-                    Err(error) => {
-                        catalog_failures.push((
-                            step.name.clone(),
-                            serde_json::json!({
-                                "error": "connection_resolution_failed",
-                                "detail": error.to_string(),
-                            }),
-                        ));
-                        continue;
-                    }
-                };
-                let runtime_target_id = connection.as_ref().map(|connection| {
-                    crate::db::model_catalog::http_runtime_target_id(&connection.id)
-                });
-                let model = step_model_override(step, connection.as_ref());
-                let resolution = crate::core::model_catalog::preflight_resolve(
-                    &state.db,
-                    runtime_target_id.as_deref(),
-                    step.agent.clone(),
-                    tier,
-                    model.as_deref(),
-                    Some(&agents_config.model_tiers),
-                );
-                #[cfg(any(test, feature = "test-support"))]
-                let resolution =
-                    crate::core::model_catalog::test_routed_discovery(routed, resolution);
-                if let Err(failure) = resolution.await {
-                    catalog_failures.push((
-                        step.name.clone(),
-                        serde_json::to_value(failure).unwrap_or_default(),
-                    ));
-                }
-            }
-            if !catalog_failures.is_empty() {
-                let msg = format!(
-                    "preflight_failed:{}",
-                    serde_json::to_string(&catalog_failures).unwrap_or_default()
-                );
-                run.status = RunStatus::Failed;
-                run.step_results.push(StepResult {
-                    step_name: "__preflight__".to_string(),
-                    status: RunStatus::Failed,
-                    output: msg.clone(),
-                    tokens_used: Some(0),
-                    duration_ms: 0,
-                    started_at: None,
-                    condition_result: None,
-                    envelope_detected: None,
-                    step_kind: Some("preflight_failed".into()),
-                    step_api_plugin_slug: None,
-                    step_api_endpoint_path: None,
-                    is_rollback: false,
-                    child_run_id: None,
-                    agent_provenance: None,
-                    native_tool_calls: Box::default(),
-                    step_agent: None,
-                    step_model: None,
-                    cached_prompt_tokens: None,
-                    cache_write_prompt_tokens: None,
-                    last_activity: None,
-                    quota_wait: None,
-                    terminal_stop: None,
-                    output_bytes: None,
-                });
-                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
-                let db_p = db.clone();
-                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
-                    .await?;
-                emit(RunEvent::RunError { error: msg });
-                return Ok(());
-            }
-        }
-    }
 
     let safety_baseline = run
         .state

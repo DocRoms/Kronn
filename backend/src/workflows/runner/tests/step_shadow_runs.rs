@@ -509,6 +509,33 @@ async fn a_shadow_that_fails_never_fails_the_main_step() {
     );
 }
 
+// KT-2055 — the run preflight never sees a shadow: the dispatch rule refuses a
+// shadow on NVIDIA with no NVIDIA key before it sends anything, in the
+// preflight's words, and the main step is untouched.
+#[tokio::test]
+async fn a_shadow_on_a_provider_without_its_key_is_refused_before_any_request() {
+    let mut fx = fixture("proj-shadow-keyless", scripted("main answer")).await;
+    let nvidia = fx.model_for(AgentType::Nvidia, scripted("never sent"));
+    let mut keyless = shadow_of("keyless");
+    keyless.agent = on(AgentType::Nvidia, "nv-model");
+    let wf = fx.workflow(vec![keyless]);
+    let run = fx.run(&wf, "run-shadow-keyless").await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+    let rows = fx.settled("run-shadow-keyless", 1).await;
+    assert_eq!(rows[0].status, ShadowStatus::Failed, "{rows:?}");
+    assert!(
+        rows[0].output.contains("'review' runs on NVIDIA")
+            && rows[0].output.contains("no NVIDIA API key"),
+        "the row gives the rule's reason: {}",
+        rows[0].output
+    );
+    assert!(
+        prompts_of(&nvidia).is_empty(),
+        "nothing reached NVIDIA: {:?}",
+        prompts_of(&nvidia)
+    );
+}
+
 #[tokio::test]
 async fn a_stalled_shadow_is_stopped_by_its_time_budget_and_never_delays_the_main_step() {
     let mut fx = fixture("proj-shadow-stall", scripted("quick")).await;

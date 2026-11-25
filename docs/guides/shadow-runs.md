@@ -240,7 +240,7 @@ stay as written, and an Artifact made from an execution holds what one made from
 a discussion preview holds. The Artifact shows what the execution wrote at that
 time.
 [src: file: backend/src/api/step_artifacts.rs:199-206#redact_agent_output]
-[src: file: backend/src/core/redact.rs:1013-1029#redact_agent_output]
+[src: file: backend/src/core/redact.rs:1032-1048#redact_agent_output]
 [src: file: backend/src/db/discussions.rs:2901-2907#mask_agent_output]
 It lives in the
 Artifact library like any other, in a folder of its run (see
@@ -266,7 +266,7 @@ refused; the main execution's output is the step result of the run, stored
 whole with no cap of its own (the run view grades a heavy one, see
 [heavy step outputs](../operations/workflow-heavy-outputs.md)).
 [src: file: backend/src/workflows/shadow.rs:32#MAX_STORED_OUTPUT_BYTES]
-[src: file: backend/src/workflows/steps.rs:970#with_runtime_notices]
+[src: file: backend/src/workflows/steps.rs:48-50#with_runtime_notices]
 
 ## Merge the shadows into the step's output
 

@@ -67,13 +67,13 @@ Three Docker services behind nginx gateway:
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
 - **macOS Docker agent bootstrap (0.3.5)**: on macOS hosts, host-mounted binaries are Darwin (macOS) executables that cannot run in the Linux container. `entrypoint.sh` detects `KRONN_HOST_OS=macOS` and installs Linux versions of Claude Code (npm), Codex (npm), and Kiro (curl) inside the container. `find_binary()` skips host-mounted Darwin binaries for `claude`, `codex`, `copilot`, `kiro-cli` when `host_is_macos()`. `~/.npm/bin` is mounted at `/host-bin/npm` via `KRONN_NPM_BIN` env var (auto-detected by Makefile `npm bin -g`).
 
-- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:3570-3585#http_agent_identity_context] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
+- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:3588-3603#http_agent_identity_context] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
 - **LiteLLM private reasoning (0.9.5)**: OpenAI-compatible streams pass
   through a stateful leading-block filter. Initial `<think>` and `<thinking>`
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8816-8926#LeadingThinkingFilter]
+  [src: file: backend/src/agents/runner.rs:8834-8944#LeadingThinkingFilter]
   [src: file: backend/src/api/discussions/streaming.rs:5499-5500#strip_leading_thinking_blocks]
 
 ### Discussions
@@ -260,7 +260,7 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5899-5907#IdleWatchdog] [src: file: backend/src/agents/runner.rs:6005-6020#begin_tool]
+[src: file: backend/src/agents/runner.rs:5917-5925#IdleWatchdog] [src: file: backend/src/agents/runner.rs:6023-6038#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:523-528#Activity]
 
@@ -577,11 +577,11 @@ pass (a frequent schedule adds no fire during the repeated hour).
   [src: file: backend/src/workflows/quota_wait.rs:306-340#park]
   [src: file: backend/src/workflows/quota_wait.rs:183-223#wake_due_runs]
   [src: file: backend/src/workflows/quota_wait.rs:197-240#wake_one]
-  [src: file: backend/src/workflows/runner.rs:5104-5154#check_resume_preconditions]
+  [src: file: backend/src/workflows/runner.rs:5132-5182#check_resume_preconditions]
   [src: file: backend/src/workflows/runner.rs:377-422#WorkflowTimeoutClock]
   [src: file: backend/src/workflows/runner.rs:428-444#checkpoint]
   [src: file: backend/src/workflows/quota_wait.rs:233-276#reschedule_after_deadline]
-  [src: file: backend/src/workflows/runner.rs:3500-3525#plan_wait]
+  [src: file: backend/src/workflows/runner.rs:3528-3553#plan_wait]
 - **A quota-paused run is visible, re-checked and movable (KT-1657).**
   `WaitingQuota` counts toward a workflow's concurrency limit, so a paused run
   can refuse a launch: the refusal names the blocking runs (workflow, state,
@@ -671,7 +671,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
 
   Isolation itself stays the workflow's decision: inheriting a recipe never
   turns a read-only fan-out into an isolated run.
-  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5624-5636#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
+  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5652-5664#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
 
 **MCP injection:**
 - `read_all_mcp_contexts()` reads `.mcp.json` and per-project MCP context files (`docs/operations/mcp-servers/*.md`).
@@ -1000,5 +1000,26 @@ approval check, so a Gate approval or an interrupted resume — which reload the
 definition from the database — keep it, and the step provenance names the agent
 actually used. Only agent, model and effort are replaced; tier, budget, tools
 stay, and a named connection stays only while the agent does.
-`[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:189-246#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1306-1326#apply_from_run]`
+`[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:209-266#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1306-1326#apply_from_run]`
 `[src: file: backend/src/api/workflows.rs:5670-5672#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5670-5726#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5580#TRIGGER_CONTEXT_KEY]`
+
+**Run preflight and the connection/key rule (KT-2045, KT-2055).** A fresh run
+(not a resume) is checked before anything runs, its `before_run` hook included:
+every Agent step it will certainly start, read as it will run (hydrated from its
+Quick Prompt, so the QP's connection counts), the `multi_agent_review` reviewer
+of each, and the Agent steps of the sub-workflows its `SubWorkflow` steps start
+(transitively, each child once, so a cycle ends). A step must be launchable — a
+`Custom` step, or a `LiteLlm`/`Nvidia` step naming a connection, runs over HTTP
+on it and needs no local binary nor the legacy `lite_llm.base_url`
+(`step_can_launch`, also what a launch-time agent choice is held to) — and pass
+`step_connection_refusal`: a named connection must exist for the agent, have an
+endpoint and hold the key its preset needs; a `LiteLlm`/`Nvidia` step without one
+needs its provider key when the preset requires one (a LiteLLM proxy may run
+keyless). A blank `connection_id` is no connection. The same rule runs again in
+`execute_step` before any request, for whatever the preflight cannot see: a
+resumed run, a key removed while a Gate waits, shadows and the shadow-merge
+condenser, `on_failure` steps, fallback links (a link the rule refuses is
+skipped like one that cannot launch). The refusal names the step and, for a
+child, the sub-workflow it lives in.
+`[src: file: backend/src/workflows/run_preflight.rs:47-113#planned_agent_steps]` `[src: file: backend/src/workflows/runner.rs:1892#planned_agent_steps]` `[src: file: backend/src/workflows/step_agents.rs:169-179#step_can_launch]`
+`[src: file: backend/src/workflows/steps.rs:1331-1340#step_connection_refusal]` `[src: file: backend/src/workflows/steps.rs:1346-1358#provider_key_refusal]` `[src: file: backend/src/workflows/steps.rs:299-312#connection_refusal_outcome]` `[src: file: backend/src/core/agent_fallback.rs:893#select_refusing]`

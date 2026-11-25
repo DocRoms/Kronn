@@ -48,11 +48,11 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4695-4700#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4746-4748#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4712-4717#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4763-4765#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:1511-1521#apply]
-[src: file: backend/src/agents/runner.rs:14913-14924#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15158-15169#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:14930-14941#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15175-15186#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14773-14792#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14923-14937#is_codex]
+[src: file: backend/src/agents/runner.rs:14791-14810#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:14940-14954#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -80,7 +80,7 @@ Workflow prompts state that repository paths are locations, not permission
 grants, and list the repositories declared by the current step. This corrects
 the runtime guidance even when companion context mentions other checkouts.
 It does not rewrite separately stored autoCode Quick Prompts or workflows.
-[src: file: backend/src/workflows/steps.rs:173-184#read_only_repos]
+[src: file: backend/src/workflows/steps.rs:190-201#read_only_repos]
 
 I recommend replacing the stored autoCode assertion that the main checkout is
 readable with this wording when that template is available:
@@ -213,7 +213,7 @@ it as a read-only directory under the policy above, without the Git checkout
 requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
 [src: file: backend/src/workflows/run_artifacts.rs:202-211#ensure]
-[src: file: backend/src/workflows/steps.rs:126-147#artifacts_read_only_dirs]
+[src: file: backend/src/workflows/steps.rs:145-166#artifacts_read_only_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:1029-1060#resolve_with_dirs]
 
 ```json

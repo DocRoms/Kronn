@@ -159,8 +159,13 @@ pub async fn hydrate_step_from_quick_prompt(
                 settings.reasoning_effort = qp_effort;
             }
             // Same merge rule as the rest: an explicit step choice wins, and a
-            // step that named no connection inherits the QP's.
-            if settings.connection_id.is_none() {
+            // step that named no connection inherits the QP's. A blank id is
+            // no connection (KT-2055).
+            if settings
+                .connection_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+            {
                 settings.connection_id = qp_connection;
             }
         }

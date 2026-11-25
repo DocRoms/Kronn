@@ -962,6 +962,25 @@ fn redact_for_audit_artifact_text(input: &str) -> (String, usize) {
 static URL_IN_TEXT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)\bhttps?://[^\s"'<>`\\]+"#).expect("static URL regex"));
 
+/// `url` with its userinfo (`user:pass@`) replaced by `***@`, any scheme, for
+/// a `Debug` print of an endpoint (KT-2055). A URL without one is unchanged.
+pub fn mask_url_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
+    let Some(scheme_end) = url.find("://") else {
+        return std::borrow::Cow::Borrowed(url);
+    };
+    let authority_start = scheme_end + 3;
+    let rest = &url[authority_start..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    match authority.rfind('@') {
+        Some(at) => std::borrow::Cow::Owned(format!(
+            "{}***@{}",
+            &url[..authority_start],
+            &rest[at + 1..]
+        )),
+        None => std::borrow::Cow::Borrowed(url),
+    }
+}
+
 /// Drops the query string and userinfo of every URL in `text`: both may
 /// carry a credential, and a diagnostic only needs the endpoint.
 pub fn strip_url_secrets(text: &str) -> String {
