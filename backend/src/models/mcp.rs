@@ -318,12 +318,16 @@ pub enum TokenInjection {
 /// endpoints) that require extra identification headers beyond the
 /// bearer token. `value_template` supports `{ENV_KEY}` substitution from
 /// the config's env map.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct OAuth2ExtraHeader {
     pub name: String,
     pub value_template: String,
 }
+
+// KT-2053 — `value_template` may be a literal secret, as
+// `ApiDefaultHeader.value`: `Debug` masks it.
+crate::debug_without_secrets!(OAuth2ExtraHeader { name; masked: value_template });
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
