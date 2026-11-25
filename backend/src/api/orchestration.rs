@@ -17068,11 +17068,10 @@ fn build_task_worker_catalogue(
         let enabled = detection.is_some_and(|item| item.enabled);
         let runtime_present =
             detection.is_some_and(|item| item.installed || item.runtime_available);
+        // NVIDIA's key is config, not a local login: read it from the config
+        // even when the detection is missing (the same rule, KT-2031).
         let auth_ready = if agent == AgentType::Nvidia {
-            config
-                .tokens
-                .active_key_for(crate::api::nvidia::PROVIDER)
-                .is_some_and(|key| !key.trim().is_empty())
+            crate::agents::agent_auth_status(&agent, config).ready != Some(false)
         } else {
             detection.and_then(|item| item.auth_ready).unwrap_or(true)
         };
@@ -20725,6 +20724,7 @@ pub mod tests {
                 runtime_available,
                 auth_ready: Some(auth_ready),
                 auth_setup_command: None,
+                auth_reason: None,
                 rtk_available: false,
                 rtk_hook_configured: false,
                 runtime_warning: None,
@@ -20760,6 +20760,7 @@ pub mod tests {
             runtime_available: true,
             auth_ready: Some(true),
             auth_setup_command: None,
+            auth_reason: None,
             rtk_available: false,
             rtk_hook_configured: false,
             runtime_warning: None,
@@ -21015,6 +21016,7 @@ pub mod tests {
                 runtime_available,
                 auth_ready: Some(true),
                 auth_setup_command: None,
+                auth_reason: None,
                 rtk_available: false,
                 rtk_hook_configured: false,
                 runtime_warning: None,
@@ -21655,6 +21657,7 @@ pub mod tests {
             runtime_available: true,
             auth_ready: Some(true),
             auth_setup_command: None,
+            auth_reason: None,
             rtk_available: false,
             rtk_hook_configured: false,
             runtime_warning: None,
@@ -21688,6 +21691,7 @@ pub mod tests {
             runtime_available: true,
             auth_ready: Some(true),
             auth_setup_command: None,
+            auth_reason: None,
             rtk_available: false,
             rtk_hook_configured: false,
             runtime_warning: None,
@@ -21774,6 +21778,7 @@ pub mod tests {
             runtime_available: installed,
             auth_ready: Some(true),
             auth_setup_command: None,
+            auth_reason: None,
             rtk_available: false,
             rtk_hook_configured: false,
             runtime_warning: None,

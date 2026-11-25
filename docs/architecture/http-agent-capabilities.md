@@ -50,7 +50,7 @@ MCP bridge. HTTP agents have none of that: they are a request/response loop, and
 capability they appear to have is a **tool Kronn executes server-side on their behalf**.
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
-any MCP environment is built [src: file: backend/src/agents/runner.rs:9630-9651#start_ollama_http_with_idle], and
+any MCP environment is built [src: file: backend/src/agents/runner.rs:9633-9654#start_ollama_http_with_idle], and
 `--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:13895-13912#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
@@ -301,7 +301,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:10020#apply_http]
+[src: file: backend/src/agents/runner.rs:10023#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -519,7 +519,7 @@ response>, "excerpt": "<start of the original>", "note": "…"}`, with the large
 excerpt that keeps the envelope inside the budget once embedded in `messages`. An
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
-[src: file: backend/src/agents/runner.rs:8007-8014#truncated_json_envelope]
+[src: file: backend/src/agents/runner.rs:8010-8017#truncated_json_envelope]
 [src: file: backend/src/agents/runner_test_tests_up.rs:3380-3383#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or

@@ -18,7 +18,7 @@ the sandbox to enumerate. Any other unreadable Git root still fails closed with
 `claude_sandbox_catalogue_unreadable`, naming the project or linked repository
 (never its path).
 [src: file: backend/src/agents/runner.rs:13315-13345#ClaudeSandboxCatalogueReceipt]
-[src: file: backend/src/agents/runner.rs:13418-13467#claude_sandbox_catalogue_receipt]
+[src: file: backend/src/agents/runner.rs:13382-13431#claude_sandbox_catalogue_receipt]
 [src: file: backend/src/agents/runner.rs:13430-13459#claude_sandbox_catalogue_roots]
 [src: file: backend/src/agents/runner.rs:13461-13468#claude_task_worker_catalogue_preflight]
 [src: file: backend/src/api/orchestration.rs:13186-13196#worker_project_refusal]

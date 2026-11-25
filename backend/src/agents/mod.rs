@@ -665,6 +665,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             runtime_available: true,
             auth_ready: None,
             auth_setup_command: None,
+            auth_reason: None,
             rtk_available: false,
             rtk_hook_configured: false,
             runtime_warning: None,
@@ -738,6 +739,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             runtime_available: true,
             auth_ready: None,
             auth_setup_command: None,
+            auth_reason: None,
             rtk_available,
             rtk_hook_configured,
             runtime_warning,
@@ -765,6 +767,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             runtime_available: runtime.available,
             auth_ready: None,
             auth_setup_command: None,
+            auth_reason: None,
             rtk_available,
             rtk_hook_configured,
             runtime_warning,
@@ -785,6 +788,41 @@ pub struct AgentAuthStatus {
     /// warning.
     pub ready: Option<bool>,
     pub setup_command: Option<&'static str>,
+    /// Stable code saying why `ready` is `Some(false)`, when Kronn knows it
+    /// (e.g. [`AUTH_REASON_API_KEY_MISSING`]). Never carries a secret.
+    pub reason: Option<&'static str>,
+}
+
+/// The provider refuses an anonymous call and no key resolves for it.
+pub const AUTH_REASON_API_KEY_MISSING: &str = "api_key_missing";
+
+/// Readiness of an HTTP provider that Kronn calls itself (KT-2031).
+///
+/// The key is resolved from the same `TokensConfig` slot the runner reads
+/// ([`crate::db::external_api_connections::legacy_credential_for_agent`]),
+/// which is also the credential slug of the provider's canonical connection.
+/// Only the presence of a non-blank active key is checked, never its value.
+///
+/// Rule per preset: a preset that `requires_credential` (hosted NVIDIA) is not
+/// ready without a key; a preset that may run keyless (a LiteLLM proxy without
+/// a master key) stays ready, and its runs surface the proxy's own 401 if it
+/// does demand one. `None` for an agent that is not such a provider.
+fn http_provider_auth_status(
+    agent_type: &AgentType,
+    config: &AppConfig,
+) -> Option<AgentAuthStatus> {
+    let (slug, preset) =
+        crate::db::external_api_connections::legacy_credential_for_agent(agent_type)?;
+    let key_resolves = config
+        .tokens
+        .active_key_for(slug)
+        .is_some_and(|key| !key.trim().is_empty());
+    let ready = key_resolves || !preset.requires_credential();
+    Some(AgentAuthStatus {
+        ready: Some(ready),
+        setup_command: None,
+        reason: (!ready).then_some(AUTH_REASON_API_KEY_MISSING),
+    })
 }
 
 #[derive(Debug, Default)]
@@ -1005,22 +1043,29 @@ fn gemini_auth_ready(config: &AppConfig) -> bool {
 /// rejects a working CLI. Let Vibe resolve its own keyring and surface a real
 /// runtime auth error if that lookup fails.
 pub fn agent_auth_status(agent_type: &AgentType, config: &AppConfig) -> AgentAuthStatus {
+    if let Some(status) = http_provider_auth_status(agent_type, config) {
+        return status;
+    }
     match agent_type {
         AgentType::GeminiCli => AgentAuthStatus {
             ready: Some(gemini_auth_ready(config)),
             setup_command: Some("gemini"),
+            reason: None,
         },
         AgentType::OpenCode => AgentAuthStatus {
             ready: opencode_auth_ready(),
             setup_command: Some("opencode auth login"),
+            reason: None,
         },
         AgentType::Vibe => AgentAuthStatus {
             ready: Some(true),
             setup_command: Some("vibe --setup"),
+            reason: None,
         },
         _ => AgentAuthStatus {
             ready: Some(true),
             setup_command: None,
+            reason: None,
         },
     }
 }
@@ -1032,6 +1077,7 @@ pub fn apply_configured_status(agents: &mut [AgentDetection], config: &AppConfig
         let auth = agent_auth_status(&agent.agent_type, config);
         agent.auth_ready = auth.ready;
         agent.auth_setup_command = auth.setup_command.map(str::to_string);
+        agent.auth_reason = auth.reason.map(str::to_string);
     }
 }
 
@@ -1724,6 +1770,106 @@ mod tests {
         let status = agent_auth_status(&AgentType::Vibe, &config);
         assert_eq!(status.ready, Some(true));
         assert_eq!(status.setup_command, Some("vibe --setup"));
+    }
+
+    use crate::db::external_api_connections::{
+        LITELLM_CREDENTIAL_SLUG as LITELLM_SLUG, NVIDIA_CREDENTIAL_SLUG as NVIDIA_SLUG,
+    };
+
+    fn config_with_key(provider: &str, value: &str) -> AppConfig {
+        let mut config = crate::core::config::default_config();
+        config.tokens.keys.retain(|key| key.provider != provider);
+        config.tokens.keys.push(crate::models::ApiKey {
+            id: format!("test-{provider}"),
+            name: provider.to_string(),
+            provider: provider.to_string(),
+            value: value.to_string(),
+            active: true,
+        });
+        config
+    }
+
+    fn nvidia_detection() -> AgentDetection {
+        serde_json::from_value(serde_json::json!({
+            "name": "NVIDIA", "agent_type": AgentType::Nvidia, "installed": true,
+            "path": null, "version": null, "latest_version": null, "origin": "api",
+            "install_command": null, "host_managed": false, "host_label": null,
+            "runtime_available": true, "rtk_available": false,
+            "rtk_hook_configured": false, "runtime_warning": null,
+        }))
+        .expect("a minimal NVIDIA detection")
+    }
+
+    /// KT-2031 — the hosted NVIDIA endpoint refuses an anonymous call, so a
+    /// detection with no resolvable key must not read as ready, and must say
+    /// why in a code the Agents settings render as "API key required".
+    #[test]
+    fn nvidia_without_a_key_is_not_auth_ready() {
+        let mut config = crate::core::config::default_config();
+        config.tokens.keys.retain(|key| key.provider != NVIDIA_SLUG);
+        let status = agent_auth_status(&AgentType::Nvidia, &config);
+        assert_eq!(status.ready, Some(false));
+        assert_eq!(status.reason, Some(AUTH_REASON_API_KEY_MISSING));
+
+        let mut detections = vec![nvidia_detection()];
+        apply_configured_status(&mut detections, &config);
+        assert_eq!(detections[0].auth_ready, Some(false));
+        assert_eq!(
+            detections[0].auth_reason.as_deref(),
+            Some(AUTH_REASON_API_KEY_MISSING)
+        );
+
+        // A blank or inactive key resolves nothing either.
+        let blank = config_with_key(NVIDIA_SLUG, "   ");
+        assert_eq!(
+            agent_auth_status(&AgentType::Nvidia, &blank).ready,
+            Some(false)
+        );
+        let mut inactive = config_with_key(NVIDIA_SLUG, "nvapi-test");
+        inactive
+            .tokens
+            .keys
+            .iter_mut()
+            .for_each(|k| k.active = false);
+        assert_eq!(
+            agent_auth_status(&AgentType::Nvidia, &inactive).ready,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn nvidia_with_a_key_stays_auth_ready_and_never_echoes_it() {
+        let config = config_with_key(NVIDIA_SLUG, "nvapi-secret-value");
+        let status = agent_auth_status(&AgentType::Nvidia, &config);
+        assert_eq!(status.ready, Some(true));
+        assert_eq!(status.reason, None);
+
+        let mut detections = vec![nvidia_detection()];
+        apply_configured_status(&mut detections, &config);
+        assert_eq!(detections[0].auth_ready, Some(true));
+        assert_eq!(detections[0].auth_reason, None);
+        let wire = serde_json::to_string(&detections[0]).unwrap();
+        assert!(!wire.contains("nvapi-secret-value"));
+    }
+
+    /// The rule is per preset: a LiteLLM proxy without a master key accepts an
+    /// anonymous call, so no key is not proof it cannot run.
+    #[test]
+    fn litellm_may_run_keyless_and_stays_ready() {
+        let mut config = crate::core::config::default_config();
+        config
+            .tokens
+            .keys
+            .retain(|key| key.provider != LITELLM_SLUG);
+        let keyless = agent_auth_status(&AgentType::LiteLlm, &config);
+        assert_eq!(keyless.ready, Some(true));
+        assert_eq!(keyless.reason, None);
+
+        let keyed = config_with_key(LITELLM_SLUG, "sk-proxy");
+        assert_eq!(
+            agent_auth_status(&AgentType::LiteLlm, &keyed).ready,
+            Some(true)
+        );
     }
 
     #[test]

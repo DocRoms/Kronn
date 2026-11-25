@@ -1712,6 +1712,7 @@ mod orchestrate_validation_tests {
             runtime_available: false,
             auth_ready: None,
             auth_setup_command: None,
+            auth_reason: None,
             rtk_available: false,
             rtk_hook_configured: false,
             runtime_warning: None,

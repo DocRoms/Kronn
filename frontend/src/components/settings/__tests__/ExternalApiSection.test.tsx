@@ -157,6 +157,30 @@ describe('ExternalApiSection', () => {
     }
   });
 
+  // KT-2031 — a keyless NVIDIA connection read as "No key", which the owner took
+  // for "configured": the hosted endpoint refuses an anonymous call, so the card
+  // says a key is required. A LiteLLM proxy may run keyless and keeps "No key".
+  it('says a key is required on a keyless connection whose preset refuses anonymous calls', async () => {
+    listMock.mockResolvedValue([
+      conn({ id: 'external-api-nvidia', origin_preset: 'nvidia', endpoint: 'https://integrate.api.nvidia.com' }),
+      conn({ id: 'nvidia-keyed', origin_preset: 'nvidia', endpoint: 'https://integrate.api.nvidia.com', has_credential: true }),
+      conn({ id: 'external-api-litellm', origin_preset: 'lite_llm', endpoint: 'http://localhost:4000' }),
+    ]);
+    renderSection();
+
+    const nvidia = await screen.findByTestId('ext-api-cred-external-api-nvidia');
+    expect(nvidia).toHaveTextContent('config.extApi.keyRequired');
+    expect(nvidia).toHaveAttribute('data-key-required', 'true');
+
+    const keyed = screen.getByTestId('ext-api-cred-nvidia-keyed');
+    expect(keyed).toHaveTextContent('config.extApi.keyConfigured');
+    expect(keyed).toHaveAttribute('data-key-required', 'false');
+
+    const litellm = screen.getByTestId('ext-api-cred-external-api-litellm');
+    expect(litellm).toHaveTextContent('config.extApi.keyOptionalStatus');
+    expect(litellm).toHaveAttribute('data-key-required', 'false');
+  });
+
   it('keeps an absent saved text tier visible but unavailable after a successful test', async () => {
     listMock.mockResolvedValue([conn({ endpoint: 'https://saved.example.test', default_model: 'retired/model' })]);
     renderSection();

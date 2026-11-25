@@ -49,10 +49,10 @@ Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4676-4681#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4724-4726#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4727-4729#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:1511-1521#apply]
-[src: file: backend/src/agents/runner.rs:14890-14901#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15135-15146#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:14893-14904#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15138-15149#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one

@@ -67,6 +67,12 @@ const PRESET_ENDPOINTS: Record<ExternalApiPreset, string> = {
   other: '',
 };
 
+/** Mirror of the backend `ExternalApiConnectionPreset::requires_credential`:
+ *  hosted NVIDIA and OpenRouter refuse an anonymous call, while a LiteLLM proxy
+ *  or another self-hosted server may accept one (KT-2031). */
+const presetRequiresKey = (preset: string): boolean =>
+  preset === 'nvidia' || preset === 'open_router';
+
 const TIERS = ['economy', 'default', 'reasoning'] as const;
 type Tier = (typeof TIERS)[number];
 const TIER_ICON: Record<Tier, string> = { economy: '⚡', default: '🎯', reasoning: '🧠' };
@@ -342,7 +348,7 @@ function ConnectionForm({
               buttonClassName="set-icon-btn set-ext-api-secret-eye"
               inputTestId="ext-api-key"
               ariaLabel={t('liteLlm.keyLabel')}
-              placeholder={['nvidia', 'open_router'].includes(form.origin_preset)
+              placeholder={presetRequiresKey(form.origin_preset)
                 ? t('config.extApi.keyRequired')
                 : t('liteLlm.keyOptional')}
               value={form.api_key}
@@ -1115,9 +1121,15 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                     <span
                       className="set-ext-api-conn-cred"
                       data-has-credential={c.has_credential}
+                      data-key-required={!c.has_credential && presetRequiresKey(c.origin_preset)}
+                      data-testid={`ext-api-cred-${c.id}`}
                     >
                       {c.has_credential ? <Check size={11} /> : <Key size={11} />}
-                      {t(c.has_credential ? 'config.extApi.keyConfigured' : 'config.extApi.keyOptionalStatus')}
+                      {t(c.has_credential
+                        ? 'config.extApi.keyConfigured'
+                        : presetRequiresKey(c.origin_preset)
+                          ? 'config.extApi.keyRequired'
+                          : 'config.extApi.keyOptionalStatus')}
                     </span>
                     <button
                       type="button"

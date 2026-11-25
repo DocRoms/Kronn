@@ -303,9 +303,9 @@ call. Its command-builder branch is a non-inference `echo` sentinel,
 like the other HTTP families; it cannot choose or invoke an embedded model.
 This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3535-3540#is_http_chat_agent]
-[src: file: backend/src/agents/runner.rs:9630-9651#start_ollama_http_with_idle]
+[src: file: backend/src/agents/runner.rs:9633-9654#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:13925-13938#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:14294-14303#Ollama]
+[src: file: backend/src/agents/runner.rs:14297-14306#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -816,7 +816,7 @@ where Ollama runs. [src: file: backend/src/api/ollama_health.rs:51-73#fetch_serv
    9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
    prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
    should steer a user to.
-   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:7276-7280#mlx_prefix_cache_reused]
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:7279-7283#mlx_prefix_cache_reused]
 
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.

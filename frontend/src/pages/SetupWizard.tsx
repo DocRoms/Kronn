@@ -338,7 +338,9 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
                           <span>
                             <strong>{t('config.agentAuthRequired')}</strong>
                             {' — '}
-                            {t('config.agentAuthRequiredHint')}
+                            {agent.auth_reason === 'api_key_missing'
+                              ? t('config.extApi.keyRequired')
+                              : t('config.agentAuthRequiredHint')}
                           </span>
                           {agent.auth_setup_command && (
                             <button

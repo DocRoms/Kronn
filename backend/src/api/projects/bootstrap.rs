@@ -55,6 +55,11 @@ pub fn bootstrap_agent_refusal(agent: &AgentType, detected: &[AgentDetection]) -
         ));
     }
     if detection.auth_ready == Some(false) {
+        if detection.auth_reason.as_deref() == Some(crate::agents::AUTH_REASON_API_KEY_MISSING) {
+            return Some(format!(
+                "{agent:?} has no API key. Add it to its connection in Config › Agents or choose another agent."
+            ));
+        }
         return Some(format!(
             "{agent:?} is not signed in. Finish its setup in Config › Agents or choose another agent."
         ));
@@ -745,6 +750,7 @@ pub fn usable_for_tests(agent: AgentType) -> AgentDetection {
         runtime_available: true,
         auth_ready: Some(true),
         auth_setup_command: None,
+        auth_reason: None,
         rtk_available: false,
         rtk_hook_configured: false,
         runtime_warning: None,
@@ -860,6 +866,11 @@ mod discussion_target_tests {
         })
         .contains("not installed"));
         assert!(refused(|d| d.auth_ready = Some(false)).contains("not signed in"));
+        assert!(refused(|d| {
+            d.auth_ready = Some(false);
+            d.auth_reason = Some(crate::agents::AUTH_REASON_API_KEY_MISSING.into());
+        })
+        .contains("has no API key"));
     }
 
     #[tokio::test]
