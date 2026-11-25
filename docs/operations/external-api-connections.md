@@ -197,7 +197,7 @@ stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
 configuration did not contain one. [src: file: backend/src/lib.rs:444-467#bootstrap_external_api_connections]
-[src: file: backend/src/db/external_api_connections.rs:403-434#backfill_legacy_config]
+[src: file: backend/src/db/external_api_connections.rs:410-441#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
 their endpoint and Economy, Default and Reasoning models. Saving either card

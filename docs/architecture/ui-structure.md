@@ -593,8 +593,8 @@ run list and never encrypted, so it holds plain labels such as the ticket a run
 is about, never a secret. `GET /api/workflows/{id}/runs?state_key=ticketKey&state_value=EW-7791&limit=1`
 returns the newest run carrying that entry, whether it was seeded or written by
 a step, without reading any step output.
-`[src: file: backend/src/api/workflows.rs:5706-5738#validate_initial_run_state]`
-`[src: file: backend/src/api/workflows.rs:6351-6365#list_runs_by_state_visible]`
+`[src: file: backend/src/api/workflows.rs:5752-5784#validate_initial_run_state]`
+`[src: file: backend/src/api/workflows.rs:6396-6410#list_runs_by_state_visible]`
 `[src: file: backend/src/db/workflows.rs:1644-1680#list_runs_by_state_visible]`
 
 **6. Rollback / `on_failure`.** `Workflow.on_failure: Vec<WorkflowStep>` — a separate step list that fires **only** when the run terminates with `RunStatus::Failed`. Skipped on `Cancelled`, `StoppedByGuard`, and Gate `reject`. Templates `{{failed_step.name}}` and `{{failed_step.output}}` are exposed inside on_failure prompts. Migration `041_workflow_on_failure.sql`. The wizard rejects `Gate` inside the rollback list (Notify + Agent + ApiCall accepted).

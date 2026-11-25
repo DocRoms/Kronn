@@ -11,6 +11,7 @@ pub mod batch_step;
 pub mod cancellation;
 pub mod collect_api_data_step;
 pub mod concurrency;
+pub mod connection_pairs;
 pub mod decide_step;
 pub mod delegate_subtasks_step;
 pub mod exec_step;

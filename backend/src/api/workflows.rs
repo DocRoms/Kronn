@@ -2915,6 +2915,32 @@ fn validate_shadows(steps: &[WorkflowStep]) -> Result<(), String> {
     crate::workflows::shadow::validate(steps)
 }
 
+/// Every agent / named-connection pair the steps, their shadows and merges
+/// name, refused when the run would refuse it (KT-2032).
+pub async fn validate_connection_pairs(
+    state: &AppState,
+    steps: &[WorkflowStep],
+    on_failure: &[WorkflowStep],
+) -> Result<(), String> {
+    if crate::workflows::connection_pairs::pairs(steps).is_empty()
+        && crate::workflows::connection_pairs::pairs(on_failure).is_empty()
+    {
+        return Ok(());
+    }
+    let (steps, on_failure) = (steps.to_vec(), on_failure.to_vec());
+    state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(crate::workflows::connection_pairs::validate_in_db(
+                conn,
+                &steps,
+                &on_failure,
+            ))
+        })
+        .await
+        .map_err(|e| format!("DB error: {e}"))?
+}
+
 /// Whether any of the steps carries a shadow.
 fn carries_shadows(steps: &[WorkflowStep]) -> bool {
     steps
@@ -3076,6 +3102,9 @@ async fn create_written(
         {
             return Json(ApiResponse::err(e));
         }
+    }
+    if let Err(e) = validate_connection_pairs(&state, &req.steps, &req.on_failure).await {
+        return Json(ApiResponse::err(e));
     }
 
     if let Err(e) = validate_artifact_specs(&req.artifacts) {
@@ -3602,6 +3631,10 @@ mod step_patch_tests;
 #[path = "workflow_examples_tests.rs"]
 mod examples_tests;
 
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "workflow_connection_pair_tests.rs"]
+mod connection_pair_tests;
+
 async fn update_written(
     state: AppState,
     id: String,
@@ -3775,6 +3808,15 @@ async fn update_written(
         if let Err(e) = validate_shadows(on_failure) {
             return Json(ApiResponse::err(e));
         }
+    }
+    if let Err(e) = validate_connection_pairs(
+        &state,
+        req.steps.as_deref().unwrap_or_default(),
+        req.on_failure.as_deref().unwrap_or_default(),
+    )
+    .await
+    {
+        return Json(ApiResponse::err(e));
     }
 
     if let Some(ref new_artifacts) = req.artifacts {

@@ -314,7 +314,7 @@ validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:591-644#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
-[src: file: backend/src/workflows/steps.rs:1435-1439#reasoning_effort_override]
+[src: file: backend/src/workflows/steps.rs:1433-1437#reasoning_effort_override]
 [src: file: backend/src/agents/runner.rs:13323-13327#validate]
 
 The HTTP regression launches through the native QP tool and the discussion
@@ -547,7 +547,7 @@ Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
 [src: file: backend/src/api/agent_workflow_tools.rs:63-120#draft_patch]
 [src: file: backend/src/api/agent_workflow_tools.rs:211-213#enabled]
-[src: file: backend/src/api/workflows.rs:2993-3053#validate_step_references]
+[src: file: backend/src/api/workflows.rs:3019-3079#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same

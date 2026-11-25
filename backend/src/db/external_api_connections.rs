@@ -238,6 +238,13 @@ pub fn target_for_connection(connection: &ExternalApiConnection) -> MessageTarge
     target
 }
 
+/// The agent `connection` goes with when it is not `agent`: a step (or shadow)
+/// pairing them is refused, by the run and by the save alike (KT-2032).
+pub fn agent_mismatch(connection: &ExternalApiConnection, agent: &AgentType) -> Option<AgentType> {
+    let serves = target_for_connection(connection).agent_type;
+    (serves != *agent).then_some(serves)
+}
+
 pub fn resolve_connection_mentions(
     content: &str,
     connections: &[ExternalApiConnection],

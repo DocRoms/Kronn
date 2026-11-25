@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::doctrine_warnings::{self, ConfiguredApi};
 use crate::models::{
-    AgentType, BlockedQuickExec, QuickExec, StepType, Workflow, WorkflowBlocker,
-    WorkflowBlockerKind, WorkflowReadiness, WorkflowStep, WorkflowWarning,
+    AgentType, BlockedQuickExec, ExternalApiConnection, QuickExec, StepType, Workflow,
+    WorkflowBlocker, WorkflowBlockerKind, WorkflowReadiness, WorkflowStep, WorkflowWarning,
 };
 
 const HUMAN_APPROVAL_ACTION: &str = "Ask a human to review and approve this line in the \
@@ -129,14 +129,33 @@ pub fn assess_in_db(
     // one advisory check: it is never a blocker.
     let apis = configured_apis(conn).unwrap_or_default();
     let decision_models = installed_decision_models(conn);
-    assess_walk(
+    // KT-2032: the named connections the steps pair with an agent.
+    let connections: HashMap<String, ExternalApiConnection> =
+        match crate::db::external_api_connections::list(conn) {
+            Ok(rows) => rows.into_iter().map(|c| (c.id.clone(), c)).collect(),
+            Err(error) => return collection_failure(root, &format!("Connections: {error}")),
+        };
+    walk_all(
         root,
-        workflows,
-        &quick_execs,
-        &apis,
-        decision_models.as_ref(),
+        Sources {
+            workflows,
+            quick_execs: &quick_execs,
+            apis: &apis,
+            decision_models: decision_models.as_ref(),
+            connections: Some(&connections),
+        },
         &mut |wf| repository_approval_refusal(conn, wf),
     )
+}
+
+/// What a check reads besides the workflow itself.
+struct Sources<'a> {
+    workflows: &'a HashMap<String, Workflow>,
+    quick_execs: &'a HashMap<String, QuickExec>,
+    apis: &'a [ConfiguredApi],
+    decision_models: Option<&'a DecisionModels>,
+    /// The stored named connections; `None` = not read, no pair check.
+    connections: Option<&'a HashMap<String, ExternalApiConnection>>,
 }
 
 /// The API plugins with at least one saved configuration, by the host their
@@ -195,11 +214,30 @@ pub fn assess_walk(
     decision_models: Option<&DecisionModels>,
     approval: &mut ApprovalCheck<'_>,
 ) -> WorkflowReadiness {
+    walk_all(
+        root,
+        Sources {
+            workflows,
+            quick_execs,
+            apis,
+            decision_models,
+            connections: None,
+        },
+        approval,
+    )
+}
+
+fn walk_all(
+    root: &Workflow,
+    sources: Sources<'_>,
+    approval: &mut ApprovalCheck<'_>,
+) -> WorkflowReadiness {
     let mut walk = Walk {
-        decision_models,
-        workflows,
-        quick_execs,
-        apis,
+        decision_models: sources.decision_models,
+        workflows: sources.workflows,
+        quick_execs: sources.quick_execs,
+        apis: sources.apis,
+        connections: sources.connections,
         root,
         path: Vec::new(),
         checked: Vec::new(),
@@ -254,6 +292,8 @@ struct Walk<'a, 'b> {
     decision_model_saved: Option<bool>,
     /// The decision models a step may name; `None` = not read, no check.
     decision_models: Option<&'a DecisionModels>,
+    /// The stored named connections; `None` = not read, no pair check.
+    connections: Option<&'a HashMap<String, ExternalApiConnection>>,
     /// The repository-import gate every run of a checked workflow passes.
     approval: &'a mut ApprovalCheck<'b>,
 }
@@ -469,6 +509,51 @@ impl Walk<'_, '_> {
         }
     }
 
+    /// An agent / named-connection pair the run refuses (KT-2032), as the
+    /// save refuses it: the connection is gone or goes with another agent.
+    fn connection_blockers(&mut self, wf: &Workflow, step: &WorkflowStep, on_failure: bool) {
+        let Some(connections) = self.connections else {
+            return;
+        };
+        let Ok(refused) = super::connection_pairs::refusals(std::slice::from_ref(step), |id| {
+            Ok(connections.get(id).cloned())
+        }) else {
+            return;
+        };
+        for refusal in refused {
+            // Shadows are human-only: an agent cannot change one.
+            let human_only = refusal.pair.part.is_some();
+            let action = if human_only {
+                "Ask the user to fix the shadow in the workflow editor (the step's \"Shadows\"): \
+                 pick the agent the connection goes with, or another connection. An agent \
+                 cannot change a shadow."
+            } else {
+                "Pick the agent the connection goes with, or another connection, for this step \
+                 (workflow_update)."
+            };
+            self.blockers.push(WorkflowBlocker {
+                workflow_id: wf.id.clone(),
+                workflow_name: wf.name.clone(),
+                step: Some(step.name.clone()),
+                on_failure,
+                kind: WorkflowBlockerKind::MisconfiguredStep,
+                phase: None,
+                reason: Some(
+                    if refusal.expected.is_some() {
+                        "connection_agent_mismatch"
+                    } else {
+                        "connection_missing"
+                    }
+                    .into(),
+                ),
+                message: refusal.message(),
+                action: action.into(),
+                human_only,
+                quick_exec: None,
+            });
+        }
+    }
+
     fn lookup(&self, id: &str) -> Option<&Workflow> {
         if id == self.root.id {
             Some(self.root)
@@ -492,6 +577,7 @@ impl Walk<'_, '_> {
                 self.quick_exec_blockers(wf, step, on_failure);
                 self.full_access_blockers(wf, step, on_failure);
                 self.decision_blockers(wf, step, on_failure);
+                self.connection_blockers(wf, step, on_failure);
             }
         }
         self.path.push(wf.id.clone());
