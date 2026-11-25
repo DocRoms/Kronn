@@ -97,12 +97,34 @@ async fn answering_provider() -> MockServer {
     server
 }
 
+/// A fake key in the LiteLLM provider slot: a keyless named connection must
+/// never send it to its own endpoint (KT-2038).
+fn store_litellm_slot_key(tokens: &mut TokensConfig) {
+    tokens.keys.push(crate::models::ApiKey {
+        id: "key-litellm-slot".into(),
+        name: "fixture litellm slot".into(),
+        provider: crate::db::external_api_connections::LITELLM_CREDENTIAL_SLUG.into(),
+        value: "fixture-litellm-slot-key".into(),
+        active: true,
+    });
+}
+
 /// Runs a one-step workflow on `step`; `with_key` stores the connection key.
 async fn run_one(
     id: &str,
     step: WorkflowStep,
     seed: Option<ExternalApiConnection>,
     with_key: Option<&str>,
+) -> WorkflowRun {
+    run_one_with_litellm_slot(id, step, seed, with_key, false).await
+}
+
+async fn run_one_with_litellm_slot(
+    id: &str,
+    step: WorkflowStep,
+    seed: Option<ExternalApiConnection>,
+    with_key: Option<&str>,
+    litellm_slot: bool,
 ) -> WorkflowRun {
     let (state, mut tokens, agents) = test_state_and_configs();
     if let Some(connection) = seed {
@@ -111,6 +133,10 @@ async fn run_one(
     if let Some(connection_id) = with_key {
         store_key(&mut tokens, connection_id);
         store_key(&mut state.config.write().await.tokens, connection_id);
+    }
+    if litellm_slot {
+        store_litellm_slot_key(&mut tokens);
+        store_litellm_slot_key(&mut state.config.write().await.tokens);
     }
     let mut wf = make_workflow_with_artifacts(Default::default());
     wf.id = format!("wf-{id}");
@@ -191,15 +217,27 @@ async fn a_named_connection_whose_preset_needs_no_key_passes_the_preflight() {
         server.uri(),
         ExternalApiConnectionPreset::Other,
     );
-    let run = run_one(
+    // The LiteLLM slot holds a key: it belongs to the LiteLLM proxy, not to
+    // this connection's endpoint, so it must not be sent here (KT-2038).
+    let run = run_one_with_litellm_slot(
         "named-keyless",
         custom_step(Some("conn-local")),
         Some(local),
         None,
+        true,
     )
     .await;
     assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
     assert!(run.step_results[0].output.contains("KEYLESS_ANSWER"));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    // Checked for presence only: the header value is never printed.
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("authorization")),
+        "a keyless connection must send no Authorization header"
+    );
 }
 
 #[tokio::test]

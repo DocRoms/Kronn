@@ -55,7 +55,7 @@ Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
 currently wins over the tier. [src: file: backend/src/models/setup.rs:1783-1829#ModelTier]
-[src: file: backend/src/agents/runner.rs:3707-3741#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3648-3682#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
 
@@ -119,7 +119,7 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:3966-3967#start_agent_with_config]
+contract. [src: file: backend/src/agents/runner.rs:3986-3987#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
 [src: file: backend/src/api/discussions/orchestration.rs:1272-1412#detect_agent_error_hint]
 

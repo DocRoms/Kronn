@@ -873,7 +873,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:13843-13893#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2748-2776#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:13857-13907#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2748-2776#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5929-5961#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5959-5972#_spawned_task_worker_mode]`
 

@@ -3331,6 +3331,26 @@ pub struct ExternalHttpRuntime {
     pub api_key: Option<String>,
 }
 
+/// The key an HTTP run sends: only ever the one belonging to the endpoint it
+/// goes to (KT-2038). On a named connection that is the connection's own
+/// credential or nothing — never a provider slot, which would hand e.g. the
+/// LiteLLM key to a third-party endpoint. Legacy connections read the
+/// `litellm` / `nvidia` slot as their own credential, so they are unchanged.
+/// Without a connection, only the native LiteLLM / NVIDIA agents read their
+/// own slot (the same one `agents::agent_auth_status` checks, KT-2031); any
+/// other agent gets none.
+pub(crate) fn resolve_http_connection_key<'a>(
+    agent_type: &AgentType,
+    external_http: Option<&'a ExternalHttpRuntime>,
+    tokens: &'a TokensConfig,
+) -> Option<&'a str> {
+    match external_http {
+        Some(runtime) => runtime.api_key.as_deref(),
+        None => crate::db::external_api_connections::legacy_credential_for_agent(agent_type)
+            .and_then(|(slug, _)| tokens.active_key_for(slug)),
+    }
+}
+
 /// The executor this HTTP run may use: `config.tools` when the verdict of
 /// `http_transport::http_tools_verdict` says attach, `None` otherwise (KT-1600).
 /// A refusal is logged so a model that "forgot" its tools is explainable.
@@ -4456,17 +4476,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     .http_endpoints
                     .and_then(|endpoints| endpoints.for_agent(config.agent_type))
             });
-        // Same slot as `agents::agent_auth_status` checks (KT-2031).
-        let provider_slug =
-            crate::db::external_api_connections::legacy_credential_for_agent(config.agent_type)
-                .map_or(
-                    crate::db::external_api_connections::LITELLM_CREDENTIAL_SLUG,
-                    |(slug, _)| slug,
-                );
-        let http_api_key = config
-            .external_http
-            .and_then(|runtime| runtime.api_key.as_deref())
-            .or_else(|| config.tokens.active_key_for(provider_slug));
+        let http_api_key =
+            resolve_http_connection_key(config.agent_type, config.external_http, config.tokens);
         let http_system_context = config.external_http.map_or_else(
             || extra_context.clone(),
             |runtime| {
@@ -15837,6 +15848,10 @@ fn codex_token_count(marker: &str, count: &str) -> Option<u64> {
 #[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 #[path = "runner_test.rs"]
 pub mod runner_test;
+
+#[cfg(test)]
+#[path = "runner_connection_key_test.rs"]
+mod runner_connection_key_test;
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_idle_test.rs"]
