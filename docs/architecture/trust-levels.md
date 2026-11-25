@@ -162,7 +162,7 @@ from any authenticator app, or one of ten single-use recovery codes
 (`core::totp`, `core::trust_proof`). It is enforced in the handler, not the
 screen, and loopback does not lift it: a command an agent approved that sends
 `PUT 127.0.0.1:3140/api/trust/instance` is refused for want of a code.
-[src: file: backend/src/core/trust_proof.rs:511-561#check_inner]
+[src: file: backend/src/core/trust_proof.rs:518-568#check_inner]
 
 - **The code is the proof, whatever the channel.** It is accepted from:
   - the UI (the risk panel's code field, the `proof` body field);
@@ -255,7 +255,7 @@ screen, and loopback does not lift it: a command an agent approved that sends
   `the_first_enrolment_needs_the_admin_secret_and_an_agent_without_it_gets_nothing`,
   `a_pending_enrolment_is_not_replaced_until_it_expires`,
   `the_owner_cancels_a_pending_enrolment_with_the_admin_secret`.
-  [src: file: backend/src/core/trust_proof.rs:411-444#begin_enrolment]
+  [src: file: backend/src/core/trust_proof.rs:418-451#begin_enrolment]
 
 ### Lockout and brute force
 

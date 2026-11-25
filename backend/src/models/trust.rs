@@ -290,11 +290,13 @@ crate::debug_without_secrets!(ConfirmTrustProofRequest { ; masked: code, admin_s
 crate::debug_without_secrets!(TrustEnrolment { ; masked: secret, uri });
 
 /// Ten single-use recovery codes, shown once: only their digests are kept.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TrustRecoveryCodes {
     pub codes: Vec<String>,
 }
+
+crate::debug_without_secrets!(TrustRecoveryCodes { ; masked: codes });
 
 /// One journal line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -342,7 +344,7 @@ pub struct TrustAuditEntry {
 }
 
 /// PUT /api/trust/...
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct SetTrustRequest {
     pub level: TrustLevel,
@@ -360,3 +362,7 @@ pub struct SetTrustRequest {
     #[serde(default)]
     pub proof: Option<String>,
 }
+crate::debug_without_secrets!(SetTrustRequest {
+    level, acknowledged_risks, acknowledged_vault_unprotected;
+    masked: proof
+});

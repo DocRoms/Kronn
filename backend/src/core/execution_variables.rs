@@ -44,12 +44,14 @@ pub struct VariablePreflightFailure {
     pub cause: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedVariables {
     pub values: HashMap<String, String>,
     pub provenance: Vec<VariableProvenance>,
     pub resolved_at: DateTime<Utc>,
 }
+
+crate::debug_without_secrets!(ResolvedVariables { provenance, resolved_at; masked: values });
 
 pub fn resolve(
     declarations: &[PromptVariable],

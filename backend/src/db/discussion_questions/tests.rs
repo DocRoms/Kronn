@@ -1957,3 +1957,18 @@ fn an_invalid_fence_keeps_the_existing_lint_report_of_the_message() {
     assert_eq!(report.unsourced_count, 3);
     assert_eq!(report.invalid_cards.len(), 1);
 }
+
+/// KT-2043 — a question's stored resume holds run variables, one of which may
+/// be the manual override of a project env credential.
+#[test]
+fn a_resume_spec_does_not_print_its_variables_debug_without_secrets() {
+    let spec = QuestionResumeSpec {
+        workflow_id: "wf-1".into(),
+        variables: [("token".to_string(), "Fake2043VariableValue".to_string())].into(),
+    };
+    for printed in [format!("{spec:?}"), format!("{spec:#?}")] {
+        assert!(!printed.contains("Fake2043"), "{printed}");
+        assert!(printed.contains("wf-1"), "{printed}");
+        assert!(printed.contains("\"token\""), "{printed}");
+    }
+}

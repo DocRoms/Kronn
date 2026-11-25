@@ -55,7 +55,7 @@ for full provider-enforced validation. For example, it does not enforce
 `additionalProperties` or resolve `$ref`.
 [src: file: backend/src/workflows/steps.rs:556-579#validate_envelope_against_schema]
 [src: file: backend/src/workflows/steps.rs:781-799#on_invalid]
-[src: file: backend/src/workflows/template.rs:1353-1373#validate_envelope_against_schema]
+[src: file: backend/src/workflows/template.rs:1355-1375#validate_envelope_against_schema]
 
 Body regressions cover explicit `strict: false`, preservation of nested optional
 properties, array items and dictionary schemas, both streaming settings, and

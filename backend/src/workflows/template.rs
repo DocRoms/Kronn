@@ -18,7 +18,7 @@ use std::collections::HashMap;
 pub use crate::models::quick::{is_reserved_name, refuse_reserved_names};
 
 /// Template context holding all available variables.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TemplateContext {
     values: HashMap<String, String>,
     /// Values Kronn sets itself (`run.id`), looked up before anything else.
@@ -32,6 +32,8 @@ pub struct TemplateContext {
     /// Zone of `{{time.now}}` without `tz:`: Kronn's global one (KT-1103).
     default_timezone: Tz,
 }
+
+crate::debug_without_secrets!(TemplateContext { builtins, time_anchor, step_kinds, previous_step_name, default_timezone; masked: values });
 
 impl Default for TemplateContext {
     fn default() -> Self {

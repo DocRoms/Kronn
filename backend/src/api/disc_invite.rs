@@ -38,7 +38,7 @@ use crate::AppState;
 /// `instruction_text` directly in the copy-paste modal — the wording
 /// lives server-side so we can tweak it (i18n, channel, etc.) without
 /// shipping a frontend release.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct InviteResponse {
     pub token: String,
@@ -52,12 +52,17 @@ pub struct InviteResponse {
     /// Token-only form, for a human who just wants the bare call (KT-52).
     pub instruction_text_minimal: String,
 }
+// Both instruction texts embed the token.
+crate::debug_without_secrets!(InviteResponse {
+    disc_id, expires_at, ttl_seconds;
+    masked: token, instruction_text, instruction_text_minimal
+});
 
 /// Body of `POST /api/discussions/peer-join`. The token is the
 /// plaintext returned by `invite_peer`. `agent_type` + `session_id`
 /// identify the calling CLI session so the bridge can rebind a
 /// disconnected agent on reconnect.
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct PeerJoinRequest {
     pub token: String,
@@ -78,6 +83,10 @@ pub struct PeerJoinRequest {
     #[serde(default)]
     pub conversation_id: Option<String>,
 }
+crate::debug_without_secrets!(PeerJoinRequest {
+    agent_type, session_id, model, conversation_id;
+    masked: token
+});
 
 fn normalize_conversation_id(raw: Option<&str>) -> Result<Option<String>, &'static str> {
     let Some(raw) = raw.filter(|id| !id.is_empty()) else {
@@ -95,7 +104,7 @@ fn normalize_conversation_id(raw: Option<&str>) -> Result<Option<String>, &'stat
 /// bridge can stash it as its `_CURRENT_DISC_ID`), a peer count for
 /// the agent's first system-prompt notice, and a recent-message
 /// preview so the joiner has immediate context.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PeerJoinResponse {
     pub disc_id: String,
@@ -145,6 +154,11 @@ pub struct PeerJoinResponse {
     #[serde(default)]
     pub pacing: crate::api::disc_introspection::PacingState,
 }
+crate::debug_without_secrets!(PeerJoinResponse {
+    disc_id, session_pk, self_alias, cli_ordinal, peer_count, disc_title, note_count,
+    recent_messages, plan_snapshot, next_steps, poll_policy, pacing;
+    masked: resume_token
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -214,7 +228,7 @@ fn peer_join_plan_snapshot(
     })
 }
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct PeerResumeRequest {
     pub agent_type: String,
@@ -235,8 +249,12 @@ pub struct PeerResumeRequest {
     #[serde(default)]
     pub expected_disc_id: Option<String>,
 }
+crate::debug_without_secrets!(PeerResumeRequest {
+    agent_type, session_id, conversation_id, expected_disc_id;
+    masked: resume_token, next_resume_token
+});
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct OrchestratorReturnResumeRequest {
     pub agent_type: String,
     pub session_id: String,
@@ -244,8 +262,12 @@ pub struct OrchestratorReturnResumeRequest {
     pub next_resume_token: Option<String>,
     pub expected_child_disc_id: String,
 }
+crate::debug_without_secrets!(OrchestratorReturnResumeRequest {
+    agent_type, session_id, expected_child_disc_id;
+    masked: resume_token, next_resume_token
+});
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PeerResumeResponse {
     pub disc_id: String,
@@ -260,6 +282,10 @@ pub struct PeerResumeResponse {
     #[serde(default)]
     pub cli_ordinal: Option<i64>,
 }
+crate::debug_without_secrets!(PeerResumeResponse {
+    disc_id, session_pk, self_alias, cli_ordinal;
+    masked: resume_token
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -2396,7 +2422,7 @@ fn invite_handoff(token: &str) -> String {
 /// naming one of our contacts AND `secret`, the per-contact secret it was paired
 /// with — the same credential as the WS Presence handshake (so this endpoint is
 /// exempt from the bearer middleware).
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct ClaimByTokenRequest {
     pub token: String,
@@ -2408,6 +2434,7 @@ pub struct ClaimByTokenRequest {
     #[ts(skip)]
     pub secret: String,
 }
+crate::debug_without_secrets!(ClaimByTokenRequest { from_invite_code; masked: token, secret });
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -2559,7 +2586,7 @@ pub async fn claim_by_token(
 /// `FileAttached` announcement calls this to pull the binary of a context file
 /// it doesn't have. Authenticated by `from_invite_code` naming a contact and its
 /// pairing `secret` (same trust model as `claim-by-token`).
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct FetchFileRequest {
     pub file_id: String,
@@ -2569,6 +2596,7 @@ pub struct FetchFileRequest {
     #[ts(skip)]
     pub secret: String,
 }
+crate::debug_without_secrets!(FetchFileRequest { file_id, from_invite_code; masked: secret });
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]

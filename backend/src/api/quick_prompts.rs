@@ -525,7 +525,7 @@ pub async fn import_qp(
 /// rendered user prompt. The frontend does the template rendering (it already
 /// has `renderTemplate` from the QP launch flow) so the backend just receives
 /// a list of already-filled prompts.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct BatchItem {
     pub title: String,
     /// Per-item values rendered into the Quick Prompt's own template. The
@@ -535,6 +535,8 @@ pub struct BatchItem {
     #[serde(default)]
     pub variables: std::collections::HashMap<String, String>,
 }
+
+crate::debug_without_secrets!(BatchItem { title; masked: variables });
 
 #[derive(Debug, Deserialize)]
 pub struct BatchRunRequest {
@@ -849,7 +851,7 @@ pub struct CompareAgentTarget {
     pub connection_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CompareAgentsRequest {
     /// Pre-rendered prompt — caller has already substituted any
     /// QP variables. We don't re-render here so the same prompt
@@ -877,6 +879,8 @@ pub struct CompareAgentsRequest {
     #[serde(default)]
     pub project_id: Option<String>,
 }
+
+crate::debug_without_secrets!(CompareAgentsRequest { prompt, batch_name, tier, targets, agents, project_id; masked: variables });
 
 fn normalize_compare_targets(
     targets: Vec<CompareAgentTarget>,

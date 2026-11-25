@@ -87,10 +87,11 @@ const BUILT_IN_UNLOCK_HASHES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct UnlockRequest {
     pub code: String,
 }
+crate::debug_without_secrets!(UnlockRequest { ; masked: code });
 
 /// One row of the response array — identifies what kind of thing was
 /// unlocked and its canonical name. The frontend dispatches per kind.

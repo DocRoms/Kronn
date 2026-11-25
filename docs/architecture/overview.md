@@ -224,7 +224,7 @@ killed on client-requested cancellation. Partial responses retain an explicit
 timeout notice.
 [src: file: backend/src/models/setup.rs:967-974#agent_global_timeout_min]
 [src: file: backend/src/models/setup.rs:1184-1197#MAX_AGENT_GLOBAL_TIMEOUT_MIN]
-[src: file: backend/src/api/setup.rs:1769-1776#clamp_stall_timeout_min]
+[src: file: backend/src/api/setup.rs:1774-1781#clamp_stall_timeout_min]
 [src: file: backend/src/api/discussions/streaming.rs:4517-4541#agent_stall_timeout_min]
 [src: file: backend/src/api/discussions/orchestration.rs:323-337#configured_agent_global_timeout]
 

@@ -751,7 +751,7 @@ pub enum OnInvalid {
 // `WorkflowStep` for ApiCall execution from a thin agent-supplied
 // payload. Every field already has serde / type defaults so the
 // derive is a free upgrade; no nullable/Option field changed.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[derive(Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WorkflowStep {
     /// Durable opaque identity of this step. `name` remains the editable
@@ -1249,6 +1249,8 @@ pub struct WorkflowStep {
     pub delegate_subtasks: Option<DelegateSubtasksConfig>,
 }
 
+crate::debug_without_secrets!(WorkflowStep { id, name, step_type, description, agent, prompt_template, mode, output_format, mcp_config_ids, agent_settings, on_result, on_timeout, stall_timeout_secs, retry, delay_after_secs, skill_ids, external_effect, shadows, shadow_merge, profile_ids, directive_ids, batch_quick_prompt_id, batch_items_from, batch_wait_for_completion, batch_max_items, batch_workspace_mode, batch_chain_prompt_ids, batch_concurrent_limit, quick_api_id, quick_prompt_id, quick_prompt_version, notify_config, api_plugin_slug, api_config_id, api_endpoint_path, api_method, api_path_params, api_query, api_body, api_extract, api_pagination, api_timeout_ms, api_max_retries, api_output_var, api_response, gate_message, gate_request_changes_target, gate_notify_url, gate_checkpoint_before, gate_auto_approve_after_secs, exec_command, exec_args, exec_timeout_secs, exec_setup_command, exec_setup_args, exec_stdin, exec_script_files, exec_unmodelled_args_approved, exec_agent_written, exec_approved_by_trust, exec_agent_lines, json_data_payload, collect_api_data, transform_data, page_publish, task_board, decide, sub_workflow_id, sub_workflow_foreach_file, multi_agent_review, room_id, read_only_repos, delegate_subtasks; masked: api_headers, quick_prompt_variables, sub_workflow_variables });
+
 /// KT-909 — what a `DelegateSubtasks` step delegates and how.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1452,7 +1454,7 @@ pub enum PaginationSpec {
 
 /// Configuration for a `StepType::Notify` webhook step. Rendered at run-time
 /// (URL + body support template expressions like `{{previous_step.summary}}`).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct NotifyConfig {
     /// Target URL. Supports template variables.
@@ -1469,6 +1471,8 @@ pub struct NotifyConfig {
     #[serde(default)]
     pub body_template: String,
 }
+
+crate::debug_without_secrets!(NotifyConfig { url, method, body_template; masked: headers });
 
 fn default_notify_method() -> String {
     "POST".to_string()
@@ -1753,7 +1757,7 @@ pub struct CollectApiDataConfig {
     pub concurrent_limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CollectApiDataSource {
     /// Clé stable dans `data.sources`.
@@ -1777,6 +1781,8 @@ pub struct CollectApiDataSource {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub variables: std::collections::HashMap<String, String>,
 }
+
+crate::debug_without_secrets!(CollectApiDataSource { alias, quick_api_id, quick_exec_id, quick_exec, required; masked: variables });
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -3113,7 +3119,7 @@ pub struct WorkflowImportPreview {
 /// the run's `trigger_context`. Empty/missing body keeps the legacy
 /// "trigger with no variables" flow working — back-compat for tracker
 /// triggers that don't need variables.
-#[derive(Debug, Deserialize, Default, TS)]
+#[derive(Deserialize, Default, TS)]
 #[ts(export)]
 pub struct TriggerWorkflowRequest {
     #[serde(default)]
@@ -3135,6 +3141,8 @@ pub struct TriggerWorkflowRequest {
     #[ts(optional)]
     pub step_agents: Option<StepAgents>,
 }
+
+crate::debug_without_secrets!(TriggerWorkflowRequest { state, project_id, step_agents; masked: variables });
 
 /// The agent one Agent step runs on for a single run (KT-1025). It replaces
 /// the step's agent, model and effort; every other step setting is kept.
@@ -3238,7 +3246,7 @@ pub struct WorkflowExportPageDataset {
     pub max_age_days: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct TestStepRequest {
     pub step: WorkflowStep,
@@ -3253,6 +3261,8 @@ pub struct TestStepRequest {
     #[serde(default)]
     pub dry_run: bool,
 }
+
+crate::debug_without_secrets!(TestStepRequest { step, project_id, mock_previous_output, dry_run; masked: mock_variables });
 
 #[cfg(all(test, feature = "full-tests"))]
 mod step_deserialization_tests {

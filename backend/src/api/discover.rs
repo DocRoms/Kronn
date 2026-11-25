@@ -4,7 +4,7 @@ use crate::models::*;
 use crate::AppState;
 use axum::{extract::State, Json};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum RepoSourceAuth {
     Token {
         token: String,
@@ -13,6 +13,21 @@ pub enum RepoSourceAuth {
     GitLabCli {
         host: Option<String>,
     },
+}
+
+// KT-2043 — the token never prints (`debug_without_secrets!` is for structs).
+impl std::fmt::Debug for RepoSourceAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::core::redact::Masked;
+        match self {
+            Self::Token { token, api_url } => f
+                .debug_struct("Token")
+                .field("token", &Masked(token))
+                .field("api_url", api_url)
+                .finish(),
+            Self::GitLabCli { host } => f.debug_struct("GitLabCli").field("host", host).finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

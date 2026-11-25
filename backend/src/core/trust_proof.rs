@@ -114,7 +114,7 @@ const ISSUER: &str = "Kronn";
 const RECOVERY_DOMAIN: &[u8] = b"kronn.trust-proof.recovery.v1";
 const CODE_ALPHABET: &[u8; 32] = b"abcdefghijkmnpqrstuvwxyz23456789";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Record {
     version: u32,
     /// AES-256-GCM of the base32 seed, base64.
@@ -134,6 +134,10 @@ struct Record {
     #[serde(default)]
     last_use: Option<Binding>,
 }
+crate::debug_without_secrets!(Record {
+    version, confirmed, enrolled_at, started, last_step, last_use;
+    masked: seed, recovery
+});
 
 /// The failure state, persisted so a restart does not clear a lockout.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

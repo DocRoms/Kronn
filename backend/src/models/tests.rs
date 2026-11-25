@@ -538,7 +538,7 @@ fn ws_message_presence_round_trip() {
     let msg = WsMessage::Presence {
         from_pseudo: "PeerAlpha".into(),
         from_invite_code: "kronn:PeerAlpha@100.64.1.5:3456".into(),
-        from_secret: String::new(),
+        from_secret: Default::default(),
         online: true,
     };
     let json = serde_json::to_string(&msg).unwrap();
@@ -588,7 +588,7 @@ fn ws_message_presence_offline() {
     let msg = WsMessage::Presence {
         from_pseudo: "PeerBeta".into(),
         from_invite_code: "kronn:PeerBeta@10.0.0.2:3456".into(),
-        from_secret: String::new(),
+        from_secret: Default::default(),
         online: false,
     };
     let json = serde_json::to_string(&msg).unwrap();

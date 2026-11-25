@@ -37,7 +37,7 @@ A human may also **decline**: settled, not pending. Never re-ask by republishing
 the key.
 See
 [`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#human-arbitration-cards).
-`[src: file: backend/src/db/discussion_questions.rs:54-66#DiscussionQuestionState]`
+`[src: file: backend/src/db/discussion_questions.rs:61-73#DiscussionQuestionState]`
 
 Use paths relative to the repo root.
 

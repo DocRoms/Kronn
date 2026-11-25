@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// A code, to exchange for a grant on one route and one object.
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct StrongGrantRequest {
     /// The HTTP method of the protected call, e.g. `DELETE`.
@@ -16,12 +16,14 @@ pub struct StrongGrantRequest {
     #[serde(default)]
     pub code: Option<String>,
 }
+crate::debug_without_secrets!(StrongGrantRequest { method, path; masked: code });
 
 /// A single-use grant for the one call it names.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct StrongGrant {
     /// Sent as `X-Kronn-Grant` on the protected call.
     pub grant: String,
     pub expires_in_secs: u32,
 }
+crate::debug_without_secrets!(StrongGrant { expires_in_secs; masked: grant });

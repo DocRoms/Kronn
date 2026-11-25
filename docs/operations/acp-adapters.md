@@ -310,7 +310,7 @@ project path never reuses that identifier.
 
 `agent_settings.tools` (`{cli: [...], kronn_internal: [...]}`) replaces what a
 workflow Agent step is launched with. Undeclared, the argv is unchanged.
-[src: file: backend/src/models/workflows.rs:1912-1923#StepTools]
+[src: file: backend/src/models/workflows.rs:1937-1948#StepTools]
 
 - Claude adapter: `--tools <cli list>` (empty string = no built-in tool),
   `--disable-slash-commands` (no skill listing), and an MCP config holding
@@ -321,7 +321,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
 - Codex adapter: the MCP override holds only `kronn-internal` with
   `enabled_tools`, or `mcp_servers={}`; `cli` is refused at save.
   [src: file: backend/src/acp/codex_adapter.rs:139-168#codex_project_mcp_override]
-  [src: file: backend/src/models/workflows.rs:1943-1964#validate]
+  [src: file: backend/src/models/workflows.rs:1951-1972#validate]
 - Native ACP agents: `session/new` offers only the narrowed bridge, or no
   server. [src: file: backend/src/agents/runner.rs:6240-6261#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools

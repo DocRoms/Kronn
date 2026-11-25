@@ -40,11 +40,13 @@ pub use crate::api::strong_confirm::CONFIRM_HEADER;
 /// bridge gate (a live bridge token), never by what the request says; the UI
 /// channel is a browser request (it carries an `Origin`), a label for the
 /// journal and not a privilege.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Confirm {
     channel: Channel,
     header: Option<String>,
 }
+
+crate::debug_without_secrets!(Confirm { channel; masked: header });
 
 impl Confirm {
     pub fn on(channel: Channel) -> Self {

@@ -76,7 +76,7 @@ pub struct PluginBundlePreview {
     pub minimum_passphrase_length: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct ExportPluginBundleRequest {
     pub config_ids: Vec<String>,
@@ -87,8 +87,12 @@ pub struct ExportPluginBundleRequest {
     #[serde(default)]
     pub confirmation: Option<String>,
 }
+crate::debug_without_secrets!(ExportPluginBundleRequest {
+    config_ids, include_values, confirmation;
+    masked: passphrase
+});
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct ImportPluginBundleRequest {
     pub content: String,
@@ -105,6 +109,11 @@ pub struct ImportPluginBundleRequest {
     #[ts(type = "Record<string, Record<string, string>>")]
     pub placeholder_values: BTreeMap<String, BTreeMap<String, String>>,
 }
+// A placeholder value is what the bundle left out: a key, a token.
+crate::debug_without_secrets!(ImportPluginBundleRequest {
+    content, accept_args_for;
+    masked: passphrase, placeholder_values
+});
 
 /// One plugin as the import would treat it, before anything is written.
 #[derive(Debug, Clone, Serialize, TS)]
@@ -139,7 +148,7 @@ pub struct ImportBundlePreview {
     pub plugins: Vec<ImportPreviewPlugin>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PortablePluginConfig {
     pub source_config_id: String,
@@ -156,6 +165,8 @@ pub struct PortablePluginConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub placeholders: Vec<ExportPlaceholder>,
 }
+
+crate::debug_without_secrets!(PortablePluginConfig { source_config_id, server, label, env_keys, args_override, was_global, include_general, preferred_interface, placeholders; masked: values });
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]

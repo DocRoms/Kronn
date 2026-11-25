@@ -133,7 +133,7 @@ pub struct AgentResumeJobView {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct StartAgentBackgroundJobRequest {
     /// A user-saved, shell-free Quick Exec. Its definition is snapshotted when
@@ -146,6 +146,8 @@ pub struct StartAgentBackgroundJobRequest {
     pub dedupe_key: String,
     pub task_execution_id: Option<String>,
 }
+
+crate::debug_without_secrets!(StartAgentBackgroundJobRequest { quick_exec_id, reason, dedupe_key, task_execution_id; masked: variables });
 
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]

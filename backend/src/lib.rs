@@ -75,6 +75,9 @@ pub mod core {
     pub mod media_probe;
     pub mod quick_exec_templates;
     #[cfg(all(test, feature = "full-tests"))]
+    #[path = "redact_debug_test.rs"]
+    pub mod redact_debug_test;
+    #[cfg(all(test, feature = "full-tests"))]
     #[path = "registry_test.rs"]
     pub mod registry_test;
     pub mod review_payload;

@@ -148,12 +148,14 @@ impl ApiSpec {
 /// Fixed request header declared on an API plugin. `value` is a literal
 /// or contains `${ENV.KEY}` references to the config's fields, resolved
 /// server-side so the value never reaches agent prompts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ApiDefaultHeader {
     pub name: String,
     pub value: String,
 }
+
+crate::debug_without_secrets!(ApiDefaultHeader { name; masked: value });
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -842,7 +844,7 @@ pub struct UpdateMcpContextRequest {
 
 // ─── MCP API requests ────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct CreateMcpConfigRequest {
     pub server_id: String,
@@ -864,6 +866,8 @@ pub struct CreateMcpConfigRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_spec: Option<CustomApiPayload>,
 }
+
+crate::debug_without_secrets!(CreateMcpConfigRequest { server_id, label, args_override, is_global, project_ids, host_sync, custom_spec; masked: env });
 
 /// Free-form spec for a user-defined API plugin (the "Custom API" flow).
 /// Captured from the frontend form; the backend turns it into an
@@ -909,14 +913,16 @@ pub struct CustomApiPayload {
     pub test_endpoint: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CustomApiField {
     pub label: String,
     pub value: String,
 }
 
-#[derive(Debug, Deserialize, TS)]
+crate::debug_without_secrets!(CustomApiField { label; masked: value });
+
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct UpdateMcpConfigRequest {
     pub label: Option<String>,
@@ -928,6 +934,8 @@ pub struct UpdateMcpConfigRequest {
     pub host_sync: Option<HostSyncMode>,
     pub preferred_interface: Option<PluginInterface>,
 }
+
+crate::debug_without_secrets!(UpdateMcpConfigRequest { label, args_override, is_global, include_general, host_sync, preferred_interface; masked: env });
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]

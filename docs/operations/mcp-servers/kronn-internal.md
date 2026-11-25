@@ -930,7 +930,7 @@ catalogue does not pay for a long manual.
 `[src: file: backend/scripts/disc-introspection-mcp.py:12246-12252#first_contact]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:469-474#rich_output_notice]`
-`[src: file: backend/src/api/disc_invite.rs:599-729#join_next_steps]`
+`[src: file: backend/src/api/disc_invite.rs:626-756#join_next_steps]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:12089-12198#initialize]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4493-4509#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4591-4657#_attach_files_to_appended_message]`
@@ -996,14 +996,14 @@ A recorded arbitration answer does not by itself restart its originating
 workflow: without a declared `resume`, no follow-up run is launched. When
 debugging a failed run, compare its output with the answer timestamps; the
 current decision history does not prove the earlier result incorporated it.
-[src: file: backend/src/db/discussion_questions.rs:886-945#claim_resume]
+[src: file: backend/src/db/discussion_questions.rs:893-952#claim_resume]
 
 Question `resume` starts a new run of the declared workflow, once per card;
 it does not resume a failed run in place or wait for every other question to
 be resolved. The target workflow must check its remaining decisions and
 domain prerequisites before proceeding. Workflow concurrency limits already
 support atomic admission per launch-variable key, within that workflow.
-[src: file: backend/src/db/discussion_questions.rs:886-945#claim_resume]
+[src: file: backend/src/db/discussion_questions.rs:893-952#claim_resume]
 [src: file: backend/src/api/discussion_questions.rs:64-135#launch_question_resume]
 [src: file: backend/src/workflows/concurrency.rs:179-217#insert_run_within_limit]
 
@@ -1223,7 +1223,7 @@ portable discussion exports include their content and attachments like any
 other visible timeline message.
 
 [src: file: backend/src/api/disc_introspection.rs:584-657#disc_note_list]
-[src: file: backend/src/api/disc_invite.rs:121-123#note_count] [src: file: backend/src/api/disc_invite.rs:413-418#note_count]
+[src: file: backend/src/api/disc_invite.rs:130-132#note_count] [src: file: backend/src/api/disc_invite.rs:439-444#note_count]
 [src: file: backend/src/api/disc_source.rs:1793-1880#disc_load_other]
 [src: file: backend/src/api/discussions/messaging.rs:441-518#MessageChannel]
 [src: file: backend/src/db/discussions.rs:1441-1481#insert_note_message]
@@ -1280,7 +1280,7 @@ When a user gives you a `kr-join-…` invite token :
    turn asks the room); `awareness` is context, not a turn to answer.
 6. Call `disc_leave()` when the task is done or the user says stop.
 
-[src: file: backend/src/api/disc_invite.rs:599-729#join_next_steps]
+[src: file: backend/src/api/disc_invite.rs:626-756#join_next_steps]
 
 The Python catalogue distinguishes bounded work from idle listening, and one
 shared orientation supplies the join manual, wait manual and initialize text.
@@ -1318,7 +1318,7 @@ durable event id and retain the revised transcript id separately in
 `target_message_id`.
 [src: file: backend/scripts/disc-introspection-mcp.py:4037-4057#_ack_pending_read_cursors] [src: file: backend/scripts/disc-introspection-mcp.py:7210-7227#delivered_message_ids]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:10799-10847#test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor]
-[src: file: backend/src/api/disc_invite.rs:1188-1250#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1269-1277#withheld_by_routing]
+[src: file: backend/src/api/disc_invite.rs:1188-1250#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1295-1303#withheld_by_routing]
 
 Human turns use typed identities. `discussion_agent` means the configured
 native agent, `agent` means a punctual native invocation, and `cli` means one

@@ -249,7 +249,7 @@ those tokens ahead of the call.
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
   [src: file: backend/src/core/token_checks.rs:316-334#spawn_scheduler]
-  [src: file: backend/src/lib.rs:2286-2288#check_token]
+  [src: file: backend/src/lib.rs:2290-2292#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
   OAuth / token-exchange refresh included), with the 15 s timeout of the

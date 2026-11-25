@@ -45,7 +45,7 @@ use crate::workflows::api_call_executor::{
 use crate::workflows::template::TemplateContext;
 use crate::AppState;
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentApiCallRequest {
     /// `KRONN_DISCUSSION_ID` of the disc making the call, when the
@@ -120,6 +120,8 @@ pub struct AgentApiCallRequest {
     #[ts(skip)]
     pub caller: Option<crate::core::api_access::ApiCaller>,
 }
+
+crate::debug_without_secrets!(AgentApiCallRequest { disc_id, project_id, api_plugin_slug, api_config_id, quick_api_id, endpoint_path, method, path_params, query, body, extract, workflow_run_id, agent, caller; masked: headers });
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
