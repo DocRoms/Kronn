@@ -12,6 +12,10 @@ use crate::workflows::shadow::{self, ShadowStatus};
 #[path = "step_shadow_runs/merge_runs.rs"]
 mod merge_runs;
 
+// KT-2029 — a restart never rewrites the main execution.
+#[path = "step_shadow_runs/restart.rs"]
+mod restart;
+
 /// Answers a prompt as scripted and records the prompt it received.
 struct Scripted {
     prompts: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
