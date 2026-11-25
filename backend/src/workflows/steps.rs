@@ -1219,6 +1219,37 @@ pub async fn resolve_step_connection(
     Ok(Some(connection))
 }
 
+/// Why a step on a named HTTP connection (`AgentType::Custom`) cannot start,
+/// or `None` when it can (KT-2030). `Custom` is no installable agent: the
+/// step can run when its connection exists for this agent, has an endpoint
+/// (both checked by `resolve_step_connection`, as dispatch does) and holds
+/// the key its kind of connection needs. The reason names the step, the
+/// connection and what is missing.
+pub async fn named_connection_refusal(
+    step: &WorkflowStep,
+    catalog_db: &crate::db::Database,
+    tokens: &TokensConfig,
+) -> Option<String> {
+    let name = &step.name;
+    match resolve_step_connection(step, Some(catalog_db)).await {
+        Ok(None) => Some(format!(
+            "'{name}' runs on a named HTTP connection but names no connection: choose one for this step in the workflow"
+        )),
+        Err(error) => Some(format!("'{name}': {error}")),
+        Ok(Some(connection)) => {
+            let has_key = tokens
+                .active_key_for(&connection.credential_slug)
+                .is_some_and(|key| !key.trim().is_empty());
+            (!has_key && connection.origin_preset.requires_credential()).then(|| {
+                format!(
+                    "'{name}': connection \"{}\" ({}) has no API key: add it to the connection in Settings",
+                    connection.display_name, connection.id
+                )
+            })
+        }
+    }
+}
+
 async fn preflight_workflow_launch(
     catalog_db: Option<&crate::db::Database>,
     #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))] work_dir: &str,
@@ -3550,6 +3581,61 @@ mod http_native_tool_step_tests {
             keys: Vec::new(),
             disabled_overrides: Vec::new(),
         }
+    }
+
+    // KT-2030: the run preflight reuses dispatch's resolution of a named
+    // connection, and adds the key its kind of connection needs.
+    #[tokio::test]
+    async fn named_connection_refusal_names_the_step_the_connection_and_what_is_missing() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let mut litellm = named_connection("conn-litellm", "http://127.0.0.1:1".into(), "m");
+        litellm.origin_preset = ExternalApiConnectionPreset::LiteLlm;
+        let mut no_endpoint = named_connection("conn-blank", "http://127.0.0.1:1".into(), "m");
+        no_endpoint.endpoint = None;
+        let mut no_key = named_connection("conn-or-nokey", "http://127.0.0.1:1".into(), "m");
+        no_key.origin_preset = ExternalApiConnectionPreset::OpenRouter;
+        let mut open_router = named_connection("conn-or", "http://127.0.0.1:1".into(), "m");
+        open_router.origin_preset = ExternalApiConnectionPreset::OpenRouter;
+        let keyless = named_connection("conn-local", "http://127.0.0.1:1".into(), "m");
+        db.with_conn(move |conn| {
+            for connection in [&litellm, &no_endpoint, &no_key, &open_router, &keyless] {
+                crate::db::external_api_connections::insert(conn, connection)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut tokens = empty_tokens();
+        tokens.keys.push(crate::models::ApiKey {
+            id: "k".into(),
+            name: "k".into(),
+            provider: "credential-conn-or".into(),
+            value: "fixture".into(),
+            active: true,
+        });
+        let refusal = |id: &str| {
+            let step = named_custom_step(id, None);
+            let (db, tokens) = (&db, &tokens);
+            async move { named_connection_refusal(&step, db, tokens).await }
+        };
+
+        let other_agent = refusal("conn-litellm").await.unwrap();
+        assert!(
+            other_agent.starts_with("'named-http-step':"),
+            "{other_agent}"
+        );
+        assert!(other_agent.contains("conn-litellm"), "{other_agent}");
+        assert!(other_agent.contains("no longer matches"), "{other_agent}");
+        let blank = refusal("conn-blank").await.unwrap();
+        assert!(blank.contains("conn-blank has no HTTP endpoint"), "{blank}");
+        let no_key = refusal("conn-or-nokey").await.unwrap();
+        assert!(
+            no_key.contains("\"conn-or-nokey\" (conn-or-nokey) has no API key"),
+            "{no_key}"
+        );
+        // A key present, or a kind of connection that needs none: it can run.
+        assert_eq!(refusal("conn-or").await, None);
+        assert_eq!(refusal("conn-local").await, None);
     }
 
     #[tokio::test]

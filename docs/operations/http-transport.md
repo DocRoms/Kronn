@@ -225,7 +225,7 @@ behaviour is the same as for a joined CLI; see
   [src: file: backend/src/api/discussions/orchestration.rs:644-652#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:983-991#checked_launch_connection]
   [src: file: backend/src/workflows/steps.rs:1180-1220#resolve_step_connection]
-  [src: file: backend/src/workflows/steps.rs:1222-1275#preflight_workflow_launch]
+  [src: file: backend/src/workflows/steps.rs:1253-1306#preflight_workflow_launch]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the

@@ -129,11 +129,11 @@ synthesis: [src: file: backend/src/api/discussions/orchestration.rs:983-991#chec
 Workflow Agent steps: the connection resolver
 [src: file: backend/src/workflows/steps.rs:1180-1220#resolve_step_connection],
 the run-start check
-[src: file: backend/src/workflows/runner.rs:2123-2171#resolve_step_connection],
+[src: file: backend/src/workflows/runner.rs:2144-2192#resolve_step_connection],
 the check immediately before dispatch
 [src: file: backend/src/workflows/steps.rs:412-424#preflight_workflow_launch]
 and the preflight on the `http:<connection-id>` target and effective model
-[src: file: backend/src/workflows/steps.rs:1222-1275#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1253-1306#preflight_workflow_launch]
 
 ## Sources
 
