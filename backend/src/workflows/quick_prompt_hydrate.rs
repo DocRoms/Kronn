@@ -137,7 +137,15 @@ pub async fn hydrate_step_from_quick_prompt(
     // 0.8.10 — the QP may pin an explicit model (agent_settings.model). Copy it
     // onto the step when the step doesn't already set one, so a QP-driven step
     // runs on the QP's model (consumed via runner::effective_model_flag).
-    let qp_model = qp.agent_settings.as_ref().and_then(|s| s.model.clone());
+    // KT-2057 — the QP's model, reasoning effort and connection belong to the
+    // QP's agent: a step that runs another agent (the step's agent wins, see
+    // above) takes none of them, as a batch item does (`connection_for_batch_item`).
+    let same_agent = step.agent == qp.agent;
+    let qp_model = qp
+        .agent_settings
+        .as_ref()
+        .and_then(|s| s.model.clone())
+        .filter(|_| same_agent);
     // KT-646 — same rule as `qp_model`: copy the QP's explicit reasoning
     // effort onto the step when the step doesn't already set one, so a
     // QP-driven step actually carries the effort the QP author picked
@@ -145,8 +153,9 @@ pub async fn hydrate_step_from_quick_prompt(
     let qp_effort = qp
         .agent_settings
         .as_ref()
-        .and_then(|s| s.reasoning_effort.clone());
-    let qp_connection = qp.connection_id.clone();
+        .and_then(|s| s.reasoning_effort.clone())
+        .filter(|_| same_agent);
+    let qp_connection = qp.connection_id.clone().filter(|_| same_agent);
     match step.agent_settings.as_mut() {
         Some(settings) => {
             if settings.tier.is_none() {
@@ -564,6 +573,40 @@ mod tests {
             Some("conn-on-step".to_string()),
             "an explicit step connection must win, like model and tier already do"
         );
+    }
+
+    #[tokio::test]
+    async fn a_step_running_another_agent_takes_neither_the_qp_connection_nor_its_model() {
+        // KT-2057 — the step's agent wins; the QP's connection and model are
+        // that other agent's, so carrying them over would run the step against
+        // a connection (and its key) it never named.
+        let db = Database::open_in_memory().unwrap();
+        seed_connection(&db, "conn-of-the-qp").await;
+        let mut qp = make_qp("qp-other-agent", "x");
+        qp.agent = AgentType::Custom;
+        qp.connection_id = Some("conn-of-the-qp".to_string());
+        qp.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
+            tools: None,
+            model: Some("model-of-the-qp".to_string()),
+            tier: None,
+            reasoning_effort: Some("xhigh".to_string()),
+            max_tokens: None,
+            connection_id: None,
+        });
+        let qp_id = seed_qp(&db, qp).await;
+        let mut step = blank_step(Some(qp_id));
+
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
+            .await
+            .unwrap();
+
+        assert_eq!(step.agent, AgentType::ClaudeCode);
+        let settings = step.agent_settings.as_ref().expect("tier still hydrated");
+        assert_eq!(settings.connection_id, None);
+        assert_eq!(settings.model, None);
+        assert_eq!(settings.reasoning_effort, None);
+        assert_eq!(settings.tier, Some(ModelTier::Reasoning));
     }
 
     #[tokio::test]

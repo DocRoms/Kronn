@@ -186,6 +186,92 @@ fn connection_debug_masks_the_key_and_the_endpoint_userinfo() {
     assert!(printed.contains("media.invalid"), "{printed}");
 }
 
+/// KT-2057: endpoints are stored as typed, so `Debug` masks a key in every form
+/// one can take: userinfo without `://`, a query, a fragment.
+#[test]
+fn connection_debug_masks_every_form_of_an_endpoint_secret() {
+    let secret = "fake7endpoint8secret";
+    for (endpoint, kept) in [
+        (
+            format!("admin:{secret}@proxy.invalid:4000/v1"),
+            "***@proxy.invalid:4000/v1",
+        ),
+        (
+            format!("https:/admin:{secret}@proxy.invalid/v1"),
+            "***@proxy.invalid/v1",
+        ),
+        (
+            format!("https:\\\\admin:{secret}@proxy.invalid/v1"),
+            "***@proxy.invalid/v1",
+        ),
+        // An `@` past the first `?` / `#`: a `?` in a password or an `@` in
+        // the query, nothing after the scheme is printed.
+        (
+            format!("https://admin:p?{secret}@proxy.invalid/v1"),
+            "https://***",
+        ),
+        (
+            format!("https://api.invalid/v1?user=alice@corp.invalid&api_key={secret}"),
+            "https://***",
+        ),
+        (
+            format!("https://proxy.invalid/cb#state=a@b&access_token={secret}"),
+            "https://***",
+        ),
+        (
+            format!("HTTPS://u:{secret}@proxy.invalid/v1"),
+            "HTTPS://***@proxy.invalid/v1",
+        ),
+        (
+            format!("http://[::1]:4000/v1?key={secret}"),
+            "http://[::1]:4000/v1?***",
+        ),
+        (
+            format!("https://proxy.invalid/v1?api_key={secret}"),
+            "https://proxy.invalid/v1?***",
+        ),
+        (
+            format!("https://media.invalid/v1beta?key={secret}&alt=sse"),
+            "https://media.invalid/v1beta?***",
+        ),
+        (
+            format!("https://proxy.invalid/cb#access_token={secret}"),
+            "https://proxy.invalid/cb#***",
+        ),
+        (
+            format!("https://u:{secret}@proxy.invalid/v1?x=1"),
+            "https://***@proxy.invalid/v1?***",
+        ),
+    ] {
+        assert_eq!(
+            crate::core::redact::mask_endpoint_secrets(&endpoint),
+            kept,
+            "{endpoint}"
+        );
+        let runtime = ExternalHttpRuntime {
+            display_name: "Proxy".into(),
+            mention_alias: "proxy".into(),
+            endpoint: endpoint.clone(),
+            tools_enabled: None,
+            api_key: None,
+        };
+        let printed = format!("{runtime:?}");
+        assert!(!printed.contains(secret), "{endpoint} -> {printed}");
+        assert!(printed.contains(kept), "{endpoint} -> {printed}");
+
+        let mut named = connection("proxy", "proxy-slot", ExternalApiConnectionPreset::Other);
+        named.endpoint = Some(endpoint.clone());
+        named.media_endpoint = Some(endpoint.clone());
+        let printed = format!("{named:?}");
+        assert!(!printed.contains(secret), "{endpoint} -> {printed}");
+        assert!(printed.contains(kept), "{endpoint} -> {printed}");
+    }
+    // Nothing to mask: printed as written.
+    for clean in ["https://proxy.invalid:4000/v1", ""] {
+        assert_eq!(crate::core::redact::mask_endpoint_secrets(clean), clean);
+    }
+}
+
 #[test]
 fn connection_key_connection_with_its_own_key_sends_that_key() {
     let tokens = tokens(vec![

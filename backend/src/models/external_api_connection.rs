@@ -42,8 +42,8 @@ pub struct ExternalApiConnection {
     pub tools_enabled: Option<bool>,
 }
 
-// Every field as written, except the userinfo of the endpoints (KT-2055): an
-// endpoint may carry `user:pass@`.
+// Every field as written, except the userinfo, query and fragment of the
+// endpoints (KT-2055, KT-2057): an endpoint may carry `user:pass@` or `?key=`.
 impl std::fmt::Debug for ExternalApiConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
@@ -66,7 +66,7 @@ impl std::fmt::Debug for ExternalApiConnection {
         } = self;
         let masked = |url: &Option<String>| {
             url.as_deref()
-                .map(|url| crate::core::redact::mask_url_userinfo(url).into_owned())
+                .map(|url| crate::core::redact::mask_endpoint_secrets(url).into_owned())
         };
         f.debug_struct("ExternalApiConnection")
             .field("id", id)

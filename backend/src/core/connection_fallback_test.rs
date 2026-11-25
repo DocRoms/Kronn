@@ -203,3 +203,86 @@ fn the_rows_round_trip_through_the_config_file() {
     let old: crate::models::AppConfig = toml::from_str(&none).unwrap();
     assert!(old.agents.connection_fallbacks.is_empty());
 }
+
+fn text_connection(
+    id: &str,
+    preset: crate::models::ExternalApiConnectionPreset,
+) -> crate::models::ExternalApiConnection {
+    let now = chrono::Utc::now();
+    crate::models::ExternalApiConnection {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        mention_alias: id.to_string(),
+        endpoint: Some("https://api.example.test/v1".into()),
+        credential_slug: format!("credential-{id}"),
+        origin_preset: preset,
+        economy_model: None,
+        default_model: Some("model".into()),
+        reasoning_model: None,
+        created_at: now,
+        updated_at: now,
+        image_model: None,
+        video_model: None,
+        decision_model: None,
+        tools_enabled: None,
+        media_endpoint: None,
+    }
+}
+
+fn key_for(slug: &str) -> crate::models::ApiKey {
+    crate::models::ApiKey {
+        id: slug.into(),
+        name: slug.into(),
+        provider: slug.into(),
+        value: "fixture".into(),
+        active: true,
+    }
+}
+
+// KT-2057 — a link whose preset needs a key it does not hold is skipped, as a
+// step on that connection is refused; a keyless preset is still taken.
+#[tokio::test]
+async fn the_text_walk_skips_a_link_missing_the_key_its_preset_needs() {
+    use crate::models::ExternalApiConnectionPreset::{OpenRouter, Other};
+    let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+    let connections = [
+        text_connection("conn-b", OpenRouter),
+        text_connection("conn-c", OpenRouter),
+        text_connection("conn-local", Other),
+    ];
+    db.with_conn(move |conn| {
+        for connection in &connections {
+            crate::db::external_api_connections::insert(conn, connection)?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let mut config = crate::core::config::default_config();
+    let mode = FallbackMode::Standard;
+    set_row(&mut config.agents, "conn-a", mode, Some(to("conn-b")));
+    set_row(&mut config.agents, "conn-b", mode, Some(to("conn-c")));
+    set_row(&mut config.agents, "conn-x", mode, Some(to("conn-local")));
+    config.tokens.keys.push(key_for("credential-conn-c"));
+    let config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
+    let state =
+        crate::AppState::new_defaults(config.clone(), db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+    let next = |owner: &'static str| {
+        let state = &state;
+        async move {
+            next_text_target(state, owner, mode)
+                .await
+                .map(|(connection, _)| connection.id)
+        }
+    };
+    assert_eq!(next("conn-a").await.as_deref(), Some("conn-c"));
+    assert_eq!(next("conn-x").await.as_deref(), Some("conn-local"));
+    config
+        .write()
+        .await
+        .tokens
+        .keys
+        .push(key_for("credential-conn-b"));
+    assert_eq!(next("conn-a").await.as_deref(), Some("conn-b"));
+}
