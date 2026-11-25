@@ -744,13 +744,20 @@ async fn run_with(
 
     let stdout_text = whole_lines(&stdout_kept, stdout_total);
     let stderr_text = whole_lines(&stderr_kept, stderr_total);
-    let extracted = summarise(
-        spec.summariser,
-        &stdout_text,
-        &stderr_text,
-        status,
-        findings_complete,
-    );
+    // KT-2044: `summarise` redacts both streams whole (up to the artifact cap
+    // each), CPU work that stays off the async workers.
+    let summariser = spec.summariser;
+    let extracted = tokio::task::spawn_blocking(move || {
+        summarise(
+            summariser,
+            &stdout_text,
+            &stderr_text,
+            status,
+            findings_complete,
+        )
+    })
+    .await
+    .context("summarising the output of a Quick Exec run")?;
 
     let artifact = match artifact_dir {
         Some(dir) => write_artifact(dir, &stdout_kept, &stderr_kept, truncated).ok(),
@@ -836,6 +843,21 @@ pub fn summarise(
     // KT-2035: why the first failing tests failed (a panic and its assertion,
     // an `AssertionError` and its diff), not only their names.
     let mut details = None;
+    // KT-2044 — each stream is redacted whole, once, before any line window or
+    // per-line pass below: `{:#?}` prints a field's name and its value on two
+    // lines (`password: Some(` then `"…",`), and a window that starts between
+    // them (the generic tail, a first error line) would keep the value without
+    // the name that lets the redaction find it. The passes below stay, cheap
+    // and idempotent, and so does the final pass over the whole summary.
+    // `Collected` never shows its stdout, only its size: only stderr is read.
+    let redacted_stdout;
+    let stdout = if summariser == Summariser::Collected {
+        stdout
+    } else {
+        redacted_stdout = redact(stdout);
+        redacted_stdout.as_str()
+    };
+    let stderr = &redact(stderr);
 
     match summariser {
         Summariser::CargoTest => {
@@ -998,8 +1020,9 @@ pub fn summarise(
     // KT-2039 — the one choke point: the summary is stored as a validation's
     // output, sent to the worker's and the principal's rooms, returned by Quick
     // Exec and posted by agent resume jobs, so it leaves here redacted whole
-    // (failing names, a collector's stderr, every line). The parts cut above
-    // were redacted before their cut; this pass is before the last one.
+    // (failing names, a collector's stderr, every line). The streams were
+    // redacted whole before any part was cut from them (KT-2044), and each part
+    // again before its own cut; this pass is before the last one.
     let summary = truncate_on_char_boundary(redact(&summary), SUMMARY_MAX_BYTES);
 
     Extracted {

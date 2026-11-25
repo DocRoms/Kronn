@@ -660,8 +660,9 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     // `Option<String>` (`api_key: Some("…")`) and `{:#?}` across lines
     // (`password: Some(\n    "…",\n)`), or as code builds a secret type
     // (`token = Secret::new('…')`). The call is kept; the bare pattern below then
-    // leaves it alone ([`call_of_a_masked_value`]).
-    let call = r"[a-z_][a-z0-9_]*(?:::[a-z_][a-z0-9_]*)*\(\s*";
+    // leaves it alone ([`call_of_a_masked_value`]). KT-2044: calls nest
+    // (`Some(Token("…"))`, `Secret::new(Box::new('…'))`), so the opener repeats.
+    let call = r"(?:[a-z_][a-z0-9_]*(?:::[a-z_][a-z0-9_]*)*\(\s*)+";
     let wrapped_dq = format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call})"((?:\\[\s\S]|[^"\\])+)""#);
     let wrapped_sq = format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call})'((?:\\[\s\S]|[^'\\])+)'"#);
     let wrapped_escaped =
@@ -679,6 +680,15 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     // The escaped-quote form (`\"…`) lives in JSON text, so the string it opens
     // may end at its own bare closing quote: stop there, and keep that quote.
     let truncated_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\?$|")"#);
+    // KT-2044 — the same inside a call (`password: Some("…` at the end of a
+    // capped stream or block): the call and the opening quote are kept.
+    let truncated_wrapped = |quote: &str| {
+        format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call}{quote})((?:\\[\s\S]|[^{quote}\\])+\\?|\\)$"#)
+    };
+    let truncated_wrapped_dq = truncated_wrapped("\"");
+    let truncated_wrapped_sq = truncated_wrapped("'");
+    let truncated_wrapped_escaped =
+        format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call}\\")((?:[^\\"]|\\[^"])+)(\\?$|")"#);
     let unquoted = format!(
         r#"(?i)(\b{name}\b\s*[:=]\s*(?:\\")?)((?:[^\s\\"'`,;]|\\[^\s"]|\\"[^\s\\"'`,;}}\])])+)"#
     );
@@ -690,6 +700,11 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     // KT-2039 — the same with single quotes, as Node's `util.inspect` prints an
     // object (`{ 'x-api-key': '…' }`) and Python a dict.
     let json_key_sq = format!(r#"(?i)('{name}'\s*:\s*)'((?:\\[\s\S]|[^'\\])+)'"#);
+    // KT-2044 — a key in one quote and its value in the other: `util.inspect`
+    // and Python's `repr` print `{ 'x-api-key': "it's…" }` when the value holds
+    // a `'`, and a JS literal can read `{ "token": '…' }`.
+    let json_key_sq_dq = format!(r#"(?i)('{name}'\s*:\s*)"((?:\\[\s\S]|[^"\\])+)""#);
+    let json_key_dq_sq = format!(r#"(?i)("{name}"\s*:\s*)'((?:\\[\s\S]|[^'\\])+)'"#);
     let leave_call: Option<LeaveMatch> = Some(call_of_a_masked_value);
     [
         (quoted_dq, "$1\"***REDACTED***\"", Gate::Assignment(Some(b'"')), None),
@@ -703,10 +718,15 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         (truncated_sq, "$1'***REDACTED***", Gate::Assignment(Some(b'\'')), None),
         (truncated_bt, "$1`***REDACTED***", Gate::Assignment(Some(b'`')), None),
         (truncated_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\')), None),
+        (truncated_wrapped_dq, "$1***REDACTED***", Gate::WrappedAssignment, None),
+        (truncated_wrapped_sq, "$1***REDACTED***", Gate::WrappedAssignment, None),
+        (truncated_wrapped_escaped, "$1***REDACTED***$3", Gate::WrappedAssignment, None),
         (unquoted, "$1***REDACTED***", Gate::Assignment(None), leave_call),
         (json_key_dq, "$1\"***REDACTED***\"", Gate::QuotedKey(b'"', b'"'), None),
         (json_key_escaped, "$1***REDACTED***$3", Gate::QuotedKey(b'"', b'\\'), None),
         (json_key_sq, "$1'***REDACTED***'", Gate::QuotedKey(b'\'', b'\''), None),
+        (json_key_sq_dq, "$1\"***REDACTED***\"", Gate::QuotedKey(b'\'', b'"'), None),
+        (json_key_dq_sq, "$1'***REDACTED***'", Gate::QuotedKey(b'"', b'\''), None),
     ]
     .into_iter()
     .filter_map(|(src, repl, gate, leave)| {
@@ -725,12 +745,24 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     .collect()
 });
 
-/// KT-2039 — whether a bare-value match (group 2) is only the call that wraps
-/// a quoted value the wrapped patterns already masked (`Some(` before
-/// `"***REDACTED***"`, or `Some(\"***REDACTED***` inside a printed string): it
-/// is then left as written, so the mask reads `api_key: Some("***REDACTED***")`
-/// rather than swallowing the `Some(`. A call whose value is not masked yet (cut
-/// before its closing quote) is masked as before.
+/// KT-2039 / KT-2044 — whether a bare-value match (group 2) is only the calls
+/// that wrap a quoted value the wrapped patterns already masked: it is then left
+/// as written, so the mask reads `api_key: Some("***REDACTED***")` rather than
+/// swallowing the `Some(`.
+///
+/// That is the case when group 2 is one or more call openers (`Some(`,
+/// `Some(Token(`, `Secret::new(`) and either
+/// - it ends with the escaped opening quote and the mask (`Some(\"***REDACTED***`,
+///   inside a printed string), followed by the closing quote (`\"`, or the bare
+///   `"` of the string around it) or by the end of the text (a value cut before
+///   its closing quote);
+/// - or the text after it, past whitespace and any further openers (`{:#?}`
+///   puts each on its own line), is a closed mask (`"***REDACTED***"`) or a mask
+///   cut at the end of the text (`"***REDACTED***`, left by the patterns of a
+///   wrapped value cut before its closing quote).
+///
+/// Anything else after the call (a value not masked, nothing at all) has the
+/// call masked with it.
 fn call_of_a_masked_value(captures: &regex_lite::Captures<'_>, text: &str) -> bool {
     const MASKED: &[&str] = &[
         "\"***REDACTED***\"",
@@ -738,27 +770,72 @@ fn call_of_a_masked_value(captures: &regex_lite::Captures<'_>, text: &str) -> bo
         "`***REDACTED***`",
         "\\\"***REDACTED***\\\"",
     ];
+    const MASKED_TO_THE_END: &[&str] = &["\"***REDACTED***", "'***REDACTED***"];
     let (Some(value), Some(matched)) = (captures.get(2), captures.get(0)) else {
         return false;
     };
+    let after = &text[matched.end()..];
     let (call, masked_inside) = match value.as_str().strip_suffix("\\\"***REDACTED***") {
-        Some(call) => (call, text[matched.end()..].starts_with("\\\"")),
+        Some(call) => (
+            call,
+            after.starts_with('"')
+                || after.starts_with("\\\"")
+                || after.is_empty()
+                || after == "\\",
+        ),
         None => (value.as_str(), false),
     };
-    let Some(path) = call.trim_end_matches(is_regex_space_char).strip_suffix('(') else {
-        return false;
-    };
-    let is_call = path.split("::").all(|part| {
-        part.chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    });
-    if !is_call {
+    let (after_call, openers) = past_call_openers(call);
+    if openers == 0 || !after_call.is_empty() {
         return false;
     }
-    let rest = text[matched.end()..].trim_start_matches(is_regex_space_char);
-    masked_inside || MASKED.iter().any(|masked| rest.starts_with(masked))
+    if masked_inside {
+        return true;
+    }
+    let (rest, _) = past_call_openers(after.trim_start_matches(is_regex_space_char));
+    MASKED.iter().any(|masked| rest.starts_with(masked)) || MASKED_TO_THE_END.contains(&rest)
+}
+
+/// `text` past the call openers it starts with (`Some(`, `Secret::new(`, each
+/// with the whitespace after it), and how many there were.
+fn past_call_openers(mut text: &str) -> (&str, usize) {
+    let mut openers = 0;
+    loop {
+        let path = call_path_len(text);
+        if path == 0 || !text[path..].starts_with('(') {
+            return (text, openers);
+        }
+        text = text[path + 1..].trim_start_matches(is_regex_space_char);
+        openers += 1;
+    }
+}
+
+/// Length of the call path `text` starts with (`Some`, `Secret::new`): ASCII
+/// identifiers joined by `::`, as the `call` of [`ASSIGNMENT`] reads them; 0
+/// when it starts with none.
+fn call_path_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let identifier_end = |from: usize| -> Option<usize> {
+        let first = bytes.get(from)?;
+        if !(first.is_ascii_alphabetic() || *first == b'_') {
+            return None;
+        }
+        let length = bytes[from..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+            .count();
+        Some(from + length)
+    };
+    let Some(mut end) = identifier_end(0) else {
+        return 0;
+    };
+    while text[end..].starts_with("::") {
+        match identifier_end(end + 2) {
+            Some(next) => end = next,
+            None => break,
+        }
+    }
+    end
 }
 
 fn is_regex_space_char(c: char) -> bool {
@@ -1172,8 +1249,9 @@ fn name_before_value(prefix: &str) -> &str {
     };
     let mut prefix = &prefix[..separators(prefix)];
     // KT-2039: `api_key: Some(`, `token = Secret::new(`: the call that wraps the
-    // value is not the name.
-    if let Some(open) = prefix.strip_suffix('(') {
+    // value is not the name, nor are the calls around it (KT-2044:
+    // `api_key: Some(Token(`).
+    while let Some(open) = prefix.strip_suffix('(') {
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         let mut call = open.trim_end_matches(word);
         while let Some(path) = call.strip_suffix("::") {
@@ -3138,7 +3216,7 @@ mod tests {
             RAW_PATTERNS.len(),
             "a pattern failed to compile"
         );
-        assert_eq!(ASSIGNMENT.len(), 15);
+        assert_eq!(ASSIGNMENT.len(), 20);
         assert!(
             matches!(&*VENDOR_PREFILTER, Prefilter::Triples(_)),
             "a gate literal shorter than three bytes turns the vendor prefilter off"
@@ -3242,6 +3320,14 @@ mod tests {
             "nvapi-Fake0Nvidia1Key2Value3Abcdef4",
             "rediss://default:Fake5Redis6Pass@cache.internal",
             "redis://:Fake5Redis6Pass@cache.internal",
+            // KT-2044
+            r#"api_key: Some(Token("Fake1Nest2Value3"))"#,
+            "password: Some(\n    Token(\n        \"Fake1Nest2Value3\",",
+            r#"password: Some("Fake2Cut3Value4"#,
+            "token = Secret::new('fake-cut-hunter2",
+            r#"token: Some(Token(\"Fake2Cut3Value4"#,
+            r#"{ 'x-api-key': "it's-Fake5Mixed6Key7" }"#,
+            r#"{ "client_secret": 'Fake5Mixed6Key7' }"#,
         ] {
             let matching: Vec<_> = every_pattern()
                 .filter(|pat| pat.re.is_match(sample))
@@ -3368,7 +3454,8 @@ mod tests {
     fn quoted_assignment_patterns_wait_for_their_own_quote() {
         // ASSIGNMENT is ordered: double quote, single quote, backtick, escaped, the
         // three wrapped in a call (KT-2039), the four quoted ones cut before their
-        // closing quote, bare, then the three quoted-key shapes (KT-1656, KT-2039).
+        // closing quote, the three wrapped ones cut the same way (KT-2044), bare,
+        // then the five quoted-key shapes (KT-1656, KT-2039, KT-2044).
         let admitted = |text: &str| -> Vec<bool> {
             ASSIGNMENT.iter().map(|pat| pat.gate.admits(text)).collect()
         };
@@ -3377,34 +3464,42 @@ mod tests {
         // value pattern has anything to do.
         assert_eq!(
             admitted("curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com"),
-            [f, f, f, f, f, f, f, f, f, f, f, t, f, f, f]
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f, f, f, f, f]
         );
         assert_eq!(
             admitted("password: \"hunter2\""),
-            [t, f, f, f, f, f, f, t, f, f, f, t, f, f, f]
+            [t, f, f, f, f, f, f, t, f, f, f, f, f, f, t, f, f, f, f, f]
         );
         assert_eq!(
             admitted("token =\n  'hunter2'"),
-            [f, t, f, f, f, f, f, f, t, f, f, t, f, f, f]
+            [f, t, f, f, f, f, f, f, t, f, f, f, f, f, t, f, f, f, f, f]
         );
         assert_eq!(
             admitted("secret=`hunter2`"),
-            [f, f, t, f, f, f, f, f, f, t, f, t, f, f, f]
+            [f, f, t, f, f, f, f, f, f, t, f, f, f, f, t, f, f, f, f, f]
         );
         assert_eq!(
             admitted(r#"token: \"hunter2\""#),
-            [f, f, f, t, f, f, f, f, f, f, t, t, f, f, f]
+            [f, f, f, t, f, f, f, f, f, f, t, f, f, f, t, f, f, f, f, f]
         );
         assert_eq!(
             admitted(r#"api_key: Some("hunter2")"#),
-            [f, f, f, f, t, t, t, f, f, f, f, t, f, f, f]
+            [f, f, f, f, t, t, t, f, f, f, f, t, t, t, t, f, f, f, f, f]
         );
         assert_eq!(
             admitted("{ 'x-api-key': 'hunter2' }"),
-            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, t]
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f, f]
+        );
+        assert_eq!(
+            admitted(r#"{ 'x-api-key': "it's-hunter2" }"#),
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f]
+        );
+        assert_eq!(
+            admitted(r#"{ "token": 'hunter2' }"#),
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t]
         );
         // No assignment at all: nothing runs, whatever quotes the text holds.
-        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 15]);
+        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 20]);
         // Each pattern that is turned away really has no match to make.
         for text in [
             "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com",
@@ -3414,6 +3509,8 @@ mod tests {
             r#"token: \"hunter2\""#,
             r#"api_key: Some("hunter2")"#,
             "{ 'x-api-key': 'hunter2' }",
+            r#"{ 'x-api-key': "it's-hunter2" }"#,
+            r#"{ "token": 'hunter2' }"#,
         ] {
             for pat in ASSIGNMENT.iter().filter(|pat| !pat.gate.admits(text)) {
                 assert!(!pat.re.is_match(text), "{} on {text:?}", pat.re.as_str());
@@ -3506,6 +3603,102 @@ mod tests {
             ),
         ] {
             assert_stored_masks(raw, secret, kept);
+        }
+    }
+
+    // ── KT-2044: the shapes the second review found ───────────────────
+    //
+    // Every value below is fake.
+
+    #[test]
+    fn a_secret_wrapped_in_nested_calls_is_masked_and_the_calls_kept() {
+        for (raw, expected) in [
+            (
+                r#"api_key: Some(Token("Fake1Nest2Value3"))"#,
+                r#"api_key: Some(Token("***REDACTED***"))"#,
+            ),
+            (
+                "password = Secret::new(Box::new('fake-nested-hunter2'))",
+                "password = Secret::new(Box::new('***REDACTED***'))",
+            ),
+            (
+                "token: Some( Token( \"Fake1Nest2Value3\" ) )",
+                "token: Some( Token( \"***REDACTED***\" ) )",
+            ),
+            (
+                "Config {\n    password: Some(\n        Token(\n            \"Fake1Nest2Value3\",\n        ),\n    ),\n    retries: 3,\n}",
+                "Config {\n    password: Some(\n        Token(\n            \"***REDACTED***\",\n        ),\n    ),\n    retries: 3,\n}",
+            ),
+            // Inside a `{:?}`-printed string, where the quotes are escaped.
+            (
+                r#"left: "Cfg { token: Some(Token(\"Fake1Nest2Value3\")) }""#,
+                r#"left: "Cfg { token: Some(Token(\"***REDACTED***\")) }""#,
+            ),
+        ] {
+            assert_eq!(redact_stored_text(raw), expected, "{raw:?}");
+            assert_eq!(redact_stored_text(expected), expected, "idempotent");
+        }
+        let out = redact_agent_output(r#"api_key: Some(Token("Fake1Nest2Value3"))"#);
+        assert!(!out.contains("Fake1Nest2Value3"), "{out}");
+        // …and keeps a placeholder wrapped twice.
+        let placeholder = r#"api_key: Some(Token("<your-api-key>"))"#;
+        assert_eq!(redact_agent_output(placeholder), placeholder);
+    }
+
+    #[test]
+    fn a_wrapped_secret_cut_before_its_closing_quote_is_masked_and_the_call_kept() {
+        for (raw, expected) in [
+            (
+                r#"password: Some("Fake2Cut3Value4"#,
+                r#"password: Some("***REDACTED***"#,
+            ),
+            (
+                r#"api_key: Some(Token("Fake2Cut3Value4"#,
+                r#"api_key: Some(Token("***REDACTED***"#,
+            ),
+            (
+                "token = Secret::new('fake-cut-hunter2",
+                "token = Secret::new('***REDACTED***",
+            ),
+            (
+                "Config {\n    password: Some(\n        \"Fake2Cut3Value4",
+                "Config {\n    password: Some(\n        \"***REDACTED***",
+            ),
+            (
+                r#"left: "Cfg { token: Some(\"Fake2Cut3Value4"#,
+                r#"left: "Cfg { token: Some(\"***REDACTED***"#,
+            ),
+            // A lone backslash ending the text belongs to the value.
+            (
+                r#"password: Some("Fake2Cut3Value4\"#,
+                r#"password: Some("***REDACTED***"#,
+            ),
+        ] {
+            assert_eq!(redact_stored_text(raw), expected, "{raw:?}");
+            assert_eq!(redact_stored_text(expected), expected, "idempotent");
+        }
+    }
+
+    #[test]
+    fn a_quoted_key_with_the_other_quote_on_its_value_is_masked() {
+        for (raw, expected) in [
+            // Node's `util.inspect` and Python's `repr` switch to double quotes
+            // for a string that holds a single one.
+            (
+                r#"{ 'x-api-key': "it's-Fake5Mixed6Key7", accept: 'application/json' }"#,
+                r#"{ 'x-api-key': "***REDACTED***", accept: 'application/json' }"#,
+            ),
+            (
+                r#"{'password': "fake-it's-hunter2"}"#,
+                r#"{'password': "***REDACTED***"}"#,
+            ),
+            (
+                r#"{ "client_secret": 'Fake5Mixed6Key7' }"#,
+                r#"{ "client_secret": '***REDACTED***' }"#,
+            ),
+        ] {
+            assert_eq!(redact_stored_text(raw), expected, "{raw:?}");
+            assert_eq!(redact_stored_text(expected), expected, "idempotent");
         }
     }
 
