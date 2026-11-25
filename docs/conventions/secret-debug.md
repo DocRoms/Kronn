@@ -8,7 +8,7 @@ password or seed must therefore not `#[derive(Debug)]`.
 ## Rule
 
 Drop `Debug` from the derive and invoke the macro right after the struct
-[src: file: backend/src/core/redact.rs:1428]:
+[src: file: backend/src/core/redact.rs:1506]:
 
 ```rust
 crate::debug_without_secrets!(ApiKey { id, name, provider, active; masked: value });
@@ -52,9 +52,21 @@ crate::debug_without_secrets!(ServerConfig { host, port; masked: auth_token; .. 
 
 ## Quick Exec summary
 
-`summarise` redacts the whole summary once, before its final cut
-[src: file: backend/src/core/quick_exec.rs:1003]. Any part cut earlier (the
-generic tail, failure blocks, error lines) is redacted before its own cut, so
-a value cut off from its name is never left behind. A stream capped mid-line
+`summarise` redacts each stream it reads whole, once, before any line window
+or per-line pass [src: file: backend/src/core/quick_exec.rs:857] (KT-2044).
+`{:#?}` prints a field's name and its value on two lines, so a window that
+starts between them (the generic 20-line tail, a first error line) would
+otherwise keep the value without its name. `Collected` never shows its stdout,
+only its size, so only its stderr is redacted. The parts cut afterwards (the
+generic tail, failure blocks, error lines) are redacted again before their own
+cut, and the whole summary once more before its final cut
+[src: file: backend/src/core/quick_exec.rs:1026]. A stream capped mid-line
 drops its partial last line before extraction
 [src: file: backend/src/core/quick_exec.rs:537].
+
+The redaction keeps a value's call readable: `api_key: Some("***REDACTED***")`,
+also when calls nest (`Some(Token("***REDACTED***"))`) and when the value is cut
+before its closing quote (`password: Some("***REDACTED***` at the end of a
+capped stream or block). A quoted key is matched with either quote on its value
+(`{ 'x-api-key': "***REDACTED***" }`, as `util.inspect` and Python's `repr`
+print a value holding a `'`) [src: file: backend/src/core/redact.rs:706].

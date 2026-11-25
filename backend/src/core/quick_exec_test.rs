@@ -1093,6 +1093,95 @@ fn the_generic_tail_is_redacted_before_its_cut() {
     );
 }
 
+// ── KT-2044: no line window separates a name from its value ─────────
+
+/// `{:#?}` prints the name of an `Option` field and its value on two lines.
+const PRETTY_SECRET: &str = "Fake3Window4Value5";
+
+fn pretty_config(value: &str) -> String {
+    format!("Config {{\n    password: Some(\n        \"{value}\",\n    ),\n")
+}
+
+/// The generic tail keeps the last 20 non-empty lines: here the value line is
+/// the first of them and the `password: Some(` line the one just before it.
+#[test]
+fn a_pretty_debug_name_sliced_off_by_the_generic_tail_leaves_no_value() {
+    let mut stdout = pretty_config(PRETTY_SECRET);
+    // The value line, its `),` and 18 more: 20 lines.
+    for index in 0..18 {
+        stdout.push_str(&format!("    field_{index:02}: {index},\n"));
+    }
+    let tail: Vec<&str> = stdout
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(20)
+        .collect();
+    assert!(tail.last().unwrap().contains(PRETTY_SECRET), "{tail:?}");
+    assert!(!tail.iter().any(|line| line.contains("password")));
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        "",
+        QuickExecStatus::Passed,
+        true,
+    );
+    assert!(
+        !extracted.summary.contains(PRETTY_SECRET),
+        "{}",
+        extracted.summary
+    );
+    assert!(
+        extracted.summary.contains("\"***REDACTED***\","),
+        "{}",
+        extracted.summary
+    );
+}
+
+/// The first error lines of a red run are picked one by one: a value line that
+/// holds a marker word is picked without the name line above it.
+#[test]
+fn a_pretty_debug_value_picked_as_a_first_error_line_is_redacted() {
+    let secret = "Fake6Error7Value8";
+    let stdout = format!(
+        "booting\n{}}}\nboot failed\n",
+        pretty_config(&format!("{secret}-error"))
+    );
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        "make: *** [boot] Error 1\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        extracted.summary.contains("first errors"),
+        "{}",
+        extracted.summary
+    );
+    assert!(!extracted.summary.contains(secret), "{}", extracted.summary);
+}
+
+/// A failure block keeps a `{:#?}` struct whole or cuts the value away: never
+/// the value without its name.
+#[test]
+fn a_pretty_debug_secret_in_a_failure_block_is_redacted() {
+    let secret = "Fake9Block0Value1";
+    let shape = format!("{}}}", pretty_config(secret));
+    for (summariser, stdout) in [
+        (Summariser::CargoTest, red_cargo_test_run(1, &shape)),
+        (Summariser::Vitest, red_vitest_run(&shape)),
+    ] {
+        let extracted = summarise(summariser, &stdout, "", QuickExecStatus::Failed, true);
+        assert!(
+            extracted.summary.contains("failure details"),
+            "{}",
+            extracted.summary
+        );
+        assert!(!extracted.summary.contains(secret), "{}", extracted.summary);
+    }
+}
+
 /// A stream cut at the cap ends mid-line: a token cut below its pattern's
 /// minimum length is no longer recognised, so that line is dropped before
 /// extraction rather than summarised.
