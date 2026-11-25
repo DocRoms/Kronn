@@ -2097,6 +2097,8 @@ async fn execute_run_body(
             let mut missing: Vec<(String, String)> = Vec::new();
             // KT-2030: `Custom` is a named HTTP connection, never an installed
             // agent; its step can start when its connection can be called.
+            // KT-2045: any step naming a connection, and a native HTTP
+            // provider step on its own key, is held to the same rule.
             let mut unusable_connections: Vec<String> = Vec::new();
             for step in workflow
                 .steps
@@ -2106,15 +2108,14 @@ async fn execute_run_body(
                 if routed {
                     continue;
                 }
-                if step.agent == crate::models::AgentType::Custom {
-                    if let Some(refusal) =
-                        super::steps::named_connection_refusal(step, &state.db, tokens_config).await
-                    {
-                        unusable_connections.push(refusal);
-                    }
-                } else if !super::step_agents::agent_can_launch(&step.agent, &usable, agents_config)
-                {
+                let launchable = step.agent == crate::models::AgentType::Custom
+                    || super::step_agents::agent_can_launch(&step.agent, &usable, agents_config);
+                if !launchable {
                     missing.push((step.name.clone(), format!("{:?}", step.agent)));
+                } else if let Some(refusal) =
+                    super::steps::step_connection_refusal(step, &state.db, tokens_config).await
+                {
+                    unusable_connections.push(refusal);
                 }
             }
             if !missing.is_empty() || !unusable_connections.is_empty() {
@@ -2127,7 +2128,7 @@ async fn execute_run_body(
                 }
                 if !unusable_connections.is_empty() {
                     reasons.push(format!(
-                        "named HTTP connection(s) not usable: {}.",
+                        "HTTP connection(s) or provider key(s) not usable: {}.",
                         unusable_connections.join("; ")
                     ));
                 }

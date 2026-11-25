@@ -1248,6 +1248,40 @@ pub async fn named_connection_refusal(
     }
 }
 
+/// Why an Agent step cannot start for its connection or its key, or `None`
+/// when nothing about them stops it (KT-2045). The run preflight asks this of
+/// every step whose agent can launch, so a step the run would refuse mid-way
+/// is refused before any step runs:
+/// - `Custom`, or any agent whose step names a connection: the connection
+///   must exist for this agent, have an endpoint and hold the key its preset
+///   needs (`named_connection_refusal`);
+/// - a native HTTP provider (`LiteLlm`, `Nvidia`) without a connection: the
+///   key its auth readiness requires must be set
+///   (`agents::http_provider_key_missing`, KT-2031).
+///
+/// Any other agent (a CLI) owns its login: `None`, the run never second-guesses it.
+pub async fn step_connection_refusal(
+    step: &WorkflowStep,
+    catalog_db: &crate::db::Database,
+    tokens: &TokensConfig,
+) -> Option<String> {
+    let names_connection = step
+        .agent_settings
+        .as_ref()
+        .is_some_and(|settings| settings.connection_id.is_some());
+    if step.agent == AgentType::Custom || names_connection {
+        return named_connection_refusal(step, catalog_db, tokens).await;
+    }
+    if crate::agents::http_provider_key_missing(&step.agent, tokens)? {
+        let provider = crate::agents::agent_display_name(&step.agent);
+        return Some(format!(
+            "'{}' runs on {provider} but no {provider} API key is set: add it in Settings or choose a named connection holding one",
+            step.name
+        ));
+    }
+    None
+}
+
 async fn preflight_workflow_launch(
     catalog_db: Option<&crate::db::Database>,
     #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))] work_dir: &str,

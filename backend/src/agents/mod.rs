@@ -1,4 +1,4 @@
-use crate::models::{AgentDetection, AgentType, AppConfig, ShadowedInstall};
+use crate::models::{AgentDetection, AgentType, AppConfig, ShadowedInstall, TokensConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -811,18 +811,25 @@ fn http_provider_auth_status(
     agent_type: &AgentType,
     config: &AppConfig,
 ) -> Option<AgentAuthStatus> {
-    let (slug, preset) =
-        crate::db::external_api_connections::legacy_credential_for_agent(agent_type)?;
-    let key_resolves = config
-        .tokens
-        .active_key_for(slug)
-        .is_some_and(|key| !key.trim().is_empty());
-    let ready = key_resolves || !preset.requires_credential();
+    let ready = !http_provider_key_missing(agent_type, &config.tokens)?;
     Some(AgentAuthStatus {
         ready: Some(ready),
         setup_command: None,
         reason: (!ready).then_some(AUTH_REASON_API_KEY_MISSING),
     })
+}
+
+/// Whether a native HTTP provider (`LiteLlm`, `Nvidia`) run without a named
+/// connection lacks the key its preset requires: the rule behind its auth
+/// readiness, shared with the workflow run preflight (KT-2045). `None` for an
+/// agent that is not such a provider.
+pub fn http_provider_key_missing(agent_type: &AgentType, tokens: &TokensConfig) -> Option<bool> {
+    let (slug, preset) =
+        crate::db::external_api_connections::legacy_credential_for_agent(agent_type)?;
+    let key_resolves = tokens
+        .active_key_for(slug)
+        .is_some_and(|key| !key.trim().is_empty());
+    Some(!key_resolves && preset.requires_credential())
 }
 
 #[derive(Debug, Default)]

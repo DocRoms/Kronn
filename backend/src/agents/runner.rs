@@ -3355,7 +3355,8 @@ pub(crate) fn resolve_http_connection_key<'a>(
     match external_http {
         Some(runtime) => runtime.api_key.as_deref(),
         None => crate::db::external_api_connections::legacy_credential_for_agent(agent_type)
-            .and_then(|(slug, _)| tokens.active_key_for(slug)),
+            .and_then(|(slug, _)| tokens.active_key_for(slug))
+            .filter(|key| !key.trim().is_empty()),
     }
 }
 

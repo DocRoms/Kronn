@@ -301,7 +301,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:10042#apply_http]
+[src: file: backend/src/agents/runner.rs:10043#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -314,7 +314,7 @@ validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:591-644#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
-[src: file: backend/src/workflows/steps.rs:1433-1437#reasoning_effort_override]
+[src: file: backend/src/workflows/steps.rs:1467-1471#reasoning_effort_override]
 [src: file: backend/src/agents/runner.rs:13345-13349#validate]
 
 The HTTP regression launches through the native QP tool and the discussion
@@ -519,7 +519,7 @@ response>, "excerpt": "<start of the original>", "note": "…"}`, with the large
 excerpt that keeps the envelope inside the budget once embedded in `messages`. An
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
-[src: file: backend/src/agents/runner.rs:8029-8036#truncated_json_envelope]
+[src: file: backend/src/agents/runner.rs:8030-8037#truncated_json_envelope]
 [src: file: backend/src/agents/runner_test_tests_up.rs:3380-3383#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or

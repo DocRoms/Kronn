@@ -49,8 +49,8 @@ temporary files. It removes inherited worker context from ordinary turns and
 the permissive container marker from workers.
 [src: file: backend/src/agents/runner.rs:5176-5204#adapter_task_worker_args]
 [src: file: backend/src/agents/runner.rs:3969-3987#task_worker_route_policy]
-[src: file: backend/src/agents/runner.rs:4587#acp_resume_id]
-[src: file: backend/src/agents/runner.rs:15158-15168#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:4588#acp_resume_id]
+[src: file: backend/src/agents/runner.rs:15159-15169#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/tests/adapter_worker_policy.rs:335-446#worker]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -169,7 +169,7 @@ When the adapter route is taken, the backend logs an `info`-level line
 (`"Starting shared ACP adapter session…"`) naming the agent and worker mode;
 the direct compatibility override is also logged. The actual route is visible
 in the logs without inspecting code.
-[src: file: backend/src/agents/runner.rs:4564-4568#acp_route]
+[src: file: backend/src/agents/runner.rs:4565-4569#acp_route]
 [src: file: backend/src/agents/runner.rs:4638-4644#AdaptedAcp]
 
 Every permission decision — live, for a native ACP agent's

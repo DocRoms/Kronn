@@ -170,6 +170,22 @@ fn connection_key_native_agents_without_connection_keep_their_own_slot() {
     ));
 }
 
+/// KT-2045: the legacy-slot arm holds the same contract as the connection
+/// arm — a whitespace-only active key is no key, so nothing is sent.
+#[test]
+fn connection_key_blank_legacy_slot_key_sends_nothing() {
+    let tokens = tokens(vec![
+        key(LITELLM_CREDENTIAL_SLUG, "   "),
+        key(NVIDIA_CREDENTIAL_SLUG, "\t\n"),
+    ]);
+    for agent in [AgentType::LiteLlm, AgentType::Nvidia] {
+        assert!(
+            is(resolve_http_connection_key(&agent, None, &tokens), None),
+            "a blank {agent:?} slot key must send no key"
+        );
+    }
+}
+
 #[test]
 fn connection_key_other_agents_without_connection_get_no_slot() {
     let tokens = provider_slots();

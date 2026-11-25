@@ -38,7 +38,7 @@ counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:9197-9208#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:9198-9209#cached_prompt_tokens]
 [src: file: backend/src/agents/runner.rs:2128-2135#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10506-10536#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
@@ -71,9 +71,9 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8509-8511#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8513-8515#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:12773-12788#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:8510-8512#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8514-8516#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:12774-12789#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:36-50#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:194-234#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:9246-9250#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:9247-9251#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
@@ -225,7 +225,7 @@ behaviour is the same as for a joined CLI; see
   [src: file: backend/src/api/discussions/orchestration.rs:644-652#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:983-991#checked_launch_connection]
   [src: file: backend/src/workflows/steps.rs:1180-1220#resolve_step_connection]
-  [src: file: backend/src/workflows/steps.rs:1251-1304#preflight_workflow_launch]
+  [src: file: backend/src/workflows/steps.rs:1285-1338#preflight_workflow_launch]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the
