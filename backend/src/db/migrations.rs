@@ -1104,6 +1104,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "302_step_execution_artifacts",
         include_str!("sql/302_step_execution_artifacts.sql"),
     ),
+    (
+        "303_step_shadow_main_rows_restart",
+        include_str!("sql/303_step_shadow_main_rows_restart.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
@@ -3377,6 +3381,66 @@ mod tests {
             .unwrap()
         };
         assert_eq!((spent("run-shadowed"), spent("run-plain")), (45, 0));
+    }
+
+    /// KT-2029 — a main row a restart marked interrupted goes back to identity
+    /// only, so its run view reads the step result again; a main row a merge
+    /// closed and the shadows a restart stopped are left as they are.
+    #[test]
+    fn main_rows_a_restart_marked_interrupted_are_repaired_on_upgrade() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "302_step_execution_artifacts").unwrap();
+        conn.execute_batch(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('wf-1', 'Flux', '\"Manual\"', '[]', '2026-11-19T00:00:00Z', '2026-11-19T00:00:00Z');
+             INSERT INTO workflow_runs (id, workflow_id, status, tokens_used, started_at) VALUES
+                 ('run-flipped', 'wf-1', 'Success', 100, '2026-11-19T00:00:00Z'),
+                 ('run-merged', 'wf-1', 'Success', 100, '2026-11-19T00:01:00Z');
+             INSERT INTO step_shadow_runs
+                 (id, run_id, result_index, step_name, shadow_id, status, identity_json, output,
+                  tokens_used, stopped, started_at, finished_at) VALUES
+                 ('f-main', 'run-flipped', 1, 'review', '', 'interrupted', '{}', '', NULL,
+                  'Kronn restarted while this shadow was running', '2026-11-19T00:00:00Z', '2026-11-20T00:00:00Z'),
+                 ('f-shadow', 'run-flipped', 1, 'review', 'a', 'interrupted', '{}', '', NULL,
+                  'Kronn restarted while this shadow was running', '2026-11-19T00:00:00Z', '2026-11-20T00:00:00Z'),
+                 ('m-main', 'run-merged', 1, 'review', '', 'success', '{}', 'main own output', 40,
+                  NULL, '2026-11-19T00:01:00Z', '2026-11-19T00:02:00Z'),
+                 ('m-other', 'run-merged', 2, 'fix', '', 'interrupted', '{}', 'main own output', 40,
+                  'Kronn restarted while this shadow was running', '2026-11-19T00:01:00Z', '2026-11-19T00:02:00Z');",
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        let state = |id: &str| -> (String, String, Option<String>, Option<String>) {
+            conn.query_row(
+                "SELECT status, output, stopped, finished_at FROM step_shadow_runs WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            state("f-main"),
+            ("running".into(), String::new(), None, None),
+            "identity only again: the run view reads the step result"
+        );
+        let restarted = Some("Kronn restarted while this shadow was running".to_string());
+        assert_eq!(state("f-shadow").0, "interrupted");
+        assert_eq!(state("f-shadow").2, restarted);
+        assert_eq!(
+            state("m-main"),
+            (
+                "success".into(),
+                "main own output".into(),
+                None,
+                Some("2026-11-19T00:02:00Z".into())
+            ),
+            "a merged main row is never touched"
+        );
+        assert_eq!(
+            state("m-other").0,
+            "interrupted",
+            "a main row holding an output is not the restart's"
+        );
     }
 
     /// KT-1656 — the upgrade masks the vendor-shaped credentials that agent output

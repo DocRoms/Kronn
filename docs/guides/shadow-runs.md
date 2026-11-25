@@ -133,7 +133,7 @@ shadow, and a crash in it is recorded on its own row.
   `max_tokens` is also handed to an agent that takes a generation cap;
   [src: file: backend/src/workflows/shadow.rs:894-895#budget_exceeded]
 - a shadow left running by a restart is marked *interrupted*.
-  [src: file: backend/src/db/step_shadows.rs:154-156#interrupt_running]
+  [src: file: backend/src/db/step_shadows.rs:154-158#interrupt_running]
 
 What each execution loaded and produced is stored in `step_shadow_runs`, with its
 tokens, duration and cost, and removed with its run; run retention blanks the

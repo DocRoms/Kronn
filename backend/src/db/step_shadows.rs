@@ -152,14 +152,16 @@ pub fn list_for_run(conn: &Connection, run_id: &str) -> Result<Vec<StepShadowRow
 }
 
 /// At boot no shadow is still running: the ones a previous process left behind
-/// are marked interrupted.
+/// are marked interrupted. The main execution's row is left alone (KT-2029):
+/// it is identity only until a merge closes it, and its status, output and
+/// metrics come from the run's step result, finished or not.
 pub fn interrupt_running(conn: &Connection) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE step_shadow_runs
             SET status = 'interrupted', finished_at = ?1,
                 stopped = 'Kronn restarted while this shadow was running'
-          WHERE status = 'running'",
-        params![chrono::Utc::now().to_rfc3339()],
+          WHERE status = 'running' AND shadow_id <> ?2",
+        params![chrono::Utc::now().to_rfc3339(), MAIN],
     )?)
 }
 
