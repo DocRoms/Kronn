@@ -313,6 +313,32 @@ fn env_header_and_variable_rows() -> Vec<Row> {
             })),
             &["X-Api-Key"],
         ),
+        // KT-2053 — an OAuth2 extra header's template is a literal or an
+        // `{ENV_KEY}` template, as `ApiDefaultHeader.value`; it prints nested in
+        // an API spec's `ApiAuthKind::OAuth2ClientCredentials`.
+        row(
+            "OAuth2ExtraHeader",
+            &parse::<mcp::OAuth2ExtraHeader>(json!({
+                "name": "x-api-key",
+                "value_template": "Fake2043ExtraHeaderValue",
+            })),
+            &["x-api-key"],
+        ),
+        row(
+            "ApiAuthKind::OAuth2ClientCredentials",
+            &parse::<mcp::ApiAuthKind>(json!({
+                "OAuth2ClientCredentials": {
+                    "token_url": "https://ims.example/token",
+                    "client_id_env": "CLIENT_ID",
+                    "client_secret_env": "CLIENT_SECRET",
+                    "scope": "openid",
+                    "extra_headers": [
+                        { "name": "x-api-key", "value_template": "Fake2043ExtraHeaderValue" },
+                    ],
+                },
+            })),
+            &["https://ims.example/token", "CLIENT_SECRET", "x-api-key"],
+        ),
         row(
             "VibeMcpEntry",
             &parse::<crate::core::mcp_scanner::VibeMcpEntry>(json!({

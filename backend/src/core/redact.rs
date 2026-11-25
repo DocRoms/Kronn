@@ -55,7 +55,7 @@ enum Gate {
     Assignment(Option<u8>),
     /// As [`Gate::Assignment`], for a value wrapped in a call (`Some("…")`,
     /// `Secret::new('…')`, KT-2039): the first byte past the `:`/`=` that is not
-    /// up to a space opens an identifier.
+    /// up to a space opens an identifier, or a closure (`|| "…"`, KT-2053).
     WrappedAssignment,
     /// As [`Gate::Assignment`], for a quoted object key (`"NAME": "value"`,
     /// `'NAME': 'value'`): the name is followed by its closing quote (escaped or
@@ -608,6 +608,15 @@ pub fn name_embeds_vendor_token(name: &str) -> bool {
 //      An escaped quote with a value character right behind it (`head\"tail`)
 //      is inside the token too. A token may open with an escaped quote (a value
 //      cut before its closing one), which is kept.
+// Before them, KT-2053 review: the value EXPRESSION of every secret NAME
+// ([`mask_value_expressions`]) has each of its quoted literals masked — `"…"`,
+// `'…'`, backtick, `\"…\"`, prefixed (`b"…"`, `r#"…"#`, `f"…"`, `u'…'`), in
+// any position: after a type (`token: &str = "…"`), a reference (`&"…"`), a
+// method call (`os.getenv("X", "…")`), as a later argument
+// (`env::var_or("KEY", "…")`). The expression runs from the `:` / `=` to a `,`
+// `;` `)` `]` `}` at depth 0 or the end of the line ([`expression_literals`]).
+// The shapes above then keep a call readable around a masked value
+// (`Some("***REDACTED***")`) and mask a bare value.
 // Anchored on the secret NAME, so ordinary path-keyed hex checksums (no NAME)
 // are never touched. Quoted MUST run before unquoted (the unquoted value class
 // excludes quotes, so it can't consume a quoted value itself).
@@ -647,26 +656,56 @@ fn ends_with_secret_word(name: &[u8], tails: &[Vec<u8>]) -> bool {
     ends(name) || without_qualifier(name).is_some_and(ends)
 }
 
-static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
-    let name = format!(
+/// The secret-ish name every assignment pattern opens with: a word ending in a
+/// word of [`ASSIGNMENT_NAMES`], optionally followed by a [`NAME_QUALIFIERS`] one.
+fn assignment_name() -> String {
+    format!(
         "[a-z0-9_.-]*(?:{ASSIGNMENT_NAMES})(?:[_-]*(?:{NAME_QUALIFIERS}))?",
         NAME_QUALIFIERS = NAME_QUALIFIERS.join("|"),
-    );
+    )
+}
+
+static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
+    let name = assignment_name();
     let quoted_dq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)\"((?:\\\\[\\s\\S]|[^\"\\\\])+)\"");
     let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\[\\s\\S]|[^'\\\\])+)'");
     let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\[\\s\\S]|[^`\\\\])+)`");
-    let quoted_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
+    // KT-2053 — the inside of a `\"…\"` value. It lives in a string printed with
+    // `{:?}` (or in JSON text), so it is read as that string escaped once more:
+    // a plain character, an escape other than `\\` (`\n`, `\t`), or `\\` with the
+    // character it escapes in the value, itself written plain or escaped. A `"`
+    // inside the value is then `\\\"`, read whole, and never the closing `\"`. A
+    // bare `"` ends the printed string, so the value never takes one.
+    let escaped_unit = r#"[^\\"]|\\[^\\"]|\\\\(?:\\[\s\S]|[^\\"])"#;
+    // The same, cut before its closing quote: it may end on the `\\` of an
+    // escape whose character was cut (`token: \"abc\\`).
+    let escaped_cut = format!(r#"(?:{escaped_unit})+(?:\\\\)?|\\\\"#);
+    let quoted_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:{escaped_unit})+)(\\")"#);
     // KT-2039 — a quoted value wrapped in a call, as `{:?}` prints an
     // `Option<String>` (`api_key: Some("…")`) and `{:#?}` across lines
     // (`password: Some(\n    "…",\n)`), or as code builds a secret type
     // (`token = Secret::new('…')`). The call is kept; the bare pattern below then
     // leaves it alone ([`call_of_a_masked_value`]). KT-2044: calls nest
     // (`Some(Token("…"))`, `Secret::new(Box::new('…'))`), so the opener repeats.
-    let call = r"(?:[a-z_][a-z0-9_]*(?:::[a-z_][a-z0-9_]*)*\(\s*)+";
+    // KT-2053: a space may come before the parenthesis (`strdup ("…")`), a path
+    // segment may be a turbofish (`Secret::<String>::new(`; its types are a flat
+    // class, so generics of any depth and lifetimes are read:
+    // `::<Vec<Box<str>>>`, `::<&'static str>`), an opener may be a closure
+    // (`unwrap_or_else(|| "…")`, `move |_|`), and the space after an opener may
+    // be a printed `\n` / `\r` / `\t` (`{:#?}` inside a `{:?}`-printed string).
+    // [`past_call_openers`], [`call_path_len`] and [`name_before_value`] read the
+    // same syntax. These shapes only keep the call readable: every literal of the
+    // value is masked by [`mask_value_expressions`] whatever its call.
+    let ident = "[a-z_][a-z0-9_]*";
+    let generic = r"<[a-z0-9_:, &'<>]*>";
+    let path = format!("{ident}(?:::(?:{ident}|{generic}))*");
+    let closure = r"(?:move[ \t]+)?\|[a-z0-9_, ]*\|";
+    let call_space = r"(?:\s|\\[nrt])*";
+    let call = format!(r"(?:(?:{path}[ \t]*\(|{closure}){call_space})+");
     let wrapped_dq = format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call})"((?:\\[\s\S]|[^"\\])+)""#);
     let wrapped_sq = format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call})'((?:\\[\s\S]|[^'\\])+)'"#);
     let wrapped_escaped =
-        format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call}\\")((?:[^\\"]|\\[^"])+)(\\")"#);
+        format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call}\\")((?:{escaped_unit})+)(\\")"#);
     // A quoted value cut before its closing quote: the closed shapes above ran
     // first, so no closing quote is left to find — mask to the end of the text.
     // A lone backslash ending the text is part of the value (`\\?`); the quote
@@ -679,7 +718,7 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let truncated_bt = truncated("`");
     // The escaped-quote form (`\"…`) lives in JSON text, so the string it opens
     // may end at its own bare closing quote: stop there, and keep that quote.
-    let truncated_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\?$|")"#);
+    let truncated_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")({escaped_cut})(\\?$|")"#);
     // KT-2044 — the same inside a call (`password: Some("…` at the end of a
     // capped stream or block): the call and the opening quote are kept.
     let truncated_wrapped = |quote: &str| {
@@ -688,7 +727,7 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let truncated_wrapped_dq = truncated_wrapped("\"");
     let truncated_wrapped_sq = truncated_wrapped("'");
     let truncated_wrapped_escaped =
-        format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call}\\")((?:[^\\"]|\\[^"])+)(\\?$|")"#);
+        format!(r#"(?i)(\b{name}\b\s*[:=]\s*{call}\\")({escaped_cut})(\\?$|")"#);
     let unquoted = format!(
         r#"(?i)(\b{name}\b\s*[:=]\s*(?:\\")?)((?:[^\s\\"'`,;]|\\[^\s"]|\\"[^\s\\"'`,;}}\])])+)"#
     );
@@ -696,7 +735,7 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     // `.npmrc`-like JSON): the secret-ish name is a quoted object key, closed
     // by its quote before the `:`, which the shapes above never read.
     let json_key_dq = format!(r#"(?i)("{name}"\s*:\s*)"((?:\\[\s\S]|[^"\\])+)""#);
-    let json_key_escaped = format!(r#"(?i)(\\"{name}\\"\s*:\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
+    let json_key_escaped = format!(r#"(?i)(\\"{name}\\"\s*:\s*\\")((?:{escaped_unit})+)(\\")"#);
     // KT-2039 — the same with single quotes, as Node's `util.inspect` prints an
     // object (`{ 'x-api-key': '…' }`) and Python a dict.
     let json_key_sq = format!(r#"(?i)('{name}'\s*:\s*)'((?:\\[\s\S]|[^'\\])+)'"#);
@@ -705,6 +744,13 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     // a `'`, and a JS literal can read `{ "token": '…' }`.
     let json_key_sq_dq = format!(r#"(?i)('{name}'\s*:\s*)"((?:\\[\s\S]|[^"\\])+)""#);
     let json_key_dq_sq = format!(r#"(?i)("{name}"\s*:\s*)'((?:\\[\s\S]|[^'\\])+)'"#);
+    // KT-2053 — the same inside a string printed with `{:?}`, where the double
+    // quotes are escaped: `{ \"token\": '…' }`, `{ 'token': \"…\" }`. A
+    // single-quoted value there is read as escaped once more, as `escaped_unit`
+    // reads a `\"…\"` one (a `"` inside it is `\\\"`).
+    let json_key_escaped_sq =
+        format!(r#"(?i)(\\"{name}\\"\s*:\s*)'((?:[^\\']|\\[^\\]|\\\\(?:\\[\s\S]|[^\\]))+)'"#);
+    let json_key_sq_escaped = format!(r#"(?i)('{name}'\s*:\s*\\")((?:{escaped_unit})+)(\\")"#);
     let leave_call: Option<LeaveMatch> = Some(call_of_a_masked_value);
     [
         (quoted_dq, "$1\"***REDACTED***\"", Gate::Assignment(Some(b'"')), None),
@@ -727,6 +773,8 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         (json_key_sq, "$1'***REDACTED***'", Gate::QuotedKey(b'\'', b'\''), None),
         (json_key_sq_dq, "$1\"***REDACTED***\"", Gate::QuotedKey(b'\'', b'"'), None),
         (json_key_dq_sq, "$1'***REDACTED***'", Gate::QuotedKey(b'"', b'\''), None),
+        (json_key_escaped_sq, "$1'***REDACTED***'", Gate::QuotedKey(b'"', b'\''), None),
+        (json_key_sq_escaped, "$1***REDACTED***$3", Gate::QuotedKey(b'\'', b'\\'), None),
     ]
     .into_iter()
     .filter_map(|(src, repl, gate, leave)| {
@@ -750,16 +798,19 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
 /// as written, so the mask reads `api_key: Some("***REDACTED***")` rather than
 /// swallowing the `Some(`.
 ///
-/// That is the case when group 2 is one or more call openers (`Some(`,
-/// `Some(Token(`, `Secret::new(`) and either
-/// - it ends with the escaped opening quote and the mask (`Some(\"***REDACTED***`,
-///   inside a printed string), followed by the closing quote (`\"`, or the bare
-///   `"` of the string around it) or by the end of the text (a value cut before
-///   its closing quote);
-/// - or the text after it, past whitespace and any further openers (`{:#?}`
-///   puts each on its own line), is a closed mask (`"***REDACTED***"`) or a mask
-///   cut at the end of the text (`"***REDACTED***`, left by the patterns of a
-///   wrapped value cut before its closing quote).
+/// The text from group 2 on is read as call openers ([`past_call_openers`]:
+/// `Some(`, `Some(Token(`, `Secret::new(`, `strdup (`, `Secret::<String>::new(`,
+/// `unwrap_or_else(||`). That is the case when there is at least one and either
+/// - group 2 goes on past them with only the escaped opening quote and the mask
+///   (`Some(\"***REDACTED***`, inside a printed string), followed by the closing
+///   quote (`\"`, or the bare `"` of the string around it) or by the end of the
+///   text (a value cut before its closing quote);
+/// - or group 2 ends within them (KT-2053: the bare value stops at the space of
+///   `strdup (`, or at the `,` of a turbofish) and the text after them is a
+///   closed mask (`"***REDACTED***"`) or a mask cut at the end of the text
+///   (`"***REDACTED***`, left by the patterns of a wrapped value cut before its
+///   closing quote). The openers take the whitespace after each of them,
+///   `{:#?}` putting each on its own line.
 ///
 /// Anything else after the call (a value not masked, nothing at all) has the
 /// call masked with it.
@@ -774,45 +825,133 @@ fn call_of_a_masked_value(captures: &regex_lite::Captures<'_>, text: &str) -> bo
     let (Some(value), Some(matched)) = (captures.get(2), captures.get(0)) else {
         return false;
     };
-    let after = &text[matched.end()..];
-    let (call, masked_inside) = match value.as_str().strip_suffix("\\\"***REDACTED***") {
-        Some(call) => (
-            call,
-            after.starts_with('"')
-                || after.starts_with("\\\"")
-                || after.is_empty()
-                || after == "\\",
-        ),
-        None => (value.as_str(), false),
-    };
-    let (after_call, openers) = past_call_openers(call);
-    if openers == 0 || !after_call.is_empty() {
+    let from = &text[value.start()..];
+    let (rest, openers) = past_call_openers(from);
+    if openers == 0 {
         return false;
     }
-    if masked_inside {
-        return true;
+    // The openers are ASCII: `consumed` is a character boundary.
+    let consumed = from.len() - rest.len();
+    // An escaped mask, then its closing quote (`\"`, or the bare `"` of the
+    // string around it) or the end of the text (a value cut before it).
+    let escaped_mask_ends = |text: &str| {
+        text.strip_prefix(ESCAPED_MASK).is_some_and(|after| {
+            after.starts_with('"') || after.starts_with("\\\"") || after.is_empty() || after == "\\"
+        })
+    };
+    match value.as_str().get(consumed..) {
+        Some(inside) if !inside.is_empty() => {
+            inside == ESCAPED_MASK && escaped_mask_ends(&text[matched.end() - inside.len()..])
+        }
+        _ => {
+            MASKED.iter().any(|masked| rest.starts_with(masked))
+                || MASKED_TO_THE_END.contains(&rest)
+                || escaped_mask_ends(rest)
+        }
     }
-    let (rest, _) = past_call_openers(after.trim_start_matches(is_regex_space_char));
-    MASKED.iter().any(|masked| rest.starts_with(masked)) || MASKED_TO_THE_END.contains(&rest)
 }
 
-/// `text` past the call openers it starts with (`Some(`, `Secret::new(`, each
-/// with the whitespace after it), and how many there were.
+/// The mask of a `\"…\"` value, from its opening quote.
+const ESCAPED_MASK: &str = "\\\"***REDACTED***";
+
+/// `text` past the call openers it starts with, and how many there were: the
+/// `call` of [`ASSIGNMENT`], read by hand. An opener is a call path
+/// ([`call_path_len`]) then `(`, with spaces or tabs between them (`strdup (`,
+/// KT-2053), or a closure ([`closure_len`]); each takes the whitespace after
+/// it, printed `\n` / `\r` / `\t` included ([`past_call_space`]).
 fn past_call_openers(mut text: &str) -> (&str, usize) {
     let mut openers = 0;
     loop {
-        let path = call_path_len(text);
-        if path == 0 || !text[path..].starts_with('(') {
+        let opener = closure_len(text).or_else(|| {
+            let path = call_path_len(text);
+            if path == 0 {
+                return None;
+            }
+            let spaced = text[path..].trim_start_matches([' ', '\t']);
+            spaced
+                .starts_with('(')
+                .then(|| text.len() - spaced.len() + 1)
+        });
+        let Some(length) = opener else {
             return (text, openers);
-        }
-        text = text[path + 1..].trim_start_matches(is_regex_space_char);
+        };
+        text = past_call_space(&text[length..]);
         openers += 1;
     }
 }
 
-/// Length of the call path `text` starts with (`Some`, `Secret::new`): ASCII
-/// identifiers joined by `::`, as the `call` of [`ASSIGNMENT`] reads them; 0
-/// when it starts with none.
+/// A byte of a closure's parameters (`|x, _|`), as the `closure` of
+/// [`ASSIGNMENT`] reads them.
+fn closure_param_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b',' | b' ')
+}
+
+/// A byte inside a turbofish's angle brackets (`::<String>`,
+/// `::<Vec<Box<str>>>`, `::<&'static str>`), as the flat class of the `generic`
+/// of [`ASSIGNMENT`] reads it: nested angle brackets and lifetimes included.
+fn generic_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(byte, b'_' | b':' | b',' | b' ' | b'&' | b'\'' | b'<' | b'>')
+}
+
+/// Length of the closure opener `text` starts with (`||`, `|x|`, `move |_|`;
+/// KT-2053), or `None`.
+fn closure_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    if bytes.len() > 4 && bytes[..4].eq_ignore_ascii_case(b"move") {
+        let spaces = bytes[4..]
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        if spaces > 0 && bytes.get(4 + spaces) == Some(&b'|') {
+            at = 4 + spaces;
+        }
+    }
+    if bytes.get(at) != Some(&b'|') {
+        return None;
+    }
+    let params = bytes[at + 1..]
+        .iter()
+        .take_while(|byte| closure_param_byte(**byte))
+        .count();
+    (bytes.get(at + 1 + params) == Some(&b'|')).then_some(at + params + 2)
+}
+
+/// `text` past the whitespace after a call opener: ASCII whitespace, and the
+/// `\n`, `\r`, `\t` escapes of a `{:#?}` dump printed again with `{:?}`.
+fn past_call_space(mut text: &str) -> &str {
+    loop {
+        text = text.trim_start_matches(is_regex_space_char);
+        match text.as_bytes() {
+            [b'\\', escape, ..] if matches!(escape.to_ascii_lowercase(), b'n' | b'r' | b't') => {
+                text = &text[2..];
+            }
+            _ => return text,
+        }
+    }
+}
+
+/// `text` without the whitespace a call opener may have after it, read from
+/// the end ([`past_call_space`]).
+fn before_call_space(mut text: &str) -> &str {
+    loop {
+        text = text.trim_end_matches(is_regex_space_char);
+        match text.as_bytes() {
+            [.., b'\\', escape] if matches!(escape.to_ascii_lowercase(), b'n' | b'r' | b't') => {
+                text = &text[..text.len() - 2];
+            }
+            _ => return text,
+        }
+    }
+}
+
+/// Length of the call path `text` starts with (`Some`, `Secret::new`,
+/// `Secret::<Vec<Box<str>>>::new`): ASCII identifiers joined by `::`, a segment
+/// being a turbofish (KT-2053), as the `path` of [`ASSIGNMENT`] reads them; 0
+/// when it starts with none. A turbofish is the longest run of [`generic_byte`]
+/// after its `<`, up to the last `>` in it, as the greedy flat class of the
+/// regex takes it.
 fn call_path_len(text: &str) -> usize {
     let bytes = text.as_bytes();
     let identifier_end = |from: usize| -> Option<usize> {
@@ -826,11 +965,25 @@ fn call_path_len(text: &str) -> usize {
             .count();
         Some(from + length)
     };
+    let generic_end = |from: usize| -> Option<usize> {
+        if bytes.get(from) != Some(&b'<') {
+            return None;
+        }
+        let inside = &bytes[from + 1..];
+        let run = inside
+            .iter()
+            .take_while(|byte| generic_byte(**byte))
+            .count();
+        inside[..run]
+            .iter()
+            .rposition(|byte| *byte == b'>')
+            .map(|last| from + 2 + last)
+    };
     let Some(mut end) = identifier_end(0) else {
         return 0;
     };
     while text[end..].starts_with("::") {
-        match identifier_end(end + 2) {
+        match identifier_end(end + 2).or_else(|| generic_end(end + 2)) {
             Some(next) => end = next,
             None => break,
         }
@@ -838,8 +991,1810 @@ fn call_path_len(text: &str) -> usize {
     end
 }
 
+/// `text` without the call path it ends with ([`call_path_len`] read from the
+/// end): `Some`, `Secret::new`, `Secret::<String>::new`.
+fn before_call_path(mut text: &str) -> &str {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    loop {
+        text = text.trim_end_matches(word);
+        if let Some(path) = text.strip_suffix("::") {
+            text = path;
+        } else if let Some(path) = before_turbofish(text) {
+            text = path;
+        } else {
+            return text;
+        }
+    }
+}
+
+/// `text` without the turbofish it ends with (`::<String>`,
+/// `::<Vec<Box<str>>>`, `::<&'static str>`): the run of [`generic_byte`] the
+/// text ends with is cut at its first `::<`, where the flat class of the regex,
+/// read from the left, opens it.
+fn before_turbofish(text: &str) -> Option<&str> {
+    if !text.ends_with('>') {
+        return None;
+    }
+    let run = text
+        .bytes()
+        .rev()
+        .take_while(|byte| generic_byte(*byte))
+        .count();
+    // The run is ASCII: its start is a character boundary.
+    let start = text.len() - run;
+    // `::` is part of the run (`:` is a type byte), so a `::<` is inside it.
+    let opens = text[start..].find("::<")?;
+    Some(&text[..start + opens])
+}
+
+/// `text` without the closure opener it ends with ([`closure_len`] read from
+/// the end): `||`, `|x|`, `move |_|`.
+fn before_closure(text: &str) -> Option<&str> {
+    let before = text
+        .strip_suffix('|')?
+        .trim_end_matches(|c: char| u8::try_from(c).is_ok_and(closure_param_byte))
+        .strip_suffix('|')?;
+    let spaced = before.trim_end_matches([' ', '\t']);
+    let bytes = spaced.as_bytes();
+    if spaced.len() < before.len()
+        && bytes.len() >= 4
+        && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b"move")
+    {
+        let head = &spaced[..spaced.len() - 4];
+        if !head.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+            return Some(head);
+        }
+    }
+    Some(before)
+}
+
 fn is_regex_space_char(c: char) -> bool {
     u8::try_from(c).is_ok_and(is_regex_space)
+}
+
+// ── KT-2053 review — every literal of a secret's value expression ──────
+//
+// The patterns of [`ASSIGNMENT`] read a quoted value right after `NAME [:=]` or
+// after the calls their `call` reads. Anything else in front of the literal
+// (a type: `token: &str = "…"`; a prefix: `b"…"`, `r#"…"#`, `&"…"`; a method:
+// `os.getenv("X", "…")`) or a second literal (`env::var_or("KEY", "…")`) used
+// to leave it in clear. This pass reads the value expression itself: from the
+// `:` / `=` to its end, every quoted literal inside it is masked.
+//
+// Round 2: a quote after `.` `!` `?` opens the value unless it closes a
+// sentence (`$salt."…"`, `ok?"…":"x"` vs `… the key Y.", "b"`); a line whose
+// next non-blank line starts with a continuation operator goes on there
+// (`\n    .unwrap_or("…")`, `\n  || "…"`); a bare `"` after a `\"…\"` literal
+// closes the `{:?}` string around the expression; and the pass stays linear
+// on any input ([`CutMemo`], tails judged once).
+//
+// Round 3: the line also goes on when nothing was read since the `:` / `=`
+// (`const token =\n  process.env.T ?? "…"`) or when it ends with an operator
+// (`x ||\n  "…"`, `ok ?\n  "…" :`, `salt +`, `$salt .`, Go's `f(…).\n\tOr("…")`),
+// as [`Carry`] reads from the last bytes of the line, tracked as it is read.
+//
+// Round 4: a trailing comment (`x || // default`, `x || # fallback`,
+// `x || /* … */`) is blanks for how the line ends, so it no longer hides the
+// operator before it; a `//` with no text after it is Perl's defined-or and
+// carries the line ([`Comment`]).
+//
+// Round 5: a unified diff is also read in its old and new versions
+// ([`diff_versions`]), so the carry that enters a `-` run enters the `+` run
+// after it and a context line after both goes on from either; a line also
+// goes on after the word `or` / `and`, a ` ..` or a `^` ([`LineEnd`]); `--`
+// comments (Lua's `--[[ … ]]` too) are blanks like `//`, and after an operator
+// any `#` opens a comment (`x || #[c]`); a bare `#"…"#` is a raw string; a
+// literal that its comment line does not close is masked whole, but the next
+// line is still read as code.
+//
+// Round 6: the mirror of round 5, a next line that starts with the word `or` /
+// `and` (`local t = os.getenv("T")\n  or "…"`), Lua's `..` or Perl's `//`
+// also goes on, after a trailing comment and in both diff versions too
+// ([`continued_at`], [`leading_word_operator`]).
+//
+// Round 7: a line that holds only comments (`--`, `#`, `//`, `/* … */`, Lua's
+// `--[[ … ]]`, a block across lines) is skipped like a blank one when looking
+// for that leading operator (`x\n  -- c\n  or "…"`), in diff versions too, and
+// its literals are still read ([`comment_run`]); Lua's long bracket `[[…]]` /
+// `[==[…]==]` is a literal where a value starts (not `a[[1]]`).
+//
+// Second security review: a generic stays open past a line break while its
+// list goes on (`Option<\n    String,\n> = …`, [`generic_goes_on`]), and the
+// `>` of `->` / `=>` closes none; after an operator `.` / `?` / `!` (`$p.":"`,
+// `??":…"`, a ternary `?" ":`) a quote opens a literal, whatever starts it;
+// a comment opens glued to `:` `(` `[` `{` `,` `^` too (`:/* c */`, `(// c`);
+// a line comment's literal stops at its line end; a `[[…]]` body's own
+// literals are read too (a nested array); line starts are tracked forward
+// ([`CutMemo::line_start`]), `\r` a line break as everywhere else.
+//
+// Round 9: a `,` at the value's own depth ends it only before a new key
+// (`name =`, `name:`, `"name":`, `'name' =>`, [`key_follows`]); otherwise the
+// value goes on (`token = x, "…"`, a Python tuple), and a line that ends with
+// that `,` carries it like `||`. A line that starts with a `,` (comma-first
+// style) continues the value and an open generic like a leading `||`.
+
+/// The name a value expression follows, then its `:` / `=`: the name of
+/// [`ASSIGNMENT`], optionally closed by its key quote, escaped or not
+/// (`"token":`, `\"token\":`, `'token' =>`). Group 1 is the name.
+static VALUE_EXPRESSION_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    let name = assignment_name();
+    Regex::new(&format!(r#"(?i)\b({name})\b(?:\\?["'])?\s*[:=]"#))
+        .expect("static value-expression regex")
+});
+
+/// Gate of [`VALUE_EXPRESSION_NAME`]: a secret-ish name, its key quote (escaped
+/// or not) if any, optional whitespace, then `:` or `=` ([`assignment_gate`]
+/// with any opener, for a bare name and both key quotes).
+fn value_expression_gate(text: &str) -> bool {
+    [None, Some(b'"'), Some(b'\'')]
+        .into_iter()
+        .any(|key_quote| assignment_gate(text, Opener::Any, key_quote))
+}
+
+/// Literal prefixes read before any quote (Rust `b`, `r`, `br`; Python `b`,
+/// `r`, `f`, `u` and their pairs), lowercase.
+const LITERAL_PREFIXES: &[&str] = &["b", "r", "br", "rb", "f", "fr", "rf", "u", "ur", "ru"];
+
+/// Literal prefixes read before a double quote only (Rust `c`, `cr`; C++ `L`,
+/// `u8`): before a `'` they are words (`l'été`).
+const DOUBLE_QUOTE_PREFIXES: &[&str] = &["c", "cr", "l", "u8"];
+
+/// Whether `word` is a literal prefix of `quote` ([`LITERAL_PREFIXES`],
+/// [`DOUBLE_QUOTE_PREFIXES`]), ASCII case ignored.
+fn literal_prefix(word: &str, quote: u8) -> bool {
+    let known = |list: &[&str]| list.iter().any(|known| word.eq_ignore_ascii_case(known));
+    known(LITERAL_PREFIXES) || (quote == b'"' && known(DOUBLE_QUOTE_PREFIXES))
+}
+
+/// An identifier byte for the expression reader: ASCII word bytes and every
+/// byte of a non-ASCII character (`l'été`: an apostrophe, not a quote).
+fn word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// The quoted literals inside the value expression that starts at `from` (right
+/// after the `:` / `=` of a secret-ish name), as the ranges of their bodies
+/// between their quotes, and where the expression ends. `memo` remembers the
+/// literals already found to run to the end of the text ([`CutMemo`]).
+///
+/// The expression ends at a `;` `)` `]` `}` at depth 0 (brackets, parens,
+/// braces opened inside it; a `<` right after a word or a `:` opens a generic,
+/// closed by `>` but not the `>` of `->` / `=>`, or by anything that closes
+/// what holds it, or by a line break unless its list goes on there:
+/// [`generic_goes_on`]), at a `,` at depth 0 that a new key follows
+/// (`, name = …`, `, "name": …`: [`key_follows`]; before anything else the
+/// value goes on: `token = x, "…"`), or at the end of
+/// the line: a line break, or a printed `\n` / `\r` (a `{:#?}` dump printed
+/// with `{:?}`), at depth 0 only, as the call shapes read one inside a call.
+/// The line does not end it when nothing but blanks was read since the `:` /
+/// `=`, when the line ends with a continuation operator (`||`, `?`, `+`, `^`,
+/// a `,`, the word `or` / `and`, a ` ..`…, [`LineEnd`], [`Carry::after`]), or
+/// when the next non-blank line starts with one (`.unwrap_or(…)`, `|| "…"`,
+/// `, "…"`), lines that hold only
+/// comments between them skipped like blank ones ([`comment_run`]): [`Carry`],
+/// [`continued_at`]. A comment (`//`, `#`, `--`, `/* … */` or Lua's
+/// `--[[ … ]]` after a blank or an operator; after an operator any `#`, even
+/// `#[` or `#!`; glued to `:` `(` `[` `{` `,` `^` too: [`comment_opens`])
+/// counts as blanks for how the line ends, and
+/// its brackets, `,` and `;` end nothing, but a literal inside it is still
+/// read; one that its line does not close is masked to that line's end, and
+/// reading goes on at that line's break, as code. A `//` with nothing after it (Perl's
+/// defined-or) carries the line, and a block comment runs across line breaks
+/// to its end. A diff's two versions are read by [`mask_value_expressions`].
+/// It also ends at a `"`, `\"` or backtick that cannot open a literal (right
+/// after a word, a closer or an escaped backslash; after a `.` `!` `?` when it
+/// closes a sentence rather than opens a value, as [`read_literal`] tells: an
+/// operator `.` `?` `!`, as in `$p.":"` or `??":…"`, never does): that
+/// quote closes the string the expression is written in (`left: "Cfg { token:
+/// abc }"`, `"… password=X and the key Y."`), as does a bare `"` once an
+/// escaped literal was read (`left: "token: \"…\""`: the expression is inside
+/// a string printed with `{:?}`, which that `"` closes).
+///
+/// A literal is `"…"`, `'…'`, a backtick one, or `\"…\"` (inside a string
+/// printed with `{:?}`, read as escaped twice), after an optional prefix
+/// (`b`, `r`, `f`, `u`…, [`LITERAL_PREFIXES`]) and, after an `r` or no word,
+/// `#`s that its end repeats (`r#"…"#`, Swift's `#"…"#`), or Lua's long
+/// bracket `[[…]]` / `[=[…]=]` (closed by the same number of `=`s, across
+/// lines) where a value starts: first, or after an operator, an opener or the
+/// word `or` / `and`, never after a name or a closer (`a[[1]]` is an index);
+/// the literals inside a `[[…]]` are read too, as it may be a nested array
+/// (`new Map([[k, "…"]])`: [`literals_within`]).
+/// A `'` right after a word is an apostrophe (`it's`),
+/// and after `&` or `<` (or a `,` in a generic) a lifetime (`&'static`). A
+/// literal not closed runs to the end of the text, and an escaped one stops at
+/// a bare `"` (the string around it ends there), which ends the expression too.
+/// A quote right after a mask (`***REDACTED***"`) closes what that mask
+/// replaced, never opens a literal, so a second pass changes nothing.
+fn expression_literals(
+    text: &str,
+    from: usize,
+    memo: &mut CutMemo,
+) -> (Vec<std::ops::Range<usize>>, usize) {
+    let bytes = text.as_bytes();
+    let mut literals = Vec::new();
+    // What each open bracket expects; a generic's `>` is "soft": anything that
+    // closes what holds it closes it too.
+    let mut open: Vec<u8> = Vec::new();
+    let pop_generics = |open: &mut Vec<u8>| {
+        while open.last() == Some(&b'>') {
+            open.pop();
+        }
+    };
+    // Whether an escaped literal was read: the expression is then inside a
+    // string printed with `{:?}`, and a bare `"` closes that string.
+    let mut printed = false;
+    // How the line read so far ends ([`LineEnd`]), which [`Carry::after`]
+    // reads at a line break without looking back, and whether the byte read
+    // last was a blank.
+    let mut line = LineEnd::default();
+    let mut blank = false;
+    // The comment being read, if any ([`Comment`]): blanks for `line`, and
+    // its brackets, `,` and `;` end nothing.
+    let mut comment: Option<Comment> = None;
+    // Whether a `lambda` was read: an `ident:` after a `,` is then one of its
+    // parameters, not a new key ([`key_follows`]).
+    let mut lambda = false;
+    let mut at = from;
+    let mut steps = 0usize;
+    let ends = loop {
+        if at >= bytes.len() {
+            break bytes.len();
+        }
+        steps += 1;
+        let byte = bytes[at];
+        let printed_break = byte == b'\\' && matches!(bytes.get(at + 1), Some(b'n' | b'r'));
+        let line_break = matches!(byte, b'\n' | b'\r') || printed_break;
+        if let Some(kind) = comment.filter(|kind| kind.spans_lines() || !line_break) {
+            if let Some(length) = kind.closes_at(bytes, at) {
+                comment = None;
+                blank = true;
+                at += length;
+                continue;
+            }
+            let printed_blank = byte == b'\\' && bytes.get(at + 1) == Some(&b't');
+            if !matches!(byte, b' ' | b'\t' | b'\n' | b'\r') && !printed_blank && !printed_break {
+                if let Some(Comment::Line { text }) = comment.as_mut() {
+                    *text = true;
+                }
+            }
+            // A literal inside it is still read (fail-closed: `$x // "…"` is
+            // Perl's defined-or, and what was masked before stays masked).
+            let escaped = match byte {
+                b'"' if printed => break at,
+                b'"' | b'\'' | b'`' => false,
+                b'\\' if bytes.get(at + 1) == Some(&b'"') => true,
+                _ => {
+                    at += if byte == b'\\' { 2 } else { 1 };
+                    continue;
+                }
+            };
+            let found = read_literal(text, from, at, &open, memo);
+            // A literal of a line comment that its line does not close is
+            // masked to the end of that line: the comment ends with its line,
+            // and the next line is read as code (`x || #"c\n  "…"`), its line
+            // break and code kept (KT-2053 second security review).
+            if !kind.spans_lines() {
+                if let Quote::Literal { body, .. } | Quote::Cut(body) = &found {
+                    let line_end = memo.line_break_after(bytes, at + 1);
+                    if line_end < body.end {
+                        if line_end > body.start {
+                            literals.push(body.start..line_end);
+                        }
+                        at = line_end;
+                        continue;
+                    }
+                }
+            }
+            match found {
+                Quote::Literal { body, next } => {
+                    literals.push(body);
+                    printed |= escaped;
+                    at = next;
+                }
+                Quote::Cut(body) => {
+                    let end = body.end;
+                    literals.push(body);
+                    break end;
+                }
+                Quote::Skip(next) => at = next,
+                Quote::Ends => break at,
+            }
+            continue;
+        }
+        if let Some((kind, length)) = comment_opens(bytes, from, at, line.operator()) {
+            comment = Some(kind);
+            blank = true;
+            at += length;
+            continue;
+        }
+        // How the line ends, read at a line break: a line comment with no text
+        // (`$ENV{X} //`) is Perl's defined-or, which carries anything.
+        let carry = match comment {
+            Some(Comment::Line { text: false }) => Carry::Any,
+            _ => Carry::after(line),
+        };
+        if line_break {
+            comment = None;
+        }
+        // Where reading goes on past a line break ([`continued_at`]): the code
+        // there, or a comment-only line (KT-2053 round 7) read as a comment.
+        let go_on = |next: Next, comment: &mut Option<Comment>, blank: &mut bool| match next {
+            Next::Code(index) => index,
+            Next::Comment { at, kind, length } => {
+                *comment = Some(kind);
+                *blank = true;
+                at + length
+            }
+        };
+        // How the line ended before this byte, for a Lua long bracket.
+        let line_before = line;
+        // Python's `lambda a, b: …`: its `b:` is a parameter, not a key.
+        if byte == b'l'
+            && (at == from || !word_byte(bytes[at - 1]))
+            && bytes[at..].starts_with(b"lambda")
+            && !bytes.get(at + 6).copied().is_some_and(word_byte)
+        {
+            lambda = true;
+        }
+        let printed_blank = byte == b'\\' && matches!(bytes.get(at + 1), Some(b'n' | b'r' | b't'));
+        if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') || printed_blank {
+            blank = true;
+        } else {
+            line.read(bytes, at, blank);
+            blank = false;
+        }
+        let quote = match byte {
+            b'(' => {
+                open.push(b')');
+                None
+            }
+            b'[' => {
+                // KT-2053 round 7: Lua's long bracket `[[…]]` / `[=[…]=]` is a
+                // literal where a value starts (first, or after an operator or
+                // an opener), not after a name or a closer (`a[[1]]`).
+                let equals = bytes[at + 1..]
+                    .iter()
+                    .take_while(|byte| **byte == b'=')
+                    .count();
+                expression_work(equals + 1);
+                let previous = line_before.tail[1];
+                let value_starts = previous == 0
+                    || line_before.word_operator
+                    || !(word_byte(previous)
+                        || matches!(previous, b')' | b']' | b'}' | b'"' | b'\'' | b'`'));
+                if value_starts && bytes.get(at + 1 + equals) == Some(&b'[') {
+                    let close = format!("]{}]", "=".repeat(equals));
+                    match scan_body(text, at + 2 + equals, b']', false, true, &close, memo) {
+                        Quote::Literal { body, next } => {
+                            literals.push(body.clone());
+                            // A `[[` may also be a nested array (`new Map([[k,
+                            // "…"]])`): the literals inside it are read too, so
+                            // each is judged on its own (KT-2053 second
+                            // security review).
+                            if equals == 0 {
+                                literals.extend(literals_within(text, body, &open, memo));
+                            }
+                            at = next;
+                            continue;
+                        }
+                        Quote::Cut(body) => {
+                            let end = body.end;
+                            literals.push(body);
+                            break end;
+                        }
+                        Quote::Skip(next) => {
+                            at = next;
+                            continue;
+                        }
+                        Quote::Ends => break at,
+                    }
+                }
+                open.push(b']');
+                None
+            }
+            b'{' => {
+                open.push(b'}');
+                None
+            }
+            b'<' => {
+                if at > from && (word_byte(bytes[at - 1]) || bytes[at - 1] == b':') {
+                    open.push(b'>');
+                }
+                None
+            }
+            b'>' => {
+                // The `>` of `->` / `=>` closes no generic (`Result<fn() ->
+                // String, E>`), unless that `-` is a diff line's marker.
+                let arrow = at > from
+                    && matches!(bytes[at - 1], b'-' | b'=')
+                    && !(at - 1 == 0 || matches!(bytes[at - 2], b'\n' | b'\r'));
+                if open.last() == Some(&b'>') && !arrow {
+                    open.pop();
+                }
+                None
+            }
+            b')' | b']' | b'}' => {
+                pop_generics(&mut open);
+                match open.iter().rposition(|expected| *expected == byte) {
+                    Some(index) => open.truncate(index),
+                    None if open.is_empty() => break at,
+                    None => {}
+                }
+                None
+            }
+            b';' => {
+                pop_generics(&mut open);
+                if open.is_empty() {
+                    break at;
+                }
+                None
+            }
+            // KT-2053 round 9: a `,` at the value's own depth ends it only
+            // before a new key (`token = "…", name = …`); otherwise the value
+            // goes on (a Python tuple, a Ruby array: `token = x, "…"`).
+            b',' => {
+                if open.is_empty() && key_follows(bytes, at, lambda, memo) {
+                    break at;
+                }
+                None
+            }
+            b'\n' | b'\r' => {
+                if !generic_goes_on(bytes, &open, line, at, false, memo) {
+                    pop_generics(&mut open);
+                }
+                if open.is_empty() {
+                    match continued_at(text, at, false, carry, memo) {
+                        Some(next) => {
+                            at = go_on(next, &mut comment, &mut blank);
+                            continue;
+                        }
+                        None => break at,
+                    }
+                }
+                None
+            }
+            b'\\' => match bytes.get(at + 1) {
+                Some(b'n' | b'r') => {
+                    if !generic_goes_on(bytes, &open, line, at, true, memo) {
+                        pop_generics(&mut open);
+                    }
+                    if open.is_empty() {
+                        match continued_at(text, at, true, carry, memo) {
+                            Some(next) => {
+                                at = go_on(next, &mut comment, &mut blank);
+                                continue;
+                            }
+                            None => break at,
+                        }
+                    }
+                    at += 2;
+                    continue;
+                }
+                Some(b'"') => Some(true),
+                _ => {
+                    at += 2;
+                    continue;
+                }
+            },
+            b'"' if printed => break at,
+            b'"' | b'\'' | b'`' => Some(false),
+            _ => None,
+        };
+        let Some(escaped) = quote else {
+            at += 1;
+            continue;
+        };
+        match read_literal(text, from, at, &open, memo) {
+            Quote::Literal { body, next } => {
+                literals.push(body);
+                printed |= escaped;
+                at = next;
+            }
+            Quote::Cut(body) => {
+                let end = body.end;
+                literals.push(body);
+                break end;
+            }
+            Quote::Skip(next) => at = next,
+            Quote::Ends => break at,
+        }
+    };
+    expression_work(steps);
+    (literals, ends)
+}
+
+/// The quoted literals inside `body`, the body of a Lua long bracket `[[…]]`
+/// that may as well be a nested array (`[[k, "…"]]`), each cut at the end of
+/// `body`; `open` are the brackets open around it. Reads `body` once (a scan
+/// past its end stops at the closing quote met first, so it reads no byte
+/// another scan of the same quote reads).
+fn literals_within(
+    text: &str,
+    body: std::ops::Range<usize>,
+    open: &[u8],
+    memo: &mut CutMemo,
+) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut at = body.start;
+    while at < body.end {
+        let quote = match bytes[at] {
+            b'"' | b'\'' | b'`' => true,
+            b'\\' => bytes.get(at + 1) == Some(&b'"'),
+            _ => false,
+        };
+        if !quote {
+            at += if bytes[at] == b'\\' { 2 } else { 1 };
+            continue;
+        }
+        match read_literal(text, body.start, at, open, memo) {
+            Quote::Literal { body: inner, next } if next <= body.end => {
+                found.push(inner);
+                at = next;
+            }
+            Quote::Literal { body: inner, .. } | Quote::Cut(inner) => {
+                if inner.start < body.end {
+                    found.push(inner.start..body.end);
+                }
+                break;
+            }
+            Quote::Skip(next) => at = next,
+            Quote::Ends => at += 1,
+        }
+    }
+    expression_work(at.min(body.end) - body.start + 1);
+    found
+}
+
+/// Whether the generic open innermost (`open`) stays open past the line break
+/// at `at` (a printed `\n` / `\r` when `printed`), KT-2053 second security
+/// review: when its type list goes on, that is the line ends with the `<` that
+/// opened it or a `,` of its list (`Option<\n    String,\n`), or the next line
+/// starts with its `>` (`\n> = Some(…)`) or a `,` of its list (comma-first:
+/// `String\n    , String`, KT-2053 round 9; in a diff, past the next line's
+/// marker). Otherwise a line break closes it, as before: a `<` glued to a word
+/// at the end of a line (`a<b`) opens nothing past it.
+fn generic_goes_on(
+    bytes: &[u8],
+    open: &[u8],
+    line: LineEnd,
+    at: usize,
+    printed: bool,
+    memo: &mut CutMemo,
+) -> bool {
+    if open.last() != Some(&b'>') {
+        return false;
+    }
+    if matches!(line.tail[1], b'<' | b',') {
+        return true;
+    }
+    let diff = !printed && matches!(bytes.get(memo.line_start(bytes, at)), Some(b'+' | b'-'));
+    // KT-2053 round 9: a next line that starts with a `,` goes on with the
+    // list too (comma-first style: `HashMap<\n    String\n    , String\n>`).
+    matches!(
+        bytes.get(line_after(bytes, at, diff, printed)),
+        Some(b'>' | b',')
+    )
+}
+
+/// KT-2053 round 9: whether the segment after the `,` at `comma` (at the value
+/// expression's own depth) starts a new key, so that the value ends at that
+/// `,`: an identifier (after an optional `$`, `@` or Ruby's `:`, before an
+/// optional `?` / `!`) or a quoted key (`"…"`, `'…'`, `\"…\"`), then blanks,
+/// then a `:` (not `::`) or a `=` (not `==` / `=~`; `=>` is one) — `name =`,
+/// `name=`, `name:`, `"name":`, `'name' =>`. After a `lambda` (`lambda_read`)
+/// an `ident:` is one of its parameters, not a key. Blanks, line breaks (a
+/// printed `\n` / `\r` / `\t`, a diff line's `+` / `-` marker) and line
+/// comments between are skipped. Anything else (a value, a closer, a call, a
+/// block comment, the end of the text) is no key, so the value goes on past
+/// the `,` (fail-closed: `token = x, "…"`).
+///
+/// It reads the blanks and comments after the `,` and the key's first 64 bytes
+/// at most; the next `,` the value reads comes after them, so each byte is
+/// looked at by one `,` only and the pass stays linear.
+fn key_follows(bytes: &[u8], comma: usize, lambda_read: bool, memo: &mut CutMemo) -> bool {
+    let mut at = comma + 1;
+    loop {
+        match bytes.get(at) {
+            Some(b' ' | b'\t') => at += 1,
+            Some(b'\n' | b'\r') => {
+                at += 1;
+                // A diff line's marker (`--` / `++` is something else).
+                if matches!(bytes.get(at), Some(b'+' | b'-')) && bytes.get(at + 1) != bytes.get(at)
+                {
+                    at += 1;
+                }
+            }
+            Some(b'\\') if matches!(bytes.get(at + 1), Some(b'n' | b'r' | b't')) => at += 2,
+            Some(_) => match comment_line_opens(bytes, at) {
+                Some((kind @ Comment::Line { .. }, length)) => {
+                    let end = comment_ends(bytes, at, kind, length, memo);
+                    at = end.unwrap_or(bytes.len());
+                }
+                // A block comment may hide a line break, or not close: no key.
+                Some(_) => {
+                    expression_work(at - comma);
+                    return false;
+                }
+                None => break,
+            },
+            None => break,
+        }
+    }
+    expression_work(at - comma);
+    key_at(bytes, at, lambda_read)
+}
+
+/// Whether a key and its `:` / `=` start at `at` ([`key_follows`]).
+fn key_at(bytes: &[u8], at: usize, lambda_read: bool) -> bool {
+    const LONGEST: usize = 64;
+    let mut index = at;
+    let quote: Option<&[u8]> = match bytes.get(index) {
+        Some(b'"') => Some(b"\""),
+        Some(b'\'') => Some(b"'"),
+        Some(b'\\') if bytes.get(index + 1) == Some(&b'"') => Some(b"\\\""),
+        _ => None,
+    };
+    match quote {
+        Some(quote) => {
+            index += quote.len();
+            let start = index;
+            while index - start < LONGEST
+                && bytes
+                    .get(index)
+                    .is_some_and(|byte| !matches!(byte, b'"' | b'\'' | b'\\' | b'\n' | b'\r'))
+            {
+                index += 1;
+            }
+            if index == start || !bytes[index..].starts_with(quote) {
+                expression_work(index - at + 1);
+                return false;
+            }
+            index += quote.len();
+        }
+        None => {
+            if matches!(bytes.get(index), Some(b'$' | b'@' | b':')) {
+                index += 1;
+            }
+            let start = index;
+            while index - start <= LONGEST && bytes.get(index).copied().is_some_and(word_byte) {
+                index += 1;
+            }
+            if index == start || index - start > LONGEST {
+                expression_work(index - at + 1);
+                return false;
+            }
+            if matches!(bytes.get(index), Some(b'?' | b'!')) && bytes.get(index + 1) == Some(&b':')
+            {
+                index += 1;
+            }
+        }
+    }
+    while matches!(bytes.get(index), Some(b' ' | b'\t')) && index - at <= 2 * LONGEST {
+        index += 1;
+    }
+    expression_work(index - at + 2);
+    match (bytes.get(index), bytes.get(index + 1)) {
+        (Some(b':'), next) => next != Some(&b':') && !(lambda_read && quote.is_none()),
+        (Some(b'='), next) => !matches!(next, Some(b'=' | b'~')),
+        _ => false,
+    }
+}
+
+/// A comment read by [`expression_literals`] (KT-2053 round 4): its bytes are
+/// blanks for how the line ends, so `x || // default` still ends with `||`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Comment {
+    /// `// …`, `# …` or `-- …`, to the end of the line; `text` once anything
+    /// but blanks was read in it (a `//` with none is Perl's defined-or
+    /// operator; an empty `#` or `--` carries the line too, fail-closed).
+    Line { text: bool },
+    /// `/* … */`, across line breaks, to its `*/` (or the end of the text).
+    Block,
+    /// Lua's `--[[ … ]]` (`--[==[ … ]==]` with `equals` `=`s), across line
+    /// breaks, to the long bracket that closes it (or the end of the text).
+    LongBracket { equals: usize },
+}
+
+impl Comment {
+    fn spans_lines(self) -> bool {
+        !matches!(self, Self::Line { .. })
+    }
+
+    /// The length of what closes this comment at `at`, if it closes there:
+    /// `*/` for a block, `]` `=`… `]` for a long bracket.
+    fn closes_at(self, bytes: &[u8], at: usize) -> Option<usize> {
+        match self {
+            Self::Line { .. } => None,
+            Self::Block => (bytes[at] == b'*' && bytes.get(at + 1) == Some(&b'/')).then_some(2),
+            Self::LongBracket { equals } => {
+                if bytes[at] != b']' {
+                    return None;
+                }
+                // Each `=` follows at most one `]` right before it: linear.
+                let run = bytes[at + 1..]
+                    .iter()
+                    .take(equals)
+                    .take_while(|byte| **byte == b'=')
+                    .count();
+                expression_work(run);
+                (run == equals && bytes.get(at + 1 + equals) == Some(&b']')).then_some(equals + 2)
+            }
+        }
+    }
+}
+
+/// The comment that starts at `at` in the expression that started at `from`,
+/// and the length of its opening marker: a `//`, `/*`, `--` (`--[[` / `--[=[`
+/// a Lua long comment) or `#` right after the `:` / `=`, a blank, a line break
+/// or an operator (`|` `&` `?` `+` `=`), so that a URL (`https://x`), a word
+/// (`C#`) or a decrement (`i--`) is none. A `#"`, `##`, `#[` or `#!` (a raw
+/// string, an attribute, a shebang) is no comment either, unless the line so
+/// far ends with an operator that needs a right-hand side (`after_operator`:
+/// after `x || `, nothing but a comment starts with `#`). Glued to a `:` `(`
+/// `[` `{` `,` `^`, a `/*` opens one, and a `//` `--` `#` when a blank or the
+/// line's end follows it (a `//` after anything but `:` always: `://x` is a
+/// URL).
+fn comment_opens(
+    bytes: &[u8],
+    from: usize,
+    at: usize,
+    after_operator: bool,
+) -> Option<(Comment, usize)> {
+    let previous = (at > from).then(|| bytes[at - 1]);
+    let after = previous.is_none_or(|byte| {
+        matches!(
+            byte,
+            b' ' | b'\t' | b'\n' | b'\r' | b'|' | b'&' | b'?' | b'+' | b'='
+        )
+    });
+    if !after {
+        // KT-2053 second security review: glued to a `:` `(` `[` `{` `,` or
+        // `^` (`a :/* c */`, `(// c`), a comment opens too. There a `/*`
+        // always does; a `//`, `--` or `#` when a blank or the line's end
+        // follows it (not a URL's `://x`, a decrement `(--i`, a CSS
+        // `color:#fff`, an attribute `(#[x]` or a raw string `(#"…"#`); a
+        // `//` after anything but a `:` whatever follows it.
+        let glued =
+            previous.is_some_and(|byte| matches!(byte, b':' | b'(' | b'[' | b'{' | b',' | b'^'));
+        if !glued {
+            return None;
+        }
+        let spaced = |index: usize| match bytes.get(index) {
+            None | Some(b' ' | b'\t' | b'\n' | b'\r') => true,
+            Some(b'\\') => matches!(bytes.get(index + 1), Some(b'n' | b'r' | b't')),
+            _ => false,
+        };
+        return match (bytes[at], bytes.get(at + 1)) {
+            (b'/', Some(b'*')) => Some((Comment::Block, 2)),
+            (b'/', Some(b'/')) if previous != Some(b':') || spaced(at + 2) => {
+                Some((Comment::Line { text: false }, 2))
+            }
+            (b'-', Some(b'-')) => match long_comment(bytes, at) {
+                Some(found) => Some(found),
+                None => spaced(at + 2).then_some((Comment::Line { text: false }, 2)),
+            },
+            (b'#', _) if spaced(at + 1) => Some((Comment::Line { text: false }, 1)),
+            _ => None,
+        };
+    }
+    match (bytes[at], bytes.get(at + 1)) {
+        (b'/', Some(b'/')) => Some((Comment::Line { text: false }, 2)),
+        (b'/', Some(b'*')) => Some((Comment::Block, 2)),
+        (b'-', Some(b'-')) => long_comment(bytes, at).or(Some((Comment::Line { text: false }, 2))),
+        (b'#', Some(b'"' | b'#' | b'[' | b'!')) if !after_operator => None,
+        (b'#', _) => Some((Comment::Line { text: false }, 1)),
+        _ => None,
+    }
+}
+
+/// Lua's long comment `--[[` / `--[=[` (`equals` `=`s) at `at`, and the length
+/// of its marker.
+fn long_comment(bytes: &[u8], at: usize) -> Option<(Comment, usize)> {
+    if bytes.get(at + 2) != Some(&b'[') {
+        return None;
+    }
+    let equals = bytes[at + 3..]
+        .iter()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    expression_work(equals);
+    (bytes.get(at + 3 + equals) == Some(&b'['))
+        .then_some((Comment::LongBracket { equals }, equals + 4))
+}
+
+/// How the line a value expression has read so far ends, outside comments
+/// ([`Comment`]): its last two non-blank bytes (`[before, last]`, `0` for none
+/// read), whether blanks came right before each (`$salt .`, `"sk_" ..`), and
+/// whether its last word is the operator `or` / `and` (ASCII case ignored).
+/// Kept up to date byte by byte ([`LineEnd::read`]), never read backwards.
+#[derive(Clone, Copy, Default, Debug)]
+struct LineEnd {
+    tail: [u8; 2],
+    spaced: [bool; 2],
+    /// The last run of word bytes, while it is the last non-blank thing read.
+    word: Option<(usize, usize)>,
+    word_operator: bool,
+}
+
+impl LineEnd {
+    /// Reads the non-blank byte at `at`, after a blank when `spaced`.
+    fn read(&mut self, bytes: &[u8], at: usize, spaced: bool) {
+        let byte = bytes[at];
+        self.tail = [self.tail[1], byte];
+        self.spaced = [self.spaced[1], spaced];
+        self.word = word_byte(byte).then(|| match self.word {
+            Some((start, end)) if end == at => (start, at + 1),
+            _ => (at, at + 1),
+        });
+        self.word_operator = self.word.is_some_and(|(start, end)| {
+            let word = &bytes[start..end];
+            word.eq_ignore_ascii_case(b"or") || word.eq_ignore_ascii_case(b"and")
+        });
+    }
+
+    /// Whether the line ends with an operator that needs a right-hand side:
+    /// `||` `&&` `?` (so `??`) `:` (so `::`) `+` `=` (so `==`) `^` (cmd's
+    /// line continuation), Perl's `//` (`$ENV{X}//`), a `.` after a blank
+    /// (`$salt .`: no sentence ends that way), a `..` after a blank (Lua's
+    /// `"sk_" ..`), or the word `or` / `and`.
+    fn operator(self) -> bool {
+        self.word_operator
+            || match self.tail {
+                [_, b'?' | b':' | b'+' | b'=' | b'^'] => true,
+                [before, last @ (b'|' | b'&' | b'/')] => before == last,
+                [_, b'.'] if self.spaced[1] => true,
+                [b'.', b'.'] => self.spaced[0],
+                _ => false,
+            }
+    }
+}
+
+/// What the line a value expression has read so far lets the next line be,
+/// from how that line ends ([`Carry::after`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Carry {
+    /// Anything: nothing but blanks was read since the `:` / `=` (the value is
+    /// on the next line: `const token =\n  process.env.T ?? "…"`), or the line
+    /// ends with an operator that needs a right-hand side (`x ||\n  "…"`).
+    Any,
+    /// A chained call only: the line ends with a `.` (Go's `f(…).\n\tOr("…")`),
+    /// which in prose ends a sentence (`abc.\nAnd then …`).
+    Call,
+    /// A line that starts with a continuation operator only ([`continued_at`]).
+    Leading,
+}
+
+impl Carry {
+    /// How a line that ends as `line` does carries on: nothing read, a
+    /// trailing operator ([`LineEnd::operator`]: `||`, `??`, `+`, `or`, ` ..`,
+    /// `^`…), a `(` or a `,` (one at the value's depth is read only when no
+    /// new key follows it: [`key_follows`]) carry anything; a trailing `.` (not `..`) right after a
+    /// word or a closer carries a chained call; anything else a leading
+    /// operator. A trailing comment is not part of `line` ([`Comment`]).
+    fn after(line: LineEnd) -> Self {
+        match line.tail {
+            // A `,` at the value's depth that no new key follows (KT-2053
+            // round 9: `token = x,\n  "…"`).
+            [_, 0 | b'(' | b','] => Self::Any,
+            _ if line.operator() => Self::Any,
+            [before, b'.'] if before != b'.' => Self::Call,
+            _ => Self::Leading,
+        }
+    }
+}
+
+/// Where a value expression goes on past the line break at `at` (a real one, or
+/// a printed `\n` / `\r` when `printed`), given how its line ends (`carry`):
+/// the start of the next non-blank line when that line may continue it, `None`
+/// when it may not, so the expression ends at the break.
+///
+/// With [`Carry::Any`] any next line continues it; with [`Carry::Call`] a line
+/// that starts with an identifier right before `(` (a chained call: `Or("…")`,
+/// not `And then …`); with [`Carry::Leading`] a line that starts with an
+/// operator a formatter puts at the start of a continued line (rustfmt's
+/// `.unwrap_or(…)` chains, a leading `|| "…"`, Lua's and Perl's leading
+/// `or "…"`): `.` and Lua's `..` (not `...`), `?.`, `??`, the `?` and `:` of a
+/// ternary (not `::`), `||`, `&&`, `+`, a `,` (comma-first style, KT-2053
+/// round 9; a new key after it still ends the value: [`key_follows`]),
+/// Perl's `//` (a comment line read as
+/// one masks its literals, fail-closed), and the word `or` / `and`
+/// ([`leading_word_operator`]). Otherwise a word, a closer or a `{:#?}` field
+/// ends the expression there, as does plain prose. How the line ends is judged
+/// on its code, a trailing comment left out ([`Comment`]).
+/// In a unified diff (the line of the break starts with `+` or `-`) the next
+/// line's own `+` / `-` / ` ` marker is skipped first, and only that line is
+/// looked at. Where that line starts is tracked forward
+/// ([`CutMemo::line_start`], past a `\n` or a `\r`), never searched backwards.
+///
+/// With [`Carry::Leading`], a line that holds only comments (`--`, `#`, `//`,
+/// `/* … */` or Lua's `--[[ … ]]`, either running across lines) is skipped like
+/// a blank one when looking for that operator (KT-2053 round 7: `x\n  -- c\n
+/// or "…"`), [`comment_run`]; the expression then goes on with that comment
+/// ([`Next::Comment`]), so its literals are read too.
+fn continued_at(
+    text: &str,
+    at: usize,
+    printed: bool,
+    carry: Carry,
+    memo: &mut CutMemo,
+) -> Option<Next> {
+    let bytes = text.as_bytes();
+    // Tracked forward ([`CutMemo::line_start`]), `\r` a line break too.
+    let line_start = (!printed).then(|| memo.line_start(bytes, at));
+    let diff = line_start.is_some_and(|start| matches!(bytes.get(start), Some(b'+' | b'-')));
+    let index = line_after(bytes, at, diff, printed);
+    let first = *bytes.get(index)?;
+    let continues = match carry {
+        Carry::Any => true,
+        Carry::Call => {
+            let name = bytes[index..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+                .count();
+            expression_work(name + 1);
+            name > 0 && !first.is_ascii_digit() && bytes.get(index + name) == Some(&b'(')
+        }
+        Carry::Leading => {
+            if !leading_operator(bytes, index) {
+                return comment_run(bytes, at, index, diff, printed, memo);
+            }
+            true
+        }
+    };
+    continues.then_some(Next::Code(index))
+}
+
+/// What a value expression goes on with past a line break ([`continued_at`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Next {
+    /// The code at this index.
+    Code(usize),
+    /// A comment-only line before a line that starts with a continuation
+    /// operator: the comment of kind `kind` whose `length`-byte marker starts
+    /// at `at`.
+    Comment {
+        at: usize,
+        kind: Comment,
+        length: usize,
+    },
+}
+
+/// The first byte after the line break at `at` and the blanks after it: in a
+/// `diff`, one line break, the next line's `+` / `-` / ` ` marker, then its
+/// indentation; otherwise every blank and line break (a printed `\n` / `\r` /
+/// `\t` too when `printed`).
+fn line_after(bytes: &[u8], at: usize, diff: bool, printed: bool) -> usize {
+    let mut index = at;
+    let blank = |index: usize, newlines: bool| match bytes.get(index) {
+        Some(b' ' | b'\t') => Some(1),
+        Some(b'\r' | b'\n') if newlines => Some(1),
+        Some(b'\\') if printed && matches!(bytes.get(index + 1), Some(b'n' | b'r' | b't')) => {
+            Some(2)
+        }
+        _ => None,
+    };
+    if diff {
+        if bytes.get(index) == Some(&b'\r') {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'\n') {
+            index += 1;
+        }
+        if matches!(bytes.get(index), Some(b'+' | b'-' | b' ')) {
+            index += 1;
+        }
+        while let Some(width) = blank(index, false) {
+            index += width;
+        }
+    } else {
+        while let Some(width) = blank(index, true) {
+            index += width;
+        }
+    }
+    expression_work(index - at);
+    index
+}
+
+/// Whether the line whose first non-blank byte is at `index` starts with an
+/// operator a formatter puts at the start of a continued line
+/// ([`continued_at`], [`Carry::Leading`]).
+fn leading_operator(bytes: &[u8], index: usize) -> bool {
+    let Some(&first) = bytes.get(index) else {
+        return false;
+    };
+    let next = bytes.get(index + 1).copied();
+    match first {
+        // `.` and Lua's `..`, not a `...` (a spread, or an ellipsis).
+        b'.' => next != Some(b'.') || bytes.get(index + 2) != Some(&b'.'),
+        // A leading `,` (comma-first style, KT-2053 round 9): a new key after
+        // it still ends the value there ([`key_follows`]).
+        b'?' | b'+' | b',' => true,
+        b':' => next != Some(b':'),
+        b'|' => next == Some(b'|'),
+        b'&' => next == Some(b'&'),
+        // Perl's defined-or (a comment line read as one fails closed).
+        b'/' => next == Some(b'/'),
+        // `or` / `and` as a whole word (Lua, Perl, Ruby, SQL).
+        b'o' | b'O' | b'a' | b'A' => leading_word_operator(bytes, index),
+        _ => false,
+    }
+}
+
+/// The comment that starts a comment-only line at `at` and the length of its
+/// marker: `/*`, `//`, `--` (`--[[` / `--[=[` a Lua long comment) or any `#`.
+fn comment_line_opens(bytes: &[u8], at: usize) -> Option<(Comment, usize)> {
+    match (bytes.get(at)?, bytes.get(at + 1)) {
+        (b'/', Some(b'*')) => Some((Comment::Block, 2)),
+        (b'/', Some(b'/')) => Some((Comment::Line { text: true }, 2)),
+        (b'-', Some(b'-')) => long_comment(bytes, at).or(Some((Comment::Line { text: true }, 2))),
+        (b'#', _) => Some((Comment::Line { text: true }, 1)),
+        _ => None,
+    }
+}
+
+/// Where the comment of kind `kind` whose `length`-byte marker starts at `at`
+/// ends: the line break that ends a line comment (or the end of the text), or
+/// right past the `*/` / long bracket that closes a block; `None` for a block
+/// not closed.
+fn comment_ends(
+    bytes: &[u8],
+    at: usize,
+    kind: Comment,
+    length: usize,
+    memo: &mut CutMemo,
+) -> Option<usize> {
+    match kind {
+        Comment::Line { .. } => Some(memo.line_break_after(bytes, at + length)),
+        Comment::Block => memo
+            .find_after(bytes, b"*/", at + length)
+            .map(|end| end + 2),
+        Comment::LongBracket { equals } => {
+            let mut close = vec![b']'];
+            close.extend(std::iter::repeat_n(b'=', equals));
+            close.push(b']');
+            memo.find_after(bytes, &close, at + length)
+                .map(|end| end + close.len())
+        }
+    }
+}
+
+/// KT-2053 round 7: from the line break at `at`, whose next line starts at
+/// `index` with neither a continuation operator nor code, the lines that hold
+/// only comments ([`comment_line_opens`]; several on a line, a block across
+/// lines) are crossed like blank ones. When the first line after them starts
+/// with a continuation operator ([`leading_operator`]), the expression goes on
+/// with the first of those comments ([`Next::Comment`]), else it ends at `at`.
+///
+/// What is found after each line break crossed is remembered ([`CutMemo`]):
+/// [`expression_literals`] reads those comments and asks again at each of their
+/// line breaks, and an expression of a name inside a comment of the run asks
+/// from a break of the run, so each is answered at once and the pass stays
+/// linear.
+fn comment_run(
+    bytes: &[u8],
+    at: usize,
+    index: usize,
+    diff: bool,
+    printed: bool,
+    memo: &mut CutMemo,
+) -> Option<Next> {
+    if let Some(known) = memo.2.get(&at) {
+        return *known;
+    }
+    comment_line_opens(bytes, index)?;
+    // Each line break crossed, with what starts the line after it.
+    let mut crossed: Vec<(usize, Next)> = Vec::new();
+    let (mut line_break, mut start) = (at, index);
+    let reaches = 'lines: loop {
+        if line_break != at {
+            if let Some(known) = memo.2.get(&line_break) {
+                break known.is_some();
+            }
+        }
+        if leading_operator(bytes, start) {
+            crossed.push((line_break, Next::Code(start)));
+            break true;
+        }
+        let Some((kind, length)) = comment_line_opens(bytes, start) else {
+            break false;
+        };
+        crossed.push((
+            line_break,
+            Next::Comment {
+                at: start,
+                kind,
+                length,
+            },
+        ));
+        // The rest of the line: comments and blanks, then its break, or a
+        // continuation operator (`/* c */ || "…"`).
+        let (mut comment_at, mut comment) = (start, (kind, length));
+        line_break = loop {
+            let Some(mut end) = comment_ends(bytes, comment_at, comment.0, comment.1, memo) else {
+                break 'lines false;
+            };
+            let from = end;
+            while matches!(bytes.get(end), Some(b' ' | b'\t'))
+                || (bytes.get(end) == Some(&b'\\') && bytes.get(end + 1) == Some(&b't'))
+            {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            expression_work(end - from + 1);
+            match bytes.get(end) {
+                None => break 'lines false,
+                Some(b'\n' | b'\r') => break end,
+                Some(b'\\') if matches!(bytes.get(end + 1), Some(b'n' | b'r')) => break end,
+                Some(_) if leading_operator(bytes, end) => break 'lines true,
+                Some(_) => match comment_line_opens(bytes, end) {
+                    Some(next) => (comment_at, comment) = (end, next),
+                    None => break 'lines false,
+                },
+            }
+        };
+        let printed_break = printed || bytes[line_break] == b'\\';
+        start = line_after(bytes, line_break, diff, printed_break);
+    };
+    let answer = crossed
+        .first()
+        .and_then(|(_, next)| reaches.then_some(*next));
+    for (line_break, next) in crossed {
+        memo.2.insert(line_break, reaches.then_some(next));
+    }
+    answer
+}
+
+/// Whether the line that starts at `index` starts with the word operator `or`
+/// / `and` (KT-2053 round 6: `local t = os.getenv("T")\n  or "…"`), a whole
+/// word ([`word_byte`]: not `order`, `android`, `or_else`). In lower or upper
+/// case it always is one (`or`, `OR`); a capitalised `Or` / `And` starts a
+/// sentence in prose (`And then she said "hello"`), so it is one only when no
+/// letter follows it, within a few blanks (`Or "…"`, `And(…)`, `Or $x`, or the
+/// end of the line; past the look, fail-closed). Reads at most 16 bytes.
+fn leading_word_operator(bytes: &[u8], index: usize) -> bool {
+    let length = bytes[index..]
+        .iter()
+        .take(4)
+        .take_while(|byte| word_byte(**byte))
+        .count();
+    let word = &bytes[index..index + length];
+    if !(word.eq_ignore_ascii_case(b"or") || word.eq_ignore_ascii_case(b"and")) {
+        expression_work(length + 1);
+        return false;
+    }
+    if word.iter().all(u8::is_ascii_lowercase) || word.iter().all(u8::is_ascii_uppercase) {
+        expression_work(length + 1);
+        return true;
+    }
+    let after = bytes[index + length..]
+        .iter()
+        .take(12)
+        .find(|byte| !matches!(byte, b' ' | b'\t'));
+    expression_work(16);
+    !after.is_some_and(u8::is_ascii_alphabetic)
+}
+
+/// What a quote met by [`expression_literals`] is.
+enum Quote {
+    /// A literal: its body, and where reading resumes past its closing quote.
+    Literal {
+        body: std::ops::Range<usize>,
+        next: usize,
+    },
+    /// A literal not closed, or an escaped one cut by a bare `"`: its body runs
+    /// to where the expression ends.
+    Cut(std::ops::Range<usize>),
+    /// An apostrophe or a lifetime: reading resumes there.
+    Skip(usize),
+    /// The quote of the string around the expression: it ends there.
+    Ends,
+}
+
+/// Reads the quote at `at` (`"`, `'`, a backtick, or the `\` of `\"`) of the
+/// expression that started at `from`; `open` are its open brackets.
+fn read_literal(text: &str, from: usize, at: usize, open: &[u8], memo: &mut CutMemo) -> Quote {
+    let bytes = text.as_bytes();
+    let escaped = bytes[at] == b'\\';
+    let quote = if escaped { b'"' } else { bytes[at] };
+    // The word right before `end` (a run of [`word_byte`], so it starts on a
+    // character boundary), and whether it is a literal prefix of this quote.
+    let word_before = |end: usize| {
+        let mut length = bytes[from..end]
+            .iter()
+            .rev()
+            .take_while(|byte| word_byte(**byte))
+            .count();
+        // A printed `\n` / `\r` / `\t` before it is whitespace, not a word
+        // (`Some(\n\"…\"`): an odd run of backslashes escapes its letter.
+        let backslashes = bytes[from..end - length]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        expression_work(length + backslashes + 1);
+        if backslashes % 2 == 1 && length > 0 && matches!(bytes[end - length], b'n' | b'r' | b't') {
+            length -= 1;
+        }
+        let word = &text[end - length..end];
+        (length, literal_prefix(word, quote))
+    };
+    // `r#"…"#`: hashes before the quote, after a prefix with an `r` or after
+    // no word at all (Swift's `#"…"#`, KT-2053 round 5: it closes only at
+    // `"#`, else runs to the end).
+    let hashes = if quote == b'"' {
+        bytes[from..at]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'#')
+            .count()
+    } else {
+        0
+    };
+    let (raw_word, raw_prefix) = word_before(at - hashes);
+    let raw = hashes > 0
+        && (raw_word == 0
+            || raw_prefix
+                && text[at - hashes - raw_word..at - hashes]
+                    .to_ascii_lowercase()
+                    .contains('r'));
+    let (hashes, (word, is_prefix)) = if raw {
+        (hashes, (raw_word, raw_prefix))
+    } else {
+        (0, word_before(at))
+    };
+    let before = (at > from).then(|| bytes[at - 1]);
+    // Right after an escaped backslash (`abc\\\"`), the quote ends a value too:
+    // the reader takes `\x` in pairs, so a `\` before it is one of a pair.
+    let closes = text[from..at].ends_with("***REDACTED***")
+        || (!raw && word > 0 && !is_prefix)
+        || (word == 0 && hashes == 0 && matches!(before, Some(b')' | b']' | b'}' | b'\\')));
+    let closer = if quote == b'\'' && !escaped {
+        Quote::Skip(at + 1)
+    } else {
+        Quote::Ends
+    };
+    if closes {
+        return closer;
+    }
+    // A quote right after `.` `!` `?`: read below, once the literal is known.
+    let sentence_end = word == 0 && hashes == 0 && matches!(before, Some(b'.' | b'!' | b'?'));
+    if quote == b'\'' && !escaped && word == 0 {
+        // A lifetime: `&'a`, `<'a>`, `, 'a` in a generic, a word not closed by
+        // a `'` right after it (`'a'` is a char literal).
+        // A generic's list may run across lines (`Foo<\n    'a,\n>`).
+        let in_generic = open.last() == Some(&b'>')
+            && text[from..at]
+                .trim_end_matches([' ', '\t', '\n', '\r'])
+                .ends_with([',', '<']);
+        if matches!(before, Some(b'&' | b'<')) || in_generic {
+            let name = bytes[at + 1..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+                .count();
+            let starts = bytes
+                .get(at + 1)
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_');
+            if starts && bytes.get(at + 1 + name) != Some(&b'\'') {
+                return Quote::Skip(at + 1 + name);
+            }
+        }
+    }
+    let start = at + if escaped { 2 } else { 1 };
+    let close = if raw {
+        format!(
+            "{}{}",
+            if escaped { "\\\"" } else { "\"" },
+            "#".repeat(hashes)
+        )
+    } else if escaped {
+        "\\\"".to_string()
+    } else {
+        char::from(quote).to_string()
+    };
+    if sentence_end {
+        // KT-2053 review: after `.` `!` `?` the quote may close the sentence
+        // the expression is written in (`… and the key Y.", "b": "c"`) or open
+        // the value (`$salt."…";`, `ok?"…":"x"`, `env.TOKEN??"…"`, `!!"…"`).
+        // It closes when the literal it would open starts with a blank or a
+        // punctuation that follows a closing quote, or when the quote that
+        // would close that literal is right before a word (it really is the
+        // next opener: `Y.", "b`); otherwise it opens the value.
+        //
+        // KT-2053 second security review: in an operator context the first
+        // test is left out, as no sentence ends there. A `.` is an operator
+        // after anything but a word (a blank, a closer, a quote: `f()."…"`,
+        // `"a".."…"`; not an ellipsis `..."`) or after a word that is a
+        // variable or a member (`$prefix.":"`, `$this->p.`, `self::P.`); a `?`
+        // after a `?` (`??":…"`), after anything but a word or a blank, or
+        // when the literal is followed by a ternary's `:` (`empty?" ":"…"`);
+        // a `!` after anything but a word or a blank (`!!" …"`).
+        let punct = bytes[at - 1];
+        let previous = (at - 1 > from).then(|| bytes[at - 2]);
+        let operator = match (punct, previous) {
+            (_, None) => true,
+            (b'.', Some(b'.')) => at - 2 == from || bytes[at - 3] != b'.',
+            (b'.', Some(byte)) if word_byte(byte) => variable_before(bytes, from, at - 1),
+            (b'.', Some(_)) => true,
+            (b'?', Some(b'?')) => true,
+            (_, Some(byte)) => !(word_byte(byte) || matches!(byte, b' ' | b'\t' | b'\n' | b'\r')),
+        };
+        let first = bytes.get(start).copied();
+        let printed_blank =
+            first == Some(b'\\') && matches!(bytes.get(start + 1), Some(b'n' | b'r' | b't'));
+        let blank = match first {
+            None => true,
+            Some(byte) => {
+                byte.is_ascii_whitespace()
+                    || matches!(byte, b',' | b';' | b':' | b')' | b']' | b'}')
+            }
+        };
+        let sentence = !operator && (blank || printed_blank);
+        if sentence && punct != b'?' {
+            return closer;
+        }
+        return match scan_body(text, start, quote, escaped, raw, &close, memo) {
+            Quote::Literal { next, .. } if bytes.get(next).copied().is_some_and(word_byte) => {
+                closer
+            }
+            Quote::Literal { next, .. } if sentence && !ternary_colon(bytes, next) => closer,
+            Quote::Cut(_) if sentence => closer,
+            found => found,
+        };
+    }
+    scan_body(text, start, quote, escaped, raw, &close, memo)
+}
+
+/// Whether the word that ends right before `dot` (in the expression that
+/// started at `from`) is a variable or a member: right after a `$` (PHP, Perl:
+/// `$prefix.`), a `->` (`$this->prefix.`) or a `::` (`self::PREFIX.`).
+fn variable_before(bytes: &[u8], from: usize, dot: usize) -> bool {
+    let length = bytes[from..dot]
+        .iter()
+        .rev()
+        .take_while(|byte| word_byte(**byte))
+        .count();
+    expression_work(length + 1);
+    let head = &bytes[from..dot - length];
+    head.ends_with(b"$") || head.ends_with(b"->") || head.ends_with(b"::")
+}
+
+/// Whether a ternary's `:` follows the literal that closed right before
+/// `next`, past blanks (`empty?" ":"…"`); a `::` is a path.
+fn ternary_colon(bytes: &[u8], next: usize) -> bool {
+    let blanks = bytes[next.min(bytes.len())..]
+        .iter()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    expression_work(blanks + 1);
+    bytes.get(next + blanks) == Some(&b':') && bytes.get(next + blanks + 1) != Some(&b':')
+}
+
+/// Where a scan by [`scan_body`] ran to the end of the text without meeting
+/// the quote that closes its literal, by closing sequence (`"`, `'`, a
+/// backtick, `\"`, or the `"#…` of a raw literal): the lowest body start each
+/// was scanned from.
+///
+/// A scan of the same sequence from any later body start runs to the end too,
+/// so it is answered at once: an input full of unclosed raw literals
+/// (`token = r#"a token = r#"a …`, each name read again from inside the one
+/// before it) stays linear. For a raw literal `find` is exact. For a quote the
+/// scan takes `\x` in pairs, and a later body starts right after an opening
+/// quote of the same sequence: the earlier scan met that quote escaped (or it
+/// would have closed there), so it resumed exactly at that body start.
+///
+/// It also remembers the last line break found by [`CutMemo::line_break_after`],
+/// what [`comment_run`] found after each line break it crossed, the last
+/// match of each closing sequence [`CutMemo::find_after`] looked for, and the
+/// last line start [`CutMemo::line_start`] found.
+#[derive(Default)]
+struct CutMemo(
+    Vec<(String, usize)>,
+    Option<(usize, usize)>,
+    std::collections::HashMap<usize, Option<Next>>,
+    Vec<(Vec<u8>, usize, Option<usize>)>,
+    Option<(usize, usize)>,
+);
+
+impl CutMemo {
+    /// Where the line that holds `at` starts: right past the last `\n` or `\r`
+    /// before it, or 0 (KT-2053 second security review: a `\r`-only text has
+    /// no `\n` to stop a search backwards). The last answer is remembered with
+    /// the position it was asked at, so a later query scans forward from there
+    /// only, and one between that line start and that position is answered at
+    /// once: the pass asks at increasing positions, so it stays linear.
+    fn line_start(&mut self, bytes: &[u8], at: usize) -> usize {
+        let (scan_from, mut start) = match self.4 {
+            Some((asked, start)) if at >= asked => (asked, start),
+            Some((_, start)) if at >= start => return start,
+            _ => {
+                // Before anything asked: back to the previous line break.
+                let back = bytes[..at]
+                    .iter()
+                    .rposition(|byte| matches!(byte, b'\n' | b'\r'))
+                    .map_or(0, |index| index + 1);
+                expression_work(at - back + 1);
+                self.4 = Some((at, back));
+                return back;
+            }
+        };
+        for (offset, byte) in bytes[scan_from..at].iter().enumerate() {
+            if matches!(byte, b'\n' | b'\r') {
+                start = scan_from + offset + 1;
+            }
+        }
+        expression_work(at - scan_from + 1);
+        self.4 = Some((at, start));
+        start
+    }
+
+    /// Where `close` first occurs at or after `at`, if it does. The last
+    /// answer for each `close` is remembered with the position its search
+    /// started from, so a query inside that range is answered at once and a
+    /// query before it searches only up to it (as [`CutMemo::line_break_after`]):
+    /// an input full of block comments that each look for the same `*/` stays
+    /// linear.
+    fn find_after(&mut self, bytes: &[u8], close: &[u8], at: usize) -> Option<usize> {
+        let known = self.3.iter().position(|(sequence, ..)| sequence == close);
+        let cached = known.map(|index| (self.3[index].1, self.3[index].2));
+        if let Some((start, found)) = cached {
+            if at >= start && found.is_none_or(|found| at <= found) {
+                return found;
+            }
+        }
+        let limit = cached.filter(|(start, _)| at < *start);
+        let mut index = at;
+        let found = loop {
+            if let Some((start, found)) = limit {
+                if index >= start {
+                    break found;
+                }
+            }
+            if index + close.len() > bytes.len() {
+                break None;
+            }
+            if bytes[index..].starts_with(close) {
+                break Some(index);
+            }
+            index += 1;
+        };
+        expression_work(index.saturating_sub(at) + close.len());
+        let entry = (close.to_vec(), at, found);
+        match known {
+            Some(index) => self.3[index] = entry,
+            None => self.3.push(entry),
+        }
+        found
+    }
+
+    fn runs_to_end(&self, close: &str, start: usize) -> bool {
+        self.0
+            .iter()
+            .any(|(known, from)| known == close && *from <= start)
+    }
+
+    fn record(&mut self, close: &str, start: usize) {
+        match self.0.iter_mut().find(|(known, _)| known == close) {
+            Some((_, from)) => *from = (*from).min(start),
+            None => self.0.push((close.to_string(), start)),
+        }
+    }
+
+    /// The first line break at or after `at` (`\n`, `\r`, or a printed `\n` /
+    /// `\r`), or the end of the text. The last answer is remembered as the
+    /// range it holds for (no break between where its scan started and the
+    /// break found), so a query inside that range is answered at once and a
+    /// query before it scans only up to it: an input full of comment lines
+    /// that each ask from inside the same long line stays linear.
+    fn line_break_after(&mut self, bytes: &[u8], at: usize) -> usize {
+        if let Some((start, found)) = self.1 {
+            if (start..=found).contains(&at) {
+                return found;
+            }
+        }
+        let known = self.1.filter(|(start, _)| at < *start);
+        let mut index = at;
+        let found = loop {
+            if let Some((start, found)) = known {
+                if index >= start {
+                    break found;
+                }
+            }
+            match bytes.get(index) {
+                None => break bytes.len(),
+                Some(b'\n' | b'\r') => break index,
+                Some(b'\\') if matches!(bytes.get(index + 1), Some(b'n' | b'r')) => break index,
+                Some(_) => index += 1,
+            }
+        };
+        expression_work(index.min(bytes.len()) - at.min(bytes.len()) + 1);
+        self.1 = Some((at, found));
+        found
+    }
+}
+
+/// Counts the bytes the value-expression pass reads, so that a test can prove
+/// it stays linear on an adversarial input. Nothing outside tests.
+#[inline]
+fn expression_work(bytes: usize) {
+    #[cfg(test)]
+    EXPRESSION_WORK.with(|work| work.set(work.get().saturating_add(bytes)));
+    #[cfg(not(test))]
+    let _ = bytes;
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXPRESSION_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Reads the body of a literal that starts at `start` up to `close`, its
+/// closing sequence (the `"#…` of a `raw` literal, else `quote`, escaped once
+/// more in an `escaped` literal): a [`Quote::Literal`], or a [`Quote::Cut`] when the text
+/// ends first or, in an escaped literal, a bare `"` ends the string around it.
+fn scan_body(
+    text: &str,
+    start: usize,
+    quote: u8,
+    escaped: bool,
+    raw: bool,
+    close: &str,
+    memo: &mut CutMemo,
+) -> Quote {
+    let bytes = text.as_bytes();
+    if memo.runs_to_end(close, start) {
+        return Quote::Cut(start..text.len());
+    }
+    if raw {
+        return match text[start..].find(close) {
+            Some(length) => {
+                expression_work(length);
+                Quote::Literal {
+                    body: start..start + length,
+                    next: start + length + close.len(),
+                }
+            }
+            None => {
+                expression_work(text.len() - start);
+                memo.record(close, start);
+                Quote::Cut(start..text.len())
+            }
+        };
+    }
+    let mut index = start;
+    let found = loop {
+        if index >= bytes.len() {
+            break None;
+        }
+        match bytes[index] {
+            b'\\' if escaped => match bytes.get(index + 1) {
+                Some(b'"') => {
+                    break Some(Quote::Literal {
+                        body: start..index,
+                        next: index + 2,
+                    });
+                }
+                // `\\`: a backslash of the value, with the character it
+                // escapes there, itself written plain or escaped.
+                Some(b'\\') => {
+                    index += 2;
+                    match bytes.get(index) {
+                        Some(b'\\') => index += 2,
+                        Some(b'"') | None => {}
+                        Some(_) => index += 1,
+                    }
+                }
+                _ => index += 2,
+            },
+            b'\\' => index += 2,
+            b'"' if escaped => break Some(Quote::Cut(start..index)),
+            byte if byte == quote && !escaped => {
+                break Some(Quote::Literal {
+                    body: start..index,
+                    next: index + 1,
+                });
+            }
+            _ => index += 1,
+        }
+    };
+    expression_work(index.min(bytes.len()) - start);
+    found.unwrap_or_else(|| {
+        memo.record(close, start);
+        Quote::Cut(start..text.len())
+    })
+}
+
+/// Masks every quoted literal in the value expression of each secret-ish name
+/// ([`expression_literals`]) for which `masks(name, body)` holds, keeping its
+/// quotes and prefix. A body already masked is left as is. Returns the text and
+/// the number of literals masked.
+///
+/// An expression holds the expression of any name inside it (it ends at the
+/// same terminator or later), so it is read once, and a literal is masked when
+/// `masks` holds for its own name or a name written between them
+/// (`pin: Some(\n token = b"…"`). A literal left unmasked that runs to the end
+/// of the text does not hide what follows it: reading resumes inside it, and a
+/// later literal running to the end there is judged on its text up to the next
+/// name (each byte judged once, so the pass stays linear on any input).
+///
+/// A unified diff holds two versions of its lines ([`diff_versions`]); the
+/// literals masked are those of the text as it is and of each version, so a
+/// value continued by a changed line (` token = a ||\n-  "x";\n+  "…";`) is
+/// read in the version where it goes on.
+fn mask_value_expressions(text: &str, masks: &dyn Fn(&str, &str) -> bool) -> (String, usize) {
+    // A version only blanks bytes: it has no `:` / `=` the text lacks.
+    if !text.contains([':', '=']) {
+        return (text.to_string(), 0);
+    }
+    let versions = diff_versions(text);
+    let gated = value_expression_gate(text)
+        || versions
+            .iter()
+            .flatten()
+            .any(|version| value_expression_gate(version));
+    if !gated {
+        return (text.to_string(), 0);
+    }
+    mask_value_expressions_in(text, versions.as_ref(), masks)
+}
+
+/// [`mask_value_expressions`] without its gate.
+fn mask_value_expressions_ungated(
+    text: &str,
+    masks: &dyn Fn(&str, &str) -> bool,
+) -> (String, usize) {
+    mask_value_expressions_in(text, diff_versions(text).as_ref(), masks)
+}
+
+/// The old and the new version of a unified diff (KT-2053 round 5), each as
+/// long as `text`, byte for byte, so a range in either is a range in `text`:
+/// in the old one every line that starts with `+` is blanked and the `-`
+/// marker of every other line is a blank, in the new one the other way round.
+/// The carry that enters a `-` run thus enters the `+` run after it, and a
+/// context line after both continues from either. `None` when no line starts
+/// with `+` or `-`. A line blanked whole keeps the text valid UTF-8.
+fn diff_versions(text: &str) -> Option<[String; 2]> {
+    let bytes = text.as_bytes();
+    let marked = bytes
+        .first()
+        .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+        || text.contains("\n+")
+        || text.contains("\n-");
+    if !marked {
+        return None;
+    }
+    let (mut old, mut new) = (bytes.to_vec(), bytes.to_vec());
+    let mut start = 0;
+    while start < bytes.len() {
+        let end = text[start..]
+            .find('\n')
+            .map_or(bytes.len(), |index| start + index);
+        let (removed, kept) = match bytes[start] {
+            b'+' => (&mut old, &mut new),
+            b'-' => (&mut new, &mut old),
+            _ => {
+                start = end + 1;
+                continue;
+            }
+        };
+        removed[start..end].fill(b' ');
+        kept[start] = b' ';
+        start = end + 1;
+    }
+    expression_work(2 * bytes.len());
+    Some([String::from_utf8(old).ok()?, String::from_utf8(new).ok()?])
+}
+
+/// Masks the literals [`value_expression_bodies`] finds in `text` and in each
+/// of its diff `versions` (same offsets), overlapping ranges merged.
+fn mask_value_expressions_in(
+    text: &str,
+    versions: Option<&[String; 2]>,
+    masks: &dyn Fn(&str, &str) -> bool,
+) -> (String, usize) {
+    let mut bodies = value_expression_bodies(text, masks);
+    for version in versions.into_iter().flatten() {
+        bodies.extend(value_expression_bodies(version, masks));
+    }
+    // Overlapping bodies (a comment's literal its line does not close, the
+    // same literal read in two versions) are masked as one.
+    bodies.sort_by_key(|body| (body.start, body.end));
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        match merged.last_mut() {
+            Some(last) if body.start < last.end => last.end = last.end.max(body.end),
+            _ => merged.push(body),
+        }
+    }
+    let bodies = merged;
+    if bodies.is_empty() {
+        return (text.to_string(), 0);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for body in &bodies {
+        out.push_str(&text[copied..body.start]);
+        out.push_str(VALUE_MASK);
+        copied = body.end;
+    }
+    out.push_str(&text[copied..]);
+    (out, bodies.len())
+}
+
+/// What [`mask_value_expressions`] writes in place of a literal's body.
+const VALUE_MASK: &str = "***REDACTED***";
+
+/// The bodies, in order, of the literals [`mask_value_expressions`] masks in
+/// `text` (see there).
+fn value_expression_bodies(
+    text: &str,
+    masks: &dyn Fn(&str, &str) -> bool,
+) -> Vec<std::ops::Range<usize>> {
+    const MASK: &str = VALUE_MASK;
+    // Every name and where its `:` / `=` ends, in order.
+    let names: Vec<(usize, usize, &str)> = VALUE_EXPRESSION_NAME
+        .captures_iter(text)
+        .filter_map(|captures| {
+            let matched = captures.get(0)?;
+            let name = captures.get(1)?;
+            Some((matched.start(), matched.end(), name.as_str()))
+        })
+        .collect();
+    let mut bodies = Vec::new();
+    let mut from = 0;
+    let mut index = 0;
+    let mut memo = CutMemo::default();
+    // Whether a literal running to the end of the text was already judged and
+    // left: every later one is a suffix of it, inside the text read again.
+    let mut tail_judged = false;
+    while index < names.len() {
+        let (start, separator_end, _) = names[index];
+        if start < from {
+            index += 1;
+            continue;
+        }
+        let (literals, end) = expression_literals(text, separator_end, &mut memo);
+        let mut resume = end.max(separator_end);
+        // The names of the expression read so far (this one, then those inside
+        // it), each once.
+        let mut inside: Vec<String> = Vec::new();
+        let mut next = index;
+        for body in literals {
+            while next < names.len() && names[next].1 <= body.start {
+                let name = names[next].2.to_ascii_lowercase();
+                if !inside.contains(&name) {
+                    inside.push(name);
+                }
+                next += 1;
+            }
+            let value = &text[body.clone()];
+            if value.is_empty() || value == MASK {
+                continue;
+            }
+            let runs_to_end = body.end == text.len();
+            // A literal running to the end inside the tail of one already left
+            // is judged up to the next name, whose own expression reads the
+            // rest: judging every suffix whole would be quadratic.
+            let judged = if runs_to_end && tail_judged {
+                let after = names.partition_point(|name| name.0 <= body.start);
+                let until = names.get(after).map_or(body.end, |name| name.0);
+                &text[body.start..until]
+            } else {
+                value
+            };
+            expression_work(judged.len().saturating_mul(inside.len()));
+            if !inside.iter().any(|name| masks(name, judged)) {
+                if runs_to_end {
+                    resume = body.start;
+                    tail_judged = true;
+                }
+                continue;
+            }
+            bodies.push(body);
+        }
+        from = resume;
+        index += 1;
+    }
+    bodies
 }
 
 /// Lowercase spellings of every name in [`ASSIGNMENT_NAMES`], with `[_-]?`
@@ -879,7 +2834,8 @@ static ASSIGNMENT_TAILS: LazyLock<Option<Vec<Vec<u8>>>> = LazyLock::new(|| {
 ///
 /// A quoted-value pattern reads its opening `quote` right after `[:=]\s*`, so
 /// the first byte past the `:`/`=` that is not up to a space must be that quote;
-/// a wrapped-value pattern reads the identifier of its call there. A quoted-key
+/// a wrapped-value pattern reads the identifier of its call there, or the `|`
+/// of a closure (KT-2053). A quoted-key
 /// pattern has the key's closing quote (`key_quote`) right before the `:`.
 fn assignment_gate(text: &str, opener: Opener, key_quote: Option<u8>) -> bool {
     let Some(tails) = ASSIGNMENT_TAILS.as_ref() else {
@@ -894,7 +2850,9 @@ fn assignment_gate(text: &str, opener: Opener, key_quote: Option<u8>) -> bool {
         let opens_right = match opener {
             Opener::Any => true,
             Opener::Quote(quote) => opens == Some(&quote),
-            Opener::Call => opens.is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_'),
+            Opener::Call => {
+                opens.is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'|'))
+            }
         };
         if !opens_right {
             return false;
@@ -923,7 +2881,8 @@ enum Opener {
     Any,
     /// This quote (or the `\` of `\"`).
     Quote(u8),
-    /// An identifier opening the call that wraps the value (KT-2039).
+    /// An identifier opening the call that wraps the value (KT-2039), or the
+    /// `|` of a closure (KT-2053).
     Call,
 }
 
@@ -947,9 +2906,12 @@ pub fn redact_for_audit_artifact(input: &str) -> (String, usize) {
 
 fn redact_for_audit_artifact_text(input: &str) -> (String, usize) {
     let (out, vendor_count) = apply_patterns(input, PATTERNS.as_slice(), &VENDOR_PREFILTER);
+    let (out, expression_count) = mask_value_expressions(&out, &|_, _| true);
     let (out, assignment_count) =
         apply_patterns(&out, ASSIGNMENT.as_slice(), &ASSIGNMENT_PREFILTER);
-    let count = vendor_count.saturating_add(assignment_count);
+    let count = vendor_count
+        .saturating_add(expression_count)
+        .saturating_add(assignment_count);
     if out == input {
         (out, 0)
     } else {
@@ -1109,13 +3071,17 @@ fn redact_agent_output_text(input: &str) -> (String, usize) {
         &VENDOR_PREFILTER,
         Some(&vendor_match_is_credential),
     );
+    let (out, expression_count) =
+        mask_value_expressions(&out, &|name, value| value_is_credential(name, value, true));
     let (out, assignment_count) = apply_patterns_guarded(
         &out,
         ASSIGNMENT.as_slice(),
         &ASSIGNMENT_PREFILTER,
         Some(&assignment_is_credential),
     );
-    let count = vendor_count.saturating_add(assignment_count);
+    let count = vendor_count
+        .saturating_add(expression_count)
+        .saturating_add(assignment_count);
     if out == input {
         (out, 0)
     } else {
@@ -1302,14 +3268,19 @@ fn name_before_value(prefix: &str) -> &str {
     let mut prefix = &prefix[..separators(prefix)];
     // KT-2039: `api_key: Some(`, `token = Secret::new(`: the call that wraps the
     // value is not the name, nor are the calls around it (KT-2044:
-    // `api_key: Some(Token(`).
-    while let Some(open) = prefix.strip_suffix('(') {
-        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-        let mut call = open.trim_end_matches(word);
-        while let Some(path) = call.strip_suffix("::") {
-            call = path.trim_end_matches(word);
-        }
-        prefix = &call[..separators(call)];
+    // `api_key: Some(Token(`). KT-2053: the calls are read as the `call` of
+    // [`ASSIGNMENT`] reads them, from the end (`strdup (`,
+    // `Secret::<String>::new(`, `unwrap_or_else(|| `, `Some(\n    \"`).
+    loop {
+        let opened = before_call_space(prefix);
+        let before = match opened.strip_suffix('(') {
+            Some(open) => before_call_path(open.trim_end_matches([' ', '\t'])),
+            None => match before_closure(opened) {
+                Some(before) => before,
+                None => break,
+            },
+        };
+        prefix = &before[..separators(before)];
     }
     let start = prefix
         .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
@@ -3268,7 +5239,7 @@ mod tests {
             RAW_PATTERNS.len(),
             "a pattern failed to compile"
         );
-        assert_eq!(ASSIGNMENT.len(), 20);
+        assert_eq!(ASSIGNMENT.len(), 22);
         assert!(
             matches!(&*VENDOR_PREFILTER, Prefilter::Triples(_)),
             "a gate literal shorter than three bytes turns the vendor prefilter off"
@@ -3380,6 +5351,20 @@ mod tests {
             r#"token: Some(Token(\"Fake2Cut3Value4"#,
             r#"{ 'x-api-key': "it's-Fake5Mixed6Key7" }"#,
             r#"{ "client_secret": 'Fake5Mixed6Key7' }"#,
+            // KT-2053
+            r#"left: "Cfg { token: Some(\"Fake1\\\"Nest2Value3\") }""#,
+            r#"token: \"Fake1\\\"Nest2Value3"#,
+            r#"password = strdup ("Fake3Gnu4Hunter5");"#,
+            "token: Secret::new\t('Fake3Gnu4Hunter5')",
+            r#"left: "Cfg {\n    token: Some(\n        \"Fake1Nest2Value3\",\n    ),\n}""#,
+            r#"token: Some(\n        \"Fake1Nest2Value3"#,
+            r#"password: Secret::<String>::new("Fake6Turbo7Fish8")"#,
+            r#"token = parse::<Secret<String>>('Fake6Turbo7Fish8"#,
+            r#"token: unwrap_or_else(|| "Fake6Turbo7Fish8")"#,
+            r#"token = || "Fake6Turbo7Fish8""#,
+            "api_key = move |_| 'Fake6Turbo7Fish8'",
+            r#"{ \"token\": 'Fake5Mixed6Key7' }"#,
+            r#"{ 'token': \"Fake5\\\"Mixed6Key7\" }"#,
         ] {
             let matching: Vec<_> = every_pattern()
                 .filter(|pat| pat.re.is_match(sample))
@@ -3507,7 +5492,7 @@ mod tests {
         // ASSIGNMENT is ordered: double quote, single quote, backtick, escaped, the
         // three wrapped in a call (KT-2039), the four quoted ones cut before their
         // closing quote, the three wrapped ones cut the same way (KT-2044), bare,
-        // then the five quoted-key shapes (KT-1656, KT-2039, KT-2044).
+        // then the seven quoted-key shapes (KT-1656, KT-2039, KT-2044, KT-2053).
         let admitted = |text: &str| -> Vec<bool> {
             ASSIGNMENT.iter().map(|pat| pat.gate.admits(text)).collect()
         };
@@ -3516,42 +5501,51 @@ mod tests {
         // value pattern has anything to do.
         assert_eq!(
             admitted("curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com"),
-            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f, f, f, f, f]
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f, f, f, f, f, f, f]
         );
         assert_eq!(
             admitted("password: \"hunter2\""),
-            [t, f, f, f, f, f, f, t, f, f, f, f, f, f, t, f, f, f, f, f]
+            [t, f, f, f, f, f, f, t, f, f, f, f, f, f, t, f, f, f, f, f, f, f]
         );
         assert_eq!(
             admitted("token =\n  'hunter2'"),
-            [f, t, f, f, f, f, f, f, t, f, f, f, f, f, t, f, f, f, f, f]
+            [f, t, f, f, f, f, f, f, t, f, f, f, f, f, t, f, f, f, f, f, f, f]
         );
         assert_eq!(
             admitted("secret=`hunter2`"),
-            [f, f, t, f, f, f, f, f, f, t, f, f, f, f, t, f, f, f, f, f]
+            [f, f, t, f, f, f, f, f, f, t, f, f, f, f, t, f, f, f, f, f, f, f]
         );
         assert_eq!(
             admitted(r#"token: \"hunter2\""#),
-            [f, f, f, t, f, f, f, f, f, f, t, f, f, f, t, f, f, f, f, f]
+            [f, f, f, t, f, f, f, f, f, f, t, f, f, f, t, f, f, f, f, f, f, f]
         );
         assert_eq!(
             admitted(r#"api_key: Some("hunter2")"#),
-            [f, f, f, f, t, t, t, f, f, f, f, t, t, t, t, f, f, f, f, f]
+            [f, f, f, f, t, t, t, f, f, f, f, t, t, t, t, f, f, f, f, f, f, f]
         );
         assert_eq!(
             admitted("{ 'x-api-key': 'hunter2' }"),
-            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f, f]
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f, f, f, f]
         );
         assert_eq!(
             admitted(r#"{ 'x-api-key': "it's-hunter2" }"#),
-            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f]
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, f, f, f]
         );
         assert_eq!(
             admitted(r#"{ "token": 'hunter2' }"#),
-            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t]
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, t, f]
+        );
+        // KT-2053 — the same keys inside a string printed with `{:?}`.
+        assert_eq!(
+            admitted(r#"{ \"token\": 'hunter2' }"#),
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t, t, f]
+        );
+        assert_eq!(
+            admitted(r#"{ 'token': \"hunter2\" }"#),
+            [f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, f, t]
         );
         // No assignment at all: nothing runs, whatever quotes the text holds.
-        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 20]);
+        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 22]);
         // Each pattern that is turned away really has no match to make.
         for text in [
             "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com",
@@ -3563,6 +5557,8 @@ mod tests {
             "{ 'x-api-key': 'hunter2' }",
             r#"{ 'x-api-key': "it's-hunter2" }"#,
             r#"{ "token": 'hunter2' }"#,
+            r#"{ \"token\": 'hunter2' }"#,
+            r#"{ 'token': \"hunter2\" }"#,
         ] {
             for pat in ASSIGNMENT.iter().filter(|pat| !pat.gate.admits(text)) {
                 assert!(!pat.re.is_match(text), "{} on {text:?}", pat.re.as_str());
@@ -3754,6 +5750,1756 @@ mod tests {
         }
     }
 
+    // ── KT-2053: the shapes the third review found ────────────────────
+    //
+    // Every value below is fake.
+
+    /// Asserts that no byte of `secret` survives `raw` through both
+    /// `redact_stored_text` and `redact_agent_output`, that the stored output is
+    /// `expected` and that a second pass changes neither.
+    fn assert_both_mask(raw: &str, secret: &str, expected: &str) {
+        let stored = redact_stored_text(raw);
+        assert_eq!(stored, expected, "stored: {raw:?}");
+        assert_eq!(redact_stored_text(&stored), stored, "stored idempotent");
+        let agent = redact_agent_output(raw);
+        for part in [
+            secret,
+            &secret[secret.len() / 2..],
+            &secret[..secret.len() / 2],
+        ] {
+            assert!(
+                !agent.contains(part),
+                "agent: {part} leaked: {raw:?} -> {agent:?}"
+            );
+        }
+        assert!(
+            agent.contains("***REDACTED***"),
+            "agent: {raw:?} -> {agent:?}"
+        );
+        assert_eq!(redact_agent_output(&agent), agent, "agent idempotent");
+    }
+
+    #[test]
+    fn an_escaped_quote_inside_a_printed_value_does_not_end_it() {
+        // A `"` inside the secret, in a string printed with `{:?}`: `\\\"`.
+        for (raw, expected) in [
+            (
+                r#"left: "Cfg { token: Some(\"Fake1\\\"Nest2Value3\") }""#,
+                r#"left: "Cfg { token: Some(\"***REDACTED***\") }""#,
+            ),
+            (
+                r#"left: "Cfg { token: \"Fake1\\\"Nest2Value3\", retries: 3 }""#,
+                r#"left: "Cfg { token: \"***REDACTED***\", retries: 3 }""#,
+            ),
+            (
+                r#"left: "{\"token\": \"Fake1\\\"Nest2Value3\", \"id\": 7}""#,
+                r#"left: "{\"token\": \"***REDACTED***\", \"id\": 7}""#,
+            ),
+            // Cut before its closing quote.
+            (
+                r#"left: "Cfg { token: Some(\"Fake1\\\"Nest2Value3"#,
+                r#"left: "Cfg { token: Some(\"***REDACTED***"#,
+            ),
+            (
+                r#"left: "Cfg { token: \"Fake1\\\"Nest2Value3"#,
+                r#"left: "Cfg { token: \"***REDACTED***"#,
+            ),
+            // A backslash inside the secret (`\\\\`) is read whole too.
+            (
+                r#"left: "Cfg { token: \"Fake1\\\\Nest2Value3\" }""#,
+                r#"left: "Cfg { token: \"***REDACTED***\" }""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake1Nest2Value3", expected);
+            assert!(!redact_stored_text(raw).contains("Nest2Value3"), "{raw:?}");
+            assert!(!redact_agent_output(raw).contains("Nest2Value3"), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_call_with_a_space_before_its_parenthesis_keeps_the_call_and_masks_the_value() {
+        for (raw, expected) in [
+            (
+                r#"password = strdup ("Fake3Gnu4Hunter5");"#,
+                r#"password = strdup ("***REDACTED***");"#,
+            ),
+            (
+                "token: Secret::new\t('Fake3Gnu4Hunter5')",
+                "token: Secret::new\t('***REDACTED***')",
+            ),
+            (
+                r#"api_key = wrap (Some ("Fake3Gnu4Hunter5"))"#,
+                r#"api_key = wrap (Some ("***REDACTED***"))"#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake3Gnu4Hunter5", expected);
+        }
+    }
+
+    #[test]
+    fn pretty_debug_printed_inside_a_string_is_masked_and_the_call_kept() {
+        // `{:?}` of a `{:#?}` dump: the newlines are a literal `\n`.
+        for (raw, expected) in [
+            (
+                r#"left: "Cfg {\n    token: Some(\n        \"Fake1Nest2Value3\",\n    ),\n}""#,
+                r#"left: "Cfg {\n    token: Some(\n        \"***REDACTED***\",\n    ),\n}""#,
+            ),
+            (
+                r#"left: "Cfg {\r\n    password: Some(\r\n        Token(\r\n            \"Fake1Nest2Value3\",\r\n"#,
+                r#"left: "Cfg {\r\n    password: Some(\r\n        Token(\r\n            \"***REDACTED***\",\r\n"#,
+            ),
+            // Cut before its closing quote.
+            (
+                r#"left: "Cfg {\n    token: Some(\n        \"Fake1Nest2Value3"#,
+                r#"left: "Cfg {\n    token: Some(\n        \"***REDACTED***"#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake1Nest2Value3", expected);
+        }
+    }
+
+    #[test]
+    fn turbofish_and_closure_openers_keep_the_call_and_mask_the_value() {
+        for (raw, expected) in [
+            (
+                r#"password: Secret::<String>::new("Fake6Turbo7Fish8")"#,
+                r#"password: Secret::<String>::new("***REDACTED***")"#,
+            ),
+            (
+                r#"token = Into::<Secret>::into("Fake6Turbo7Fish8")"#,
+                r#"token = Into::<Secret>::into("***REDACTED***")"#,
+            ),
+            (
+                r#"token = parse::<Secret<String>>("Fake6Turbo7Fish8")"#,
+                r#"token = parse::<Secret<String>>("***REDACTED***")"#,
+            ),
+            (
+                r#"token: unwrap_or_else(|| "Fake6Turbo7Fish8")"#,
+                r#"token: unwrap_or_else(|| "***REDACTED***")"#,
+            ),
+            (
+                "api_key = get_or_insert_with(move |_| 'Fake6Turbo7Fish8')",
+                "api_key = get_or_insert_with(move |_| '***REDACTED***')",
+            ),
+            (
+                r#"left: "Cfg { token: Secret::<String>::new(\"Fake6Turbo7Fish8\") }""#,
+                r#"left: "Cfg { token: Secret::<String>::new(\"***REDACTED***\") }""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake6Turbo7Fish8", expected);
+        }
+    }
+
+    #[test]
+    fn an_escaped_key_with_the_other_quote_on_its_value_is_masked() {
+        for (raw, expected) in [
+            (
+                r#"left: "{ \"token\": 'Fake5Mixed6Key7', \"id\": 7 }""#,
+                r#"left: "{ \"token\": '***REDACTED***', \"id\": 7 }""#,
+            ),
+            (
+                r#"left: "{ 'token': \"Fake5Mixed6Key7\", 'id': 7 }""#,
+                r#"left: "{ 'token': \"***REDACTED***\", 'id': 7 }""#,
+            ),
+            // A `"` inside the value, printed `\\\"`.
+            (
+                r#"left: "{ 'client_secret': \"Fake5\\\"Mixed6Key7\" }""#,
+                r#"left: "{ 'client_secret': \"***REDACTED***\" }""#,
+            ),
+            (
+                r#"left: "{ \"client_secret\": 'Fake5\\\"Mixed6Key7' }""#,
+                r#"left: "{ \"client_secret\": '***REDACTED***' }""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake5Mixed6Key7", expected);
+            assert!(!redact_stored_text(raw).contains("Mixed6Key7"), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn the_name_before_a_call_reads_the_call_syntax_of_the_patterns() {
+        for (prefix, name) in [
+            ("password = strdup (", "password"),
+            ("password = strdup\t(", "password"),
+            ("api_key = wrap (Some (", "api_key"),
+            ("password: Secret::<String>::new(", "password"),
+            ("token = Into::<Secret>::into(", "token"),
+            ("token = parse::<Secret<String>>(", "token"),
+            ("password: Secret::<Vec<Box<str>>>::new(", "password"),
+            ("token: Secret::<&'static str>::new(", "token"),
+            ("token: Wrap::<HashMap<String, Vec<u8>>>::from(", "token"),
+            ("token: unwrap_or_else(|| ", "token"),
+            ("api_key = get_or_insert_with(move |_| '", "api_key"),
+            (r#"token: Some(\n        \""#, "token"),
+            (
+                r#"password: Some(\r\n        Token(\r\n            \""#,
+                "password",
+            ),
+            // Unchanged readings.
+            ("api_key: Some(Token(", "api_key"),
+            (r#"  "GEMINI_API_KEY": ""#, "GEMINI_API_KEY"),
+            ("export GITHUB_TOKEN=", "GITHUB_TOKEN"),
+        ] {
+            assert_eq!(name_before_value(prefix), name, "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn the_call_openers_read_the_call_syntax_of_the_patterns() {
+        for (text, rest, openers) in [
+            ("strdup (\"x\"", "\"x\"", 1),
+            ("strdup\t(  \"x\"", "\"x\"", 1),
+            ("wrap (Some (\"x\"", "\"x\"", 2),
+            ("Secret::<String>::new(\"x\"", "\"x\"", 1),
+            ("Into::<Secret>::into(\"x\"", "\"x\"", 1),
+            ("parse::<Secret<String>>(\"x\"", "\"x\"", 1),
+            ("Secret::<Vec<Box<str>>>::new(\"x\"", "\"x\"", 1),
+            ("Secret::<&'static str>::new(\"x\"", "\"x\"", 1),
+            ("unwrap_or_else(|| \"x\"", "\"x\"", 2),
+            ("get_or_insert_with(move |_| 'x'", "'x'", 2),
+            ("|| \"x\"", "\"x\"", 1),
+            (r#"Some(\n        Token(\n    \"x"#, r#"\"x"#, 2),
+            (r#"Some(\r\n\t\"x"#, r#"\"x"#, 1),
+            // Not openers.
+            ("strdup \"x\"", "strdup \"x\"", 0),
+            ("Secret::<String \"x\"", "Secret::<String \"x\"", 0),
+            ("|x \"x\"", "|x \"x\"", 0),
+            ("move \"x\"", "move \"x\"", 0),
+        ] {
+            assert_eq!(past_call_openers(text), (rest, openers), "{text:?}");
+        }
+        for (text, length) in [
+            ("strdup (", 6),
+            ("Secret::<String>::new(", 21),
+            ("Into::<Secret>::into(", 20),
+            ("parse::<Secret<String>>(", 23),
+            ("Secret::<Vec<Box<str>>>::new(", 28),
+            ("Secret::<&'static str>::new(", 27),
+            ("Secret::<String", 6),
+            ("Some(", 4),
+            ("(", 0),
+        ] {
+            assert_eq!(call_path_len(text), length, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_kt_2035_cargo_failure_keeps_its_result_line_with_the_new_shapes() {
+        let block = concat!(
+            "---- core::cfg::tests::loads stdout ----\n",
+            "thread 'core::cfg::tests::loads' panicked at src/core/cfg.rs:10:5:\n",
+            "assertion `left == right` failed\n",
+            r#"  left: "Cfg { token: Some(\"Fake1\\\"Nest2Value3\"), retries: 3 }""#,
+            "\n",
+            r#" right: "Cfg {\n    password: Some(\n        \"Fake4Pretty5Value6\",\n    ),\n}""#,
+            "\n",
+            "password = strdup (\"Fake3Gnu4Hunter5\");\n",
+            "\n",
+            "test result: FAILED. 41 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        );
+        for out in [redact_stored_text(block), redact_agent_output(block)] {
+            for secret in ["Nest2Value3", "Fake4Pretty5Value6", "Fake3Gnu4Hunter5"] {
+                assert!(!out.contains(secret), "{secret} leaked: {out}");
+            }
+            assert!(
+                out.contains(
+                    "test result: FAILED. 41 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out"
+                ),
+                "{out}"
+            );
+            assert!(out.contains("retries: 3"), "{out}");
+        }
+    }
+
+    // ── KT-2053 review: every literal of a secret's value expression ──
+    //
+    // Every value below is fake.
+
+    #[test]
+    fn a_typed_declaration_masks_the_literal_after_its_type() {
+        for (raw, expected) in [
+            (
+                r#"let token: &str = "Fake9Typed0Decl1";"#,
+                r#"let token: ***REDACTED*** = "***REDACTED***";"#,
+            ),
+            (
+                r#"const apiKey: string = "Fake9Typed0Decl1";"#,
+                r#"const apiKey: ***REDACTED*** = "***REDACTED***";"#,
+            ),
+            (
+                r#"password: str = "Fake9Typed0Decl1""#,
+                r#"password: ***REDACTED*** = "***REDACTED***""#,
+            ),
+            (
+                r#"api_key: Option<String> = Some("Fake9Typed0Decl1".into());"#,
+                r#"api_key: ***REDACTED*** = Some("***REDACTED***".into());"#,
+            ),
+            (
+                r#"left: "let token: &str = \"Fake9Typed0Decl1\";""#,
+                r#"left: "let token: ***REDACTED*** = \"***REDACTED***\";""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake9Typed0Decl1", expected);
+        }
+    }
+
+    #[test]
+    fn a_prefixed_literal_is_masked() {
+        for (raw, expected) in [
+            (
+                r#"password = &"Fake2Prefix3Lit4""#,
+                r#"password = ***REDACTED***"***REDACTED***""#,
+            ),
+            (
+                r#"password = b"Fake2Prefix3Lit4""#,
+                r#"password = ***REDACTED***"***REDACTED***""#,
+            ),
+            (
+                r#"token = r"Fake2Prefix3Lit4""#,
+                r#"token = ***REDACTED***"***REDACTED***""#,
+            ),
+            (
+                r##"token = r#"Fake2"Prefix3Lit4"#;"##,
+                r##"token = ***REDACTED***"***REDACTED***"#;"##,
+            ),
+            (
+                r#"secret = f"Fake2Prefix3Lit4""#,
+                r#"secret = ***REDACTED***"***REDACTED***""#,
+            ),
+            (
+                "secret = u'Fake2Prefix3Lit4'",
+                "secret = ***REDACTED***'***REDACTED***'",
+            ),
+            (
+                r#"left: "Cfg { token: b\"Fake2Prefix3Lit4\", retries: 3 }""#,
+                // The bare pattern takes the prefix with the opening quote.
+                r#"left: "Cfg { token: ***REDACTED***\", retries: 3 }""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake2Prefix3Lit4", expected);
+        }
+    }
+
+    #[test]
+    fn a_dotted_or_method_call_masks_its_literals() {
+        for (raw, expected) in [
+            (
+                r#"password = os.getenv("DB_PASSWORD", "Fake5Dotted6Call7")"#,
+                r#"password = ***REDACTED***"***REDACTED***", "***REDACTED***")"#,
+            ),
+            (
+                r#"token = self.secret("Fake5Dotted6Call7")"#,
+                r#"token = ***REDACTED***"***REDACTED***")"#,
+            ),
+            (
+                "api_key = config.get('Fake5Dotted6Call7')",
+                "api_key = ***REDACTED***'***REDACTED***')",
+            ),
+            // A default buried in a method chain is in the expression too.
+            (
+                r#"token = env::var("TOKEN").unwrap_or("Fake5Dotted6Call7");"#,
+                r#"token = env::var("***REDACTED***").unwrap_or("***REDACTED***");"#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake5Dotted6Call7", expected);
+        }
+    }
+
+    #[test]
+    fn a_later_literal_of_a_recognised_call_is_masked() {
+        for (raw, expected) in [
+            (
+                r#"api_key = env::var_or("KEY", "Fake8Second9Arg0")"#,
+                r#"api_key = env::var_or("***REDACTED***", "***REDACTED***")"#,
+            ),
+            (
+                r#"token: Some(Pair('id', "Fake8Second9Arg0")), retries: 3"#,
+                r#"token: Some(Pair('***REDACTED***', "***REDACTED***")), retries: 3"#,
+            ),
+            (
+                r#"left: "Cfg { token: pick(\"KEY\", \"Fake8Second9Arg0\"), retries: 3 }""#,
+                r#"left: "Cfg { token: pick(\"***REDACTED***\", \"***REDACTED***\"), retries: 3 }""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake8Second9Arg0", expected);
+        }
+    }
+
+    #[test]
+    fn deep_generics_and_lifetimes_keep_the_call_and_mask_the_value() {
+        for (raw, expected) in [
+            (
+                r#"password: Secret::<Vec<Box<str>>>::new("Fake1Deep2Generic3")"#,
+                r#"password: Secret::<Vec<Box<str>>>::new("***REDACTED***")"#,
+            ),
+            (
+                r#"token: Secret::<&'static str>::new("Fake1Deep2Generic3")"#,
+                r#"token: Secret::<&'static str>::new("***REDACTED***")"#,
+            ),
+            (
+                r#"token = Wrap::<HashMap<String, Vec<u8>>>::from('Fake1Deep2Generic3');"#,
+                r#"token = Wrap::<HashMap<String, Vec<u8>>>::from('***REDACTED***');"#,
+            ),
+            (
+                r#"left: "Cfg { token: Secret::<&'static str>::new(\"Fake1Deep2Generic3\") }""#,
+                r#"left: "Cfg { token: Secret::<&'static str>::new(\"***REDACTED***\") }""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake1Deep2Generic3", expected);
+        }
+    }
+
+    #[test]
+    fn a_value_expression_ends_at_its_own_end() {
+        for (raw, expected) in [
+            (
+                r#"Cfg { token: Some("Fake4End5Here6"), retries: 3, name: "kept" }"#,
+                r#"Cfg { token: Some("***REDACTED***"), retries: 3, name: "kept" }"#,
+            ),
+            (
+                "password = os.getenv(\"X\", 'Fake4End5Here6');\nlabel = \"kept\"",
+                "password = ***REDACTED***\"***REDACTED***\", '***REDACTED***');\nlabel = \"kept\"",
+            ),
+            (
+                r#"f(token: &"Fake4End5Here6") + g("kept")"#,
+                r#"f(token: ***REDACTED***"***REDACTED***") + g("kept")"#,
+            ),
+            (
+                r#"left: "Cfg { token: b\"Fake4End5Here6\" }", right: "kept""#,
+                r#"left: "Cfg { token: ***REDACTED***\" }", right: "kept""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake4End5Here6", expected);
+        }
+    }
+
+    #[test]
+    fn text_with_no_secret_value_expression_is_left_alone() {
+        for plain in [
+            "max_tokens: 100",
+            r#"token_count = f("abc")"#,
+            r#"She said "hello" and left."#,
+            r#"tokens = tokenize("some input")"#,
+            "the user's token is valid, see 'docs'",
+        ] {
+            assert_eq!(redact_stored_text(plain), plain, "{plain:?}");
+            assert_eq!(redact_agent_output(plain), plain, "{plain:?}");
+        }
+    }
+
+    // ── KT-2053 review, round 2 ────────────────────────────────────────
+    //
+    // Every value below is fake.
+
+    #[test]
+    fn a_quote_after_a_dot_bang_or_question_mark_opens_the_value() {
+        for (raw, expected) in [
+            (
+                r#"$password = $salt."Fake1Dot2Value3";"#,
+                r#"$password = ***REDACTED***"***REDACTED***";"#,
+            ),
+            (
+                "$token = 'sk_'.'Fake1Dot2Value3';",
+                "$token = '***REDACTED***'.'***REDACTED***';",
+            ),
+            (
+                r#"token = ok?"Fake1Dot2Value3":"x";"#,
+                r#"token = ***REDACTED***"***REDACTED***":"***REDACTED***";"#,
+            ),
+            (
+                r#"const token = env.TOKEN??"Fake1Dot2Value3";"#,
+                r#"const token = ***REDACTED***"***REDACTED***";"#,
+            ),
+            (
+                r#"token = !!"Fake1Dot2Value3""#,
+                r#"token = ***REDACTED***"***REDACTED***""#,
+            ),
+            (
+                r#"left: "$password = $salt.\"Fake1Dot2Value3\";""#,
+                r#"left: "$password = ***REDACTED***\";""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake1Dot2Value3", expected);
+        }
+        // The quote that closes a sentence still ends the expression: what
+        // follows it is kept (the `api::projects::resources` diff line).
+        let prose = r#"{"a": "use password=X and the key Y.", "b": "c"}"#;
+        assert_eq!(
+            redact_stored_text(prose),
+            r#"{"a": "use password=***REDACTED*** and the key Y.", "b": "c"}"#
+        );
+        assert_eq!(redact_agent_output(prose), prose);
+    }
+
+    #[test]
+    fn a_value_continued_on_the_next_line_is_masked() {
+        for (raw, expected) in [
+            (
+                "let token = env::var(\"TOKEN\")\n    .unwrap_or(\"Fake4Next5Line6\".into());",
+                "let token = env::var(\"***REDACTED***\")\n    .unwrap_or(\"***REDACTED***\".into());",
+            ),
+            (
+                "const token = process.env.TOKEN\n  || \"Fake4Next5Line6\";",
+                "const token = ***REDACTED***\n  || \"***REDACTED***\";",
+            ),
+            (
+                "const token = ok\n  ? \"Fake4Next5Line6\"\n  : \"\";\nlabel = \"kept\"",
+                "const token = ***REDACTED***\n  ? \"***REDACTED***\"\n  : \"\";\nlabel = \"kept\"",
+            ),
+            (
+                "+    let token = env::var(\"TOKEN\")\n+        .unwrap_or(\"Fake4Next5Line6\");",
+                "+    let token = env::var(\"***REDACTED***\")\n+        .unwrap_or(\"***REDACTED***\");",
+            ),
+        ] {
+            assert_both_mask(raw, "Fake4Next5Line6", expected);
+        }
+        // A line that starts anything else ends the expression: prose, the
+        // next diff line, a `{:#?}` field.
+        for (raw, kept) in [
+            (
+                "token: abc\nAnd then she said \"hello\" twice.",
+                "\"hello\"",
+            ),
+            ("+token = \"Fake4Next5Line6\"\n+name = \"kept\"", "\"kept\""),
+            (
+                "Cfg {\n    token: Some(\n        \"Fake4Next5Line6\",\n    ),\n    name: \"kept\",\n}",
+                "\"kept\"",
+            ),
+        ] {
+            let stored = redact_stored_text(raw);
+            assert!(!stored.contains("Fake4Next5Line6"), "{stored}");
+            assert!(stored.contains(kept), "{raw:?} -> {stored:?}");
+            assert!(redact_agent_output(raw).contains(kept), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_bare_quote_after_an_escaped_literal_closes_the_printed_string() {
+        for (raw, expected) in [
+            (
+                "assertion `left == right` failed\n  left: \"token: \\\"Fake7Bare8Quote9\\\"\"\n right: \"kept\"\nnote: run with `RUST_BACKTRACE=1`",
+                "assertion `left == right` failed\n  left: \"token: \\\"***REDACTED***\\\"\"\n right: \"kept\"\nnote: run with `RUST_BACKTRACE=1`",
+            ),
+            (
+                "Cfg { note: \"token: \\\"Fake7Bare8Quote9\\\"\" }\nnext line kept",
+                "Cfg { note: \"token: \\\"***REDACTED***\\\"\" }\nnext line kept",
+            ),
+            (
+                "left: \"token: Some(\\\"Fake7Bare8Quote9\\\") \" right: \"kept\"",
+                "left: \"token: Some(\\\"***REDACTED***\\\") \" right: \"kept\"",
+            ),
+        ] {
+            assert_both_mask(raw, "Fake7Bare8Quote9", expected);
+        }
+    }
+
+    #[test]
+    fn a_value_on_the_next_line_or_after_a_trailing_operator_is_masked() {
+        // Stored text: the bare pattern of `ASSIGNMENT` also masks the code
+        // before the literal, as for the other new shapes (fail-closed).
+        for (raw, expected) in [
+            // Nothing read yet since the `=`: the value is on the next line.
+            (
+                "const token =\n  process.env.TOKEN ?? \"Fake3Trail4Op5\";",
+                "const token =\n  ***REDACTED*** ?? \"***REDACTED***\";",
+            ),
+            (
+                "password =\n    os.getenv(\"DB_PASSWORD\", \"Fake3Trail4Op5\")",
+                "password =\n    ***REDACTED***\"***REDACTED***\", \"***REDACTED***\")",
+            ),
+            // The line ends with a continuation operator.
+            (
+                "const token =\n  process.env.TOKEN ||\n  \"Fake3Trail4Op5\";",
+                "const token =\n  ***REDACTED*** ||\n  \"***REDACTED***\";",
+            ),
+            (
+                "const token = ok ?\n  \"Fake3Trail4Op5\" :\n  \"x\";\nlabel = \"kept\"",
+                "const token = ***REDACTED*** ?\n  \"***REDACTED***\" :\n  \"***REDACTED***\";\nlabel = \"kept\"",
+            ),
+            (
+                "password = salt +\n    \"Fake3Trail4Op5\"",
+                "password = ***REDACTED*** +\n    \"***REDACTED***\"",
+            ),
+            (
+                "token := os.Getenv(\"TOKEN\").\n\tOr(\"Fake3Trail4Op5\")",
+                "token :***REDACTED*** os.Getenv(\"***REDACTED***\").\n\tOr(\"***REDACTED***\")",
+            ),
+            (
+                "$password = $salt .\n    \"Fake3Trail4Op5\";",
+                "$password = ***REDACTED*** .\n    \"***REDACTED***\";",
+            ),
+            (
+                "+const token =\n+  process.env.TOKEN ||\n+  \"Fake3Trail4Op5\";",
+                "+const token =\n***REDACTED***  process.env.TOKEN ||\n+  \"***REDACTED***\";",
+            ),
+            // The same layout printed inside a `{:?}` string.
+            (
+                r#"left: "const token =\n  x ||\n  \"Fake3Trail4Op5\";""#,
+                r#"left: "const token =***REDACTED***  x ||\n  \"***REDACTED***\";""#,
+            ),
+        ] {
+            assert_both_mask(raw, "Fake3Trail4Op5", expected);
+        }
+        // A sentence's `.` is no chained call: what follows the break is kept.
+        for (raw, kept) in [
+            (
+                "token: abc.\nAnd then she said \"hello\" twice.",
+                "\"hello\"",
+            ),
+            ("token = \"Fake3Trail4Op5\"\nname = \"kept\"", "\"kept\""),
+        ] {
+            let stored = redact_stored_text(raw);
+            assert!(!stored.contains("Fake3Trail4Op5"), "{stored}");
+            assert!(stored.contains(kept), "{raw:?} -> {stored:?}");
+            assert!(redact_agent_output(raw).contains(kept), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_comment_does_not_hide_the_continuation_operator() {
+        // Stored text: the bare pattern of `ASSIGNMENT` also masks the code
+        // before the operator, as for the round-3 shapes (fail-closed).
+        for (raw, expected) in [
+            (
+                "const token = process.env.TOKEN || // default\n  \"Fake4Comment5Op6\";",
+                "const token = ***REDACTED*** || // default\n  \"***REDACTED***\";",
+            ),
+            (
+                "const token = process.env.TOKEN ?? // dev only\n  \"Fake4Comment5Op6\";",
+                "const token = ***REDACTED*** ?? // dev only\n  \"***REDACTED***\";",
+            ),
+            (
+                "password: process.env.P || // local\n  \"Fake4Comment5Op6\",\nuser: \"kept\"",
+                "password: ***REDACTED*** || // local\n  \"***REDACTED***\",\nuser: \"kept\"",
+            ),
+            (
+                "const token = process.env.TOKEN || /* default */\n  \"Fake4Comment5Op6\";",
+                "const token = ***REDACTED*** || /* default */\n  \"***REDACTED***\";",
+            ),
+            (
+                "token = ENV[\"T\"] || # fallback\n  \"Fake4Comment5Op6\"",
+                "token = ***REDACTED***\"***REDACTED***\"] || # fallback\n  \"***REDACTED***\"",
+            ),
+            (
+                "my $password = $ENV{X} //\n  \"Fake4Comment5Op6\";",
+                "my $password = ***REDACTED*** //\n  \"***REDACTED***\";",
+            ),
+        ] {
+            assert_both_mask(raw, "Fake4Comment5Op6", expected);
+            assert!(
+                redact_agent_output(raw).lines().next() == raw.lines().next(),
+                "agent output keeps the code line: {raw:?}"
+            );
+        }
+        // A comment after a word carries nothing: what follows is kept.
+        for raw in [
+            "token = \"Fake4Comment5Op6\" // default\nname = \"kept\"",
+            "token = \"Fake4Comment5Op6\" # fallback ||\nname = \"kept\"",
+        ] {
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(!out.contains("Comment5"), "{raw:?} -> {out:?}");
+                assert!(out.contains("name = \"kept\""), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_diff_is_read_in_its_old_and_new_versions() {
+        let text = " a ||\n-  \"x\";\n+  \"y\";\n b";
+        let [old, new] = diff_versions(text).expect("a diff");
+        assert_eq!(old, format!(" a ||\n   \"x\";\n{}\n b", " ".repeat(7)));
+        assert_eq!(new, format!(" a ||\n{}\n   \"y\";\n b", " ".repeat(7)));
+        assert!(diff_versions(" a ||\n  \"x\"").is_none());
+        assert_eq!(
+            diff_versions("+é\r\n-ü").expect("a diff"),
+            ["    \n ü".to_string(), " é\r\n   ".to_string()]
+        );
+    }
+
+    /// Asserts that no half of `secret` survives `raw` through either entry
+    /// point, and that a second pass changes neither output.
+    fn assert_both_hide(raw: &str, secret: &str) {
+        for (pass, redact) in [
+            ("stored", redact_stored_text as fn(&str) -> String),
+            ("agent", redact_agent_output),
+        ] {
+            let out = redact(raw);
+            for part in [&secret[secret.len() / 2..], &secret[..secret.len() / 2]] {
+                assert!(
+                    !out.contains(part),
+                    "{pass}: {part} leaked: {raw:?} -> {out:?}"
+                );
+            }
+            assert_eq!(redact(&out), out, "{pass} idempotent: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_changed_continuation_line_of_a_diff_is_read_in_both_versions() {
+        // KT-2053 round 5: the carry that enters a `-` run enters the `+` run
+        // after it, and a context line after both continues from either.
+        for raw in [
+            " const token = a ||\n-  \"x\";\n+  \"Fake5Diff6Op7\";",
+            " const token =\n-  \"x\";\n+  \"Fake5Diff6Op7\";",
+            "@@ -1,2 +1,2 @@\n token = a ||\n-  \"x\"\n+  \"Fake5Diff6Op7\"",
+            " token = a ||\n-  // old\n+  // new\n   \"Fake5Diff6Op7\"",
+            " token = Some(\n-    \"x\"),\n+    \"Fake5Diff6Op7\"),",
+            " token = a ||\n-  b ||\n+  c\n   \"Fake5Diff6Op7\"",
+            " token = a ||\n+  b ||\n-  c\n   \"Fake5Diff6Op7\"",
+            " token = a ||\n-  \"x\";\n   \"Fake5Diff6Op7\";",
+            "-token = a ||\n+token = b ||\n   \"Fake5Diff6Op7\"",
+        ] {
+            assert_both_hide(raw, "Fake5Diff6Op7");
+        }
+        // A value that ends in both versions keeps the line after it.
+        for raw in [
+            "+token = \"Fake5Diff6Op7\"\n+name = \"kept\"",
+            "-token = \"x\"\n+token = \"Fake5Diff6Op7\"\n name = \"kept\"",
+            " token = a ||\n-  \"x\";\n+  \"Fake5Diff6Op7\";\n name = \"kept\"",
+        ] {
+            assert_both_hide(raw, "Fake5Diff6Op7");
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(out.contains("name = \"kept\""), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_word_operator_or_a_caret_at_the_end_of_a_line_carries_it() {
+        for raw in [
+            "local token = os.getenv(\"T\") or\n  \"Fake5Word6Op7\"",
+            "local token = os.getenv(\"T\") and\n  \"Fake5Word6Op7\"",
+            "local token = os.getenv(\"T\") OR\n  \"Fake5Word6Op7\"",
+            "local token = \"sk_\" ..\n  \"Fake5Word6Op7\"",
+            "token = a or  # default\n  \"Fake5Word6Op7\"",
+            "set token=%A% ^\n  \"Fake5Word6Op7\"",
+        ] {
+            assert_both_hide(raw, "Fake5Word6Op7");
+        }
+        // A word that merely ends in `or` / `and` carries nothing.
+        for raw in [
+            "token = \"Fake5Word6Op7\" + color\nname = \"kept\"",
+            "token = \"Fake5Word6Op7\" + brand\nname = \"kept\"",
+            "token = \"Fake5Word6Op7\"..\nname = \"kept\"",
+        ] {
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(!out.contains("Word6"), "{raw:?} -> {out:?}");
+                assert!(out.contains("name = \"kept\""), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_dash_dash_or_hash_comment_after_an_operator_does_not_hide_it() {
+        for raw in [
+            "local token = os.getenv(\"T\") or -- default\n  \"Fake5Dash6Op7\"",
+            "local token = os.getenv(\"T\") or --[[ default ]]\n  \"Fake5Dash6Op7\"",
+            "local token = os.getenv(\"T\") or --[==[ a ]] b ]==]\n  \"Fake5Dash6Op7\"",
+            "local token = os.getenv(\"T\") or --[[ a\n b ]]\n  \"Fake5Dash6Op7\"",
+            "password = 'a' || -- c\n  'Fake5Dash6Op7'",
+            "token = a ?? -- c\n  \"Fake5Dash6Op7\"",
+            "token = a .. -- c\n  \"Fake5Dash6Op7\"",
+            "token = a || ## c\n  \"Fake5Dash6Op7\"",
+            "token = a || ##\n  \"Fake5Dash6Op7\"",
+            "token = a || #!c\n  \"Fake5Dash6Op7\"",
+            "token = a || #[c]\n  \"Fake5Dash6Op7\"",
+            "token = a || #\"c\n  \"Fake5Dash6Op7\"",
+            // A raw `#"…"#` closes only at `"#`, or runs to the end.
+            "token = #\"Fake5Dash6Op7\"#, name = \"kept\"",
+            "token = #\"Fake5\"Dash6Op7\"#",
+            "token = #\"Fake5\"Dash6Op7",
+        ] {
+            assert_both_hide(raw, "Fake5Dash6Op7");
+        }
+        // Neither a decrement nor an attribute after a word is a comment.
+        for raw in [
+            "token = \"Fake5Dash6Op7\" + i--, name = \"kept\"",
+            "token = \"Fake5Dash6Op7\" #[x], name = \"kept\"",
+            "token = #\"Fake5Dash6Op7\"#, name = \"kept\"",
+        ] {
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(!out.contains("Dash6"), "{raw:?} -> {out:?}");
+                assert!(out.contains("name = \"kept\""), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_word_operator_dot_dot_or_slash_slash_starting_the_next_line_carries_it() {
+        // KT-2053 round 6: the mirror of the line-end word operators, the
+        // usual Lua and Perl layout of a fallback.
+        for raw in [
+            "local token = os.getenv(\"T\")\n  or \"Fake6Lead7Op8\"",
+            "local token = os.getenv(\"T\")\n  and \"Fake6Lead7Op8\"",
+            "local token = os.getenv(\"T\")\n  OR \"Fake6Lead7Op8\"",
+            "token = a\n  or \"Fake6Lead7Op8\"",
+            "my $token = $ENV{X}\n  or \"Fake6Lead7Op8\";",
+            "local token = \"sk_\"\n  .. \"Fake6Lead7Op8\"",
+            "local token = \"sk_\"\n  ..\"Fake6Lead7Op8\"",
+            "my $token = $ENV{X}\n  // \"Fake6Lead7Op8\";",
+            "local token = os.getenv(\"T\") -- c\n  or \"Fake6Lead7Op8\"",
+            "local token = os.getenv(\"T\") // c\n  or \"Fake6Lead7Op8\"",
+            " local token = os.getenv(\"T\")\n-  or \"x\"\n+  or \"Fake6Lead7Op8\"",
+            " local token = os.getenv(\"T\")\n+  or \"Fake6Lead7Op8\"",
+            "+local token = \"sk_\"\n+  .. \"Fake6Lead7Op8\"",
+            "local token = os.getenv(\"T\")\n  or(\"Fake6Lead7Op8\")",
+            "token = a\n  Or \"Fake6Lead7Op8\"",
+        ] {
+            assert_both_hide(raw, "Fake6Lead7Op8");
+        }
+        // A word that only starts like one, a `...` and a line that starts
+        // with anything else still end the value at the break.
+        for raw in [
+            "token = \"Fake6Lead7Op8\"\norder = \"kept\"",
+            "token = \"Fake6Lead7Op8\"\nandroid = \"kept\"",
+            "token = \"Fake6Lead7Op8\"\n...more \"kept\"",
+            "token = \"Fake6Lead7Op8\"\nname = \"kept\"",
+        ] {
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(!out.contains("Lead7"), "{raw:?} -> {out:?}");
+                assert!(out.contains("\"kept\""), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_comment_only_line_before_a_leading_operator_is_skipped_like_a_blank_one() {
+        // KT-2053 round 7: the mirror of round 5's `a ||\n  // note\n  "…"`.
+        for raw in [
+            "local token = os.getenv(\"T\")\n  -- a comment line\n  or \"Fake7Note8Line9\"",
+            "token = x\n  # c\n  or \"Fake7Note8Line9\"",
+            "const token = a\n  /* c */\n  || \"Fake7Note8Line9\";",
+            "token = x -- c\n  -- d\n  or \"Fake7Note8Line9\"",
+            "{\"code\": \"local token = a\\n  -- c\\n  or \\\"Fake7Note8Line9\\\"\"}",
+            // Comments spanning lines, stacked, after a blank line, or two on
+            // one line; any `#`, and a comment at the start of the line.
+            "token = x\n  --[[ a\n  b ]]\n  or \"Fake7Note8Line9\"",
+            "token = x\n  --[==[ a ]]\n  ]==]\n  or \"Fake7Note8Line9\"",
+            "token = x\n  /* a\n   * b\n   */\n  or \"Fake7Note8Line9\"",
+            "token = x\n  # a\n\n  -- b\n  // c\n  or \"Fake7Note8Line9\"",
+            "token = x\n  /* a */ -- b\n  or \"Fake7Note8Line9\"",
+            "token = x\n  /* a */ or \"Fake7Note8Line9\"",
+            "token = x\n  #[c]\n  or \"Fake7Note8Line9\"",
+            "token = x\n-- c\nor \"Fake7Note8Line9\"",
+            "token = x\r\n  # c\r\n  or \"Fake7Note8Line9\"",
+            // In a diff's versions.
+            " token = x\n-  -- old\n+  -- new\n   or \"Fake7Note8Line9\"",
+            " token = x\n+  # c\n+  or \"Fake7Note8Line9\"",
+            "+token = x\n+  -- c\n+  or \"Fake7Note8Line9\"",
+            " token = x\n-  # c\n-  or \"y\"\n+  # c\n+  or \"Fake7Note8Line9\"",
+            // A literal inside a comment line read so is masked too.
+            "token = x\n  -- was \"Fake7Note8Line9\"\n  or y",
+        ] {
+            assert_both_hide(raw, "Fake7Note8Line9");
+        }
+        // A comment-only line before anything but a leading operator still
+        // ends the value at the break.
+        for raw in [
+            "token = \"Fake7Note8Line9\"\n# c\nname = \"kept\"",
+            "token = \"Fake7Note8Line9\"\n-- c\nname = \"kept\"",
+            "token = \"Fake7Note8Line9\"\n/* c */\nname = \"kept\"",
+            "token = \"Fake7Note8Line9\"\n/* a\n b */\nname = \"kept\"",
+            "token = \"Fake7Note8Line9\"\n  // c\n  # d\nname = \"kept\"",
+        ] {
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(!out.contains("Note8"), "{raw:?} -> {out:?}");
+                assert!(out.contains("name = \"kept\""), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lua_long_bracket_string_is_a_literal_of_the_value() {
+        // KT-2053 round 7: `[[…]]` and `[=[…]=]` (level-matched).
+        for raw in [
+            "token = [[Fake7Long8Br9]]",
+            "token = x or [[Fake7Long8Br9]]",
+            "token = x\n  or [[Fake7Long8Br9]]",
+            "local token = os.getenv(\"T\") or [==[Fake7Long8Br9]==]",
+            "local token = [=[Fake7Long8Br9]]x]=], name = \"kept\"",
+            "local token = x .. [[Fake7Long8Br9]] .. y",
+            "{\"code\": \"local token = x or [[Fake7Long8Br9]]\"}",
+            // Not closed (or closed at another level): to the end of the text.
+            "token = [[Fake7Long8Br9",
+            "local token = os.getenv(\"T\") or [==[Fake7Long8Br9]=]",
+        ] {
+            assert_both_hide(raw, "Fake7Long8Br9");
+        }
+        // A body across lines (agent mode keeps a value with blanks).
+        let raw = "local token = [[Fake7Long8Br9\nSecond5Line6]]\nname = \"kept\"";
+        let out = redact_stored_text(raw);
+        assert!(!out.contains("Long8") && !out.contains("Line6"), "{out:?}");
+        assert!(out.contains("name = \"kept\""), "{out:?}");
+        // The expression forms are masked by the value-expression pass itself.
+        for raw in [
+            "token = x or [[Fake7Long8Br9]]",
+            "token = x\n  or [[Fake7Long8Br9]]",
+            "local token = os.getenv(\"T\") or [==[Fake7Long8Br9]==]",
+        ] {
+            let (out, masked) = mask_value_expressions(raw, &|_: &str, _: &str| true);
+            assert!(masked > 0 && !out.contains("Long8"), "{raw:?} -> {out:?}");
+        }
+        // A `[[` after a name or a closer is an index, not a literal.
+        for raw in [
+            "token = a[[1]], name = \"kept\"",
+            "token = f(x)[[1]], name = \"kept\"",
+        ] {
+            let (out, masked) = mask_value_expressions(raw, &|_: &str, _: &str| true);
+            assert_eq!((out.as_str(), masked), (raw, 0), "{raw:?}");
+        }
+    }
+
+    // ── KT-2053 second security review (round 8) ──────────────────────
+
+    #[test]
+    fn the_second_security_review_inputs_mask_the_secret_and_keep_the_code() {
+        // The exact inputs of findings 1-4 and 6: stored output pinned (the
+        // bare-value pattern still masks the first token after the `:` / `=`,
+        // as before), and agent output keeps every byte but the secret's.
+        for (raw, stored) in [
+            // 1: a generic left open at a line break.
+            (
+                "let api_key: Option<\n    String,\n> = Some(\"S3cr3tVal-99\".to_string());",
+                "let api_key: ***REDACTED***\n    String,\n> = Some(\"***REDACTED***\".to_string());",
+            ),
+            (
+                "const api_key: Record<\n  string,\n  string\n> = { key: \"S3cr3tVal-99\" };",
+                "const api_key: ***REDACTED***\n  string,\n  string\n> = { key: \"***REDACTED***\" };",
+            ),
+            (
+                "let api_key = env::var::<\n    &str,\n>(\"API_KEY\").unwrap_or(\"S3cr3tVal-99\");",
+                "let api_key = ***REDACTED***\n    &str,\n>(\"***REDACTED***\").unwrap_or(\"***REDACTED***\");",
+            ),
+            // 2: the `>` of `->` / `=>`.
+            (
+                "let token: Result<fn() -> String, Error> = Ok(\"S3cr3tVal-99\".to_string());",
+                "let token: ***REDACTED*** -> String, Error> = Ok(\"***REDACTED***\".to_string());",
+            ),
+            (
+                "const token: Map<() => void, string> = new Map([[fn, \"S3cr3tVal-99\"]]);",
+                "const token: ***REDACTED*** => void, string> = new Map([[***REDACTED***]]);",
+            ),
+            // 3: a quote after an operator `.` / `?`.
+            (
+                "$api_key = $prefix.\":\".\"S3cr3tVal-99\";",
+                "$api_key = ***REDACTED***\"***REDACTED***\".\"***REDACTED***\";",
+            ),
+            (
+                "const token = empty?\" \":\"S3cr3tVal-99\";",
+                "const token = ***REDACTED***\"***REDACTED***\":\"***REDACTED***\";",
+            ),
+            (
+                "const password = env.PASS??\":S3cr3tVal-99\";",
+                "const password = ***REDACTED***\"***REDACTED***\";",
+            ),
+            // 4: a comment glued to `:` / `(`.
+            (
+                "const token = cond ? a :/* fallback; */ \"S3cr3tVal-99\";",
+                "const token = ***REDACTED*** ? a :/* fallback; */ \"***REDACTED***\";",
+            ),
+            (
+                "const token = cond ? a :/* fallback */\n  \"S3cr3tVal-99\";",
+                "const token = ***REDACTED*** ? a :/* fallback */\n  \"***REDACTED***\";",
+            ),
+            (
+                "const token = (// 1) fallback\n  \"S3cr3tVal-99\"\n);",
+                "const token = ***REDACTED*** 1) fallback\n  \"***REDACTED***\"\n);",
+            ),
+            // 6: a comment's unclosed literal stops at its line end.
+            (
+                "token = os.getenv(\"X\") or # don't use \"old\n  fallback(\"arg1\", \"S3cr3tVal-99\")",
+                "token = ***REDACTED***\"***REDACTED***\") or # don't use \"***REDACTED***\n  fallback(\"***REDACTED***\", \"***REDACTED***\")",
+            ),
+        ] {
+            assert_both_mask(raw, "S3cr3tVal-99", stored);
+            // The whole body is masked: `":S3cr3tVal-99"` loses its `:` too.
+            assert_eq!(
+                redact_agent_output(raw),
+                raw.replace("\":S3cr3tVal-99", "\"S3cr3tVal-99")
+                    .replace("S3cr3tVal-99", "***REDACTED***"),
+                "agent: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_generic_left_open_at_a_line_break_still_holds_the_value() {
+        // Finding 1: a line break no longer closes an open generic when the
+        // type list goes on (`Option<\n`, `String,\n`, `\n>`).
+        for raw in [
+            "let api_key: Option<\n    String,\n> = Some(\"S3cr3tVal-99\".to_string());",
+            "const api_key: Record<\n  string,\n  string\n> = { key: \"S3cr3tVal-99\" };",
+            "let api_key = env::var::<\n    &str,\n>(\"API_KEY\").unwrap_or(\"S3cr3tVal-99\");",
+            "let api_key: HashMap<\n  String,\n  Vec<\n    u8,\n  >,\n> = f(\"S3cr3tVal-99\");",
+            "let api_key: Option<\r\n    String,\r\n> = Some(\"S3cr3tVal-99\");",
+            "let api_key: Foo<\n    'a,\n> = Foo(\"S3cr3tVal-99\");",
+            "{\"code\": \"let api_key: Option<\\n    String,\\n> = Some(\\\"S3cr3tVal-99\\\");\"}",
+            " let api_key: Option<\n-    String,\n+    Box<str>,\n > = Some(\"S3cr3tVal-99\");",
+        ] {
+            assert_both_hide(raw, "S3cr3tVal-99");
+        }
+        // A comparison glued to a word at the end of a line opens no value
+        // that never ends: the next line that is not part of a type list is
+        // read as before.
+        for raw in [
+            "token = a<b\nname = \"kept\"",
+            "token = a < b\nname = \"kept\"",
+            "token = \"S3cr3tVal-99\" if a<b\nname = \"kept\"",
+        ] {
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(!out.contains("Val-99"), "{raw:?} -> {out:?}");
+                assert!(out.contains("name = \"kept\""), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_arrow_inside_a_generic_does_not_close_it() {
+        // Finding 2: the `>` of `->` / `=>` is no generic's closer.
+        for raw in [
+            "let token: Result<fn() -> String, Error> = Ok(\"S3cr3tVal-99\".to_string());",
+            "const token: Map<() => void, string> = new Map([[fn, \"S3cr3tVal-99\"]]);",
+            "let token: Box<dyn Fn(u8) -> u8, A> = mk(\"S3cr3tVal-99\");",
+        ] {
+            assert_both_hide(raw, "S3cr3tVal-99");
+        }
+    }
+
+    #[test]
+    fn a_quote_after_an_operator_dot_or_question_mark_opens_a_literal() {
+        // Finding 3: a `.` after a `$var` or a closer, `??`, a ternary `?`
+        // are operators, not a sentence's end.
+        for raw in [
+            "$api_key = $prefix.\":\".\"S3cr3tVal-99\";",
+            "const token = empty?\" \":\"S3cr3tVal-99\";",
+            "const password = env.PASS??\":S3cr3tVal-99\";",
+            "$api_key = $this->prefix.\":\".\"S3cr3tVal-99\";",
+            "$api_key = self::P.\" \".\"S3cr3tVal-99\";",
+            "$api_key = f(). \", \" .\"S3cr3tVal-99\";",
+            "local token = \"a\"..\" \"..\"S3cr3tVal-99\"",
+            "const token = !!\" S3cr3tVal-99\";",
+        ] {
+            assert_both_hide(raw, "S3cr3tVal-99");
+        }
+        // Prose still ends at its closing quote.
+        for (raw, kept) in [
+            (
+                r#"{"a": "the password is X and the key Y.", "b": "c"}"#,
+                r#", "b": "c"}"#,
+            ),
+            (
+                r#"{"a": "token: see the doc (above).", "b": "c"}"#,
+                r#", "b": "c"}"#,
+            ),
+            (r#"{"a": "token: wait...", "b": "c"}"#, r#", "b": "c"}"#),
+        ] {
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(out.ends_with(kept), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_comment_glued_to_an_opener_does_not_hide_the_value() {
+        // Finding 4: a comment right after `:` `(` `[` `{` `,` `^`.
+        for raw in [
+            "const token = cond ? a :/* fallback; */ \"S3cr3tVal-99\";",
+            "const token = cond ? a :/* fallback */\n  \"S3cr3tVal-99\";",
+            "const token = (// 1) fallback\n  \"S3cr3tVal-99\"\n);",
+            "const token = [/* a] */ \"S3cr3tVal-99\"];",
+            "const token = f(a,// x) y\n  \"S3cr3tVal-99\");",
+            "token = f(a,-- x) y\n  \"S3cr3tVal-99\")",
+            "token = f(# x) y\n  \"S3cr3tVal-99\")",
+            "set token=%A% ^// x\n  \"S3cr3tVal-99\"",
+            "const token = cond ? a :// fallback\n  \"S3cr3tVal-99\";",
+        ] {
+            assert_both_hide(raw, "S3cr3tVal-99");
+        }
+        // Not comments: a URL, a decrement, an attribute, a raw string, a
+        // CSS color.
+        for (text, literals, rest) in [
+            (" \"https://x\", y: 1", vec!["https://x"], ", y: 1"),
+            (" url:https://x.y/z, k: \"b\"", vec![], ", k: \"b\""),
+            (" f(--i), k: \"b\"", vec![], ", k: \"b\""),
+            (" f(#[x], \"a\"), b: 1", vec!["a"], ", b: 1"),
+            (" f(#\"a\"#), b: 1", vec!["a"], ", b: 1"),
+            (" {color:#fff, x: \"a\"}, b: 1", vec!["a"], ", b: 1"),
+        ] {
+            let (found, end) = expression_literals(text, 0, &mut CutMemo::default());
+            let found: Vec<&str> = found.into_iter().map(|range| &text[range]).collect();
+            assert_eq!((found, &text[end..]), (literals, rest), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_comment_literal_its_line_does_not_close_stops_at_the_line_end() {
+        // Finding 6: the next line keeps its code and its line break.
+        let raw =
+            "token = os.getenv(\"X\") or # don't use \"old\n  fallback(\"arg1\", \"S3cr3tVal-99\")";
+        for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+            assert!(!out.contains("Val-99"), "{out:?}");
+            assert!(out.contains("\n  fallback(\""), "{out:?}");
+        }
+        assert_both_hide(raw, "S3cr3tVal-99");
+    }
+
+    // ── KT-2053 round 9: a `,` at the value's own depth ──────────────────
+
+    #[test]
+    fn a_top_level_comma_ends_the_value_only_before_a_new_key() {
+        // G1: a Python tuple or a Ruby array assignment goes on past its `,`.
+        for raw in [
+            "token = x, \"S3cr3tVal-99\"",
+            "api_key = prefix, \"S3cr3tVal-99\"",
+            "token = x,\n  \"S3cr3tVal-99\"",
+            "token = x,# c; d\n  \"S3cr3tVal-99\"",
+            "token = x, \"S3cr3tVal-99\"\nname = \"kept\"",
+            "token = x , 'S3cr3tVal-99'",
+            "token = x,\r\n  \"S3cr3tVal-99\"",
+            "token = x, # c\n  \"S3cr3tVal-99\"",
+            "token = x, /* c */ \"S3cr3tVal-99\"",
+            "token = x, y, z, \"S3cr3tVal-99\"",
+            "token = |a, b| \"S3cr3tVal-99\"",
+            "token = lambda a, b: \"S3cr3tVal-99\"",
+            "token = x,\n  // c\n  \"S3cr3tVal-99\"",
+            "{\"code\": \"token = x,\\n  \\\"S3cr3tVal-99\\\"\"}",
+            " token = x,\n-  \"y\"\n+  \"S3cr3tVal-99\"",
+            "+token = x,\n+  \"S3cr3tVal-99\"",
+        ] {
+            assert_both_hide(raw, "S3cr3tVal-99");
+        }
+        let raw = "token = x, \"S3cr3tVal-99\"\nname = \"kept\"";
+        for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+            assert!(out.ends_with("\nname = \"kept\""), "{raw:?} -> {out:?}");
+        }
+        // A new key after the `,` ends the value: its own value is kept.
+        for (raw, kept) in [
+            (
+                "connect(token = \"S3cr3tVal-99\", name = \"kept\")",
+                ", name = \"kept\")",
+            ),
+            ("token=abc, user=\"bob\"", ", user=\"bob\""),
+            (
+                "{\"token\": \"S3cr3tVal-99\", \"name\": \"kept\"}",
+                ", \"name\": \"kept\"}",
+            ),
+            (
+                "{ token: 'S3cr3tVal-99', 'name': 'kept' }",
+                ", 'name': 'kept' }",
+            ),
+            (
+                "Cfg { token: Some(\"S3cr3tVal-99\"), retries: 3, name: \"kept\" }",
+                ", retries: 3, name: \"kept\" }",
+            ),
+            (
+                "connect(\n    token = \"S3cr3tVal-99\",\n    name = \"kept\",\n)",
+                ",\n    name = \"kept\",\n)",
+            ),
+            (
+                "{\n  \"token\": \"S3cr3tVal-99\",  # the token\n  \"name\": \"kept\"\n}",
+                "\n  \"name\": \"kept\"\n}",
+            ),
+            (
+                "{ token: \"S3cr3tVal-99\", :name => \"kept\" }",
+                ", :name => \"kept\" }",
+            ),
+            (
+                "['token' => 'S3cr3tVal-99', 'name' => 'kept']",
+                ", 'name' => 'kept']",
+            ),
+            (
+                "{ token: \"S3cr3tVal-99\", name?: \"kept\" }",
+                ", name?: \"kept\" }",
+            ),
+            (
+                "left: \"{\\\"token\\\": \\\"S3cr3tVal-99\\\", \\\"name\\\": \\\"kept\\\"}\"",
+                ", \\\"name\\\": \\\"kept\\\"}\"",
+            ),
+            (
+                " token = \"S3cr3tVal-99\",\n+  name = \"kept\",",
+                "\n+  name = \"kept\",",
+            ),
+        ] {
+            for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+                assert!(!out.contains("Val-99"), "{raw:?} -> {out:?}");
+                assert!(out.ends_with(kept), "{raw:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_that_starts_with_a_comma_continues_the_value() {
+        // G2: comma-first style, for an open generic and for the value.
+        for raw in [
+            "let api_key: HashMap<\n    String\n    , String\n> = make(\"S3cr3tVal-99\");",
+            "let api_key: Result<String\n    , Error> = Ok(\"S3cr3tVal-99\");",
+            "token = x\n  , \"S3cr3tVal-99\"",
+            "let api_key = make(\n    a\n    , \"S3cr3tVal-99\"\n);",
+            "token = x\n  -- c\n  , \"S3cr3tVal-99\"",
+            "token = x\r\n  , \"S3cr3tVal-99\"",
+            "{\"code\": \"token = x\\n  , \\\"S3cr3tVal-99\\\"\"}",
+            " token = x\n-  , \"y\"\n+  , \"S3cr3tVal-99\"",
+            " let api_key: Result<String\n+    , Error> = Ok(\"S3cr3tVal-99\");",
+        ] {
+            assert_both_hide(raw, "S3cr3tVal-99");
+        }
+        // A comma-first key still ends the value.
+        let raw = "{ token = \"S3cr3tVal-99\"\n, name = \"kept\" }";
+        for out in [redact_stored_text(raw), redact_agent_output(raw)] {
+            assert!(!out.contains("Val-99"), "{out:?}");
+            assert!(out.ends_with("\n, name = \"kept\" }"), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn the_round_9_inputs_mask_the_secret_and_keep_the_code() {
+        // The exact inputs of G1 and G2: stored output pinned, and agent
+        // output keeps every byte but the secret's.
+        // The bare-value pattern still masks the first token after the `=` /
+        // `:` in stored text, as before this round.
+        for (raw, stored) in [
+            (
+                "token = x, \"S3cr3tVal-99\"",
+                "token = ***REDACTED***, \"***REDACTED***\"",
+            ),
+            (
+                "api_key = prefix, \"S3cr3tVal-99\"",
+                "api_key = ***REDACTED***, \"***REDACTED***\"",
+            ),
+            (
+                "token = x,\n  \"S3cr3tVal-99\"",
+                "token = ***REDACTED***,\n  \"***REDACTED***\"",
+            ),
+            (
+                "token = x,# c; d\n  \"S3cr3tVal-99\"",
+                "token = ***REDACTED***,# c; d\n  \"***REDACTED***\"",
+            ),
+            (
+                "token = x, \"S3cr3tVal-99\"\nname = \"kept\"",
+                "token = ***REDACTED***, \"***REDACTED***\"\nname = \"kept\"",
+            ),
+            (
+                "let api_key: HashMap<\n    String\n    , String\n> = make(\"S3cr3tVal-99\");",
+                "let api_key: ***REDACTED***\n    String\n    , String\n> = make(\"***REDACTED***\");",
+            ),
+            (
+                "let api_key: Result<String\n    , Error> = Ok(\"S3cr3tVal-99\");",
+                "let api_key: ***REDACTED***\n    , Error> = Ok(\"***REDACTED***\");",
+            ),
+            (
+                "token = x\n  , \"S3cr3tVal-99\"",
+                "token = ***REDACTED***\n  , \"***REDACTED***\"",
+            ),
+        ] {
+            assert_both_mask(raw, "S3cr3tVal-99", stored);
+            assert_eq!(
+                redact_agent_output(raw),
+                raw.replace("S3cr3tVal-99", "***REDACTED***"),
+                "agent: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comma_run_stays_linear() {
+        // Round 9: each `,` looks ahead once, at the segment after it.
+        for unit in [
+            ",\n",
+            "x,\n",
+            "\n  , x",
+            "a, b",
+            "a, # c\n",
+            "a, \"k\" ",
+            "a, k ",
+            "a,\r",
+        ] {
+            let text = format!("token = {}", unit.repeat(40_000));
+            EXPRESSION_WORK.with(|work| work.set(0));
+            mask_value_expressions_ungated(&text, &|_: &str, _: &str| true);
+            let work = EXPRESSION_WORK.with(std::cell::Cell::get);
+            assert!(
+                work <= 16 * text.len(),
+                "{unit:?}: {work} bytes read for {} bytes of text",
+                text.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_carriage_return_only_text_stays_linear() {
+        // Finding 5: a `\r`-only line break looks back no further than its
+        // own line.
+        for unit in ["a ||\r", "a ||\r\n", "a ||\n", "a ||\r\r\n", "x\r or "] {
+            let text = format!("token = {}", unit.repeat(40_000));
+            EXPRESSION_WORK.with(|work| work.set(0));
+            mask_value_expressions_ungated(&text, &|_: &str, _: &str| true);
+            let work = EXPRESSION_WORK.with(std::cell::Cell::get);
+            assert!(
+                work <= 16 * text.len(),
+                "{unit:?}: {work} bytes read for {} bytes of text",
+                text.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_value_expression_pass_stays_linear_on_adversarial_input() {
+        let agent = |name: &str, value: &str| value_is_credential(name, value, true);
+        let audit = |_: &str, _: &str| true;
+        for unit in [
+            // Unclosed raw literals, each name read again from inside the
+            // literal before it (agent mode leaves them: they hold spaces).
+            r#"token = r#\"a "#,
+            r##"token = r#"a "##,
+            r###"token = r##"a "###,
+            // No whitespace, a placeholder start: left in agent mode too.
+            r##"$a.token=r#""##,
+            // Quotes after a `.`, read tentatively.
+            r#"token = $x."a "#,
+            r#"token = $x.\"a "#,
+            // Escaped literals and bare quotes.
+            r#"token: \"a\" " "#,
+            // Line breaks looked past.
+            "token = x\n\n\n",
+            "+token = x\n+ ",
+            // Line breaks carried by how the line ends (round 3).
+            "token =\n",
+            "token = x ||\n",
+            "token = f().\nb(",
+            "token = a .\n'a ",
+            "+token =\n+ x ??\n",
+            r#"token: \"a\" ||\n"#,
+            // Trailing comments (round 4).
+            "token = x || // x\n",
+            "token = x /* */ ",
+            "token = x /* ",
+            "token = x // \"a \n",
+            "token = x # y\n",
+            // Diffs, word operators and `--` / `#` comments (round 5).
+            "-token = a ||\n+  \"a \n",
+            " token = a ||\n-  b ||\n+  c\n",
+            "+token = (\n-x\n",
+            "token = x or\n",
+            "token = \"a\" ..\n",
+            "token = x ^\n",
+            "token = x or -- y\n",
+            "token = x --[=[ ]=] ",
+            "token = x --[==[ ]=] ",
+            "token = x || ## \"a \n",
+            "token = x || #\"a ",
+            "token = x || # \"a ",
+            // Leading word operators, `..` and `//` (round 6).
+            "token = x\n or ",
+            "token = x\n  .. \"a \n",
+            "token = x\n // \"a \n",
+            "token = x -- y\n or\n",
+            " token = x\n-  or b\n+  or ",
+            "token = x\n order\n",
+            // Comment-only lines before a leading operator, and Lua long
+            // brackets (round 7).
+            "token = x\n -- c\n or ",
+            "token = x\n # c\n",
+            "token = x\n # token = x\n",
+            "token = x\n /* c\n",
+            "token = x\n /* c */\n",
+            "token = x\n --[[ c\n",
+            "token = x\n --[=[ c ]]\n",
+            "token = [[a ",
+            "token = [==[a ]=] ",
+            "token = x or [=[a ",
+            // Second security review (round 8): generics across lines,
+            // arrows, operator quotes, glued comments, `\r`-only and mixed
+            // line breaks, comment literals capped at their line.
+            "token: A<\n B,\n",
+            "token: A<\n B,\n> ",
+            "token: A<\r B,\r",
+            "token = a<b,\n",
+            "token: A<fn() -> B, C> ",
+            "token = $x.\":\".\"a ",
+            "token = a?\" \":\"a ",
+            "token = a??\": ",
+            "token = a :/* ",
+            "token = (// x\n",
+            "token = a ||\r",
+            "token = a\r or ",
+            "token = a ||\r\n\r",
+            "token = x || # \"a\n",
+            // A `,` at the value's depth (round 9).
+            "token = ,\n",
+            "token = x,\n",
+            "token = x\n  , x",
+            "token = a, b",
+            "token = a, # \"a\n",
+            "token: A<B\n , C\n",
+            "token = a, \"k\": ",
+        ] {
+            let text = unit.repeat(20_000);
+            for masks in [&agent as &dyn Fn(&str, &str) -> bool, &audit] {
+                EXPRESSION_WORK.with(|work| work.set(0));
+                mask_value_expressions_ungated(&text, masks);
+                let work = EXPRESSION_WORK.with(std::cell::Cell::get);
+                assert!(
+                    work <= 16 * text.len(),
+                    "{unit:?}: {work} bytes read for {} bytes of text",
+                    text.len()
+                );
+            }
+        }
+        // A run of blank lines before a continuation is crossed once.
+        let text = format!("token = x{}.unwrap_or(\"Fake1\")", "\n".repeat(200_000));
+        EXPRESSION_WORK.with(|work| work.set(0));
+        let (out, _) = mask_value_expressions_ungated(&text, &audit);
+        assert!(!out.contains("Fake1"));
+        assert!(EXPRESSION_WORK.with(std::cell::Cell::get) <= 16 * text.len());
+    }
+
+    #[test]
+    fn the_expression_reader_reads_literals_to_the_end_of_the_value() {
+        let bodies = |text: &str| -> (Vec<String>, String) {
+            let (literals, end) = expression_literals(text, 0, &mut CutMemo::default());
+            (
+                literals
+                    .into_iter()
+                    .map(|range| text[range].to_string())
+                    .collect(),
+                text[end..].to_string(),
+            )
+        };
+        for (text, literals, rest) in [
+            (r#" &str = "a", b: 1"#, vec!["a"], ", b: 1"),
+            (r#" f("a", 'b'), c: 1"#, vec!["a", "b"], ", c: 1"),
+            (r#" Vec<Box<str>>::new("a"); d"#, vec!["a"], "; d"),
+            (r#" X::<&'static str>::new("a")}"#, vec!["a"], "}"),
+            (r##" r#"a"b"#, c: 1"##, vec![r#"a"b"#], ", c: 1"),
+            (r#" b"a" u'b' f`c`"#, vec!["a", "b", "c"], ""),
+            (r#" Some(\"a\\\"b\") }"#, vec![r#"a\\\"b"#], "}"),
+            (r#" abc" tail"#, vec![], r#"" tail"#),
+            (r#" X and the key Y.", "b": "c""#, vec![], r#"", "b": "c""#),
+            (r#" f(x) + "d""#, vec!["d"], ""),
+            (" it's 'a'\nnext 'b'", vec!["a"], "\nnext 'b'"),
+            (" Some(\n  \"a\",\n), x: 1", vec!["a"], ", x: 1"),
+            (r#" Some(\n  \"a\"\n)\nnext"#, vec!["a"], r#"\nnext"#),
+            (r#" "open"#, vec!["open"], ""),
+            (r#" \"cut"#, vec!["cut"], ""),
+            (r#" \"cut" tail"#, vec!["cut"], r#"" tail"#),
+            // KT-2053 round 2: a quote after `.` `!` `?` opens a value in code.
+            (r#" $salt."a1"; x"#, vec!["a1"], "; x"),
+            (" 'sk_'.'a1'; x", vec!["sk_", "a1"], "; x"),
+            (r#" ok?"a1":"b2"; x"#, vec!["a1", "b2"], "; x"),
+            (r#" env.TOKEN??"a1"; x"#, vec!["a1"], "; x"),
+            (r#" !!"a1""#, vec!["a1"], ""),
+            (r#" x.\"a1\"; y"#, vec!["a1"], "; y"),
+            (r#" x."open"#, vec!["open"], ""),
+            // …and closes a sentence in prose.
+            (r#" X and Y.", "b": "c""#, vec![], r#"", "b": "c""#),
+            (r#" X and Y."}, {"b": 1}"#, vec![], r#""}, {"b": 1}"#),
+            (r#" X and Y."#, vec![], ""),
+            (" X and Y.\"\nnext \"q\"", vec![], "\"\nnext \"q\""),
+            (r#" X and Y!\", \"b\""#, vec![], r#"\", \"b\""#),
+            (" it's done.' and 'kept'", vec!["kept"], ""),
+            // A line continued by a leading operator.
+            (
+                " env::var(\"T\")\n    .unwrap_or(\"a1\");\nnext",
+                vec!["T", "a1"],
+                ";\nnext",
+            ),
+            (" process.env.T\n  || \"a1\";", vec!["a1"], ";"),
+            (" a\n\n  ?? \"a1\"\nnext \"b\"", vec!["a1"], "\nnext \"b\""),
+            (
+                " ok\n  ? \"a1\"\n  : \"b2\"\nnext",
+                vec!["a1", "b2"],
+                "\nnext",
+            ),
+            (" \"a\"\n  + \"b\"", vec!["a", "b"], ""),
+            (" x\n  ?.y(\"a1\")", vec!["a1"], ""),
+            (" x\n  && \"a1\"", vec!["a1"], ""),
+            (r#" f(\"T\")\n    .or(\"a1\")"#, vec!["T", "a1"], ""),
+            // …a line that starts anything else ends it.
+            (" \"a\"\n...more \"b\"", vec!["a"], "\n...more \"b\""),
+            (" \"a\"\n::path \"b\"", vec!["a"], "\n::path \"b\""),
+            (" \"a\"\n| x \"b\"", vec!["a"], "\n| x \"b\""),
+            (" \"a\"\n  next \"b\"", vec!["a"], "\n  next \"b\""),
+            // In a diff, the next line's marker is not an operator.
+            (
+                "+token = \"a\"\n+name = \"b\"",
+                vec!["a"],
+                "\n+name = \"b\"",
+            ),
+            ("+let t = f(\"a\")\n+    .or(\"b\");", vec!["a", "b"], ";"),
+            ("-let t = \"a\"\n-  + \"b\"", vec!["a", "b"], ""),
+            // A bare `"` after an escaped literal closes the printed string.
+            (
+                r#" \"a1\""\n right: "kept""#,
+                vec!["a1"],
+                r#""\n right: "kept""#,
+            ),
+            (r#" Some(\"a1\") "tail" x"#, vec!["a1"], r#""tail" x"#),
+            // KT-2053 round 3: nothing read since the `=` yet, the value is
+            // on the next non-blank line…
+            ("\n  process.env.T ?? \"a1\";", vec!["a1"], ";"),
+            (
+                "\n\n    os.getenv(\"T\", \"a1\")\nnext \"b\"",
+                vec!["T", "a1"],
+                "\nnext \"b\"",
+            ),
+            (" \t\n  \"a1\"", vec!["a1"], ""),
+            (r#"\n  \"a1\"\n"#, vec!["a1"], r#"\n"#),
+            ("\n+  \"a1\"", vec!["a1"], ""),
+            // …or the line ends with a continuation operator.
+            (" x ||\n  \"a1\";", vec!["a1"], ";"),
+            (" x &&  \n  \"a1\"", vec!["a1"], ""),
+            (" x ??\n\"a1\"", vec!["a1"], ""),
+            (" ok ?\n  \"a1\" :\n  \"b2\";", vec!["a1", "b2"], ";"),
+            (
+                " salt +\n    \"a1\"\nnext \"b\"",
+                vec!["a1"],
+                "\nnext \"b\"",
+            ),
+            (" x ==\n  \"a1\"", vec!["a1"], ""),
+            (" f(\"T\").\n\tOr(\"a1\")", vec!["T", "a1"], ""),
+            (" f(\"T\").\n\tchain_2(\"a1\")", vec!["T", "a1"], ""),
+            (" $salt .\n    \"a1\";", vec!["a1"], ";"),
+            (r#" x ||\n  \"a1\""#, vec!["a1"], ""),
+            ("+x ||\n+  \"a1\"", vec!["a1"], ""),
+            // A trailing `.` before anything but a chained call is a sentence.
+            (" abc.\nAnd then \"b\"", vec![], "\nAnd then \"b\""),
+            (" abc.\nOr \"b\"", vec![], "\nOr \"b\""),
+            (" abc.\n(\"b\")", vec![], "\n(\"b\")"),
+            (" abc\nnext \"b\"", vec![], "\nnext \"b\""),
+            (" \"a\" \nnext \"b\"", vec!["a"], "\nnext \"b\""),
+            // KT-2053 round 4: a trailing comment is blanks for how the line
+            // ends…
+            (" x || // default\n  \"a1\";", vec!["a1"], ";"),
+            (" x ?? // dev only\n  \"a1\"", vec!["a1"], ""),
+            (" x || /* default */\n  \"a1\"", vec!["a1"], ""),
+            (" x ||/* d */ \n  \"a1\"", vec!["a1"], ""),
+            (" ENV[\"T\"] || # fallback\n  \"a1\"", vec!["T", "a1"], ""),
+            (r#" x || // d\n  \"a1\""#, vec!["a1"], ""),
+            ("+x || // d\n+  \"a1\"", vec!["a1"], ""),
+            (" x ||\n  // note\n  \"a1\"", vec!["a1"], ""),
+            (" // note\n  \"a1\"", vec!["a1"], ""),
+            // …its brackets, `,` and `;` end nothing…
+            (" x || // e.g., dev (see) }\n  \"a1\";", vec!["a1"], ";"),
+            (" f( /* ) */ \"a1\")", vec!["a1"], ""),
+            (" x || /* a\n b */ \"a1\"", vec!["a1"], ""),
+            // …a literal inside it is still read (Perl's `//` operator)…
+            (" x // \"q\"\nnext \"b\"", vec!["q"], "\nnext \"b\""),
+            (" $ENV{X} // \"a1\"; next", vec!["a1"], ""),
+            // …and a `//` with nothing after it is Perl's operator.
+            (" $ENV{X} //\n  \"a1\"", vec!["a1"], ""),
+            (" $ENV{X} //  \n\"a1\"", vec!["a1"], ""),
+            (" $ENV{X}//\n  \"a1\"", vec!["a1"], ""),
+            // After a word, a comment does not carry the line…
+            (" abc // note\nnext \"b\"", vec![], "\nnext \"b\""),
+            (" abc # note ||\nnext \"b\"", vec![], "\nnext \"b\""),
+            (" abc. /* x */\nAnd then \"b\"", vec![], "\nAnd then \"b\""),
+            // …and neither a URL nor a raw string or attribute is a comment.
+            (" see https://x\nnext \"b\"", vec![], "\nnext \"b\""),
+            (" #\"a1\"#, x: 1", vec!["a1"], ", x: 1"),
+            (" a #[x], b: 1", vec![], ", b: 1"),
+            // KT-2053 round 5: a word operator, ` ..` or `^` ends a line that
+            // goes on…
+            (" x or\n  \"a1\"", vec!["a1"], ""),
+            (" x AND\n  \"a1\";", vec!["a1"], ";"),
+            (" \"sk_\" ..\n  \"a1\"", vec!["sk_", "a1"], ""),
+            (" x or  # default\n  \"a1\"", vec!["a1"], ""),
+            (" %A% ^\n  \"a1\"", vec!["a1"], ""),
+            // …a word that only ends like one, or a `..` right after a
+            // literal, does not.
+            (" color\nnext \"b\"", vec![], "\nnext \"b\""),
+            (" brand\nnext \"b\"", vec![], "\nnext \"b\""),
+            (" \"a\"..\nnext \"b\"", vec!["a"], "\nnext \"b\""),
+            // A `--` comment, and Lua's long `--[[ … ]]` one, are blanks…
+            (" x or -- default\n  \"a1\"", vec!["a1"], ""),
+            (" x or --[[ d ]]\n  \"a1\"", vec!["a1"], ""),
+            (" x or --[==[ a ]] b ]==]\n  \"a1\"", vec!["a1"], ""),
+            (" x --[[ a\n b, ]] \"a1\"", vec!["a1"], ""),
+            (" x || -- e.g., (see)\n  \"a1\";", vec!["a1"], ";"),
+            // …as is any `#` after an operator…
+            (" x || ## c\n  \"a1\"", vec!["a1"], ""),
+            (" x || ##\n  \"a1\"", vec!["a1"], ""),
+            (" x || #!c\n  \"a1\"", vec!["a1"], ""),
+            (" x || #[c]\n  \"a1\"", vec!["a1"], ""),
+            // …a literal its comment line does not close is masked to the
+            // end of that line (second security review), and the comment
+            // still ends with its line…
+            (" x || #\"c\n  \"a1\"", vec!["c", "a1"], ""),
+            (" x // c \"q\nnext \"b\"", vec!["q"], "\nnext \"b\""),
+            (" x || # \"q\r\n  \"a1\"", vec!["q", "a1"], ""),
+            // …a bare `#"` is a raw string, closed only by `"#`…
+            (" #\"a\"b\"#, x: 1", vec!["a\"b"], ", x: 1"),
+            (" #\"open", vec!["open"], ""),
+            // …and neither a decrement nor a shebang after a word is a comment.
+            (" i--, x: 1", vec![], ", x: 1"),
+            (" a #!x, b: 1", vec![], ", b: 1"),
+            // KT-2053 round 6: a next line that starts with `or` / `and` (a
+            // whole word, any case), `..` or `//` goes on…
+            (" f(\"T\")\n  or \"a1\"", vec!["T", "a1"], ""),
+            (" x\n  and \"a1\";", vec!["a1"], ";"),
+            (" x\n  OR \"a1\"", vec!["a1"], ""),
+            (" x\n  And(\"a1\")", vec!["a1"], ""),
+            (" x\n\tor\n  \"a1\"", vec!["a1"], ""),
+            (" \"sk_\"\n  .. \"a1\"", vec!["sk_", "a1"], ""),
+            (" \"sk_\"\n  ..\"a1\"", vec!["sk_", "a1"], ""),
+            // (a leading `//` line is also read as a comment, so its `;` ends
+            // nothing; the line after it is judged on the code before it.)
+            (" $ENV{X}\n  // \"a1\";", vec!["a1"], ""),
+            (
+                " $ENV{X}\n  // \"a1\";\nnext \"b\"",
+                vec!["a1"],
+                "\nnext \"b\"",
+            ),
+            (" x -- c\n  or \"a1\"", vec!["a1"], ""),
+            (" x /* c */\n  or \"a1\"", vec!["a1"], ""),
+            (" x # c\n  or \"a1\"", vec!["a1"], ""),
+            (r#" x\n  or \"a1\""#, vec!["a1"], ""),
+            ("+x\n+  or \"a1\"", vec!["a1"], ""),
+            ("-x\n-  .. \"a1\"", vec!["a1"], ""),
+            // …a word that only starts like one, or a `...`, does not.
+            (" \"a\"\norder \"b\"", vec!["a"], "\norder \"b\""),
+            (" \"a\"\nandroid \"b\"", vec!["a"], "\nandroid \"b\""),
+            (" \"a\"\nor_else \"b\"", vec!["a"], "\nor_else \"b\""),
+            (" \"a\"\n... \"b\"", vec!["a"], "\n... \"b\""),
+            // A capitalised `Or` / `And` carries only before a non-letter…
+            (" x\n  Or \"a1\"", vec!["a1"], ""),
+            (" x\n  And $y", vec![], ""),
+            // …a sentence that starts with one ends the value.
+            (" abc\nAnd then \"b\"", vec![], "\nAnd then \"b\""),
+            (" abc\nOr maybe \"b\"", vec![], "\nOr maybe \"b\""),
+            // KT-2053 round 7: a comment-only line before a leading operator
+            // is skipped like a blank line (its literals still read)…
+            (
+                " f(\"T\")\n  -- a comment line\n  or \"a1\"",
+                vec!["T", "a1"],
+                "",
+            ),
+            (" x\n  # c\n  or \"a1\"", vec!["a1"], ""),
+            (" a\n  /* c */\n  || \"a1\";", vec!["a1"], ";"),
+            (" x -- c\n  -- d\n  or \"a1\"", vec!["a1"], ""),
+            (r#" a\n  -- c\n  or \"a1\"""#, vec!["a1"], "\""),
+            (" x\n  --[[ a\n  b ]]\n  or \"a1\"", vec!["a1"], ""),
+            (" x\n  /* a\n  b */\n  or \"a1\"", vec!["a1"], ""),
+            (" x\n  # a\n\n  -- b\n  // c\n  or \"a1\"", vec!["a1"], ""),
+            (" x\n  /* a */ -- b\n  or \"a1\"", vec!["a1"], ""),
+            (" x\n  #[c, d]\n  or \"a1\"", vec!["a1"], ""),
+            (" x\n  -- was \"q\"\n  or \"a1\"", vec!["q", "a1"], ""),
+            ("+x\n+  -- c\n+  or \"a1\"", vec!["a1"], ""),
+            (" x\r\n  # c\r\n  or \"a1\"", vec!["a1"], ""),
+            // …and before anything else the value ends at the first break.
+            (
+                " \"a\"\n# c\nname = \"b\"",
+                vec!["a"],
+                "\n# c\nname = \"b\"",
+            ),
+            (
+                " \"a\"\n-- c\nname = \"b\"",
+                vec!["a"],
+                "\n-- c\nname = \"b\"",
+            ),
+            (
+                " \"a\"\n/* c */\nname = \"b\"",
+                vec!["a"],
+                "\n/* c */\nname = \"b\"",
+            ),
+            (
+                " \"a\"\n/* a\n b */\nname = \"b\"",
+                vec!["a"],
+                "\n/* a\n b */\nname = \"b\"",
+            ),
+            (" x\n  # c\n", vec![], "\n  # c\n"),
+            (" x\n  /* c", vec![], "\n  /* c"),
+            // Lua's long brackets are literals, level-matched…
+            (" [[a1]], b: 1", vec!["a1"], ", b: 1"),
+            (" x or [[a1]]", vec!["a1"], ""),
+            (" x\n  or [[a1]]", vec!["a1"], ""),
+            (" x or [==[a]]b]==]; c", vec!["a]]b"], "; c"),
+            (" [[a\nb]]\nnext", vec!["a\nb"], "\nnext"),
+            (" [[open", vec!["open"], ""),
+            (" [=[open]]", vec!["open]]"], ""),
+            (" x .. [[a1]] .. y", vec!["a1"], ""),
+            // …but a `[[` after a name or a closer is an index.
+            (" a[[1]], b: 1", vec![], ", b: 1"),
+            (" a[[\"q\"]], b: 1", vec!["q"], ", b: 1"),
+            (" f(x)[[1]], b: 1", vec![], ", b: 1"),
+            // Second security review: a generic's list across lines…
+            (
+                " Option<\n    String,\n> = Some(\"a\"); x",
+                vec!["a"],
+                "; x",
+            ),
+            (" R<\n  s,\n  t\n> = { k: \"a\" }; x", vec!["a"], "; x"),
+            (" f::<\r\n  &str,\r\n>(\"a\"); x", vec!["a"], "; x"),
+            (" Foo<\n  'a,\n> = F(\"a\"); x", vec!["a"], "; x"),
+            // …but a `<` glued to a word at a line end opens nothing past it.
+            (" a<b\nnext \"b\"", vec![], "\nnext \"b\""),
+            // An arrow closes no generic.
+            (" R<fn() -> S, E> = Ok(\"a\"); x", vec!["a"], "; x"),
+            (" M<() => V, S> = m(\"a\"); x", vec!["a"], "; x"),
+            // A `[[` read as a long bracket and as a nested array.
+            (" m([[k, \"a\"]]); x", vec!["k, \"a\"", "a"], "; x"),
+            // A quote after an operator `.` `?` opens a literal.
+            (" $p.\":\".\"a\"; x", vec![":", "a"], "; x"),
+            (" e?\" \":\"a\"; x", vec![" ", "a"], "; x"),
+            (" e??\":a\"; x", vec![":a"], "; x"),
+            (" \"a\"..\" \"..\"b\"", vec!["a", " ", "b"], ""),
+            // A comment glued to `:` `(` `,`.
+            (" c ? a :/* b; */ \"a\"; x", vec!["a"], "; x"),
+            (" (// b) c\n  \"a\"\n); x", vec!["a"], "; x"),
+            (" f(a,-- b) c\n  \"a\"); x", vec!["a"], "; x"),
+            // Round 9: a `,` at the value's depth ends it before a new key
+            // only…
+            (" x, \"a\"; y", vec!["a"], "; y"),
+            (" x,\n  \"a\"; y", vec!["a"], "; y"),
+            (" x,# c; d\n  \"a\"; y", vec!["a"], "; y"),
+            (" x, \"a\"\nname = \"b\"", vec!["a"], "\nname = \"b\""),
+            (" |a, b| \"a\"; y", vec!["a"], "; y"),
+            (" lambda a, b: \"a\"; y", vec!["a"], "; y"),
+            (" \"a\", name = \"b\"", vec!["a"], ", name = \"b\""),
+            (" \"a\", name=\"b\"", vec!["a"], ", name=\"b\""),
+            (" \"a\", name: \"b\"", vec!["a"], ", name: \"b\""),
+            (" \"a\", \"name\": \"b\"", vec!["a"], ", \"name\": \"b\""),
+            (" \"a\", 'name': \"b\"", vec!["a"], ", 'name': \"b\""),
+            (
+                " \\\"a\\\", \\\"name\\\": 1",
+                vec!["a"],
+                ", \\\"name\\\": 1",
+            ),
+            (" \"a\", :name => 1", vec!["a"], ", :name => 1"),
+            (" \"a\", name?: 1", vec!["a"], ", name?: 1"),
+            (" \"a\",\n  name = 1", vec!["a"], ",\n  name = 1"),
+            (" \"a\", # c\n  name = 1", vec!["a"], ", # c\n  name = 1"),
+            // …not before a comparison, a path or a call.
+            (" x, y == \"a\"; z", vec!["a"], "; z"),
+            (" x, a::b(\"a\"); z", vec!["a"], "; z"),
+            (" x, f(\"a\"); z", vec!["a"], "; z"),
+            // A line that starts with a `,` continues the value and a generic.
+            (" x\n  , \"a\"; y", vec!["a"], "; y"),
+            (" H<\n  S\n  , T\n> = m(\"a\"); y", vec!["a"], "; y"),
+            (" R<S\n  , E> = Ok(\"a\"); y", vec!["a"], "; y"),
+            (" \"a\"\n, name = 1", vec!["a"], ", name = 1"),
+        ] {
+            let (found, after) = bodies(text);
+            assert_eq!(found, literals, "{text:?}");
+            assert_eq!(after, rest, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_value_expression_gate_admits_every_new_shape() {
+        for sample in [
+            r#"let token: &str = "x";"#,
+            r#"password = b"x""#,
+            r#"password = os.getenv("X", "y")"#,
+            r#"{"token": os.getenv("X")}"#,
+            r#"{ \"token\": b'x' }"#,
+            r#"'token' => 'x'"#,
+            r#"api_key = env::var_or("KEY", "x")"#,
+        ] {
+            assert!(VALUE_EXPRESSION_NAME.is_match(sample), "{sample:?}");
+            assert!(value_expression_gate(sample), "{sample:?}");
+        }
+    }
+
     #[test]
     fn an_nvidia_key_is_masked_by_its_vendor_shape() {
         let key = "nvapi-Fake0Nvidia1Key2Value3Abcdef4_xyz-5";
@@ -3908,6 +7654,34 @@ mod tests {
             "'x-api-key': '",
             "'",
             "(",
+            // KT-2053
+            "strdup (",
+            "::<String>::new(",
+            "::<",
+            ">",
+            "|| ",
+            "move |_| ",
+            "|",
+            "\\n    ",
+            "\\\"",
+            "\\\\\\\"",
+            "{ \\\"token\\\": '",
+            "{ 'token': \\\"",
+            // KT-2053 review: value expressions.
+            ": &str = ",
+            "Option<String> = ",
+            "b\"",
+            "r#\"",
+            "\"#",
+            "&'static ",
+            "::<Vec<Box<str>>>::new(",
+            ".getenv(",
+            "\"KEY\", ",
+            "' => ",
+            ")",
+            "}",
+            "]",
+            "<",
             "nvapi-",
             "sk-",
             "p8e-",
@@ -3970,6 +7744,10 @@ mod tests {
 
             #[test]
             fn a_gate_never_holds_back_a_match(input in text()) {
+                prop_assert!(
+                    !VALUE_EXPRESSION_NAME.is_match(&input) || value_expression_gate(&input),
+                    "value-expression gate holds back a match on {:?}", input
+                );
                 for pat in every_pattern() {
                     prop_assert!(
                         !pat.re.is_match(&input) || pat.gate.admits(&input),
@@ -3992,13 +7770,18 @@ mod tests {
                     apply_patterns(&input, ASSIGNMENT.as_slice(), &ASSIGNMENT_PREFILTER),
                     apply_patterns_ungated(&input, ASSIGNMENT.as_slice())
                 );
-                // The whole audit-artifact pipeline, both passes chained.
+                prop_assert_eq!(
+                    mask_value_expressions(&input, &|_, _| true),
+                    mask_value_expressions_ungated(&input, &|_, _| true)
+                );
+                // The whole audit-artifact pipeline, every pass chained.
                 let (once, first) = apply_patterns_ungated(&input, PATTERNS.as_slice());
-                let (twice, second) = apply_patterns_ungated(&once, ASSIGNMENT.as_slice());
+                let (expressed, middle) = mask_value_expressions_ungated(&once, &|_, _| true);
+                let (twice, second) = apply_patterns_ungated(&expressed, ASSIGNMENT.as_slice());
                 let changed = twice != input;
                 prop_assert_eq!(
                     redact_for_audit_artifact(&input),
-                    (twice, if changed { (first + second).max(1) } else { 0 })
+                    (twice, if changed { (first + middle + second).max(1) } else { 0 })
                 );
                 prop_assert_eq!(
                     looks_like_secret(&input),

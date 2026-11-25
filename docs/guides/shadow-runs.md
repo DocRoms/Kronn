@@ -240,7 +240,7 @@ stay as written, and an Artifact made from an execution holds what one made from
 a discussion preview holds. The Artifact shows what the execution wrote at that
 time.
 [src: file: backend/src/api/step_artifacts.rs:199-206#redact_agent_output]
-[src: file: backend/src/core/redact.rs:1065-1081#redact_agent_output]
+[src: file: backend/src/core/redact.rs:3027-3043#redact_agent_output]
 [src: file: backend/src/db/discussions.rs:2901-2907#mask_agent_output]
 It lives in the
 Artifact library like any other, in a folder of its run (see
