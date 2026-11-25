@@ -222,7 +222,7 @@ pub async fn add(
 
 /// Body of `POST /api/contacts/pair`: a peer completes a pairing with a pairing
 /// code this instance handed out.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct PairRequest {
     /// The caller's public invite code: who it is, not a credential.
     pub from_invite_code: String,
@@ -232,6 +232,7 @@ pub struct PairRequest {
     /// The secret we will present to the caller from now on.
     pub reverse_secret: String,
 }
+crate::debug_without_secrets!(PairRequest { from_invite_code; masked: offer_secret, reverse_secret });
 
 #[derive(Debug, Serialize)]
 pub struct PairResponse {

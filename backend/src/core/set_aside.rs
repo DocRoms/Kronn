@@ -205,7 +205,7 @@ fn sealed(name: &str) -> bool {
 }
 
 /// What a config text carries in clear.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Scan {
     /// Credentials the store can hold, and the secrets of places it cannot.
     credentials: Vec<ClearCredential>,
@@ -226,6 +226,7 @@ struct Scan {
     /// usually is.
     lost: bool,
 }
+crate::debug_without_secrets!(Scan { credentials, unparsed, unknown, entry, lost; masked: file_key });
 
 /// The agents of `[agents]` and `[agents.model_tiers]`.
 const AGENTS: [&str; 10] = [
@@ -1565,5 +1566,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(a.blocker, Some(Blocker::Unreadable));
+    }
+
+    /// KT-2043 — the key a config file holds in clear never prints through
+    /// `Debug`.
+    #[test]
+    fn a_scan_does_not_print_the_file_key_debug_without_secrets() {
+        let scan = Scan {
+            file_key: Some("Fake2043FileKey".into()),
+            unparsed: 3,
+            ..Scan::default()
+        };
+        for printed in [format!("{scan:?}"), format!("{scan:#?}")] {
+            assert!(!printed.contains("Fake2043"), "{printed}");
+            assert!(printed.contains("***REDACTED***"), "{printed}");
+            assert!(printed.contains("unparsed: 3"), "{printed}");
+        }
     }
 }

@@ -73,8 +73,8 @@ Awareness batches are bounded (20/wake), explicitly flagged
 `awareness: true`, delivered with a durable scan/offer/ack contract and
 never end a quiet wait. The bridge itself does not return merely because one
 server poll was quiet.
-[src: file: backend/src/api/disc_invite.rs:1128-1132#AWARENESS_MAX_MESSAGES] [src: file: backend/src/api/disc_invite.rs:1131-1138#awareness]
-[src: file: backend/src/api/disc_invite.rs:2058-2077#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7344-7355#_WAIT_MIN_QUIET_POLL_SECS]
+[src: file: backend/src/api/disc_invite.rs:1154-1158#AWARENESS_MAX_MESSAGES] [src: file: backend/src/api/disc_invite.rs:1157-1164#awareness]
+[src: file: backend/src/api/disc_invite.rs:2084-2103#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7344-7355#_WAIT_MIN_QUIET_POLL_SECS]
 [src: file: docs/architecture/discussion-agent-routing.md:87-99#awareness_offered_upto]
 
 ## 3 bis — Bridge guarantee vs host capability
@@ -110,12 +110,12 @@ do not poll. A punctual agent is also told it is a one-off, not the
 joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
 [src: file: backend/src/db/discussions.rs:2096-2099#reply_author]
-[src: file: backend/src/api/disc_invite.rs:2036-2056#addressed_to_session]
-[src: file: backend/src/api/disc_invite.rs:1699-1709#addressed_to_caller]
+[src: file: backend/src/api/disc_invite.rs:2062-2082#addressed_to_session]
+[src: file: backend/src/api/disc_invite.rs:1725-1735#addressed_to_caller]
 [src: file: backend/scripts/disc-introspection-mcp.py:11386-11396#attention_required]
 [src: file: backend/src/api/discussions/streaming.rs:2416-2464#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
-[src: file: backend/src/api/disc_invite.rs:1716-1724#reply_target]
+[src: file: backend/src/api/disc_invite.rs:1742-1750#reply_target]
 
 ## 5. Reply-coherence guard (KT-211)
 
@@ -141,7 +141,7 @@ context the short alias stays free (both identities may be wanted).
   `next_poll_at`. Eligibility = unexpired lease or next_poll grace. A
   session identified only by its session id (provider unknown) keeps
   full presence via the agent type stored on its row.
-  [src: file: backend/src/api/disc_invite.rs:1326-1339#ACTIVITY_LISTENING_MARGIN_SECS] [src: file: backend/src/api/disc_invite.rs:1412-1414#presence_agent] [src: file: backend/src/db/discussion_sessions.rs:1253-1278#RESPONDER_ELIGIBLE_PREDICATE]
+  [src: file: backend/src/api/disc_invite.rs:1352-1365#ACTIVITY_LISTENING_MARGIN_SECS] [src: file: backend/src/api/disc_invite.rs:1438-1440#presence_agent] [src: file: backend/src/db/discussion_sessions.rs:1253-1278#RESPONDER_ELIGIBLE_PREDICATE]
 - **Untargeted human turn**: in a room with a native agent it always
   belongs to the configured discussion agent, whatever the CLI presence
   (target identity, not presence, decides ownership); the turn reaches the

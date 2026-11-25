@@ -600,7 +600,7 @@ pub enum MessageRole {
     System,
 }
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct CreateDiscussionRequest {
     pub project_id: Option<String>,
@@ -665,6 +665,8 @@ pub struct CreateDiscussionRequest {
     #[ts(optional)]
     pub assistant: Option<crate::db::assistant_conversations::AssistantContext>,
 }
+
+crate::debug_without_secrets!(CreateDiscussionRequest { project_id, title, agent, connection_id, language, initial_prompt, initial_targets, skill_ids, profile_ids, directive_ids, workspace_mode, base_branch, review_head, review_base, tier, originating_qp_id, no_agent, assistant; masked: launch_variables });
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
@@ -820,7 +822,7 @@ impl MessageTarget {
     }
 }
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct SendMessageRequest {
     pub content: String,
@@ -868,6 +870,8 @@ pub struct SendMessageRequest {
     #[ts(as = "Option<Vec<String>>", optional)]
     pub assistant_secrets: crate::db::assistant_conversations::TransientSecrets,
 }
+
+crate::debug_without_secrets!(SendMessageRequest { content, channel, targets, target_all, target_agents, target_agent, client_message_id, publication_proof, defer_dispatch, reply_to_message_id, assistant_secrets; masked: publication_grant });
 
 /// Atomic edit/resend request. `expected_revision` is the opaque timestamp
 /// exposed on the target message. `idempotency_key` is generated once by the

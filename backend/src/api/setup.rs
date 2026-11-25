@@ -1215,7 +1215,7 @@ fn normalize_origin_list(entries: &[String]) -> Result<Vec<String>, String> {
 // ── Network exposure ("Allow connections from other devices") ───────────────
 
 /// State of the LAN/Tailscale exposure toggle.
-#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[derive(Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
 pub struct NetworkExposure {
     /// Reachable from other machines. Native: the configured host is a bind-all
@@ -1255,6 +1255,11 @@ pub struct NetworkExposure {
     #[ts(optional)]
     pub issued_auth_token: Option<String>,
 }
+crate::debug_without_secrets!(NetworkExposure {
+    exposed, restart_required, in_docker, kronn_bind, port, reachable_ips, auth_token_set,
+    tls_terminated_by_proxy, tls_declared_by_env, public_origin, plain_http_blocked;
+    masked: issued_auth_token
+});
 
 #[derive(Debug, serde::Deserialize)]
 pub struct SetNetworkExposureRequest {

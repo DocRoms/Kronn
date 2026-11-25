@@ -266,7 +266,7 @@ These snapshots are local execution state, not a portable QP setting. Exporting
 or importing a QP preserves its editable `agent_settings`, while it does not
 reconstruct historic discussion launch overrides.
 [src: file: backend/src/db/discussion_effort.rs:1#Immutable]
-[src: file: backend/src/models/quick.rs:866-876#QuickPromptExportEnvelope]
+[src: file: backend/src/models/quick.rs:875-885#QuickPromptExportEnvelope]
 [src: file: backend/src/api/quick_prompts.rs:386-457#export_qp]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.

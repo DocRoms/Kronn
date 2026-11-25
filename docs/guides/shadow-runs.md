@@ -350,7 +350,7 @@ step is. A `PublishPageData` step writes it into a dataset with
 `value_from: "steps.advise.shadows"`, and the Page then shows the merged shadow
 and the identical one beside the step's own agent.
 [src: file: backend/src/workflows/shadow_summary.rs:297#summarize]
-[src: file: backend/src/workflows/template.rs:204#set_step_shadows]
+[src: file: backend/src/workflows/template.rs:202-206#set_step_shadows]
 
 ```json
 { "step": "advise",

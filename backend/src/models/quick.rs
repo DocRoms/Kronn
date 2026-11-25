@@ -571,7 +571,7 @@ pub struct CreateQuickPromptRequest {
 // `ApiCallStepCard` (and therefore `ApiCallAiHelper`) as the editor.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct QuickApi {
     pub id: String,
@@ -632,7 +632,9 @@ pub struct QuickApi {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize, TS)]
+crate::debug_without_secrets!(QuickApi { id, name, icon, description, project_id, api_plugin_slug, api_config_id, api_endpoint_path, api_method, api_query, api_path_params, api_body, api_extract, api_pagination, api_timeout_ms, api_max_retries, variables, profile_ids, directive_ids, pinned, created_at, updated_at; masked: api_headers });
+
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct CreateQuickApiRequest {
     pub name: String,
@@ -659,6 +661,8 @@ pub struct CreateQuickApiRequest {
     #[serde(default)]
     pub directive_ids: Vec<String>,
 }
+
+crate::debug_without_secrets!(CreateQuickApiRequest { name, icon, description, project_id, api_plugin_slug, api_config_id, api_endpoint_path, api_method, api_query, api_path_params, api_body, api_extract, api_pagination, api_timeout_ms, api_max_retries, variables, profile_ids, directive_ids; masked: api_headers });
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Quick Execs (saved shell-free CLI data collectors)
@@ -736,7 +740,7 @@ pub struct UpdateQuickFavoriteRequest {
     pub pinned: bool,
 }
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct RunQuickExecRequest {
     #[serde(default)]
@@ -750,6 +754,8 @@ pub struct RunQuickExecRequest {
     #[ts(skip)]
     pub launch: Option<crate::core::launch_context::LaunchContext>,
 }
+
+crate::debug_without_secrets!(RunQuickExecRequest { launch; masked: variables });
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
@@ -904,7 +910,7 @@ pub struct QuickApiExportEnvelope {
 /// 0.6.0 — payload for `POST /api/quick-apis/:id/run`. Lets the user
 /// launch a saved QuickApi standalone (Run drawer in the Quick APIs page),
 /// passing values for the declared `variables`.
-#[derive(Debug, Deserialize, TS)]
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct RunQuickApiRequest {
     /// Map of variable name → user-entered value. Keys must match
@@ -934,6 +940,8 @@ pub struct RunQuickApiRequest {
     #[ts(skip)]
     pub caller: Option<ApiCaller>,
 }
+
+crate::debug_without_secrets!(RunQuickApiRequest { workflow_run_id, agent, launch, caller; masked: variables });
 
 /// Response from `POST /api/quick-apis/:id/run`. Mirrors the
 /// `/test-api-call` shape so the frontend can reuse the same UI.

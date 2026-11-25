@@ -157,7 +157,7 @@ pub struct DiscussionAction {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct LaunchDiscussionActionRequest {
     #[serde(default)]
@@ -168,6 +168,8 @@ pub struct LaunchDiscussionActionRequest {
     #[ts(optional)]
     pub step_agents: Option<crate::models::StepAgents>,
 }
+
+crate::debug_without_secrets!(LaunchDiscussionActionRequest { step_agents; masked: variables });
 
 pub enum ClaimLaunchOutcome {
     Claimed {

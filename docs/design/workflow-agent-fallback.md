@@ -16,7 +16,7 @@ fails when that provider is rate-limited, unavailable, or unhealthy. A quota or
 session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
-[src: file: backend/src/models/workflows.rs:2019-2025#RetryConfig]
+[src: file: backend/src/models/workflows.rs:2029-2035#RetryConfig]
 [src: file: backend/src/workflows/steps.rs:217-223#retry_backoff_unit]
 [src: file: backend/src/workflows/steps.rs:1006-1013#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
@@ -290,7 +290,7 @@ resolved model, success, duration and `cost_usd`), and `step_agent`/`step_model`
 are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
-[src: file: backend/src/models/workflows.rs:2338-2417#WorkflowAgentProvenance]
+[src: file: backend/src/models/workflows.rs:2349-2428#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1481-1505#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:5369-5391#selected_attempt]
 
@@ -328,7 +328,7 @@ Required UI:
 Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
 attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
 cross-provider cost display therefore needs additive persistence of that total,
-not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2136-2145#tokens_used] [src: file: backend/src/models/workflows.rs:2411-2419#cost_usd]
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2142-2151#tokens_used] [src: file: backend/src/models/workflows.rs:2417-2425#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.

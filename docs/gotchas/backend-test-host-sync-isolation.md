@@ -10,7 +10,7 @@ roots. [src: file: backend/src/api/mcps.rs:945-953#sync_pids]
 [src: file: backend/src/api/mcps.rs:1674-1686#secrets_changed]
 [src: file: backend/src/api/mcps.rs:1752-1758#cfg]
 [src: file: backend/src/api/agents.rs:6-22#resync_mcp_configs_after_install]
-[src: file: backend/src/core/mcp_scanner.rs:2529-2532#registry]
+[src: file: backend/src/core/mcp_scanner.rs:2533-2536#registry]
 [src: file: backend/src/core/mcp_scanner.rs:3671-3681#sync_all_projects]
 
 `backend/tests/api_tests.rs` is a module of the single integration binary
@@ -64,8 +64,8 @@ override it changes. [src: file: backend/src/core/mcp_scanner_test.rs:43-55]
 [src: file: backend/src/core/mcp_scanner_test.rs:58-107#HOST_ENV]
 [src: file: backend/src/core/mcp_scanner_test.rs:3403-3482#unavailable_command_is_skipped_by_codex_and_copilot_writers]
 [src: file: backend/src/core/mcp_scanner_test.rs:3617-3650#copilot_global_sync_emits_kronn_internal_into_mcp_config_json]
-[src: file: backend/src/core/mcp_scanner.rs:5693-5740#host_mcp_sync_switch_leaves_every_host_cli_config_untouched]
-[src: file: backend/src/core/mcp_scanner.rs:5742-5801#project_sync_receipt_distinguishes_written_unchanged_and_read_only]
+[src: file: backend/src/core/mcp_scanner.rs:5714-5761#host_mcp_sync_switch_leaves_every_host_cli_config_untouched]
+[src: file: backend/src/core/mcp_scanner.rs:5763-5822#project_sync_receipt_distinguishes_written_unchanged_and_read_only]
 
 Host-discovery and agent-auth unit tests that change `KRONN_HOST_HOME` are
 serial and restore the saved value; they exercise discovery/auth reads rather

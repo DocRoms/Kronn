@@ -49,6 +49,55 @@ pub struct NetworkInfo {
     pub detected_ips: Vec<crate::core::tailscale::DetectedIp>,
 }
 
+/// The per-contact pairing secret a peer presents in its Presence frame
+/// (KT-1650). On the wire it is the plain string it always was; `Debug`
+/// prints `***REDACTED***` so a logged or asserted frame never shows it
+/// (KT-2043). Read it through `Deref<Target = str>`.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PairingSecret(String);
+
+impl PairingSecret {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Forget the secret, e.g. before the frame is relayed to the local bus.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl std::ops::Deref for PairingSecret {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for PairingSecret {
+    fn from(secret: String) -> Self {
+        Self(secret)
+    }
+}
+
+impl From<&str> for PairingSecret {
+    fn from(secret: &str) -> Self {
+        Self(secret.to_owned())
+    }
+}
+
+impl std::fmt::Debug for PairingSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() {
+            "\"\""
+        } else {
+            "\"***REDACTED***\""
+        })
+    }
+}
+
 /// Real-time message exchanged between Kronn instances via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -62,9 +111,9 @@ pub enum WsMessage {
         /// The per-contact secret this peer was paired with (KT-1650). Empty on
         /// the local bus and for the frontend, never relayed, never shown to the
         /// UI: the receiver strips it before the frame reaches the bus.
-        #[serde(default, skip_serializing_if = "String::is_empty")]
+        #[serde(default, skip_serializing_if = "PairingSecret::is_empty")]
         #[ts(skip)]
-        from_secret: String,
+        from_secret: PairingSecret,
         online: bool,
     },
     /// Heartbeat ping (sent by client).
@@ -370,7 +419,7 @@ mod tests {
         WsMessage::Presence {
             from_pseudo: "p".into(),
             from_invite_code: code.into(),
-            from_secret: String::new(),
+            from_secret: Default::default(),
             online: true,
         }
     }

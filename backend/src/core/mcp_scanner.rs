@@ -87,7 +87,7 @@ fn ensure_safe_kronn_state_dir(project_path: &str) -> Result<PathBuf, String> {
 
 /// Codex config.toml — only the mcp_servers section.
 /// We preserve everything else by doing a partial read/write.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 struct CodexMcpEntry {
     command: String,
     args: Vec<String>,
@@ -109,6 +109,8 @@ struct CodexMcpEntry {
     default_tools_approval_mode: Option<String>,
 }
 
+crate::debug_without_secrets!(CodexMcpEntry { command, args, env_vars, enabled, startup_timeout_sec, default_tools_approval_mode; masked: env });
+
 pub fn default_startup_timeout() -> u32 {
     30
 }
@@ -123,7 +125,7 @@ fn is_true(v: &bool) -> bool {
 // ─── Vibe config.toml format ─────────────────────────────────────────────────
 
 /// Vibe config.toml `[[mcp_servers]]` entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VibeMcpEntry {
     pub name: String,
     pub transport: String,
@@ -136,6 +138,8 @@ pub struct VibeMcpEntry {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
 }
+
+crate::debug_without_secrets!(VibeMcpEntry { name, transport, command, args, url; masked: env });
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VibeConfig {
@@ -4497,6 +4501,23 @@ fn resolve_host_path(path: &str) -> String {
 }
 
 // ─── Tests for Phase-3 host_sync (merge logic) ───────────────────────────────
+
+/// KT-2043 — a Codex MCP entry holds the server's env values in clear.
+#[cfg(all(test, feature = "full-tests"))]
+mod codex_entry_debug_tests {
+    #[test]
+    fn a_codex_entry_does_not_print_its_env_values_debug_without_secrets() {
+        let entry: super::CodexMcpEntry = toml::from_str(
+            "command = \"npx\"\nargs = []\n[env]\nGITHUB_TOKEN = \"Fake2043EnvValue\"\n",
+        )
+        .unwrap();
+        for printed in [format!("{entry:?}"), format!("{entry:#?}")] {
+            assert!(!printed.contains("Fake2043"), "{printed}");
+            assert!(printed.contains("GITHUB_TOKEN"), "{printed}");
+            assert!(printed.contains("npx"), "{printed}");
+        }
+    }
+}
 
 #[cfg(all(test, feature = "full-tests"))]
 mod inject_context_tests {

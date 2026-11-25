@@ -172,7 +172,7 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
                 let _ = state.ws_broadcast.send(WsMessage::Presence {
                     from_pseudo: contact.pseudo.clone(),
                     from_invite_code: contact.invite_code.clone(),
-                    from_secret: String::new(),
+                    from_secret: Default::default(),
                     online: true,
                 });
 
@@ -184,7 +184,7 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
                 let _ = state.ws_broadcast.send(WsMessage::Presence {
                     from_pseudo: contact.pseudo.clone(),
                     from_invite_code: contact.invite_code.clone(),
-                    from_secret: String::new(),
+                    from_secret: Default::default(),
                     online: false,
                 });
 
@@ -284,7 +284,7 @@ where
     let presence_msg = WsMessage::Presence {
         from_pseudo: our_pseudo,
         from_invite_code: our_invite_code,
-        from_secret: secret,
+        from_secret: secret.into(),
         online: true,
     };
     if !send_if_authorized(ws_sender, state, peer, &presence_msg).await {

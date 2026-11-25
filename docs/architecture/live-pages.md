@@ -764,7 +764,7 @@ out no longer displays that historical result in the Page; retained runs and
 discussions remain accessible through their own history. An old pruned launch
 handle returns not-found and never falls back to a new launch. Only an explicit
 click on the still-current declaration can start another execution.
-[src: file: backend/src/db/live_page_actions.rs:708-716#MAX_RETAINED_TERMINAL_LAUNCHES]
+[src: file: backend/src/db/live_page_actions.rs:655-663#MAX_RETAINED_TERMINAL_LAUNCHES]
 [src: file: backend/src/db/live_page_action_retention_tests.rs:57-107#retention_is_per_block_across_bindings_and_a_pruned_handle_never_relaunches]
 
 The Page reads back how each row went. `GET /api/pages/{id}/action-launches`
@@ -782,7 +782,7 @@ opens a fresh offer, which launches a new attempt of that row, with the
 previous launch one click away (a trusted action launches directly instead,
 see "Trusted actions" below); a Discussion card never relaunches, since a
 fence carries one intention.
-[src: file: backend/src/db/live_page_actions.rs:620-624#latest_launches_for_live_page]
+[src: file: backend/src/db/live_page_actions.rs:622-626#latest_launches_for_live_page]
 [src: file: frontend/src/lib/live-page-sandbox.ts:296-311#postLivePageActionStates]
 [src: file: frontend/src/lib/live-page-sandbox.ts:490-509#markActions]
 [src: file: frontend/src/lib/live-page-sandbox.ts:339-342#ACTION_STATE_STYLE]

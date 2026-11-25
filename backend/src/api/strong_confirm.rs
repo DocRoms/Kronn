@@ -56,11 +56,12 @@ pub struct BridgeCodePass;
 pub struct StrongProven;
 
 /// What a request carries as proof.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Presented {
     pub code: Option<String>,
     pub grant: Option<String>,
 }
+crate::debug_without_secrets!(Presented { ; masked: code, grant });
 
 impl Presented {
     pub fn from_headers(headers: &HeaderMap) -> Self {

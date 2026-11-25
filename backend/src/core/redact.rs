@@ -1360,7 +1360,8 @@ fn encode_json_string(text: &str) -> String {
 
 /// KT-2039 — a secret field as `Debug` prints it: `"***REDACTED***"` in place
 /// of a value (an empty one stays `""`, so "cleared" still reads apart from
-/// "set"), `None` and `Some(…)` kept, a map's keys kept and its values masked.
+/// "set"), `None` and `Some(…)` kept, a map's keys kept and its values masked,
+/// a list's length kept and each item masked.
 /// Used by [`debug_without_secrets!`](crate::debug_without_secrets).
 pub struct Masked<'a, T: ?Sized>(pub &'a T);
 
@@ -1393,6 +1394,20 @@ impl<K: std::fmt::Debug, V: MaskedDebug, S> MaskedDebug for std::collections::Ha
         f.debug_map()
             .entries(self.iter().map(|(key, value)| (key, Masked(value))))
             .finish()
+    }
+}
+
+impl<K: std::fmt::Debug, V: MaskedDebug> MaskedDebug for std::collections::BTreeMap<K, V> {
+    fn fmt_masked(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(self.iter().map(|(key, value)| (key, Masked(value))))
+            .finish()
+    }
+}
+
+impl<T: MaskedDebug> MaskedDebug for Vec<T> {
+    fn fmt_masked(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter().map(Masked)).finish()
     }
 }
 

@@ -81,7 +81,7 @@ fn avg_workflow_duration_ms(runs: &[WorkflowRun]) -> (Option<u64>, u32) {
 
 // ─── workflow_trigger ──────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct McpTriggerWorkflowRequest {
     pub workflow_id: String,
     #[serde(default)]
@@ -94,6 +94,8 @@ pub struct McpTriggerWorkflowRequest {
     #[serde(default)]
     pub step_agents: Option<crate::models::StepAgents>,
 }
+
+crate::debug_without_secrets!(McpTriggerWorkflowRequest { workflow_id, project_id, step_agents; masked: variables });
 
 #[derive(Debug, Serialize)]
 pub struct McpTriggerWorkflowResponse {
@@ -381,7 +383,7 @@ pub async fn workflow_run_status(
 
 // ─── qp_run ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct McpQpRunRequest {
     pub qp_id: String,
     /// Variable values for the QP's `{{var}}` placeholders. Missing
@@ -405,6 +407,8 @@ pub struct McpQpRunRequest {
     #[serde(skip)]
     pub launch: Option<crate::core::launch_context::LaunchContext>,
 }
+
+crate::debug_without_secrets!(McpQpRunRequest { qp_id, agent, project_id, title, launch; masked: vars });
 
 #[derive(Debug, Serialize)]
 pub struct McpQpRunResponse {
@@ -678,7 +682,7 @@ pub async fn qp_run_scoped(
 
 const MCP_MAX_BATCH_SIZE: usize = 50;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct McpBatchItem {
     /// Optional discussion title. Defaults to `<qp_name> #<n>`.
     #[serde(default)]
@@ -687,6 +691,8 @@ pub struct McpBatchItem {
     #[serde(default)]
     pub vars: HashMap<String, String>,
 }
+
+crate::debug_without_secrets!(McpBatchItem { title; masked: vars });
 
 #[derive(Debug, Deserialize)]
 pub struct McpQpBatchRunRequest {

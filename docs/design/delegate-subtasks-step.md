@@ -15,7 +15,7 @@ only judgement in that loop is reading a delivery against its DoD.
 
 At 0.14.3 no workflow step could delegate: `StepType` had no variant that
 drives a task execution (0.15.0 adds `DelegateSubtasks`).
-`[src: file: backend/src/models/workflows.rs:1568-1571#DelegateSubtasks]`
+`[src: file: backend/src/models/workflows.rs:1572-1575#DelegateSubtasks]`
 
 ## 2. What already exists (and is reused as is)
 

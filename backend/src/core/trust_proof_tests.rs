@@ -568,3 +568,24 @@ fn wrong_first_codes_lock_the_enrolment_too() {
         Err(ProofError::Locked(LOCKOUT_SECS - 1))
     );
 }
+
+/// KT-2043 — the sealed seed and the recovery digests never print through
+/// `Debug`.
+#[test]
+fn a_proof_record_does_not_print_its_seed_debug_without_secrets() {
+    let record = Record {
+        version: 1,
+        seed: "Fake2043SealedSeed".into(),
+        confirmed: true,
+        enrolled_at: "2026-11-24".into(),
+        started: 5,
+        last_step: 9,
+        recovery: vec!["Fake2043RecoveryDigest".into()],
+        last_use: None,
+    };
+    for printed in [format!("{record:?}"), format!("{record:#?}")] {
+        assert!(!printed.contains("Fake2043"), "{printed}");
+        assert!(printed.contains("***REDACTED***"), "{printed}");
+        assert!(printed.contains("2026-11-24"), "{printed}");
+    }
+}

@@ -424,13 +424,14 @@ pub fn derive_presence_state(
 /// Metadata returned by `create_invite_token`. The plain `token` field
 /// is the ONLY place the plaintext value ever lives outside the agent
 /// that's about to consume it — never logged, never persisted.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct InviteTokenIssued {
     pub token: String,
     pub disc_id: String,
     pub expires_at: String,
 }
+crate::debug_without_secrets!(InviteTokenIssued { disc_id, expires_at; masked: token });
 
 /// One invite-token row, hash-only. Returned by audit-style queries
 /// (who joined via which invite). Never carries plaintext.
@@ -1489,7 +1490,7 @@ pub fn consume_invite_token(
 /// Result of an atomic invite-token consumption + session creation.
 /// Used by the `POST /api/discussions/peer-join` endpoint that
 /// the `disc_join` MCP tool calls.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct JoinViaTokenResult {
     pub disc_id: String,
@@ -1497,6 +1498,7 @@ pub struct JoinViaTokenResult {
     /// Plain resume credential, returned once. Only its SHA-256 hash is stored.
     pub resume_token: String,
 }
+crate::debug_without_secrets!(JoinViaTokenResult { disc_id, session_pk; masked: resume_token });
 
 /// Authenticate a caller by the resume credential it holds, and nothing else.
 ///

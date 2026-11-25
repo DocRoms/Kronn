@@ -17444,7 +17444,7 @@ fn frontend_presence() -> WsMessage {
     WsMessage::Presence {
         from_pseudo: "local".into(),
         from_invite_code: "".into(),
-        from_secret: String::new(),
+        from_secret: Default::default(),
         online: true,
     }
 }
@@ -17497,7 +17497,7 @@ fn presence_of(pseudo: &str) -> WsMessage {
     WsMessage::Presence {
         from_pseudo: pseudo.into(),
         from_invite_code: "".into(),
-        from_secret: String::new(),
+        from_secret: Default::default(),
         online: true,
     }
 }
@@ -17861,7 +17861,7 @@ async fn ws_unknown_valid_invite_code_is_a_request_not_a_verified_peer() {
     let presence = WsMessage::Presence {
         from_pseudo: "PeerGamma".into(),
         from_invite_code: code.into(),
-        from_secret: String::new(),
+        from_secret: Default::default(),
         online: true,
     };
     send_ws(&mut sender, &presence).await;
@@ -18284,7 +18284,7 @@ async fn ws_rejects_invalid_invite_code_format() {
     let msg = WsMessage::Presence {
         from_pseudo: "BadPeer".into(),
         from_invite_code: "not-a-valid-code".into(),
-        from_secret: String::new(),
+        from_secret: Default::default(),
         online: true,
     };
     sender
@@ -18376,7 +18376,7 @@ async fn ws_public_invite_code_alone_is_refused_and_the_peer_is_told_to_repair()
             &WsMessage::Presence {
                 from_pseudo: "TestPeer".into(),
                 from_invite_code: TEST_PEER_CODE.into(),
-                from_secret: secret.clone(),
+                from_secret: secret.clone().into(),
                 online: true,
             },
         )

@@ -48,13 +48,15 @@ struct QuestionSpec {
     td_errors: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 struct QuestionResumeSpec {
     workflow_id: String,
     #[serde(default)]
     variables: HashMap<String, String>,
 }
+
+crate::debug_without_secrets!(QuestionResumeSpec { workflow_id; masked: variables });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -80,7 +82,7 @@ pub enum DiscussionQuestionResumeState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscussionQuestionResume {
     pub workflow_id: String,
@@ -90,6 +92,8 @@ pub struct DiscussionQuestionResume {
     pub run_id: Option<String>,
     pub error: Option<String>,
 }
+
+crate::debug_without_secrets!(DiscussionQuestionResume { workflow_id, state, run_id, error; masked: variables });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -873,7 +877,7 @@ fn room_native_agent(
 
 /// Reserved launch data for one question resolution. Claiming stores the run
 /// id before any asynchronous work, so retries cannot start a second run.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QuestionResumeLaunch {
     pub question_id: String,
     pub run_id: String,
@@ -883,6 +887,8 @@ pub struct QuestionResumeLaunch {
     pub discussion_id: String,
     pub project_id: Option<String>,
 }
+
+crate::debug_without_secrets!(QuestionResumeLaunch { question_id, run_id, workflow_id, source_run_id, discussion_id, project_id; masked: variables });
 
 pub fn claim_resume(
     conn: &Connection,

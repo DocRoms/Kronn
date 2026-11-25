@@ -92,7 +92,7 @@ pub struct LivePageAction {
     pub trusted: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct LaunchLivePageActionRequest {
     #[serde(default)]
@@ -117,6 +117,8 @@ pub struct LaunchLivePageActionRequest {
     #[ts(optional)]
     pub trusted: Option<bool>,
 }
+
+crate::debug_without_secrets!(LaunchLivePageActionRequest { bindings, step_agents, trusted; masked: variables });
 
 pub enum LivePageActionClaimOutcome {
     Claimed {

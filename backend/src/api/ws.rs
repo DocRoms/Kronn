@@ -199,11 +199,12 @@ pub fn should_reject_empty_invite(invite_code: &str, is_local: bool) -> bool {
 
 /// Query string of the WS upgrade. `?token=` is what frontends before 0.14.3
 /// sent; current ones offer the token as a subprotocol instead.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Default, serde::Deserialize)]
 pub struct WsAuthQuery {
     #[serde(default)]
     token: Option<String>,
 }
+crate::debug_without_secrets!(WsAuthQuery { ; masked: token });
 
 /// GET /api/ws — WebSocket upgrade handler.
 ///
@@ -1548,7 +1549,7 @@ mod handshake_tests {
         let m = WsMessage::Presence {
             from_pseudo: "x".into(),
             from_invite_code: "".into(),
-            from_secret: String::new(),
+            from_secret: Default::default(),
             online: true,
         };
         assert_eq!(classify_pre_presence(&m), PrePresenceAction::Presence);
