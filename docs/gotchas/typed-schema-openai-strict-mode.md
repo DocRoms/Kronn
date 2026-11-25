@@ -63,7 +63,7 @@ absence of `response_format` when no schema is supplied. The workflow regression
 passes the actual envelope to both request builders and checks the unchanged
 Ollama `format` and the non-strict OpenAI schema.
 [src: file: backend/src/agents/chat_codec.rs:502-567#build_openai_chat_body]
-[src: file: backend/src/workflows/steps.rs:2331-2369#build_openai_chat_body]
+[src: file: backend/src/workflows/steps.rs:2397-2435#build_openai_chat_body]
 
 Schema errors still do not trigger the KT-709 unsupported-feature fallback;
 the existing refusal regressions exercise that distinction.

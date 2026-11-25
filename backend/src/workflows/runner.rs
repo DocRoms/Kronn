@@ -2095,22 +2095,43 @@ async fn execute_run_body(
             #[cfg(not(any(test, feature = "test-support")))]
             let routed = false;
             let mut missing: Vec<(String, String)> = Vec::new();
+            // KT-2030: `Custom` is a named HTTP connection, never an installed
+            // agent; its step can start when its connection can be called.
+            let mut unusable_connections: Vec<String> = Vec::new();
             for step in workflow
                 .steps
                 .iter()
                 .filter(|s| matches!(s.step_type, StepType::Agent))
             {
-                let ok = routed
-                    || super::step_agents::agent_can_launch(&step.agent, &usable, agents_config);
-                if !ok {
+                if routed {
+                    continue;
+                }
+                if step.agent == crate::models::AgentType::Custom {
+                    if let Some(refusal) =
+                        super::steps::named_connection_refusal(step, &state.db, tokens_config).await
+                    {
+                        unusable_connections.push(refusal);
+                    }
+                } else if !super::step_agents::agent_can_launch(&step.agent, &usable, agents_config)
+                {
                     missing.push((step.name.clone(), format!("{:?}", step.agent)));
                 }
             }
-            if !missing.is_empty() {
-                let msg = format!(
-                    "Workflow refuses to start — agent(s) not installed/enabled: {}. Install or enable them in Config before running this workflow.",
-                    missing.iter().map(|(n, a)| format!("'{}' needs {}", n, a)).collect::<Vec<_>>().join(", ")
-                );
+            if !missing.is_empty() || !unusable_connections.is_empty() {
+                let mut reasons = Vec::new();
+                if !missing.is_empty() {
+                    reasons.push(format!(
+                        "agent(s) not installed/enabled: {}. Install or enable them in Config before running this workflow.",
+                        missing.iter().map(|(n, a)| format!("'{}' needs {}", n, a)).collect::<Vec<_>>().join(", ")
+                    ));
+                }
+                if !unusable_connections.is_empty() {
+                    reasons.push(format!(
+                        "named HTTP connection(s) not usable: {}.",
+                        unusable_connections.join("; ")
+                    ));
+                }
+                let msg = format!("Workflow refuses to start — {}", reasons.join(" "));
                 run.status = RunStatus::Failed;
                 run.step_results.push(StepResult {
                     step_name: "__preflight__".to_string(),

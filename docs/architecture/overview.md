@@ -577,11 +577,11 @@ pass (a frequent schedule adds no fire during the repeated hour).
   [src: file: backend/src/workflows/quota_wait.rs:306-340#park]
   [src: file: backend/src/workflows/quota_wait.rs:183-223#wake_due_runs]
   [src: file: backend/src/workflows/quota_wait.rs:197-240#wake_one]
-  [src: file: backend/src/workflows/runner.rs:5083-5133#check_resume_preconditions]
+  [src: file: backend/src/workflows/runner.rs:5104-5154#check_resume_preconditions]
   [src: file: backend/src/workflows/runner.rs:377-422#WorkflowTimeoutClock]
   [src: file: backend/src/workflows/runner.rs:428-444#checkpoint]
   [src: file: backend/src/workflows/quota_wait.rs:233-276#reschedule_after_deadline]
-  [src: file: backend/src/workflows/runner.rs:3461-3486#plan_wait]
+  [src: file: backend/src/workflows/runner.rs:3500-3525#plan_wait]
 - **A quota-paused run is visible, re-checked and movable (KT-1657).**
   `WaitingQuota` counts toward a workflow's concurrency limit, so a paused run
   can refuse a launch: the refusal names the blocking runs (workflow, state,
@@ -671,7 +671,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
 
   Isolation itself stays the workflow's decision: inheriting a recipe never
   turns a read-only fan-out into an isolated run.
-  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5603-5615#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
+  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5624-5636#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
 
 **MCP injection:**
 - `read_all_mcp_contexts()` reads `.mcp.json` and per-project MCP context files (`docs/operations/mcp-servers/*.md`).
@@ -1000,5 +1000,5 @@ approval check, so a Gate approval or an interrupted resume — which reload the
 definition from the database — keep it, and the step provenance names the agent
 actually used. Only agent, model and effort are replaced; tier, budget, tools
 stay, and a named connection stays only while the agent does.
-`[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:181-238#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1306-1326#apply_from_run]`
+`[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:189-246#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1306-1326#apply_from_run]`
 `[src: file: backend/src/api/workflows.rs:5484#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5629-5685#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5538#TRIGGER_CONTEXT_KEY]`

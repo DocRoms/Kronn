@@ -51,3 +51,11 @@ pub enum ExternalApiConnectionPreset {
     OpenRouter,
     Other,
 }
+
+impl ExternalApiConnectionPreset {
+    /// Hosted NVIDIA and OpenRouter endpoints refuse an anonymous call; a
+    /// LiteLLM proxy or another self-hosted server may accept one.
+    pub fn requires_credential(self) -> bool {
+        matches!(self, Self::Nvidia | Self::OpenRouter)
+    }
+}

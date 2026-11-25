@@ -135,11 +135,19 @@ pub fn validate(workflow: &Workflow, requested: &StepAgents) -> Result<ResolvedS
 
 /// Whether `agent` can start here. Shared with the runner's own preflight so
 /// launch and run refuse exactly the same agents.
+///
+/// Always false for `Custom`: it is a named HTTP connection, not an agent, so
+/// nothing that knows no connection (a launch override, the fallback chain)
+/// may pick it. A step kept on its own `Custom` agent is checked against its
+/// connection by `steps::named_connection_refusal` (KT-2030).
 pub fn agent_can_launch(
     agent: &AgentType,
     usable: &[AgentType],
     agents_config: &AgentsConfig,
 ) -> bool {
+    if matches!(agent, AgentType::Custom) {
+        return false;
+    }
     // A LiteLLM proxy is a server the user declares: no local binary needed.
     let declared_proxy = matches!(agent, AgentType::LiteLlm)
         && agents_config
@@ -492,6 +500,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("named HTTP connection"), "{error}");
+    }
+
+    // KT-2030: a step kept on its own named connection is no override to
+    // `Custom`: launch accepts it and leaves it to the run preflight, which
+    // checks its connection; the connection stays on the step.
+    #[test]
+    fn a_step_kept_on_its_named_connection_goes_to_the_run_preflight() {
+        let mut step = agent_step("jeu", AgentType::Custom);
+        step.agent_settings = Some(AgentSettings {
+            connection_id: Some("conn-or".into()),
+            ..Default::default()
+        });
+        let mut wf = workflow(vec![step]);
+        let resolved = validate(
+            &wf,
+            &request(&[("jeu", choice(AgentType::Custom, Some("z-ai/glm"), None))]),
+        )
+        .unwrap();
+        let config = crate::core::config::default_config().agents;
+        // Custom is never "usable": the launch check must not refuse it here.
+        assert!(!agent_can_launch(&AgentType::Custom, &[], &config));
+        check_available(&wf, &resolved, &[], &config).unwrap();
+        apply(&mut wf, &resolved);
+        let settings = wf.steps[0].agent_settings.as_ref().unwrap();
+        assert_eq!(settings.connection_id.as_deref(), Some("conn-or"));
+        assert_eq!(settings.model.as_deref(), Some("z-ai/glm"));
     }
 
     #[test]

@@ -171,8 +171,8 @@ explicit escalation policy rather than be folded into this router. [src: file: b
 This is the hardest part. An Agent step can modify the worktree or call tools
 before a provider error. The current executor streams output and tool markers,
 then only returns success or a string error; it does not produce a durable
-effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1590-1602#drive_agent_to_output]
-[src: file: backend/src/workflows/steps.rs:1314-1346#run_agent_with_timeout]
+effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1621-1633#drive_agent_to_output]
+[src: file: backend/src/workflows/steps.rs:1345-1377#run_agent_with_timeout]
 
 The router must distinguish these cases:
 
@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:500-522#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:5068-5077#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:5089-5098#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -255,7 +255,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:966-1123#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/disc_introspection.rs:732-931#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1855-2096#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4156-4241#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1886-2127#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4177-4262#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
@@ -291,8 +291,8 @@ are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
 [src: file: backend/src/models/workflows.rs:2338-2417#WorkflowAgentProvenance]
-[src: file: backend/src/workflows/steps.rs:1435-1459#WorkflowAgentAttempt]
-[src: file: backend/src/workflows/runner.rs:5330-5352#selected_attempt]
+[src: file: backend/src/workflows/steps.rs:1483-1507#WorkflowAgentAttempt]
+[src: file: backend/src/workflows/runner.rs:5369-5391#selected_attempt]
 
 Persist an `AgentAttempt` record (table or versioned run JSON) with:
 
