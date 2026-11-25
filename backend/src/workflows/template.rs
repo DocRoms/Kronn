@@ -21,6 +21,10 @@ pub use crate::models::quick::{is_reserved_name, refuse_reserved_names};
 #[derive(Clone)]
 pub struct TemplateContext {
     values: HashMap<String, String>,
+    /// JSON type of a value set with [`Self::set_typed`] (a number, a bool,
+    /// an object), as JSON text: a lone `{{key}}` in an api_body injects it
+    /// as that type.
+    typed: HashMap<String, String>,
     /// Values Kronn sets itself (`run.id`), looked up before anything else.
     builtins: HashMap<String, String>,
     time_anchor: DateTime<Utc>,
@@ -33,7 +37,7 @@ pub struct TemplateContext {
     default_timezone: Tz,
 }
 
-crate::debug_without_secrets!(TemplateContext { builtins, time_anchor, step_kinds, previous_step_name, default_timezone; masked: values });
+crate::debug_without_secrets!(TemplateContext { builtins, time_anchor, step_kinds, previous_step_name, default_timezone; masked: values, typed });
 
 impl Default for TemplateContext {
     fn default() -> Self {
@@ -49,6 +53,7 @@ impl TemplateContext {
     pub fn with_time_anchor(time_anchor: DateTime<Utc>) -> Self {
         Self {
             values: HashMap::new(),
+            typed: HashMap::new(),
             builtins: HashMap::new(),
             time_anchor,
             step_kinds: HashMap::new(),
@@ -78,7 +83,28 @@ impl TemplateContext {
         if is_reserved_name(&key) {
             return;
         }
+        self.typed.remove(&key);
         self.values.insert(key, value.into());
+    }
+
+    /// Set `key` from a JSON value: `{{key}}` renders its flat text, and a
+    /// lone `{{key}}` in an api_body keeps its JSON type, so a number stays a
+    /// number for a field that refuses text.
+    pub fn set_typed(&mut self, key: impl Into<String>, value: &serde_json::Value) {
+        let key = key.into();
+        if is_reserved_name(&key) {
+            return;
+        }
+        let flat = match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => String::new(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        };
+        self.values.insert(key.clone(), flat);
+        self.typed
+            .insert(key, serde_json::to_string(value).unwrap_or_default());
     }
 
     /// Set a value Kronn produces itself (`run.id`, `run.artifacts_dir`).
@@ -339,6 +365,12 @@ impl TemplateContext {
                 (!is_reserved_name(path))
                     .then(|| resolve_typed_path(&self.values, path))
                     .flatten()
+            })
+            .or_else(|| {
+                (!is_reserved_name(path))
+                    .then(|| self.typed.get(path))
+                    .flatten()
+                    .and_then(|json| serde_json::from_str(json).ok())
             })
             .or_else(|| {
                 self.values

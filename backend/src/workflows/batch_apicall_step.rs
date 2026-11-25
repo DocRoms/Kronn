@@ -486,24 +486,20 @@ fn inject_item_vars(ctx: &mut TemplateContext, item: &Value, idx: usize) {
     match item {
         Value::Object(obj) => {
             for (k, v) in obj {
-                let val = match v {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Null => String::new(),
-                    _ => serde_json::to_string(v).unwrap_or_default(),
-                };
+                // Typed, so a lone `{{batch.item.version}}` in the api_body
+                // sends the number the item holds, not its text (a Jira
+                // number field answers 400 to "1").
                 // `batch.item.<key>` — explicit/namespaced (workflow steps
                 // that pass items_from = a previous step's data array).
-                ctx.set(format!("batch.item.{}", k), val.clone());
+                ctx.set_typed(format!("batch.item.{}", k), v);
                 // `item.<key>` — forgiving alias: agents intuitively reach for
                 // `{{item.commentId}}` (it's the natural per-item name), so we
                 // accept it alongside `batch.item.<key>` rather than 404 on a
                 // literal placeholder.
-                ctx.set(format!("item.{}", k), val.clone());
+                ctx.set_typed(format!("item.{}", k), v);
                 // `<key>` — bare top-level (QA-batch path: the QA's
                 // `{{host}}` template needs `host` resolved directly).
-                ctx.set(k.clone(), val);
+                ctx.set_typed(k.clone(), v);
             }
             // `batch.item` / `item` = the JSON-stringified object, useful if
             // the user wants to dump the whole item into a body.
@@ -622,6 +618,28 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_number_in_a_batch_item_keeps_its_type_for_the_api_body() {
+        let mut ctx = TemplateContext::new();
+        let item = serde_json::json!({"key": "EW-1", "review_version": 1, "done": true});
+        inject_item_vars(&mut ctx, &item, 0);
+        for key in ["batch.item.review_version", "item.review_version", "review_version"] {
+            assert_eq!(ctx.resolve_value(key), Some(serde_json::json!(1)), "{key}");
+        }
+        assert_eq!(ctx.resolve_value("batch.item.done"), Some(serde_json::json!(true)));
+        assert_eq!(ctx.resolve_value("batch.item.key"), Some(serde_json::json!("EW-1")));
+        let text = ctx.render_strict("v{{batch.item.review_version}}").unwrap();
+        assert_eq!(text, "v1", "embedded in text it still renders flat");
+    }
+
+    #[test]
+    fn a_plain_set_over_a_typed_value_drops_its_type() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_typed("n", &serde_json::json!(3));
+        ctx.set("n", "three");
+        assert_eq!(ctx.resolve_value("n"), Some(serde_json::json!("three")));
+    }
 
     #[test]
     fn parse_items_array_of_objects() {
