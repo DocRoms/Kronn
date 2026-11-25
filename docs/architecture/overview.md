@@ -67,13 +67,13 @@ Three Docker services behind nginx gateway:
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
 - **macOS Docker agent bootstrap (0.3.5)**: on macOS hosts, host-mounted binaries are Darwin (macOS) executables that cannot run in the Linux container. `entrypoint.sh` detects `KRONN_HOST_OS=macOS` and installs Linux versions of Claude Code (npm), Codex (npm), and Kiro (curl) inside the container. `find_binary()` skips host-mounted Darwin binaries for `claude`, `codex`, `copilot`, `kiro-cli` when `host_is_macos()`. `~/.npm/bin` is mounted at `/host-bin/npm` via `KRONN_NPM_BIN` env var (auto-detected by Makefile `npm bin -g`).
 
-- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:3562-3577#http_agent_identity_context] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
+- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:3570-3585#http_agent_identity_context] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
 - **LiteLLM private reasoning (0.9.5)**: OpenAI-compatible streams pass
   through a stateful leading-block filter. Initial `<think>` and `<thinking>`
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8808-8918#LeadingThinkingFilter]
+  [src: file: backend/src/agents/runner.rs:8816-8926#LeadingThinkingFilter]
   [src: file: backend/src/api/discussions/streaming.rs:5499-5500#strip_leading_thinking_blocks]
 
 ### Discussions
@@ -260,7 +260,7 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5891-5899#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5983-5998#begin_tool]
+[src: file: backend/src/agents/runner.rs:5899-5907#IdleWatchdog] [src: file: backend/src/agents/runner.rs:6005-6020#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:523-528#Activity]
 

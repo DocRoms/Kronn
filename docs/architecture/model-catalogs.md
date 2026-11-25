@@ -43,7 +43,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:200-320#migrate_hardcoded_catalog_once]
 [src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
 [src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
-[src: file: backend/src/agents/runner.rs:3648-3667#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3656-3675#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -60,11 +60,11 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-109#discover_with_transport]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
-[src: file: backend/src/api/external_api_connections.rs:287-454#probe_models]
-[src: file: backend/src/api/external_api_connections.rs:1389-1419#fetch_capability_catalogue]
-[src: file: backend/src/api/external_api_connections.rs:1417-1429#catalog_declares_modality]
-[src: file: backend/src/api/external_api_connections.rs:1435-1489#catalog_models_from_body]
-[src: file: backend/src/api/external_api_connections.rs:1491-1506#merge_catalog]
+[src: file: backend/src/api/external_api_connections.rs:314-481#probe_models]
+[src: file: backend/src/api/external_api_connections.rs:1416-1446#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1448-1460#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:1462-1516#catalog_models_from_body]
+[src: file: backend/src/api/external_api_connections.rs:1518-1533#merge_catalog]
 [src: file: backend/src/core/model_catalog/mod.rs:762-777#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:1820-1850#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:1854-1884#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3686-3861#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3694-3869#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13952-13969#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:14084-14115#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13960-13977#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14092-14123#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5168-5196#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5176-5204#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is

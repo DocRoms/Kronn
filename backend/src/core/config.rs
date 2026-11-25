@@ -1247,7 +1247,7 @@ pub fn salvage_key_line(content: &str) -> Option<String> {
 }
 
 /// What a text says about its top-level `encryption_secret`.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 pub struct KeyRead {
     /// The key line's string, when the text gives one ([`read_key`]).
     pub value: Option<String>,
@@ -1256,6 +1256,8 @@ pub struct KeyRead {
     /// down.
     pub unreadable: bool,
 }
+
+crate::debug_without_secrets!(KeyRead { unreadable; masked: value });
 
 /// The name of the key's line in config.toml.
 const KEY_NAME: &str = "encryption_secret";

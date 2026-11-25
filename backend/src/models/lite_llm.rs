@@ -73,7 +73,7 @@ pub struct LiteLlmModelRetryResponse {
 
 /// Connection attempt from the settings card. The key is write-only: it is
 /// stored in the encrypted token store and never read back to the frontend.
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct LiteLlmTestRequest {
     pub base_url: String,
@@ -81,6 +81,8 @@ pub struct LiteLlmTestRequest {
     #[serde(default)]
     pub api_key: Option<String>,
 }
+
+crate::debug_without_secrets!(LiteLlmTestRequest { base_url; masked: api_key });
 
 /// Outcome of a connection attempt. `saved` tells the card whether it may
 /// move on to model selection — a probe that failed persists nothing.

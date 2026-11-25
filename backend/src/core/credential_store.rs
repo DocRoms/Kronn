@@ -34,7 +34,7 @@ use crate::models::{ApiKey, AppConfig};
 /// recovery passphrase restores that key, so it also opens this backup.
 pub const BACKUP_FILENAME: &str = "config.toml.pre-credential-store.enc";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PlainCredential {
     pub kind: String,
     pub id: String,
@@ -43,6 +43,8 @@ pub struct PlainCredential {
     pub active: bool,
     pub value: String,
 }
+
+crate::debug_without_secrets!(PlainCredential { kind, id, name, provider, active; masked: value });
 
 impl PlainCredential {
     fn row_key(&self) -> (String, String) {

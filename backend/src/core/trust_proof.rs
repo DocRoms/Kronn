@@ -208,11 +208,14 @@ impl std::fmt::Display for ProofError {
 }
 
 /// The seed to show once, to enrol an authenticator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Enrolment {
     pub secret: String,
     pub uri: String,
 }
+
+// KT-2039: the URI carries the seed too.
+crate::debug_without_secrets!(Enrolment { ; masked: secret, uri });
 
 /// The one critical section of every read-modify-write of the record and the
 /// lock state. Held across verify, consume and write.

@@ -38,15 +38,15 @@ counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:9189-9200#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:2128-2135#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10498-10528#task_usage]
+[src: file: backend/src/agents/runner.rs:9197-9208#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:2128-2135#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10506-10536#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
-[src: file: backend/src/agents/runner.rs:8493-8499#request_provider_cost]
+[src: file: backend/src/agents/runner.rs:8501-8507#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:2121-2126#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2239#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1295#reported_cost_usd_micros]
@@ -71,9 +71,9 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8501-8503#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8505-8507#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:12765-12780#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:8509-8511#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8513-8515#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:12773-12788#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:36-50#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:194-234#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:9238-9242#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:9246-9250#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
@@ -243,7 +243,7 @@ behaviour is the same as for a joined CLI; see
   [key-management.md](key-management.md) and
   `docs/inconsistencies-tech-debt.md` (TD-20260901).
   [src: file: backend/src/core/credential_store.rs:136-153#encrypt_rows]
-  [src: file: backend/src/core/credential_store.rs:345-348#sync_for_save]
+  [src: file: backend/src/core/credential_store.rs:347-350#sync_for_save]
 
 ## Troubleshooting
 
@@ -262,11 +262,11 @@ behaviour is the same as for a joined CLI; see
   invocation. It stops the test immediately: later model errors cannot hide
   the billing failure. The form and saved connection card show a translated
   message; provider response bodies and credentials remain private.
-  [src: file: backend/src/api/external_api_connections.rs:1297-1303#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:564-570#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:677-679#ChatProbe]
-  [src: file: backend/src/api/external_api_connections.rs:708-728#failure_response]
-  [src: file: backend/src/api/external_api_connections.rs:822-833#assemble_tier_report]
+  [src: file: backend/src/api/external_api_connections.rs:1324-1330#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:591-597#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:672-676#ChatProbe]
+  [src: file: backend/src/api/external_api_connections.rs:735-755#failure_response]
+  [src: file: backend/src/api/external_api_connections.rs:849-860#assemble_tier_report]
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:397-398#billing_error]
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1185#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
