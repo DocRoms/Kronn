@@ -32,3 +32,27 @@ itself is stopped.
 
 The Docker socket carries the host's rights: allow it only for a project whose
 validations you trust.
+
+## macOS: no loopback connection, not even to a server the validation started (KT-2036)
+
+On macOS a validation cannot connect to `127.0.0.1`, including to a server it
+started itself (a wiremock, a supertest app, a Python stub). The Seatbelt
+profile denies every outbound connection, loopback included; it only lets a
+loopback port be bound and accepted on.
+[src: file: backend/src/core/task_worker_sandbox.rs:284-304#seatbelt_profile]
+The reason: the Kronn API, Ollama and a local database all listen on loopback,
+and Seatbelt cannot limit loopback to the ports the validation bound itself.
+The boundary stays (owner decision, 2026-11-23). Inside the profile a Python
+`urllib` call to a loopback server fails with `[Errno 1] Operation not
+permitted`.
+
+A test that talks to a local server therefore passes in the worker's run, on
+Linux and in CI, then fails at integration on macOS. Such a test belongs in CI
+or in the worker's run, not in a macOS validation gate. On Linux, bubblewrap
+gives the sandbox its own network namespace (`--unshare-net`), with a private
+loopback, so the same test passes there.
+[src: file: backend/src/core/task_worker_sandbox.rs:382-424#bubblewrap_args_hiding]
+
+Kronn's own autoCode dry runs, which call a loopback stub, probe a loopback
+connect once and skip with an explicit message where it is refused.
+[src: file: backend/src/workflows/autocode_issue_template_test.rs:447-466#dry_run_skipped]
