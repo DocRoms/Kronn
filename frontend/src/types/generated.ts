@@ -469,6 +469,12 @@ auth_ready?: boolean,
  */
 auth_setup_command?: string,
 /**
+ * Stable code saying why `auth_ready == false`, when known:
+ * `"api_key_missing"` — the provider refuses an anonymous call and no key
+ * resolves for it. Says whether a key resolves, never which.
+ */
+auth_reason?: string,
+/**
  * `rtk` binary found on the host (PATH). Same value for every agent
  * detection in a given sweep, but kept per-agent so the frontend can
  * render the state inline without a separate endpoint.

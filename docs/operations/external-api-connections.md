@@ -46,8 +46,8 @@ the same final route. Only a final `/v1` path segment is removed: `/v1beta`,
    endpoint and credential have passed that test. Changing the endpoint, key or
    preset invalidates the prior result; previous mappings stay visible but
    cannot be changed until the new connection state succeeds.
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:247#modelsUnlocked]
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:678-684#changeConnection]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:253#modelsUnlocked]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:684-690#changeConnection]
 
 The model tiers remain optional: leaving one blank stores no per-connection
 override for that tier. The connection card shows the saved endpoint,
@@ -57,8 +57,8 @@ an explicit click on the eye requests the stored value. **Replace** opens a
 blank editable field, while saving without replacement preserves the current
 credential. [src: file: backend/src/api/external_api_connections.rs:1820-1826#reveal_credential]
 [src: file: backend/src/api/external_api_connections.rs:2129-2130#set_credential]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:1110-1119#has_credential]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:328-342#SecretField]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:1116-1127#has_credential]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:334-348#SecretField]
 
 ## LiteLLM proxy
 
@@ -140,7 +140,7 @@ from the API keys.
 Mention the saved alias, such as `@nvidia` or `@company-proxy`, in the message.
 Kronn resolves named connection mentions before canonicalizing the requested
 agent targets, and carries the exact connection identifier in that target.
-[src: file: backend/src/db/external_api_connections.rs:228-262#target_for_connection]
+[src: file: backend/src/db/external_api_connections.rs:251-285#target_for_connection]
 [src: file: backend/src/api/discussions/messaging.rs:571-603#resolve_connection_mentions]
 
 The new-discussion form merges configured OpenRouter/Other aliases with native
@@ -157,11 +157,11 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:15587-15618#ollama_tokens]
+[src: file: backend/src/agents/runner.rs:15590-15621#ollama_tokens]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
-wrong endpoint. [src: file: backend/src/db/external_api_connections.rs:203-224#ensure_mention_alias_available]
+wrong endpoint. [src: file: backend/src/db/external_api_connections.rs:228-249#ensure_mention_alias_available]
 
 ### A connection is an agent everywhere, not only in the router (0.13.0)
 
@@ -197,7 +197,7 @@ stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
 configuration did not contain one. [src: file: backend/src/lib.rs:444-467#bootstrap_external_api_connections]
-[src: file: backend/src/db/external_api_connections.rs:410-441#backfill_legacy_config]
+[src: file: backend/src/db/external_api_connections.rs:433-464#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
 their endpoint and Economy, Default and Reasoning models. Saving either card
@@ -205,7 +205,7 @@ immediately refreshes the global agent selectors, and startup projects any
 previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2125-2129#sync_runtime_config]
-[src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
+[src: file: backend/src/db/external_api_connections.rs:44-69#sync_runtime_config]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1962-1967#onModelTiersChanged]
 
 The former standalone LiteLLM settings card (`LiteLlmCard`) and its frontend
@@ -319,9 +319,9 @@ those tokens ahead of the call.
   lists the connections that can generate the requested modality.
   [src: file: backend/src/api/orchestration.rs:17708-17717#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6195-6210#call_agent_list]
-  [src: file: backend/src/db/external_api_connections.rs:167-185#resolve]
+  [src: file: backend/src/db/external_api_connections.rs:190-208#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]
   [src: file: backend/src/api/media.rs:449-478#usable_connections]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:678-684#changeConnection]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:684-690#changeConnection]

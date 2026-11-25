@@ -23,7 +23,7 @@ use axum::{extract::State, Json};
 
 /// Credential slot in `TokensConfig`. Kept distinct from `litellm` so one
 /// provider can never borrow the other's key.
-pub const PROVIDER: &str = "nvidia";
+pub const PROVIDER: &str = crate::db::external_api_connections::NVIDIA_CREDENTIAL_SLUG;
 
 use crate::db::external_api_connections::nvidia_resolve_base_url as resolve_base_url;
 pub use crate::db::external_api_connections::nvidia_resolve_base_url_pub as resolve_base_url_pub;

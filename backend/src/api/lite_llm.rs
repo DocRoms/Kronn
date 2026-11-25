@@ -16,7 +16,7 @@ use crate::AppState;
 use axum::{extract::State, Json};
 
 /// Provider slug under which the proxy key lives in the encrypted token store.
-const PROVIDER: &str = "litellm";
+const PROVIDER: &str = crate::db::external_api_connections::LITELLM_CREDENTIAL_SLUG;
 const MODEL_NOT_IN_CATALOGUE: &str = "kronn:model-not-in-catalogue";
 
 /// Phrases a LiteLLM proxy uses when it refuses a model for THIS key or team

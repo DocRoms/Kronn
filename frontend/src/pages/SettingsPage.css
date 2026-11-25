@@ -2898,6 +2898,13 @@
   color: var(--kr-text-muted);
 }
 
+/* KT-2031 — a preset that refuses an anonymous call cannot run without one. */
+.set-ext-api-conn-cred[data-key-required='true'] {
+  border-color: rgba(var(--kr-warning-rgb), 0.3);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  color: var(--kr-warning-amber);
+}
+
 .set-ext-api-conn-actions {
   display: flex;
   align-items: center;

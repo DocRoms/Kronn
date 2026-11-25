@@ -58,7 +58,7 @@ reads a snapshot once; typing filters locally, without provider discovery.
 | Planning launch/reassignment | The same agent and model controls, without clearing unrelated execution policy/history. [src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker] [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1170-1187#AgentSwitchPicker] |
 | Comparison rerun/reviewer | Shared target picker for new selections; historical identity stays recorded/attested/unknown rather than being replaced by current settings. [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343#AgentSwitchPicker] [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412#AgentSwitchPicker] See [comparison identity](compare-model-identity.md). |
 | Agent and Ollama settings | Shared `catalogModelOptions`, exact runtime target and searchable model choices. [src: file: frontend/src/components/settings/AgentsSection.tsx:895#catalogModelOptions] [src: file: frontend/src/components/settings/OllamaCard.tsx:498#catalogModelOptions] See [tier settings](agent-tier-catalogue-settings.md). |
-| HTTP connection draft | Searchable choices come from that draft's test result; missing/untested saved IDs remain visible but unverified. A changed endpoint cannot borrow another saved target's verified catalogue. [src: file: frontend/src/components/settings/ExternalApiSection.tsx:244-252#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:248-258#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:678-684#changeConnection] See [HTTP probe isolation](http-probe-catalogue-isolation.md). |
+| HTTP connection draft | Searchable choices come from that draft's test result; missing/untested saved IDs remain visible but unverified. A changed endpoint cannot borrow another saved target's verified catalogue. [src: file: frontend/src/components/settings/ExternalApiSection.tsx:254-262#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:254-264#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:684-690#changeConnection] See [HTTP probe isolation](http-probe-catalogue-isolation.md). |
 | Manual catalogue management | Searchable runtime target, model/ID/source filtering and shared derived provenance. Failed refresh/reload retains identities as cached; manual provenance is preserved. [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:104-114#visibleRows] [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:272-289#SearchableSelect] [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:92-102#rows] |
 
 `ModelCatalogPicker` additionally preserves an unrecognized saved reasoning
@@ -87,7 +87,7 @@ fallbacks. The OpenRouter GLM preset selects only a model actually returned by
 its test and preserves an existing choice; it is not an unconditional runtime
 fallback. Neither is removed by this inventory.
 [src: file: frontend/src/components/settings/OllamaCard.tsx:412-442#suggestions]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:704-713#open_router]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:710-719#open_router]
 
 This closes the catalogue migration/consumer audit only after its final gates
 pass and the exact change is integrated. It does not qualify KT-619/635,

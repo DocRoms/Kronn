@@ -580,7 +580,7 @@ returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/src/api/orchestration.rs:18086-18140#compact_next_action]
 [src: file: backend/src/api/orchestration.rs:14658-14766#resume_blocked_apply]
-[src: file: backend/src/api/orchestration.rs:18513-18557#task_exec_resume]
+[src: file: backend/src/api/orchestration.rs:18512-18556#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6311-6389#call_task_exec_status]
 
 An approved delivery the integration sends back (a red validation, a merge
@@ -660,7 +660,7 @@ alias or display name; a name two connections share is refused rather than
 guessed, and every refusal lists the connections that can generate the
 modality asked for, with their ids.
 [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
-[src: file: backend/src/db/external_api_connections.rs:159-187#ConnectionReference]
+[src: file: backend/src/db/external_api_connections.rs:182-210#ConnectionReference]
 
 The catalogue reports `configured` and `reachable`
 independently; its only strict implication is

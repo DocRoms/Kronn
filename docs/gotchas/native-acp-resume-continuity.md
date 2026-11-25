@@ -69,7 +69,7 @@ The safe fresh-session fallback is restricted to absent resume capability or a
 positively identified missing session before a prompt is sent. Authentication,
 timeouts and ambiguous transport errors fail visibly. Prompt, cancellation and
 persistence failures are not followed by an automatic fresh-session replay.
-[src: file: backend/src/agents/runner.rs:5660-5716#resume_refused]
+[src: file: backend/src/agents/runner.rs:5663-5719#resume_refused]
 [src: file: backend/src/agents/runner.rs:6160-6225#acp_failure_diagnostic]
 
 OpenCode v1.18.27 defines a structured missing-session error using code -32602,
@@ -91,7 +91,7 @@ discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
 [src: file: backend/src/api/discussions/streaming.rs:2759-2769#settle_turn_continuity]
-[src: file: backend/src/agents/runner.rs:6142-6157#resume_refused]
+[src: file: backend/src/agents/runner.rs:6145-6160#resume_refused]
 
 ## Deterministic qualification boundaries
 

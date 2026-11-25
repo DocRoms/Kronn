@@ -260,7 +260,7 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5877-5885#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5983-5998#begin_tool]
+[src: file: backend/src/agents/runner.rs:5880-5888#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5983-5998#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:523-528#Activity]
 

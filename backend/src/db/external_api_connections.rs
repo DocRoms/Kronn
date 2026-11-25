@@ -18,6 +18,29 @@ const COLUMNS: &str = "id, display_name, mention_alias, endpoint, credential_slu
 pub const LEGACY_LITELLM_ID: &str = "external-api-litellm";
 pub const LEGACY_NVIDIA_ID: &str = "external-api-nvidia";
 
+/// `TokensConfig` slots of the two legacy providers. The canonical rows above
+/// are backfilled with these slugs, and a run that names no connection falls
+/// back to the same slot: [`legacy_credential_for_agent`].
+pub const LITELLM_CREDENTIAL_SLUG: &str = "litellm";
+pub const NVIDIA_CREDENTIAL_SLUG: &str = "nvidia";
+
+/// The credential slot a legacy HTTP agent's run reads its key from, and the
+/// preset that says whether the provider refuses a call without one
+/// ([`ExternalApiConnectionPreset::requires_credential`]). `None` for an agent
+/// that is not one of these providers.
+pub fn legacy_credential_for_agent(
+    agent_type: &AgentType,
+) -> Option<(&'static str, ExternalApiConnectionPreset)> {
+    match agent_type {
+        AgentType::LiteLlm => Some((
+            LITELLM_CREDENTIAL_SLUG,
+            ExternalApiConnectionPreset::LiteLlm,
+        )),
+        AgentType::Nvidia => Some((NVIDIA_CREDENTIAL_SLUG, ExternalApiConnectionPreset::Nvidia)),
+        _ => None,
+    }
+}
+
 /// Apply the canonical named connection to the legacy runtime slots still
 /// consumed by agent selectors and the runner. Named connections are the UI
 /// source of truth; these fields remain as a compatibility projection until
@@ -414,7 +437,7 @@ pub fn backfill_legacy_config(conn: &Connection, config: &AppConfig) -> Result<(
         conn,
         LEGACY_LITELLM_ID,
         "LiteLLM",
-        "litellm",
+        LITELLM_CREDENTIAL_SLUG,
         config.agents.lite_llm.base_url.as_deref(),
         ExternalApiConnectionPreset::LiteLlm,
         &config.agents.model_tiers.lite_llm,
@@ -424,7 +447,7 @@ pub fn backfill_legacy_config(conn: &Connection, config: &AppConfig) -> Result<(
         conn,
         LEGACY_NVIDIA_ID,
         "NVIDIA",
-        "nvidia",
+        NVIDIA_CREDENTIAL_SLUG,
         Some(&nvidia_endpoint),
         ExternalApiConnectionPreset::Nvidia,
         &config.agents.model_tiers.nvidia,

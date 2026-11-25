@@ -996,7 +996,7 @@ load, not a performance guarantee.
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:329-336#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:1036-1046#apply_bash_timeouts]
-[src: file: backend/src/agents/runner.rs:15186-15188#apply_bash_timeouts]
+[src: file: backend/src/agents/runner.rs:15189-15191#apply_bash_timeouts]
 [src: file: backend/src/core/worktree.rs:3452-3453#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:321-322#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]

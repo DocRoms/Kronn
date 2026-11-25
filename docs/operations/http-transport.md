@@ -38,8 +38,8 @@ counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:9175-9186#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:2128-2135#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10484-10514#task_usage]
+[src: file: backend/src/agents/runner.rs:9178-9189#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:2128-2135#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10487-10517#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
@@ -71,9 +71,9 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8487-8489#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8491-8493#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:12751-12766#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:8490-8492#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8494-8496#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:12754-12769#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:36-50#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:194-234#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:9224-9228#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:9227-9231#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
@@ -267,8 +267,8 @@ behaviour is the same as for a joined CLI; see
   [src: file: backend/src/api/external_api_connections.rs:677-679#ChatProbe]
   [src: file: backend/src/api/external_api_connections.rs:708-728#failure_response]
   [src: file: backend/src/api/external_api_connections.rs:822-833#assemble_tier_report]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:391-392#billing_error]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1173#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:397-398#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1185#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.

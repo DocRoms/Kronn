@@ -4456,10 +4456,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     .http_endpoints
                     .and_then(|endpoints| endpoints.for_agent(config.agent_type))
             });
-        let provider_slug = match config.agent_type {
-            AgentType::Nvidia => crate::api::nvidia::PROVIDER,
-            _ => "litellm",
-        };
+        // Same slot as `agents::agent_auth_status` checks (KT-2031).
+        let provider_slug =
+            crate::db::external_api_connections::legacy_credential_for_agent(config.agent_type)
+                .map_or(
+                    crate::db::external_api_connections::LITELLM_CREDENTIAL_SLUG,
+                    |(slug, _)| slug,
+                );
         let http_api_key = config
             .external_http
             .and_then(|runtime| runtime.api_key.as_deref())
