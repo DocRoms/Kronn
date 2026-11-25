@@ -2214,9 +2214,12 @@ async fn execute_run_body(
     let references = db
         .with_conn(move |conn| {
             // KT-1096 — values recorded at pin time, from the pinned objects.
-            if let Some(pinned) =
-                super::run_pins::pinned_template_references(conn, &refs_run, &refs_workflow.id)?
-            {
+            if let Some(pinned) = super::run_pins::pinned_template_references(
+                conn,
+                &refs_run,
+                &refs_workflow.id,
+                refs_project.as_deref(),
+            )? {
                 return Ok(pinned);
             }
             crate::core::resource_refs::resolve_template_references(

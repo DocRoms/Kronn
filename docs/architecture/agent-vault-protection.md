@@ -273,7 +273,7 @@ exist on the host, as given and with their links resolved, in two tiers:
   text: they are the fingerprints of the documents on disk, captured after the
   validation child stopped.
   The regression samples are `AS_WRITTEN` in `db::insert_redaction_measure`.
-  [src: file: backend/src/core/redact.rs:1032-1043#redact_agent_output]
+  [src: file: backend/src/core/redact.rs:1065-1076#redact_agent_output]
 - **Measured on a corpus, not yet on a database.** `db::insert_redaction_measure`
   (ignored) runs the insert path over every Agent message of a copy of a database
   and/or over text files cut into message-sized chunks. On this repository (prose,

@@ -1090,6 +1090,81 @@ async fn http_step_preflight_reads_a_childs_references_as_the_run_pinned_them() 
 }
 
 #[tokio::test]
+async fn http_step_preflight_judges_a_child_reached_from_two_projects_on_each_projects_prompt() {
+    // KT-2059 — the run pins a multi-project child's references once per
+    // project it runs in: reached under A (p1) then B (p2), it is judged on
+    // each project's prompt and connection, not twice on the first one's.
+    let (state, _, _) = test_state_and_configs();
+    let projects = tempfile::tempdir().unwrap();
+    for (project, connection_id) in [("proj-two-1", "conn-two-1"), ("proj-two-2", "conn-two-2")] {
+        insert_project_at(&state, project, &projects.path().join(project)).await;
+        insert_connection(
+            &state,
+            connection(
+                connection_id,
+                Some("https://nvidia.invalid/v1"),
+                ExternalApiConnectionPreset::Nvidia,
+            ),
+        )
+        .await;
+        let mut prompt = quick_prompt(&format!("qp-{project}"), Some(connection_id));
+        prompt.name = "Two Projects".into();
+        prompt.project_id = Some(project.into());
+        state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &prompt))
+            .await
+            .unwrap();
+    }
+    let mut child = make_workflow_with_artifacts(Default::default());
+    child.id = "wf-two-child".into();
+    child.name = "enfant".into();
+    child.steps = vec![qp_step("jeu-enfant", "ref:prompt:two-projects")];
+    insert_workflow(&state, child).await;
+    for (parent, project) in [("wf-two-a", "proj-two-1"), ("wf-two-b", "proj-two-2")] {
+        let mut wf = starting(parent, "wf-two-child");
+        wf.name = parent.into();
+        wf.project_id = Some(project.into());
+        insert_workflow(&state, wf).await;
+    }
+    let mut root = starting("wf-two-root", "wf-two-a");
+    let mut second = fake_step("second");
+    second.step_type = StepType::SubWorkflow;
+    second.sub_workflow_id = Some("wf-two-b".into());
+    root.steps.push(second);
+    let run = pending_run("run-two-root", &root.id);
+    insert_wf_and_run(&state, &root, &run).await;
+    let (pinned_wf, pinned_run) = (root.clone(), run.clone());
+    state
+        .db
+        .with_conn(move |conn| {
+            crate::workflows::run_pins::pin_or_load(conn, &pinned_wf, &pinned_run)
+        })
+        .await
+        .unwrap()
+        .expect("pinned");
+
+    let planned = crate::workflows::run_preflight::planned_agent_steps(&state, &root, &run).await;
+    let mut judged: Vec<(String, Option<String>)> = planned
+        .iter()
+        .filter(|p| p.step.name == "jeu-enfant")
+        .map(|p| {
+            assert_eq!(p.unloaded, None, "{:?}", p.within);
+            (
+                p.within.clone().unwrap_or_default(),
+                crate::workflows::steps::step_connection_id(&p.step).map(str::to_string),
+            )
+        })
+        .collect();
+    judged.sort();
+    assert_eq!(judged.len(), 2, "{judged:?}");
+    assert!(judged[0].0.contains("`wf-two-a`"), "{judged:?}");
+    assert_eq!(judged[0].1.as_deref(), Some("conn-two-1"), "{judged:?}");
+    assert!(judged[1].0.contains("`wf-two-b`"), "{judged:?}");
+    assert_eq!(judged[1].1.as_deref(), Some("conn-two-2"), "{judged:?}");
+}
+
+#[tokio::test]
 async fn http_step_preflight_a_childs_step_whose_quick_prompt_cannot_load_is_refused_before_the_parents_first_step(
 ) {
     // KT-2057 — read with this run's pins, which the child run inherits: it

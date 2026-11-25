@@ -1017,7 +1017,15 @@ and profiles included) read those rows, never the live definitions. A pinned
 run gets its skills and profiles inline in its prompt, not through the shared
 native files (`.claude/skills/…`) a project sync can rewrite during its turn. The pin also records how the run resolved its structured `ref:`
 fields and its `{{ref:…}}` template values, so a resume never resolves them
-again; a pinned dependency deleted meanwhile fails its step with a
+again. It records them in each project a workflow runs in: a sub-workflow
+reached from two projects reads each project's Quick Prompts and
+connections, and a workflow the pin resolved in other projects only is
+refused, never read from another project's row. A pin taken before 0.15.4
+holds one row per workflow, read only in the first project its walk reached
+the workflow in, or anywhere when it resolved nothing; it is refused when
+that project cannot be known, as for a sub-workflow run whose root run's pin
+is gone [src: file: backend/src/workflows/run_pins.rs:212-247#resolution]. A pinned
+dependency deleted meanwhile fails its step with a
 clear message, and one absent from the pin is refused. A run whose workflow
 an agent's change disabled between launch and first execution is not pinned
 and does not start. `run_pins::revision_fingerprint` is the one identity of a
