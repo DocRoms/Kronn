@@ -22,7 +22,7 @@ tier assignments. HTTP agents may use their explicit/durable default tier;
 they do not revive the old embedded model list. Frontend display fallback is
 also configuration/caller supplied, rather than a second embedded catalogue.
 [src: file: backend/src/agents/runner.rs:3654-3705#configured_model_flag]
-[src: file: backend/src/agents/runner.rs:3628-3647#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3648-3667#resolve_model_flag]
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 
 The production-library migration tests cover file-backed reopen, deletion
