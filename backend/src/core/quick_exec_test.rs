@@ -649,6 +649,224 @@ fn the_first_errors_of_a_red_run_are_redacted() {
     }
 }
 
+// ── KT-2035: why a red test run failed ──────────────────────────────
+
+/// A red `cargo test` run as libtest prints it: the failure blocks between the
+/// two `failures:` headings, then the verdict.
+fn red_cargo_test_run(failing: usize, panic_line: &str) -> String {
+    let mut stdout = String::from("\nrunning 3 tests\n");
+    for index in 0..failing {
+        stdout.push_str(&format!(
+            "test core::preflight::case_{index}_is_refused ... FAILED\n"
+        ));
+    }
+    stdout.push_str("test core::preflight::passes ... ok\n\nfailures:\n\n");
+    for index in 0..failing {
+        stdout.push_str(&format!(
+            "---- core::preflight::case_{index}_is_refused stdout ----\n\
+             \n\
+             thread 'core::preflight::case_{index}_is_refused' panicked at src/core/preflight.rs:{line}:9:\n\
+             {panic_line} {index}\n\
+             assertion `left == right` failed\n\
+             \x20 left: Refused(\"connection {index}\")\n\
+             \x20right: Callable\n\
+             note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\
+             \n\n",
+            line = 100 + index,
+        ));
+    }
+    stdout.push_str("\nfailures:\n");
+    for index in 0..failing {
+        stdout.push_str(&format!("    core::preflight::case_{index}_is_refused\n"));
+    }
+    stdout.push_str(&format!(
+        "\ntest result: FAILED. 1 passed; {failing} failed; 0 ignored; 0 measured; 900 filtered out; finished in 0.02s\n"
+    ));
+    stdout
+}
+
+#[test]
+fn a_red_cargo_test_run_keeps_the_panic_message_of_its_failing_test() {
+    let stdout = red_cargo_test_run(1, "the connection was not callable");
+    let extracted = summarise(
+        Summariser::CargoTest,
+        &stdout,
+        "error: test failed, to rerun pass `--lib`\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    let summary = &extracted.summary;
+    assert_eq!(
+        extracted.failed_tests,
+        vec!["core::preflight::case_0_is_refused"]
+    );
+    for expected in [
+        "panicked at src/core/preflight.rs:100:9",
+        "the connection was not callable 0",
+        "left: Refused(\"connection 0\")",
+        "right: Callable",
+        "test result: FAILED",
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+    assert!(
+        !summary.contains("RUST_BACKTRACE"),
+        "the backtrace hint is noise: {summary}"
+    );
+    assert!(summary.len() <= SUMMARY_MAX_BYTES);
+}
+
+#[test]
+fn many_red_cargo_tests_keep_the_first_panics_within_the_summary_cap() {
+    let stdout = red_cargo_test_run(MAX_FAILED_TESTS + 20, &"why it failed ".repeat(40));
+    let extracted = summarise(
+        Summariser::CargoTest,
+        &stdout,
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    let summary = &extracted.summary;
+    assert!(summary.len() <= SUMMARY_MAX_BYTES, "{}", summary.len());
+    assert!(
+        summary.contains("panicked at src/core/preflight.rs:100:9"),
+        "the first panic must survive the failing names: {summary}"
+    );
+    assert!(summary.contains("why it failed"), "{summary}");
+    assert!(summary.contains("test result: FAILED"), "{summary}");
+    assert_eq!(extracted.failed_tests.len(), MAX_FAILED_TESTS);
+}
+
+/// `cargo nextest` (or any runner without libtest's `---- name stdout ----`
+/// blocks) still keeps the panic and the lines under it.
+#[test]
+fn a_red_rust_run_without_libtest_blocks_keeps_its_panic() {
+    let stderr = "    FAIL [   0.004s] kronn core::preflight::refused\n\
+                  --- STDERR:              kronn core::preflight::refused ---\n\
+                  thread 'core::preflight::refused' panicked at src/core/preflight.rs:12:5:\n\
+                  assertion `left == right` failed\n\
+                  \x20 left: 1\n\
+                  \x20right: 2\n\
+                  \n\
+                  error: test run failed\n";
+    let extracted = summarise(
+        Summariser::CargoTest,
+        "",
+        stderr,
+        QuickExecStatus::Failed,
+        true,
+    );
+    let summary = &extracted.summary;
+    assert!(
+        summary.contains("panicked at src/core/preflight.rs:12:5"),
+        "{summary}"
+    );
+    assert!(summary.contains("left: 1"), "{summary}");
+    assert!(summary.contains("right: 2"), "{summary}");
+}
+
+#[test]
+fn the_kept_panic_lines_are_redacted() {
+    let stdout = red_cargo_test_run(
+        1,
+        "could not connect to postgres://app:Sup3rS3cretPw@db.internal:5432/kronn with Authorization: Bearer abc123def456ghi789jkl",
+    );
+    let extracted = summarise(
+        Summariser::CargoTest,
+        &stdout,
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    let summary = &extracted.summary;
+    assert!(
+        summary.contains("could not connect to postgres://app:"),
+        "{summary}"
+    );
+    for secret in ["Sup3rS3cretPw", "abc123def456ghi789jkl"] {
+        assert!(!summary.contains(secret), "{secret} leaked: {summary}");
+    }
+}
+
+#[test]
+fn a_green_cargo_test_summary_is_unchanged() {
+    let stdout = "\nrunning 2 tests\ntest a ... ok\ntest b ... ok\n\n\
+                  test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+    let extracted = summarise(
+        Summariser::CargoTest,
+        stdout,
+        "",
+        QuickExecStatus::Passed,
+        true,
+    );
+    assert_eq!(
+        extracted.summary,
+        "Passed\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+    );
+}
+
+/// A red vitest run as the default reporter prints it.
+fn red_vitest_run(secret: &str) -> String {
+    format!(
+        " ❯ src/a.test.ts (2 tests | 1 failed) 4ms\n\
+         \x20  × adds 2ms\n\
+         \x20  ✓ subtracts 1ms\n\
+         \n\
+         ⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\
+         \n\
+         \x20FAIL  src/a.test.ts > adds\n\
+         AssertionError: expected 3 to be 4 // Object.is equality {secret}\n\
+         \n\
+         - Expected\n\
+         + Received\n\
+         \n\
+         - 4\n\
+         + 3\n\
+         \n\
+         \x20❯ src/a.test.ts:4:15\n\
+         \x20     4|   expect(1 + 2).toBe(4)\n\
+         \n\
+         ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\
+         \n\
+         \x20Test Files  1 failed (1)\n\
+         \x20     Tests  1 failed | 1 passed (2)\n"
+    )
+}
+
+#[test]
+fn a_red_vitest_run_keeps_its_failure_message() {
+    let extracted = summarise(
+        Summariser::Vitest,
+        &red_vitest_run("token=ghp_0123456789abcdefghijABCDEFGHIJ012345"),
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    let summary = &extracted.summary;
+    assert!(
+        summary.contains("AssertionError: expected 3 to be 4"),
+        "{summary}"
+    );
+    assert!(summary.contains("src/a.test.ts:4:15"), "{summary}");
+    assert!(
+        !summary.contains("ghp_0123456789abcdefghijABCDEFGHIJ012345"),
+        "leaked: {summary}"
+    );
+    assert!(summary.len() <= SUMMARY_MAX_BYTES);
+}
+
+#[test]
+fn a_green_vitest_summary_is_unchanged() {
+    let extracted = summarise(
+        Summariser::Vitest,
+        " ✓ src/a.test.ts (2 tests) 3ms\n\n Test Files  1 passed (1)\n      Tests  2 passed (2)\n",
+        "",
+        QuickExecStatus::Passed,
+        true,
+    );
+    assert_eq!(extracted.summary, "Passed\n");
+}
+
 // ── idempotency key ─────────────────────────────────────────────────
 
 #[test]
