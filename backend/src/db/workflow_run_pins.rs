@@ -70,6 +70,18 @@ pub fn list_kind(conn: &Connection, run_id: &str, kind: &str) -> Result<Vec<(Str
     Ok(rows)
 }
 
+/// Whether the run pinned any resource of `kind`.
+pub fn has_kind(conn: &Connection, run_id: &str, kind: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM workflow_run_pins WHERE run_id = ?1 AND kind = ?2 LIMIT 1",
+            params![run_id, kind],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// A child inherits its parent's dependencies, not its parent's own workflow.
 pub fn copy_dependencies(conn: &Connection, from_run: &str, to_run: &str) -> Result<usize> {
     Ok(conn.execute(

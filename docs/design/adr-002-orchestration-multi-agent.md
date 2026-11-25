@@ -463,7 +463,7 @@ and/or a `kronn-delivery` fence):
 ```
 
 **ReviewDecision v1** (principal → backend, via a new `task_exec_review` MCP tool; reuses the
-`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4619-4642#GateDecision]`):
+`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4641-4664#GateDecision]`):
 ```json
 { "version":"1", "task_ref":"KT-142", "decision":"approve|request_changes",
   "comment":"<required when request_changes>",
@@ -521,7 +521,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   An optional `escalation_notify_url` is stored on the run
   `[src: file: backend/src/models/orchestration.rs:737#escalation_notify_url]`; nothing fires it yet.
   The gate webhook it was meant to reuse is `fire_gate_webhook`
-  `[src: file: backend/src/workflows/runner.rs:1026-1047#fire_gate_webhook]`.
+  `[src: file: backend/src/workflows/runner.rs:1070-1091#fire_gate_webhook]`.
 
 ---
 

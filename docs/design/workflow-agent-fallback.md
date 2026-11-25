@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:500-522#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:5117-5126#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:5139-5148#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -255,7 +255,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:966-1123#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/disc_introspection.rs:732-931#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1993-2234#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4205-4290#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1993-2234#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4227-4312#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 

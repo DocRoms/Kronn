@@ -149,7 +149,7 @@ authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4240-4286#preflight_resolve]
-[src: file: backend/src/workflows/runner.rs:2036-2121#preflight_resolve]
+[src: file: backend/src/workflows/runner.rs:1766-1851#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1360-1413#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
@@ -237,8 +237,9 @@ Settings first.
 A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
 hydrated workflow step the same way its `agent_settings.model` already is
 (step wins if it sets its own), so a QP-driven step carries the effort its
-author picked.
-[src: file: backend/src/workflows/quick_prompt_hydrate.rs:114-148#qp_effort]
+author picked. Both, like the QP's connection, belong to the QP's agent: a
+step that runs another agent takes none of them.
+[src: file: backend/src/workflows/quick_prompt_hydrate.rs:140-192#qp_effort]
 
 Standalone QP launches additionally capture their explicit effort alongside
 the resolved model, agent and tier in `discussion_effort_snapshots` (migration

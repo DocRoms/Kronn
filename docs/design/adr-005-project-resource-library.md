@@ -211,7 +211,7 @@ parent `node_modules`, Python's site-packages) are not covered
 [src: file: backend/src/core/approved_scripts.rs:173-179#copy_dir]
 [src: file: backend/src/core/approved_scripts.rs:181-231#prepare_copy]
 [src: file: backend/src/api/workflows.rs:1648-1720#pin_exec_script_files]
-[src: file: backend/src/workflows/runner.rs:1490-1527#carrying_repository]
+[src: file: backend/src/workflows/runner.rs:1534-1571#carrying_repository]
 [src: file: backend/src/workflows/exec_step.rs:143-189#approved_script_child].
 
 **Implementation note (KT-920, 0.15.0).** Templated step fields read the
@@ -240,9 +240,9 @@ read-only with a Copy button in the audit view; it never writes into the
 checkout, and only a human publishes it
 [src: file: backend/src/core/lane_git.rs:96-164#default_branch_ref]
 [src: file: backend/src/core/project_profile.rs:203-254#schema_error]
-[src: file: backend/src/workflows/run_pins.rs:33#PROJECT_PROFILE]
-[src: file: backend/src/workflows/run_pins.rs:241-261#record_project_profile]
-[src: file: backend/src/workflows/run_pins.rs:454-466#revision_fingerprint_with_profiles]
+[src: file: backend/src/workflows/run_pins.rs:37#PROJECT_PROFILE]
+[src: file: backend/src/workflows/run_pins.rs:377-397#record_project_profile]
+[src: file: backend/src/workflows/run_pins.rs:605-617#revision_fingerprint_with_profiles]
 [src: file: backend/src/core/project_profile.rs:793-812#draft_if_missing]
 [src: file: docs/guides/project-profile.md:166-177].
 
@@ -312,7 +312,7 @@ A workflow Agent step also loads the project's repository skills: the run pin
 reads each one as committed on the default branch and pins it, so neither the
 checkout's branch nor the run's worktree changes it; one the pin lacks stops
 the step by name. A discussion still reads the checkout as it is.
-`[src: file: backend/src/workflows/run_pins.rs:623-637#DefaultBranch]`
+`[src: file: backend/src/workflows/run_pins.rs:777-791#DefaultBranch]`
 `[src: file: backend/src/core/repository_skills.rs:339-372#default_branch_commit]`
 `[src: file: backend/src/api/projects/used_skills.rs:25-41#resolve_repository_skills]`
 

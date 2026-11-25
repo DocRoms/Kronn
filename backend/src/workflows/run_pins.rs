@@ -29,6 +29,10 @@ pub const SKILL: &str = "skill";
 pub const DIRECTIVE: &str = "directive";
 pub const PROFILE: &str = "profile";
 pub const RESOLUTION: &str = "resolution";
+/// KT-2059 — a workflow's resolutions in each project it runs in, keyed by
+/// [`resolution_in_project_key`]. [`RESOLUTION`] keeps the first project's
+/// for the fingerprint, and is all a pin older than KT-2059 holds.
+pub const RESOLUTION_IN_PROJECT: &str = "resolution_in_project";
 /// The repository profile a run read (KT-920), keyed by its project id.
 pub const PROJECT_PROFILE: &str = "project_profile";
 
@@ -171,34 +175,166 @@ fn pin_fresh(
 }
 
 /// Applies the structured `ref:` resolutions `run_id` recorded for this
-/// workflow; `false` when it recorded none (resolve live).
+/// workflow in its project (`workflow.project_id`, the one it runs in);
+/// `false` when the pin never resolved the workflow (resolve live), an error
+/// when it resolved it in other projects only.
 pub fn apply_pinned_structured(
     conn: &Connection,
     run_id: &str,
     workflow: &mut Workflow,
 ) -> Result<bool> {
-    let Some(resolution) = resolution(conn, run_id, &workflow.id)? else {
+    let Some(resolution) = resolution(conn, run_id, &workflow.id, workflow.project_id.as_deref())?
+    else {
         return Ok(false);
     };
     crate::core::resource_refs::apply_structured_reference_map(workflow, &resolution.structured);
     Ok(true)
 }
 
-/// The `{{ref:…}}` template values `run_id` recorded for this workflow.
+/// The `{{ref:…}}` template values `run_id` recorded for this workflow in
+/// `project_id`.
 pub fn pinned_template_references(
     conn: &Connection,
     run_id: &str,
     workflow_id: &str,
+    project_id: Option<&str>,
 ) -> Result<Option<std::collections::HashMap<String, String>>> {
-    Ok(resolution(conn, run_id, workflow_id)?
+    Ok(resolution(conn, run_id, workflow_id, project_id)?
         .map(|resolution| resolution.template.into_iter().collect()))
 }
 
-fn resolution(conn: &Connection, run_id: &str, workflow_id: &str) -> Result<Option<Resolution>> {
-    match rows::get(conn, run_id, RESOLUTION, workflow_id)? {
-        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
-        None => Ok(None),
+/// The row of `workflow_id`'s resolutions in the project keyed `project`
+/// (KT-2059), as a JSON pair: no id can make two pairs share a key.
+fn resolution_in_project_key(workflow_id: &str, project: &str) -> String {
+    serde_json::json!([workflow_id, project]).to_string()
+}
+
+/// The resolutions recorded for `workflow_id` in `project_id`; `None` for a
+/// workflow the pin never resolved (one its walk did not reach, like a run
+/// started under a parent that does not call it). A workflow it resolved in
+/// other projects only is refused, never read from another project's row: a
+/// pin since KT-2059 records every (workflow, project) its walk reached, and
+/// an older pin's single row is read only in the project its walk reached
+/// the workflow in first. A row that resolved nothing holds no project's
+/// values and is read in any project.
+fn resolution(
+    conn: &Connection,
+    run_id: &str,
+    workflow_id: &str,
+    project_id: Option<&str>,
+) -> Result<Option<Resolution>> {
+    let project = project_key(project_id);
+    let in_project = resolution_in_project_key(workflow_id, &project);
+    if let Some(json) = rows::get(conn, run_id, RESOLUTION_IN_PROJECT, &in_project)? {
+        return Ok(Some(serde_json::from_str(&json)?));
     }
+    let Some(json) = rows::get(conn, run_id, RESOLUTION, workflow_id)? else {
+        return Ok(None);
+    };
+    let resolution: Resolution = serde_json::from_str(&json)?;
+    if resolution == Resolution::default() {
+        return Ok(Some(resolution));
+    }
+    let first = if rows::has_kind(conn, run_id, RESOLUTION_IN_PROJECT)? {
+        None
+    } else {
+        legacy_resolution_projects(conn, run_id)?.remove(workflow_id)
+    };
+    if first.as_deref() != Some(project.as_str()) {
+        anyhow::bail!(unrecorded_project(workflow_id, &project));
+    }
+    Ok(Some(resolution))
+}
+
+fn unrecorded_project(workflow_id: &str, project: &str) -> String {
+    let project = if project.is_empty() {
+        "without a project".to_string()
+    } else {
+        format!("in project `{project}`")
+    };
+    format!(
+        "This run did not record the references of workflow `{workflow_id}` {project}: it would \
+         read another project's Quick Prompts and connections. Launch a new run."
+    )
+}
+
+/// For a pin older than KT-2059: the project each workflow's [`RESOLUTION`]
+/// row was resolved in, the first one its walk reached the workflow in. The
+/// walk is replayed from the tree's root on the pinned revisions and
+/// resolutions, the way [`collect`] walked before KT-2059. Empty when the
+/// root is unknown: an inherited pin whose root's pin is gone (a run's pin is
+/// purged when it ends) would replay from itself, in its own project; and
+/// when the root's pin is a KT-2059 one, which no legacy row comes from.
+fn legacy_resolution_projects(conn: &Connection, run_id: &str) -> Result<BTreeMap<String, String>> {
+    let owner = pin_owner(conn, run_id)?;
+    let mut first = BTreeMap::new();
+    if rows::has_kind(conn, &owner, RESOLUTION_IN_PROJECT)? {
+        return Ok(first);
+    }
+    let Some(root) = header(conn, &owner)?
+        .filter(|header| header.fingerprint.is_some())
+        .and_then(|header| header.workflow)
+    else {
+        return Ok(first);
+    };
+    let run_project: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM workflow_runs WHERE id = ?1",
+            params![owner],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let project = run_project.or_else(|| root.project_id.clone());
+    let mut walked = BTreeSet::new();
+    replay_legacy_walk(
+        conn,
+        &owner,
+        &root,
+        project.as_deref(),
+        &mut walked,
+        &mut first,
+    )?;
+    Ok(first)
+}
+
+fn replay_legacy_walk(
+    conn: &Connection,
+    owner: &str,
+    workflow: &Workflow,
+    project_id: Option<&str>,
+    walked: &mut BTreeSet<String>,
+    first: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    first
+        .entry(workflow.id.clone())
+        .or_insert_with(|| project_key(project_id));
+    let mut resolved = workflow.clone();
+    if let Some(json) = rows::get(conn, owner, RESOLUTION, &workflow.id)? {
+        let resolution: Resolution = serde_json::from_str(&json)?;
+        crate::core::resource_refs::apply_structured_reference_map(
+            &mut resolved,
+            &resolution.structured,
+        );
+    }
+    for step in resolved.steps.iter().chain(resolved.on_failure.iter()) {
+        if step.step_type != StepType::SubWorkflow {
+            continue;
+        }
+        let Some(target) = step.sub_workflow_id.as_deref().map(str::trim) else {
+            continue;
+        };
+        if target.is_empty() || !walked.insert(target.to_string()) {
+            continue;
+        }
+        let Some(json) = rows::get(conn, owner, WORKFLOW, target)? else {
+            continue;
+        };
+        let child: Workflow = serde_json::from_str(&json)?;
+        let child_project = super::sub_workflow_step::child_project_id(&child, project_id);
+        replay_legacy_walk(conn, owner, &child, child_project.as_deref(), walked, first)?;
+    }
+    Ok(())
 }
 
 /// The root of `run_id`'s pinned run tree: the farthest pinned ancestor.
@@ -492,6 +628,17 @@ fn fingerprint_of(workflow: &Workflow, deps: &Deps, profiles: &ProfileSnapshots)
         "directives": deps.directives.values().collect::<Vec<_>>(),
         "profiles": deps.profiles.values().collect::<Vec<_>>(),
     });
+    // The pairs resolved differently from their workflow's first project:
+    // absent when none is, so older fingerprints stay equal (KT-2059).
+    let project_resolutions: BTreeMap<String, &Resolution> = deps
+        .in_project
+        .iter()
+        .filter(|((id, _), resolution)| deps.resolutions.get(id) != Some(*resolution))
+        .map(|((id, project), resolution)| (resolution_in_project_key(id, project), resolution))
+        .collect();
+    if !project_resolutions.is_empty() {
+        identity["project_resolutions"] = serde_json::to_value(&project_resolutions)?;
+    }
     // Absent when no profile was resolved, so older fingerprints stay equal.
     if !profiles.is_empty() {
         identity["project_profiles"] = profiles
@@ -598,7 +745,14 @@ struct Deps {
     prompts: BTreeMap<String, QuickPrompt>,
     apis: BTreeMap<String, QuickApi>,
     workflows: BTreeMap<String, Workflow>,
+    /// Each workflow's resolutions in the first project it was reached in.
     resolutions: BTreeMap<String, Resolution>,
+    /// KT-2059 — its resolutions in every project it runs in, by
+    /// `(workflow id, project key)`.
+    in_project: BTreeMap<(String, String), Resolution>,
+    /// `(workflow id, project key)` already walked: a child is walked once per
+    /// project it runs in, and a cycle ends.
+    walked: BTreeSet<(String, String)>,
     skill_ids: BTreeSet<String>,
     /// Repository skill ids by the project of the step naming them (`""` for
     /// none): a sub-workflow of another project loads that project's skills.
@@ -691,6 +845,15 @@ impl Deps {
         put(conn, run_id, QUICK_API, &self.apis)?;
         put(conn, run_id, WORKFLOW, &self.workflows)?;
         put(conn, run_id, RESOLUTION, &self.resolutions)?;
+        for ((id, project), resolution) in &self.in_project {
+            rows::insert(
+                conn,
+                run_id,
+                RESOLUTION_IN_PROJECT,
+                &resolution_in_project_key(id, project),
+                &serde_json::to_string(resolution)?,
+            )?;
+        }
         put(conn, run_id, SKILL, &self.skills)?;
         put(conn, run_id, DIRECTIVE, &self.directives)?;
         put(conn, run_id, PROFILE, &self.profiles)
@@ -705,6 +868,12 @@ fn collect(
     project_id: Option<&str>,
     deps: &mut Deps,
 ) -> Result<()> {
+    if !deps
+        .walked
+        .insert((workflow.id.clone(), project_key(project_id)))
+    {
+        return Ok(());
+    }
     deps.projects.insert(project_key(project_id));
     let structured =
         crate::core::resource_refs::structured_reference_map(conn, workflow, project_id)?;
@@ -714,12 +883,17 @@ fn collect(
         crate::core::resource_refs::resolve_template_references(conn, &resolved, project_id)?
             .into_iter()
             .collect();
+    let resolution = Resolution {
+        structured,
+        template,
+    };
+    // KT-2059 — a workflow reached again in another project keeps that
+    // project's resolutions too.
     deps.resolutions
         .entry(workflow.id.clone())
-        .or_insert(Resolution {
-            structured,
-            template,
-        });
+        .or_insert_with(|| resolution.clone());
+    deps.in_project
+        .insert((workflow.id.clone(), project_key(project_id)), resolution);
     for step in resolved.steps.iter().chain(resolved.on_failure.iter()) {
         deps.bindings(
             project_id,
@@ -750,18 +924,21 @@ fn collect(
             .chain(step.batch_chain_prompt_ids.iter())
             .chain(shadow_prompts);
         for id in prompt_ids {
-            if deps.prompts.contains_key(id) {
-                continue;
-            }
-            if let Some(prompt) = crate::db::quick_prompts::get_quick_prompt(conn, id)? {
-                deps.bindings(
-                    project_id,
-                    &prompt.skill_ids,
-                    &prompt.profile_ids,
-                    &prompt.directive_ids,
-                );
+            if !deps.prompts.contains_key(id) {
+                let Some(prompt) = crate::db::quick_prompts::get_quick_prompt(conn, id)? else {
+                    continue;
+                };
                 deps.prompts.insert(id.clone(), prompt);
             }
+            // Bound in every project the prompt runs in: a repository skill
+            // loads only in its own project.
+            let prompt = &deps.prompts[id];
+            let (skills, profiles, directives) = (
+                prompt.skill_ids.clone(),
+                prompt.profile_ids.clone(),
+                prompt.directive_ids.clone(),
+            );
+            deps.bindings(project_id, &skills, &profiles, &directives);
         }
         let collected = step
             .collect_api_data
@@ -783,12 +960,19 @@ fn collect(
         let Some(target) = step.sub_workflow_id.as_deref().map(str::trim) else {
             continue;
         };
-        if target.is_empty() || deps.workflows.contains_key(target) {
+        if target.is_empty() {
             continue;
         }
-        if let Some(child) = crate::db::workflows::get_workflow(conn, target)? {
+        // One revision of each child, walked once per project it runs in.
+        let child = match deps.workflows.get(target) {
+            Some(child) => Some(child.clone()),
+            None => crate::db::workflows::get_workflow(conn, target)?,
+        };
+        if let Some(child) = child {
             let child_project = super::sub_workflow_step::child_project_id(&child, project_id);
-            deps.workflows.insert(target.to_string(), child.clone());
+            deps.workflows
+                .entry(target.to_string())
+                .or_insert_with(|| child.clone());
             collect(conn, &child, child_project.as_deref(), deps)?;
         }
     }
@@ -1538,5 +1722,192 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recorded.as_deref(), Some(after.as_str()));
+    }
+
+    /// KT-2059 — a child reached from two projects keeps each project's
+    /// structured and template resolutions and a child run inherits them; a
+    /// project the run never resolved it in is refused, on a pin older than
+    /// KT-2059 too.
+    #[tokio::test]
+    async fn a_child_reached_from_two_projects_reads_each_projects_resolution() {
+        let db = Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            for project in ["p1", "p2"] {
+                let path = format!("/nonexistent/{project}");
+                crate::db::projects::insert_project(conn, &test_project(project, &path))?;
+                let mut shared = prompt(&format!("qp-{project}"), "shared");
+                shared.name = "Shared".into();
+                shared.project_id = Some(project.into());
+                crate::db::quick_prompts::insert_quick_prompt(conn, &shared)?;
+            }
+            let mut step = agent_step("ref:prompt:shared");
+            step.prompt_template = "Read {{ref:prompt:shared}}".into();
+            crate::db::workflows::insert_workflow(conn, &workflow("c", vec![step]))?;
+            let sub = |name: &str, target: &str| WorkflowStep {
+                name: name.into(),
+                step_type: StepType::SubWorkflow,
+                sub_workflow_id: Some(target.into()),
+                ..WorkflowStep::default()
+            };
+            for (id, project) in [("a", "p1"), ("b", "p2")] {
+                let mut parent = workflow(id, vec![sub("sub", "c")]);
+                parent.project_id = Some(project.into());
+                crate::db::workflows::insert_workflow(conn, &parent)?;
+            }
+            let root = workflow("root", vec![sub("first", "a"), sub("second", "b")]);
+            crate::db::workflows::insert_workflow(conn, &root)?;
+            crate::db::workflows::insert_run(conn, &run("run-two", "root"))?;
+            crate::db::workflows::insert_workflow(conn, &workflow("lone", vec![sub("only", "a")]))?;
+            crate::db::workflows::insert_run(conn, &run("run-one", "lone"))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        db.with_conn(|conn| {
+            for (run_id, root) in [("run-two", "root"), ("run-one", "lone")] {
+                let workflow = crate::db::workflows::get_workflow(conn, root)?.unwrap();
+                let run = crate::db::workflows::get_run(conn, run_id)?.unwrap();
+                pin_or_load(conn, &workflow, &run)?.expect("pinned");
+            }
+            let c = crate::db::workflows::get_workflow(conn, "c")?.unwrap();
+            let mut child_run = run("run-two-child", "c");
+            child_run.parent_run_id = Some("run-two".into());
+            crate::db::workflows::insert_run(conn, &child_run)?;
+            pin_or_load(conn, &c, &child_run)?.expect("child pinned");
+
+            for run_id in ["run-two", "run-two-child"] {
+                for (project, want) in [("p1", "qp-p1"), ("p2", "qp-p2")] {
+                    let mut child = c.clone();
+                    child.project_id = Some(project.into());
+                    assert!(apply_pinned_structured(conn, run_id, &mut child)?);
+                    assert_eq!(
+                        child.steps[0].quick_prompt_id.as_deref(),
+                        Some(want),
+                        "{run_id} in {project}"
+                    );
+                    let template = pinned_template_references(conn, run_id, "c", Some(project))?
+                        .expect("template references pinned");
+                    assert_eq!(
+                        template.get("ref:prompt:shared").map(String::as_str),
+                        Some(want),
+                        "{run_id} in {project}: {template:?}"
+                    );
+                }
+            }
+            // root, a, b, and c in each project.
+            assert_eq!(
+                rows::list_kind(conn, "run-two", RESOLUTION_IN_PROJECT)?.len(),
+                5
+            );
+            assert_eq!(
+                rows::list_kind(conn, "run-one", RESOLUTION_IN_PROJECT)?.len(),
+                3
+            );
+            // A project the run never resolved c in is refused, not read from p1.
+            let mut elsewhere = c.clone();
+            elsewhere.project_id = Some("p3".into());
+            let refused = apply_pinned_structured(conn, "run-two", &mut elsewhere).unwrap_err();
+            assert!(refused.to_string().contains("did not record"), "{refused}");
+            assert!(pinned_template_references(conn, "run-two-child", "c", Some("p3")).is_err());
+            // A workflow the walk never reached resolves live, as before.
+            let mut stranger = workflow("stranger", vec![agent_step("ref:prompt:shared")]);
+            stranger.project_id = Some("p1".into());
+            assert!(!apply_pinned_structured(conn, "run-two", &mut stranger)?);
+
+            // A pin older than KT-2059 holds only the first project's rows:
+            // they are read in that project, and refused in the other.
+            conn.execute(
+                "DELETE FROM workflow_run_pins WHERE kind = ?1",
+                params![RESOLUTION_IN_PROJECT],
+            )?;
+            for run_id in ["run-two", "run-two-child"] {
+                let mut child = c.clone();
+                child.project_id = Some("p1".into());
+                assert!(apply_pinned_structured(conn, run_id, &mut child)?);
+                assert_eq!(child.steps[0].quick_prompt_id.as_deref(), Some("qp-p1"));
+                child.project_id = Some("p2".into());
+                assert!(apply_pinned_structured(conn, run_id, &mut child).is_err());
+                assert!(pinned_template_references(conn, run_id, "c", Some("p2")).is_err());
+                assert!(pinned_template_references(conn, run_id, "root", None)?.is_some());
+                // root resolved nothing: no project's values to leak.
+                assert!(pinned_template_references(conn, run_id, "root", Some("p1"))?.is_some());
+            }
+            // No legacy row comes from a KT-2059 root: under one, it is refused.
+            rows::insert(
+                conn,
+                "run-two",
+                RESOLUTION_IN_PROJECT,
+                r#"["x","p9"]"#,
+                "{}",
+            )?;
+            let mut child = c.clone();
+            child.project_id = Some("p1".into());
+            let refused = apply_pinned_structured(conn, "run-two-child", &mut child).unwrap_err();
+            assert!(refused.to_string().contains("did not record"), "{refused}");
+            conn.execute(
+                "DELETE FROM workflow_run_pins WHERE kind = ?1",
+                params![RESOLUTION_IN_PROJECT],
+            )?;
+
+            // An inherited old pin whose root's pin is gone cannot be placed:
+            // replayed from itself, in p2, it would accept p1's row.
+            let mut orphan = run("run-two-orphan", "c");
+            orphan.parent_run_id = Some("run-two".into());
+            orphan.project_id = Some("p2".into());
+            crate::db::workflows::insert_run(conn, &orphan)?;
+            pin_or_load(conn, &c, &orphan)?.expect("orphan pinned");
+            conn.execute(
+                "DELETE FROM workflow_run_pins WHERE run_id = 'run-two' AND kind = ?1",
+                params![rows::RUN_KIND],
+            )?;
+            let mut child = c.clone();
+            child.project_id = Some("p2".into());
+            let refused = apply_pinned_structured(conn, "run-two-orphan", &mut child).unwrap_err();
+            assert!(refused.to_string().contains("did not record"), "{refused}");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2059 — a Quick Prompt two projects run binds its repository skills
+    /// in each: the second project's skill is pinned too.
+    #[tokio::test]
+    async fn a_shared_quick_prompt_pins_the_repository_skill_of_each_project_it_runs_in() {
+        let repo_b = repository_with_skill("B-BODY");
+        let db = seeded().await;
+        let path_b = repo_b.path().display().to_string();
+        let id = "repository:pB:block-migration";
+        let stored = db
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &test_project("pA", "/nonexistent/a"))?;
+                crate::db::projects::insert_project(conn, &test_project("pB", &path_b))?;
+                crate::db::project_skill_references::upsert(
+                    conn,
+                    "pB",
+                    "block-migration",
+                    ".agents/skills/block-migration/SKILL.md",
+                    "Block migration",
+                    "2026-10-09T00:00:00Z",
+                )?;
+                let mut shared = prompt("qp-1", "APPROVED prompt");
+                shared.skill_ids = vec![id.into()];
+                crate::db::quick_prompts::update_quick_prompt(conn, &shared)?;
+                let mut child = crate::db::workflows::get_workflow(conn, "child")?.unwrap();
+                child.project_id = Some("pB".into());
+                child.steps[0].quick_prompt_id = Some("qp-1".into());
+                crate::db::workflows::update_workflow(conn, &child)?;
+                let mut parent = crate::db::workflows::get_workflow(conn, "parent")?.unwrap();
+                parent.project_id = Some("pA".into());
+                crate::db::workflows::update_workflow(conn, &parent)?;
+                let run = crate::db::workflows::get_run(conn, "run-1")?.unwrap();
+                pin_or_load(conn, &parent, &run)?.map_err(anyhow::Error::msg)?;
+                rows::get(conn, "run-1", SKILL, id)
+            })
+            .await
+            .unwrap()
+            .expect("pB's repository skill is pinned");
+        assert!(stored.contains("B-BODY"), "{stored}");
     }
 }

@@ -444,7 +444,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
   `require_isolation`, hooks or `base_ref`, for workflows that never write the
   checkout (KT-787); no separate mode exists for it.
   [src: file: backend/src/workflows/runner.rs:469-478#workflow_requests_workspace]
-  [src: file: backend/src/workflows/runner.rs:1731-1740#writes_main_tree]
+  [src: file: backend/src/workflows/runner.rs:1968-1977#writes_main_tree]
 - **Starting point (`workspace_config.base_ref`, KT-798).** Without it a
   worktree starts from the main checkout's HEAD, which may lag its remote.
   With it (`origin/main`, a tag, a SHA), a value naming a configured remote's
@@ -577,7 +577,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
   [src: file: backend/src/workflows/quota_wait.rs:306-340#park]
   [src: file: backend/src/workflows/quota_wait.rs:183-223#wake_due_runs]
   [src: file: backend/src/workflows/quota_wait.rs:197-240#wake_one]
-  [src: file: backend/src/workflows/runner.rs:5132-5182#check_resume_preconditions]
+  [src: file: backend/src/workflows/runner.rs:5154-5204#check_resume_preconditions]
   [src: file: backend/src/workflows/runner.rs:377-422#WorkflowTimeoutClock]
   [src: file: backend/src/workflows/runner.rs:428-444#checkpoint]
   [src: file: backend/src/workflows/quota_wait.rs:233-276#reschedule_after_deadline]
@@ -671,7 +671,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
 
   Isolation itself stays the workflow's decision: inheriting a recipe never
   turns a read-only fan-out into an isolated run.
-  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5652-5664#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
+  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5674-5686#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
 
 **MCP injection:**
 - `read_all_mcp_contexts()` reads `.mcp.json` and per-project MCP context files (`docs/operations/mcp-servers/*.md`).
@@ -1000,7 +1000,7 @@ approval check, so a Gate approval or an interrupted resume — which reload the
 definition from the database — keep it, and the step provenance names the agent
 actually used. Only agent, model and effort are replaced; tier, budget, tools
 stay, and a named connection stays only while the agent does.
-`[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:209-266#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1306-1326#apply_from_run]`
+`[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:209-266#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1350-1370#apply_from_run]`
 `[src: file: backend/src/api/workflows.rs:5670-5672#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5670-5726#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5580#TRIGGER_CONTEXT_KEY]`
 
 **Run preflight and the connection/key rule (KT-2045, KT-2055).** A fresh run
@@ -1021,5 +1021,5 @@ resumed run, a key removed while a Gate waits, shadows and the shadow-merge
 condenser, `on_failure` steps, fallback links (a link the rule refuses is
 skipped like one that cannot launch). The refusal names the step and, for a
 child, the sub-workflow it lives in.
-`[src: file: backend/src/workflows/run_preflight.rs:47-113#planned_agent_steps]` `[src: file: backend/src/workflows/runner.rs:1892#planned_agent_steps]` `[src: file: backend/src/workflows/step_agents.rs:169-179#step_can_launch]`
+`[src: file: backend/src/workflows/run_preflight.rs:79-201#planned_agent_steps]` `[src: file: backend/src/workflows/runner.rs:1621#planned_agent_steps]` `[src: file: backend/src/workflows/step_agents.rs:169-179#step_can_launch]`
 `[src: file: backend/src/workflows/steps.rs:1331-1340#step_connection_refusal]` `[src: file: backend/src/workflows/steps.rs:1346-1358#provider_key_refusal]` `[src: file: backend/src/workflows/steps.rs:299-312#connection_refusal_outcome]` `[src: file: backend/src/core/agent_fallback.rs:893#select_refusing]`
