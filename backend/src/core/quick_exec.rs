@@ -796,10 +796,11 @@ fn resolve_binary(spec: &ValidatedSpec) -> PathBuf {
     PathBuf::from(&spec.binary)
 }
 
-struct Extracted {
-    summary: String,
-    failed_tests: Vec<String>,
-    diagnostics: Vec<Diagnostic>,
+/// The bounded canonical view of a run's streams.
+pub struct Extracted {
+    pub summary: String,
+    pub failed_tests: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Turn the streams into the bounded canonical view.
@@ -807,7 +808,7 @@ struct Extracted {
 /// `findings_complete` is threaded in so the summary can SAY that its lists are
 /// partial. A "0 failures" drawn from a truncated log is the failure mode this
 /// whole module exists to avoid.
-fn summarise(
+pub fn summarise(
     summariser: Summariser,
     stdout: &str,
     stderr: &str,
@@ -817,6 +818,9 @@ fn summarise(
     let mut failed_tests = Vec::new();
     let mut diagnostics = Vec::new();
     let mut lines = Vec::new();
+    // KT-2035: why the first failing tests failed (a panic and its assertion,
+    // an `AssertionError` and its diff), not only their names.
+    let mut details = None;
 
     match summariser {
         Summariser::CargoTest => {
@@ -831,6 +835,9 @@ fn summarise(
                 {
                     push_capped(&mut failed_tests, name.trim().to_string(), MAX_FAILED_TESTS);
                 }
+            }
+            if status != QuickExecStatus::Passed {
+                details = failure_details(cargo_test_failure_blocks(stdout, stderr));
             }
         }
         Summariser::Clippy => {
@@ -881,6 +888,9 @@ fn summarise(
                         break;
                     }
                 }
+            }
+            if status != QuickExecStatus::Passed {
+                details = failure_details(vitest_failure_blocks(stdout, stderr));
             }
         }
         Summariser::Collected => {
@@ -946,6 +956,12 @@ fn summarise(
         summary.push_str(&format!(" — {} diagnostics", diagnostics.len()));
     }
     summary.push('\n');
+    // Right under the verdict: the room and the worker are sent the start of a
+    // long output, and the failing names that follow can fill the summary.
+    if let Some(details) = &details {
+        summary.push_str(details);
+        summary.push('\n');
+    }
     for line in lines.iter().chain(failed_tests.iter()) {
         summary.push_str(line);
         summary.push('\n');
@@ -1014,6 +1030,118 @@ fn first_error_lines(stdout: &str, stderr: &str, tail: &[String]) -> Vec<String>
             }
         })
         .collect()
+}
+
+/// KT-2035: what a red test run keeps of the blocks that say why its first
+/// failing tests failed. Small enough that the section, right under the
+/// verdict, stays within the head of the output a rework message keeps.
+const FAILURE_DETAILS_MAX_BYTES: usize = 1_300;
+const FAILURE_BLOCKS: usize = 3;
+const FAILURE_BLOCK_LINES: usize = 12;
+
+/// The failure blocks of a libtest run: from `---- <test> stdout ----` up to
+/// the next block, the `failures:` list of names or the verdict. A runner that
+/// prints no such block (`cargo nextest`, a custom harness) still prints the
+/// panic: then each `panicked at` line and the lines under it, up to a blank.
+fn cargo_test_failure_blocks<'a>(stdout: &'a str, stderr: &'a str) -> Vec<Vec<&'a str>> {
+    let lines = || stdout.lines().chain(stderr.lines());
+    let libtest = failure_blocks(
+        lines(),
+        |line| {
+            let line = line.trim();
+            line.starts_with("---- ") && line.ends_with(" ----")
+        },
+        |line| {
+            let line = line.trim();
+            line == "failures:" || line.starts_with("test result:")
+        },
+    );
+    if !libtest.is_empty() {
+        return libtest;
+    }
+    failure_blocks(
+        lines(),
+        |line| line.contains("panicked at"),
+        |line| line.trim().is_empty(),
+    )
+}
+
+/// The failure blocks of a vitest run: from each `FAIL` heading of its failed
+/// tests up to the `⎯` separator, the next heading or the closing counts.
+fn vitest_failure_blocks<'a>(stdout: &'a str, stderr: &'a str) -> Vec<Vec<&'a str>> {
+    failure_blocks(
+        stdout.lines().chain(stderr.lines()),
+        |line| line.trim_start().starts_with("FAIL "),
+        |line| {
+            let line = line.trim_start();
+            line.starts_with('⎯') || line.starts_with("Test Files ")
+        },
+    )
+}
+
+/// The first [`FAILURE_BLOCKS`] blocks that `starts` opens and `ends` (or the
+/// next opening) closes, each without its blank lines, a runner's backtrace
+/// hint and beyond [`FAILURE_BLOCK_LINES`] lines.
+fn failure_blocks<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    starts: impl Fn(&str) -> bool,
+    ends: impl Fn(&str) -> bool,
+) -> Vec<Vec<&'a str>> {
+    let mut blocks: Vec<Vec<&'a str>> = Vec::new();
+    let mut open = false;
+    for line in lines {
+        if starts(line) {
+            if blocks.len() == FAILURE_BLOCKS {
+                break;
+            }
+            blocks.push(vec![line]);
+            open = true;
+        } else if open && ends(line) {
+            open = false;
+        } else if open {
+            let block = blocks.last_mut().expect("an open block exists");
+            let noise = line.trim().is_empty()
+                || line
+                    .trim_start()
+                    .starts_with("note: run with `RUST_BACKTRACE");
+            if !noise && block.len() < FAILURE_BLOCK_LINES {
+                block.push(line);
+            }
+        }
+    }
+    blocks
+}
+
+/// The kept failure blocks as one capped section, redacted like
+/// [`first_error_lines`]: a panic message is where a connection string turns up.
+fn failure_details(blocks: Vec<Vec<&str>>) -> Option<String> {
+    if blocks.is_empty() {
+        return None;
+    }
+    let text = blocks
+        .iter()
+        .map(|block| {
+            // Redacted whole, before any cut, so no credential is split by it.
+            crate::core::redact::redact_stored_text(&block.join("\n"))
+                .lines()
+                .map(|line| {
+                    let line = line.trim_end();
+                    if line.chars().count() > ERROR_LINE_MAX_CHARS {
+                        let cut: String = line.chars().take(ERROR_LINE_MAX_CHARS).collect();
+                        format!("{cut}…")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(cap_bytes_keeping_start(
+        &format!("failure details:\n{text}"),
+        FAILURE_DETAILS_MAX_BYTES,
+    ))
 }
 
 /// At most `max` bytes of the start of `text`, on a character boundary.

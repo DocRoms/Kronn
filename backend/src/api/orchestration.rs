@@ -22273,6 +22273,74 @@ pub mod tests {
             "{no_shell}"
         );
     }
+
+    /// KT-2035: a red `cargo test` validation sends the worker and the
+    /// principal the panic that says why, even when the failing names of a
+    /// large red run fill the summary.
+    #[test]
+    fn a_red_cargo_test_validation_reaches_the_rework_messages_with_its_panic() {
+        use crate::core::quick_exec::{summarise, QuickExecStatus, Summariser};
+        let failing = 70;
+        let mut stdout = String::from("\nrunning 71 tests\n");
+        for index in 0..failing {
+            stdout.push_str(&format!(
+                "test core::preflight::case_{index}_is_refused ... FAILED\n"
+            ));
+        }
+        stdout.push_str("\nfailures:\n\n");
+        for index in 0..failing {
+            stdout.push_str(&format!(
+                "---- core::preflight::case_{index}_is_refused stdout ----\n\n\
+                 thread 'core::preflight::case_{index}_is_refused' panicked at src/core/preflight.rs:{}:9:\n\
+                 the connection was not callable {index}\n\
+                 assertion `left == right` failed\n  left: Refused(\"connection {index}\")\n right: Callable\n\n\n",
+                100 + index
+            ));
+        }
+        stdout.push_str("\nfailures:\n");
+        for index in 0..failing {
+            stdout.push_str(&format!("    core::preflight::case_{index}_is_refused\n"));
+        }
+        stdout.push_str("\ntest result: FAILED. 1 passed; 70 failed; 0 ignored\n");
+        let summary = summarise(
+            Summariser::CargoTest,
+            &stdout,
+            "",
+            QuickExecStatus::Failed,
+            true,
+        )
+        .summary;
+        let report = ReworkReport::validation(ValidationFailure {
+            command: "cargo test --manifest-path backend/Cargo.toml --lib preflight".into(),
+            exit_code: Some(101),
+            output: summary,
+        });
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            let worker = build_integration_rework_message(
+                "exec-1",
+                2,
+                "KT-1",
+                "title",
+                Some("main"),
+                &report,
+                lang,
+            )
+            .content;
+            let principal = build_integration_rework_notice(
+                "exec-1", 2, "KT-1", "title", "child-1", &report, lang,
+            )
+            .content;
+            for message in [worker, principal] {
+                for expected in [
+                    "panicked at src/core/preflight.rs:100:9",
+                    "the connection was not callable 0",
+                    "left: Refused(\"connection 0\")",
+                ] {
+                    assert!(message.contains(expected), "{expected} missing: {message}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "full-tests"))]
