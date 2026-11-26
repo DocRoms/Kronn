@@ -176,6 +176,8 @@ export function WorkersSection({ t }: Props) {
         heavy_output_kb: heavy,
         bash_default_timeout_min: bashDefaultMin,
         bash_max_timeout_min: bashMaxMin,
+        // No field yet: the saved value goes back as it is, so a save does not reset it.
+        rate_limit_wait_max_min: saved.rate_limit_wait_max_min,
         os_junk_patterns: junkList,
         // Nothing set is no key at all, as the backend stores it.
         ...(commitSettingsOf(commitFieldsNow) ? { commit: commitSettingsOf(commitFieldsNow) } : {}),

@@ -37,6 +37,9 @@ struct Plan {
     from_model: Option<String>,
     trigger: Trigger,
     until: DateTime<Utc>,
+    /// KT-1992 — the reset the provider itself announced, when it did: `until`
+    /// alone cannot tell it from Kronn's own re-try window.
+    announced: Option<DateTime<Utc>>,
     selection: Selection,
     surface: Surface,
     tier: ModelTier,
@@ -239,6 +242,7 @@ async fn plan(
         from_model,
         trigger,
         until,
+        announced,
         selection,
         surface,
         tier,
@@ -292,7 +296,9 @@ pub(super) fn system_notice(
 /// A task worker's QUOTA refusal is left to the caller: its settlement and the
 /// campaign's own opt-in (`quota_fallback`) come first, and the chain is asked
 /// from there through [`worker_after_quota`]. Any other trigger (a rate limit,
-/// an outage, an authentication failure) follows the agent's chain at once.
+/// an outage, an authentication failure) follows the agent's chain at once,
+/// but a worker's rate limit whose announced reset is within the Workers wait
+/// limit, waited out once on the same agent (KT-1992).
 /// KT-1991 — on every path a task worker without a prelocalised scope asks for
 /// a shell, so its chain never moves it to an HTTP model.
 pub async fn intercept_failed_turn(
@@ -338,6 +344,24 @@ pub async fn intercept_failed_turn_among(
     if trigger == Trigger::Outage && job.turn_attempts < 2 && matches!(plan.surface, Surface::Room)
     {
         return requeue_same_agent(state, job).await;
+    }
+    // KT-1992 — a reset the provider announced within the Workers wait limit
+    // costs less than a new agent rebuilding the context: one wait per turn.
+    if trigger == Trigger::RateLimit && job.turn_attempts < 2 {
+        if let (Surface::Worker { .. }, Some(reset)) = (&plan.surface, plan.announced) {
+            let limit_min = state
+                .config
+                .read()
+                .await
+                .workers
+                .effective_rate_limit_wait_max_min();
+            if limit_min > 0
+                && reset - Utc::now() <= chrono::Duration::minutes(i64::from(limit_min))
+                && wait_for_announced_reset(state, job, &plan, reset, limit_min).await
+            {
+                return true;
+            }
+        }
     }
     match (&plan.surface, &plan.selection) {
         (Surface::Room, Selection::Switch(link)) => requeue_on_link(state, job, &plan, link).await,
@@ -498,6 +522,102 @@ async fn requeue_same_agent(state: &AppState, job: &AgentDispatchJob) -> bool {
         }
         Err(error) => {
             tracing::warn!(dispatch_job_id = %job.id, "outage retry failed: {error}");
+            false
+        }
+    }
+}
+
+/// The redispatch is this long after the announced reset: on the dot, the
+/// provider's own clock may still refuse.
+const RESET_MARGIN_SECS: i64 = 60;
+
+/// KT-1992 — queues the SAME dispatch for the announced reset, on the same agent,
+/// and tells both rooms until when. `true`: the turn waits, nothing is left to settle.
+async fn wait_for_announced_reset(
+    state: &AppState,
+    job: &AgentDispatchJob,
+    plan: &Plan,
+    reset: DateTime<Utc>,
+    limit_min: u32,
+) -> bool {
+    let Surface::Worker {
+        execution_id,
+        parent_room,
+    } = &plan.surface
+    else {
+        return false;
+    };
+    let now = Utc::now();
+    let wait_secs = (reset - now).num_seconds().max(0);
+    let delay_secs = wait_secs + RESET_MARGIN_SECS;
+    let minutes = ((wait_secs + 59) / 60).max(1);
+    let reset_at = fallback::stamp(reset);
+    let restart = fallback::stamp(now + chrono::Duration::seconds(delay_secs));
+    let agent = fallback::display_name(&plan.failing);
+    let from = plan
+        .from_model
+        .clone()
+        .unwrap_or_else(|| format!("{} mode", FallbackMode::from_tier(plan.tier).label()));
+    let worker_notice = system_notice(
+        format!(
+            "**Rate limited — waiting for the announced reset.** {agent} refused this turn and \
+             announced its reset at {reset_at}, {minutes} min from now, within the \
+             {limit_min}-min wait limit (`workers.rate_limit_wait_max_min`). Kronn redispatches \
+             this turn on the same agent at {restart} instead of moving the worker to another \
+             agent. If it is refused again, the fallback chain applies."
+        ),
+        &plan.failing,
+        plan.tier,
+        &job.trigger_message_id,
+    );
+    let parent_notice = crate::api::orchestration::orchestrator_message(
+        format!("agent-fallback-wait:{}", job.id),
+        format!(
+            "Task worker execution {execution_id}: {agent} · {from}: {} until {reset_at} → \
+             waiting for the reset on the same agent ({minutes} min, limit {limit_min} min); \
+             the turn restarts at {restart}",
+            plan.trigger.reason()
+        ),
+    );
+    let marker = format!(
+        "{} redispatch at {restart}",
+        crate::api::orchestration::RATE_LIMIT_WAIT_PREFIX
+    );
+    let id = job.id.clone();
+    let discussion_id = job.discussion_id.clone();
+    let parent = parent_room.clone();
+    let waiting = state
+        .db
+        .with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            anyhow::ensure!(
+                crate::db::agent_dispatch::retry_after(&transaction, &id, delay_secs, &marker)?,
+                "dispatch is no longer running"
+            );
+            crate::db::discussions::delete_dispatch_reply_messages(
+                &transaction,
+                &discussion_id,
+                &id,
+            )?;
+            crate::db::discussions::insert_message(&transaction, &discussion_id, &worker_notice)?;
+            // One line per dispatch: its id refuses a second wait of the same turn.
+            crate::db::discussions::insert_message(&transaction, &parent, &parent_notice)?;
+            crate::db::discussions::set_awaiting_agent(&transaction, &discussion_id, true)?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await;
+    match waiting {
+        Ok(()) => {
+            tracing::info!(
+                dispatch_job_id = %job.id,
+                "rate limit waited out on the same agent: redispatch at {restart}"
+            );
+            state.agent_dispatch_notify.notify_one();
+            true
+        }
+        Err(error) => {
+            tracing::warn!(dispatch_job_id = %job.id, "rate-limit wait could not be queued: {error}");
             false
         }
     }

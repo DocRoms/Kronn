@@ -901,6 +901,14 @@ pub async fn notify_waiting_fallback_dispatches(state: &AppState) -> Vec<String>
     };
     let mut announced = Vec::new();
     for wait in waiting {
+        // KT-1992 — a worker waiting for an announced reset has run, and said so.
+        if wait
+            .last_error
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with(RATE_LIMIT_WAIT_PREFIX))
+        {
+            continue;
+        }
         let message_id = fallback_dispatch_waiting_message_id(&wait.dispatch_id);
         let lang = room_lang(&state.db, &wait.parent_discussion_id).await;
         let minutes = (now - wait.waiting_since).num_minutes().max(0);
@@ -14887,11 +14895,19 @@ fn execution_phase_progress(
                     Some(detail),
                     Some(position),
                 ),
-                None => (
-                    TaskExecutionProgressPhase::Queued,
-                    Some("concurrency_limit_or_scheduler".into()),
-                    None,
-                ),
+                None => {
+                    // KT-1992 — held back until the reset its provider announced:
+                    // the wait says so itself, while it lasts.
+                    let waits_for_reset = job.available_at > chrono::Utc::now();
+                    let reason = job
+                        .last_error
+                        .clone()
+                        .filter(|error| {
+                            waits_for_reset && error.starts_with(RATE_LIMIT_WAIT_PREFIX)
+                        })
+                        .unwrap_or_else(|| "concurrency_limit_or_scheduler".into());
+                    (TaskExecutionProgressPhase::Queued, Some(reason), None)
+                }
             }
         }
         DispatchStatus::Running if job.agent_started_at.is_none() => (
@@ -18813,16 +18829,26 @@ pub fn compact_next_action(
     Some(CompactNextAction { tool, reason })
 }
 
+/// KT-1992 — what `last_error` starts with while a dispatch waits, on its own
+/// agent, for an announced rate-limit reset; the rest says when it restarts.
+pub const RATE_LIMIT_WAIT_PREFIX: &str = "rate_limit_wait:";
+
 /// The sentence a queued launch reports in place of a silent `Working`: the
-/// cap that holds it, how full it is and its place in the queue.
+/// cap that holds it, how full it is and its place in the queue, or the
+/// announced reset its agent waits for.
 fn task_worker_queue_reason(progress: &crate::models::TaskExecutionProgress) -> Option<String> {
     if progress.phase != crate::models::TaskExecutionProgressPhase::Queued {
         return None;
     }
-    let counts = progress
-        .reason
-        .as_deref()?
-        .strip_prefix(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)?;
+    let reason = progress.reason.as_deref()?;
+    if let Some(restart) = reason.strip_prefix(RATE_LIMIT_WAIT_PREFIX) {
+        return Some(format!(
+            "waiting for the announced rate-limit reset on the same agent: {}",
+            restart.trim()
+        ));
+    }
+    let counts =
+        reason.strip_prefix(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)?;
     let (running, cap) = counts.split_once('/')?;
     let place = progress
         .queue_position

@@ -366,6 +366,73 @@ fn the_bash_timeouts_default_are_bounded_and_clamped_at_spawn() {
     );
 }
 
+/// KT-1992 — the rate-limit wait limit: 15 minutes by default, 0 turns the wait
+/// off, an hour at most, and a hand-edited value is bounded where it is read.
+#[test]
+fn the_rate_limit_wait_setting_defaults_to_15_and_refuses_more_than_60() {
+    let defaults = WorkersConfig::default();
+    assert_eq!(defaults.rate_limit_wait_max_min, 15);
+    assert_eq!(defaults.effective_rate_limit_wait_max_min(), 15);
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert_eq!(partial.rate_limit_wait_max_min, 15);
+    for (minutes, valid) in [
+        (0, true),
+        (1, true),
+        (15, true),
+        (60, true),
+        (61, false),
+        (1_440, false),
+    ] {
+        let candidate = WorkersConfig {
+            rate_limit_wait_max_min: minutes,
+            ..Default::default()
+        };
+        assert_eq!(candidate.validate().is_ok(), valid, "{minutes} min");
+    }
+    // Off survives the config file: 0 is a value, not a missing key.
+    let off = WorkersConfig {
+        rate_limit_wait_max_min: 0,
+        ..Default::default()
+    };
+    let back: WorkersConfig = toml::from_str(&toml::to_string(&off).unwrap()).unwrap();
+    assert_eq!(back.rate_limit_wait_max_min, 0);
+    assert_eq!(back.effective_rate_limit_wait_max_min(), 0);
+    let hand_edited = WorkersConfig {
+        rate_limit_wait_max_min: 999,
+        ..Default::default()
+    };
+    assert_eq!(hand_edited.effective_rate_limit_wait_max_min(), 60);
+}
+
+/// KT-1992 — the form has no field for the wait limit and sends back what it
+/// read: a hand-edited value above the bound is read as the value that applies,
+/// so a save of any other Workers field is not refused.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_hand_edited_wait_limit_above_the_bound_does_not_block_the_workers_form() {
+    let _restore =
+        crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
+    let data = tempfile::tempdir().unwrap();
+    crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+    let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+    let mut hand_edited = config::default_config();
+    hand_edited.workers.rate_limit_wait_max_min = 120;
+    let config = std::sync::Arc::new(tokio::sync::RwLock::new(hand_edited));
+    let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+    let Json(read) = get_workers_config(State(state.clone())).await;
+    let read = read.data.unwrap();
+    assert_eq!(read.rate_limit_wait_max_min, 60);
+
+    let (status, body) =
+        workers_reply(save_workers_config(State(state.clone()), Json(read)).await).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state.config.read().await.workers.rate_limit_wait_max_min,
+        60
+    );
+}
+
 /// KT-1750 — the commit identity and sign-off of Settings > Workers: nothing set
 /// (and so nothing written) by default, kept by an older `[workers]` table, and
 /// refused when half an identity or not an address.

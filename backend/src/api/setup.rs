@@ -763,7 +763,11 @@ pub async fn save_default_docs_dir(
 
 /// GET /api/config/workers — the task-worker policy (KT-1345).
 pub async fn get_workers_config(State(state): State<AppState>) -> Json<ApiResponse<WorkersConfig>> {
-    Json(ApiResponse::ok(state.config.read().await.workers.clone()))
+    let mut workers = state.config.read().await.workers.clone();
+    // The form sends this value back as read: a hand-edited one above the bound
+    // would make every save a 400, so it is read as the value that applies.
+    workers.rate_limit_wait_max_min = workers.effective_rate_limit_wait_max_min();
+    Json(ApiResponse::ok(workers))
 }
 
 /// GET /api/config/workers/first-build-env-secs — KT-1742: the host's
