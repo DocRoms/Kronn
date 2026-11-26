@@ -1562,7 +1562,16 @@ impl AgentsConfig {
         agent: &AgentType,
         in_container: bool,
     ) -> (bool, Option<&'static str>) {
-        let setting = self.full_access_for(agent);
+        Self::effective_full_access_of(agent, self.full_access_for(agent), in_container)
+    }
+
+    /// [`Self::effective_full_access`] for a setting read elsewhere than from
+    /// this struct (config.toml, by the code that has no application state).
+    pub fn effective_full_access_of(
+        agent: &AgentType,
+        setting: bool,
+        in_container: bool,
+    ) -> (bool, Option<&'static str>) {
         if matches!(agent, AgentType::Codex) && in_container && !setting {
             return (true, Some("forced_in_container"));
         }

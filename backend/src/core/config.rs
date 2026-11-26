@@ -96,6 +96,17 @@ pub fn saved_full_access(agent: &crate::models::AgentType) -> bool {
     }
 }
 
+/// What a launch of `agent` really runs with now: its saved setting, and Codex
+/// unsandboxed inside the container (`AgentsConfig::effective_full_access`).
+pub fn saved_effective_full_access(agent: &crate::models::AgentType) -> bool {
+    AgentsConfig::effective_full_access_of(
+        agent,
+        saved_full_access(agent),
+        crate::core::env::is_docker(),
+    )
+    .0
+}
+
 /// KT-1367 — whether config.toml names a decision model for Decide steps
 /// (`agents.model_tiers.ollama.decision`), read without any other effect.
 pub fn saved_decision_model() -> bool {

@@ -343,6 +343,7 @@ pub async fn file_request(
     let asker = bridge
         .as_ref()
         .map(|axum::Extension(caller)| crate::db::trust::TrustOrigin::from_caller(caller));
+    let asked_by = requested_by.clone();
     match state
         .db
         .with_conn(move |conn| {
@@ -364,11 +365,9 @@ pub async fn file_request(
     {
         Ok((Filed::New(request) | Filed::AlreadyPending(request), Some(_))) => {
             // KT-1492: the room's trust level granted it; the journal says so.
-            let reply = filed(
-                "granted_by_trust",
-                Some(request),
-                "Granted by this room's trust level and journalled. The grant shows in the room; continue.",
-            );
+            let granted = request.granted_access.unwrap_or(request.access);
+            let next = discussion_scope::trust_grant_next(granted, &asked_by);
+            let reply = filed("granted_by_trust", Some(request), next);
             (StatusCode::OK, Json(ApiResponse::ok(reply)))
         }
         Ok((outcome, _)) => {

@@ -350,7 +350,8 @@ fn room_scope_names_the_same_access_levels_on_both_sides() {
     for sentence in [
         "plan (planning only: create and edit tasks there, `project_ids` naming it; its files stay read-only; formerly called write)",
         "code (plan, and you edit that project's checkout like your own: one project, never every project",
-        "the grant is applied for Claude Code only, a full-access agent ignores the room scope and the grant is not enforced for it",
+        "Claude Code edits it, and so does Codex running with full access; any other launch is told in its room context what stops it and never works on a copy instead",
+        "In the journal, a revoked grant with a null `project_id` and a source of `link` or `request` names a project this room no longer reaches.",
     ] {
         assert!(
             ROOM_SCOPE_MANUAL.contains(sentence),

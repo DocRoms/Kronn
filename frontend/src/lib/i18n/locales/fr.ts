@@ -2640,7 +2640,7 @@ const fr: TranslationDict = {
   'disc.scopeCode': 'code (modifie le checkout)',
   'disc.scopeReadAllows': 'Lit ce projet : ses tâches, rooms, runs et pages, et ses fichiers en lecture seule (pas ses fichiers .env ni ses credentials).',
   'disc.scopePlanAllows': 'Planifie dans ce projet : crée et modifie ses tâches. Ses fichiers restent en lecture seule (pas ses fichiers .env ni ses credentials).',
-  'disc.scopeCodeAllows': 'Planifie et modifie les fichiers de ce projet comme les siens, dans son checkout (Claude Code uniquement). Ses fichiers .env, configs MCP et credentials restent fermés, ainsi que sa config et ses hooks Git et ses réglages d’agents (.claude, .cursor, fichiers d’instructions).',
+  'disc.scopeCodeAllows': 'Planifie et modifie les fichiers de ce projet comme les siens, dans son checkout. Aujourd’hui : Claude Code, et Codex lancé avec l’accès complet. Ses fichiers .env, configs MCP et credentials restent fermés, ainsi que sa config et ses hooks Git et ses réglages d’agents (.claude, .cursor, fichiers d’instructions) ; un agent lancé avec l’accès complet reçoit seulement la consigne de ne pas y toucher.',
   'disc.scopeAllProjects': 'Tous les projets',
   'disc.scopeAllRead': 'Tous les projets · lecture',
   'disc.scopeAllWrite': 'Tous les projets · planification',

@@ -903,7 +903,7 @@ pub fn project_refusal(scope: &BridgeScope, read_only: bool) -> String {
     } else if scope.room_grant_discussions.is_empty() {
         format!("{what}: a worker reaches its task's project only; the principal asks for more")
     } else if read_only {
-        format!("{what}: ask a human for write access with room_scope({{project, access: \"write\", reason}})")
+        format!("{what}: ask a human with room_scope({{project, access: \"plan\", reason}}), or access \"code\" to edit its files")
     } else {
         format!("{what}: ask a human with room_scope({{project, access, reason}})")
     }
@@ -2952,6 +2952,54 @@ pub fn scope_response(
     scope_response_in(route, data, grant, &Reach::bound_only(bound), residences)
 }
 
+/// KT-2102 — a room's own agent reads its room's whole scope journal. A revoked
+/// grant, or a request on a project the token does not reach, was dropped with
+/// its row, so the agent could not tell that its grant had been taken back. The
+/// row stays; the project it names is blanked. Any other token: unchanged. Never an
+/// active grant: there a blank project means every project, so an unreached one is
+/// dropped as before.
+fn blank_unreached_scope_projects(
+    route: &BridgeRoute,
+    data: &mut serde_json::Value,
+    grant: &BridgeGrant,
+    reach: &Reach,
+) {
+    if route.method != "GET" || route.pattern != "/api/discussions/{id}/scope" {
+        return;
+    }
+    let Some(fields) = data.as_object_mut() else {
+        return;
+    };
+    let room = match fields.get("discussion_id").and_then(|id| id.as_str()) {
+        Some(room)
+            if grant
+                .scope
+                .room_grant_discussions
+                .iter()
+                .any(|own| own == room) =>
+        {
+            room.to_owned()
+        }
+        _ => return,
+    };
+    for list in ["revoked", "requests"] {
+        let Some(rows) = fields.get_mut(list).and_then(|rows| rows.as_array_mut()) else {
+            continue;
+        };
+        for row in rows.iter_mut().filter_map(|row| row.as_object_mut()) {
+            let own = row.get("discussion_id").and_then(|id| id.as_str()) == Some(room.as_str());
+            let unreached = row
+                .get("project_id")
+                .and_then(|project| project.as_str())
+                .is_some_and(|project| !reach.reads(project));
+            if own && unreached {
+                row.insert("project_id".into(), serde_json::Value::Null);
+                row.insert("project_name".into(), serde_json::Value::Null);
+            }
+        }
+    }
+}
+
 /// [`scope_response`] with the room grants.
 pub fn scope_response_in(
     route: &BridgeRoute,
@@ -2961,6 +3009,7 @@ pub fn scope_response_in(
     residences: &Residences,
 ) -> Result<(), Refusal> {
     strip_credentials(data);
+    blank_unreached_scope_projects(route, data, grant, reach);
     let scoper = Scoper {
         route,
         grant,

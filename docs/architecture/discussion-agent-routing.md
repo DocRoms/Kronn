@@ -87,7 +87,7 @@ host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
 [src: file: backend/src/api/disc_invite.rs:1154-1158#AWARENESS_MAX_MESSAGES]
 [src: file: backend/scripts/disc-introspection-mcp.py:7447-7478#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12493-12500#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12499-12506#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server

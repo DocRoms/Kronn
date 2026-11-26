@@ -711,7 +711,14 @@ fn a_project_refusal_names_the_way_out_for_its_caller() {
         ..Default::default()
     };
     assert!(project_refusal(&room, false).contains("room_scope"));
-    assert!(project_refusal(&room, true).contains("write"));
+    // The levels an agent may ask for are read, plan and code: `write` is a
+    // legacy alias the refusal no longer teaches.
+    let read_only = project_refusal(&room, true);
+    assert!(
+        read_only.contains("access: \"plan\"") && read_only.contains("\"code\""),
+        "{read_only}"
+    );
+    assert!(!read_only.contains("write"), "{read_only}");
     let for_step = project_refusal(&step, false);
     assert!(
         for_step.contains("workflow's scope") && for_step.contains("Projects accessible"),

@@ -199,10 +199,16 @@ or not the path exists when the turn starts:
   directories are in `denyWrite` of a launch only when the vault protection is on
   (`core::vault_guard`); the overlap refusal above holds either way.
 
-Full-access agents (Codex with full access, Gemini, OpenCode, Kiro…) ignore a
-project's scope: nothing is opened or closed for them, a `code` grant is not
-enforced, and their context says so. Codex with its default sandbox is told the
-grant is opened for Claude Code only.
+Nothing is opened or closed for a launch that runs with full access. Claude Code
+and Codex are then not confined: with a `code` grant they edit the project like
+their own, and their context tells them never to open its secrets (KT-2102). The
+others cannot use a `code` grant yet, and their context names what stops them and
+forbids working on a copy: Codex with its full access off edits no project (a
+human enables Config › Agents › Codex › Full access); a native ACP agent (Gemini,
+OpenCode, Kiro…) is held to the room's own project by its permission broker,
+full access or not; an HTTP agent's file tools reach the room's own project only.
+One function decides it for the context block and for the grant's journal line
+(`models::discussion_scope::edit_access`).
 
 ## Run artifacts directory
 
