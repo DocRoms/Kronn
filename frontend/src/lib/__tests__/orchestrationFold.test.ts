@@ -152,6 +152,8 @@ describe('requiresUserAction', () => {
       'provider-quota-escalation:job-1',
       'orch-disk-pressure:now',
       'orch-integration-refused:exec-1:2',
+      'orch-worker-undelivered:exec-1:job-1',
+      // Posted before the id was per dispatch: still a decision to take.
       'orch-worker-undelivered:exec-1',
       'orch-worker-stopped:exec-1:job-1',
       'orch-worker-timed-out:exec-1:job-1',

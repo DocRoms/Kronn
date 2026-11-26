@@ -18210,6 +18210,21 @@ async fn room_message(db: &Database, room: String, id: String) -> Option<String>
     .unwrap()
 }
 
+/// The undelivered-worker notices of `execution_id` in `room`, oldest first:
+/// one per dispatch that ended without delivering (KT-2108).
+async fn undelivered_notices(db: &Database, room: String, execution_id: &str) -> Vec<String> {
+    let prefix = format!("orch-worker-undelivered:{execution_id}:");
+    db.with_read_conn(move |conn| {
+        Ok(crate::db::discussions::list_messages(conn, &room)?
+            .into_iter()
+            .filter(|message| message.id.starts_with(&prefix))
+            .map(|message| message.content)
+            .collect())
+    })
+    .await
+    .unwrap()
+}
+
 /// Make a deferred dispatch due and claim it, as the next scanner pass does.
 async fn claim_when_due(
     db: &Database,
@@ -18316,15 +18331,14 @@ async fn a_fallback_refused_at_spawn_fails_fast_and_the_next_link_is_tried() {
     // RED-1 — a link took the work over: the execution was never parked and
     // the principal was not told to reassign what Kronn reassigned.
     assert_eq!(next.status, TaskExecutionStatus::Working);
-    let undelivered = format!("orch-worker-undelivered:{}", was.id);
     assert!(
-        room_message(&db, next.parent_discussion_id.clone(), undelivered.clone())
+        undelivered_notices(&db, next.parent_discussion_id.clone(), &was.id)
             .await
-            .is_none(),
+            .is_empty(),
         "no undelivered notice while a link is taking over"
     );
-    // …and the notice is still unspent: the replacement ending without a
-    // delivery parks the execution and wakes the principal, once.
+    // …and the replacement ending without a delivery parks the execution and
+    // wakes the principal with its own notice.
     let (job_id, discussion) = (replacement.clone(), queued.discussion_id.clone());
     db.with_conn(move |conn| {
         crate::api::discussions::runtime::persist_dispatch_settlement(
@@ -18343,10 +18357,21 @@ async fn a_fallback_refused_at_spawn_fails_fast_and_the_next_link_is_tried() {
         exec_of(&db, &was.id).await.status,
         TaskExecutionStatus::Interrupted
     );
-    let spent = room_message(&db, next.parent_discussion_id.clone(), undelivered)
-        .await
-        .expect("the principal is told when the replacement ends without delivery");
+    let spent = room_message(
+        &db,
+        next.parent_discussion_id.clone(),
+        format!("orch-worker-undelivered:{}:{replacement}", was.id),
+    )
+    .await
+    .expect("the principal is told when the replacement ends without delivery");
     assert!(spent.contains("sans livraison durable"), "{spent}");
+    assert_eq!(
+        undelivered_notices(&db, next.parent_discussion_id.clone(), &was.id)
+            .await
+            .len(),
+        1,
+        "the refused launch that was handed over posted none"
+    );
     assert!(
         !db.with_conn(
             |conn| crate::db::orchestration::provider_quota_unavailable_at(
@@ -18435,7 +18460,7 @@ async fn a_fallback_refused_at_spawn_with_no_link_left_stops_and_says_why_in_bot
         room_message(
             &db,
             after.parent_discussion_id.clone(),
-            format!("orch-worker-undelivered:{}", was.id)
+            format!("orch-worker-undelivered:{}:{refused}", was.id)
         )
         .await
         .is_some_and(|notice| notice.contains("réaffecte ou annule")),
@@ -18543,13 +18568,9 @@ async fn a_chain_link_refused_at_spawn_hands_the_worker_to_the_next_link_without
         "the chain took the work over: it was never parked"
     );
     assert!(
-        room_message(
-            &db,
-            next.parent_discussion_id.clone(),
-            format!("orch-worker-undelivered:{}", was.id)
-        )
-        .await
-        .is_none(),
+        undelivered_notices(&db, next.parent_discussion_id.clone(), &was.id)
+            .await
+            .is_empty(),
         "no undelivered notice before an automatic move"
     );
     assert_eq!(
@@ -18850,10 +18871,6 @@ async fn a_refused_launch_whose_execution_the_return_moved_says_nothing() {
             format!("worker-launch-fallback:{refused}"),
         ),
         (
-            after.parent_discussion_id.clone(),
-            format!("orch-worker-undelivered:{}", was.id),
-        ),
-        (
             job.discussion_id.clone(),
             format!("worker-launch-refused-child:{refused}"),
         ),
@@ -18863,6 +18880,12 @@ async fn a_refused_launch_whose_execution_the_return_moved_says_nothing() {
             "{id} must not be posted"
         );
     }
+    assert!(
+        undelivered_notices(&db, after.parent_discussion_id.clone(), &was.id)
+            .await
+            .is_empty(),
+        "no undelivered notice must be posted"
+    );
 }
 
 /// KT-1758 — the late interrupt of a hand-over nobody took is robust: a
@@ -18902,13 +18925,11 @@ async fn a_late_interrupt_whose_notice_fails_still_parks_the_execution() {
 
     let parked = exec_of(&db, &was.id).await;
     assert_eq!(parked.status, TaskExecutionStatus::Interrupted);
-    assert!(room_message(
-        &db,
-        parked.parent_discussion_id.clone(),
-        format!("orch-worker-undelivered:{}", was.id)
-    )
-    .await
-    .is_none());
+    assert!(
+        undelivered_notices(&db, parked.parent_discussion_id.clone(), &was.id)
+            .await
+            .is_empty()
+    );
 }
 
 /// KT-1758 — an execution the campaign's own quota fallback moved from Claude
@@ -21244,6 +21265,302 @@ async fn deliver_refuses_claimed_files_when_head_is_still_the_execution_base() {
     );
 }
 
+/// A native worker execution on `main`, with what its trusted runner supplies
+/// on a delivery: `(execution, child room, dispatch id, dispatch trigger)`.
+async fn native_worker_execution(
+    db: &Database,
+    repo: &Path,
+    key: &str,
+) -> (TaskExecution, String, String, String) {
+    let (task_ref, parent_id, _) = seed(db, repo).await;
+    let execution = provision_single_task_execution(
+        db,
+        ProvisionInput {
+            task_reference: task_ref,
+            parent_discussion_id: parent_id,
+            worker: native_worker(),
+            base_rev: Some("main".into()),
+            idempotency_key: Some(key.into()),
+        },
+    )
+    .await
+    .unwrap();
+    let child = execution.sub_discussion_id.clone().unwrap();
+    let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
+    let lookup = dispatch_job_id.clone();
+    let trigger = db
+        .with_conn(move |conn| {
+            Ok(crate::db::agent_dispatch::get(conn, &lookup)?
+                .unwrap()
+                .trigger_message_id)
+        })
+        .await
+        .unwrap();
+    (execution, child, dispatch_job_id, trigger)
+}
+
+/// What a refused hand-back must leave behind: no delivery row, no review
+/// obligation, no review request in the parent room, and the refusal journaled.
+async fn assert_nothing_was_delivered(db: &Database, exec_id: &str, parent: &str, detail: &str) {
+    assert_eq!(
+        exec_of(db, exec_id).await.status,
+        TaskExecutionStatus::Working,
+        "the execution is not moved to review"
+    );
+    assert_eq!(delivery_count(db).await, 0, "no delivery row");
+    assert_eq!(
+        count(
+            db,
+            "SELECT COUNT(*) FROM task_execution_events WHERE action = 'review_requested'"
+        )
+        .await,
+        0,
+        "no review obligation"
+    );
+    assert!(
+        messages_of(db, parent)
+            .await
+            .iter()
+            .all(|message| !message.id.starts_with("orch-review-request:")),
+        "the principal is not asked to review nothing"
+    );
+    let id = exec_id.to_string();
+    let journaled = db
+        .with_conn(move |conn| crate::db::orchestration::latest_delivery_refusal(conn, &id))
+        .await
+        .unwrap();
+    assert_eq!(journaled.as_deref(), Some(detail));
+}
+
+/// KT-1992 — a manifest with no commit past the base and no DoD item met is a
+/// hand-back: it is refused with the worker's own reason and nothing is delivered.
+#[tokio::test]
+async fn a_delivery_with_no_commit_and_no_dod_item_met_is_refused_as_a_hand_back() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task_ref, parent_id, _child_id, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let path = managed_worktree_path(&db, &exec_id).await;
+    let head = git_rev(Path::new(&path), "HEAD");
+    let dod_id = dod_id_for_execution(&db, &exec_id).await;
+    let run_by_a_dispatch = exec_of(&db, &exec_id).await.dispatch_job_id.is_some();
+    let handed_back =
+        manifest_json_with_files_for_dod(&head, serde_json::json!([]), &dod_id, false);
+
+    let outcome = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &handed_back)
+        .await
+        .unwrap();
+    let DeliverOutcome::InvalidManifest(detail) = outcome else {
+        panic!("a hand-back with nothing in it must be refused, got {outcome:?}")
+    };
+    assert!(detail.starts_with("nothing to review"), "{detail}");
+    assert!(detail.contains(&short_sha(&head)), "{detail}");
+    assert!(
+        detail.contains("none of the 1 Definition of Done items is met"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("«did the thing» (the worker's reason)"),
+        "{detail}"
+    );
+    assert_eq!(
+        detail.contains("Kronn parks the execution"),
+        run_by_a_dispatch,
+        "only a worker run by a dispatch is told it will be parked: {detail}"
+    );
+    assert!(
+        !detail.contains("your turn") && !detail.contains("Do not call"),
+        "the principal reads this text too, so it gives no order to its reader: {detail}"
+    );
+    assert_nothing_was_delivered(&db, &exec_id, &parent_id, &detail).await;
+
+    // The status shows 160 characters of the refusal: the reason is inside them, and a
+    // credential the worker quoted is masked before the text is stored.
+    const SECRET: &str = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+    let mut quoting: serde_json::Value = serde_json::from_str(&handed_back).unwrap();
+    quoting["summary"] = serde_json::json!(format!(
+        "the push is refused with token={SECRET}, so the build tools could not be fetched"
+    ));
+    let outcome =
+        deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &quoting.to_string())
+            .await
+            .unwrap();
+    let DeliverOutcome::InvalidManifest(detail) = outcome else {
+        panic!("a hand-back with nothing in it must be refused, got {outcome:?}")
+    };
+    assert!(!detail.contains(SECRET), "{detail}");
+    let shown: String = format!("delivery refused: {detail}")
+        .chars()
+        .take(160)
+        .collect();
+    assert!(
+        shown.contains("so the build tools could not be fetched"),
+        "the compact status cuts the reason off: {shown}"
+    );
+}
+
+/// KT-1992 — the limit of the rule: no commit, but a DoD item met (a
+/// verification task) is still a delivery.
+#[tokio::test]
+async fn a_delivery_with_no_commit_but_a_dod_item_met_is_still_a_delivery() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task_ref, _parent_id, _child_id, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let verified = clean_manifest_for_execution(&db, &exec_id).await;
+
+    let outcome = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &verified)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, DeliverOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// KT-1992 — the limit of the rule: a commit with no DoD item met is still a
+/// delivery; the approval guard is what holds it.
+#[tokio::test]
+async fn a_delivery_with_a_commit_and_no_dod_item_met_is_still_a_delivery() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task_ref, _parent_id, _child_id, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
+    let head = git_rev(Path::new(&path), "HEAD");
+
+    let outcome = deliver_worker_manifest(
+        &db,
+        &exec_id,
+        "ClaudeCode",
+        "sess-a",
+        &manifest_json_unmet(&db, &exec_id, &head).await,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, DeliverOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// KT-1992 — a native worker's projected delivery follows the same rule, and
+/// is told its turn's end parks the execution.
+#[tokio::test]
+async fn the_same_rule_holds_for_a_native_projected_delivery() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (execution, child, dispatch_job_id, trigger) =
+        native_worker_execution(&db, repo.path(), "native-hand-back").await;
+    let handed_back = serde_json::json!({
+        "tests": [],
+        "dod_status": [{ "met": false, "evidence": "not started: the build tools are missing" }],
+        "docs": [], "migrations": [], "risks": [], "limitations": [],
+        "summary": "I cannot run   the build here,\nso nothing was changed",
+        "tests_executed": { "executed": false, "which": [] }
+    })
+    .to_string();
+
+    let outcome = deliver_native_worker_manifest(
+        &db,
+        &execution.id,
+        NativeExecutionCaller {
+            discussion_id: &child,
+            agent_type: &AgentType::ClaudeCode,
+            source_message_id: Some(&trigger),
+            alias: "Claude Code",
+            actor_session_id: Some("native-delivery-turn"),
+        },
+        &dispatch_job_id,
+        &handed_back,
+    )
+    .await
+    .unwrap();
+    let DeliverOutcome::InvalidManifest(detail) = outcome else {
+        panic!("a native hand-back with nothing in it must be refused, got {outcome:?}")
+    };
+    assert!(detail.starts_with("nothing to review"), "{detail}");
+    assert!(
+        detail.contains("«I cannot run the build here, so nothing was changed»"),
+        "the reason is on one line: {detail}"
+    );
+    assert!(detail.contains("Kronn parks the execution"), "{detail}");
+    assert_nothing_was_delivered(&db, &execution.id, &execution.parent_discussion_id, &detail)
+        .await;
+
+    // The same assertions with the item met are a delivery.
+    let outcome = deliver_native_worker_manifest(
+        &db,
+        &execution.id,
+        NativeExecutionCaller {
+            discussion_id: &child,
+            agent_type: &AgentType::ClaudeCode,
+            source_message_id: Some(&trigger),
+            alias: "Claude Code",
+            actor_session_id: Some("native-delivery-turn"),
+        },
+        &dispatch_job_id,
+        &projected_manifest_for_execution(&db, &execution.id).await,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, DeliverOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// KT-1992 — the brief says before the worker tries that an empty manifest is
+/// refused, and promises the parking only to a worker Kronn launched.
+#[test]
+fn the_worker_brief_says_not_to_deliver_an_empty_manifest() {
+    let brief = |lang, projection| {
+        worker_brief_markdown_in(
+            lang,
+            "KT-1992",
+            "Empty",
+            "desc",
+            &[],
+            "/wt",
+            "branch",
+            "abc",
+            true,
+            projection,
+            None,
+            true,
+        )
+    };
+    let en = brief(RoomLang::En, true);
+    assert!(
+        en.contains(
+            "refused, not silently accepted). If you cannot do the task, do not deliver: a \
+             manifest with no commit and no DoD item met is refused. End your turn with one \
+             paragraph saying what blocks you; Kronn parks the execution and tells the principal."
+        ),
+        "{en}"
+    );
+    let fr = brief(RoomLang::Fr, true);
+    assert!(
+        fr.contains(
+            "Si tu ne peux pas faire la tâche, ne livre pas : un manifeste sans commit et sans \
+             aucun item de DoD atteint est refusé. Termine ton tour par un paragraphe qui dit ce \
+             qui te bloque ; Kronn met l'exécution en attente et prévient le principal."
+        ),
+        "{fr}"
+    );
+    // A joined CLI session has no dispatch whose end would park the execution.
+    for joined in [brief(RoomLang::En, false), brief(RoomLang::Fr, false)] {
+        assert!(
+            joined.contains("no DoD item met is refused")
+                || joined.contains("aucun item de DoD atteint est refusé"),
+            "{joined}"
+        );
+        assert!(
+            !joined.contains("Kronn parks the execution")
+                && !joined.contains("Kronn met l'exécution en attente"),
+            "{joined}"
+        );
+    }
+}
+
 /// Commit `file` in the execution worktree with `message`, as a CLI worker
 /// does itself, and return the manifest for the new HEAD.
 async fn cli_worker_commit(
@@ -22303,9 +22620,27 @@ fn review_request_changes(comment: &str) -> String {
     .to_string()
 }
 
+const UNMET_WORK_FILE: &str = "unmet-work.txt";
+
+/// KT-1992 — the work a delivery whose DoD item is unmet still hands over: one
+/// commit in the execution worktree, the one [`manifest_json_unmet`] declares.
+fn commit_unmet_work(worktree: &Path) {
+    std::fs::write(worktree.join(UNMET_WORK_FILE), "work in progress\n").unwrap();
+    git(worktree, &["add", UNMET_WORK_FILE]);
+    let committed = git(worktree, &["commit", "-m", "work with an unmet DoD item"]);
+    assert!(committed.status.success(), "{committed:?}");
+}
+
+/// The manifest of a worker that committed [`commit_unmet_work`] and reports
+/// its DoD item unmet; `head_sha` is the HEAD after that commit.
 async fn manifest_json_unmet(db: &Database, exec_id: &str, head_sha: &str) -> String {
     let dod_id = dod_id_for_execution(db, exec_id).await;
-    manifest_json_with_files_for_dod(head_sha, serde_json::json!([]), &dod_id, false)
+    manifest_json_with_files_for_dod(
+        head_sha,
+        serde_json::json!([{ "path": UNMET_WORK_FILE, "kind": "added" }]),
+        &dod_id,
+        false,
+    )
 }
 
 /// The managed child-worktree path of an execution.
@@ -22803,6 +23138,7 @@ async fn a_post_integration_dod_unmet_in_the_manifest_does_not_block_approval() 
     let db = Database::open_in_memory().unwrap();
     let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
     let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     let dod_id = dod_id_for_execution(&db, &exec_id).await;
     mark_dod_post_integration_in_db(&db, &exec_id, &dod_id).await;
@@ -22847,6 +23183,7 @@ async fn a_review_can_declare_an_unmet_dod_a_post_integration_check() {
     let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
     unticked_dod(&db, &exec_id).await;
     let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     let dod_id = dod_id_for_execution(&db, &exec_id).await;
     deliver_worker_manifest(
@@ -22983,6 +23320,7 @@ async fn an_unmet_dod_carried_to_an_open_task_integrates_and_is_detached() {
     let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
     unticked_dod(&db, &exec_id).await;
     let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     let dod_id = dod_id_for_execution(&db, &exec_id).await;
     deliver_worker_manifest(
@@ -23067,6 +23405,7 @@ async fn a_dod_carried_to_a_missing_closed_or_unrelated_task_is_refused() {
     let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
     unticked_dod(&db, &exec_id).await;
     let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     let dod_id = dod_id_for_execution(&db, &exec_id).await;
     deliver_worker_manifest(
@@ -23152,6 +23491,7 @@ async fn unmet_delivery(db: &Database, repo: &Path) -> (String, String, String) 
     let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(db, repo).await;
     unticked_dod(db, &exec_id).await;
     let path = managed_worktree_path(db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     let dod_id = dod_id_for_execution(db, &exec_id).await;
     let delivered = deliver_worker_manifest(
@@ -27372,6 +27712,7 @@ async fn approve_is_refused_when_a_dod_is_not_met() {
     let db = Database::open_in_memory().unwrap();
     let (_task_ref, _parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
     let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     deliver_worker_manifest(
         &db,
@@ -27424,6 +27765,7 @@ async fn a_dod_verified_by_the_principal_unblocks_approval() {
     let db = Database::open_in_memory().unwrap();
     let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
     let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     deliver_worker_manifest(
         &db,
@@ -27467,6 +27809,7 @@ async fn a_live_planning_checkbox_cannot_replace_attempt_scoped_review_evidence(
     let db = Database::open_in_memory().unwrap();
     let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
     let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     let dod_id = dod_id_for_execution(&db, &exec_id).await;
     deliver_worker_manifest(
@@ -27575,6 +27918,7 @@ async fn an_allowed_worker_self_review_cannot_forge_principal_dod_evidence() {
     let db = Database::open_in_memory().unwrap();
     let (_task_ref, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
     let path = managed_worktree_path(&db, &exec_id).await;
+    commit_unmet_work(Path::new(&path));
     let head = git_rev(Path::new(&path), "HEAD");
     let dod_id = dod_id_for_execution(&db, &exec_id).await;
     deliver_worker_manifest(
