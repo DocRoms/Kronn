@@ -10,7 +10,7 @@ prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
 [src: file: backend/src/api/agent_tools.rs:4782-4784#signals]
-[src: file: backend/scripts/disc-introspection-mcp.py:11030-11031#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:11036-11037#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]

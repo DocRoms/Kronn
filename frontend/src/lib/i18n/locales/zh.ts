@@ -2612,7 +2612,7 @@ const zh: TranslationDict = {
   "disc.scopeCode": "代码（修改检出）",
   "disc.scopeReadAllows": "读取此项目：其任务、房间、运行和页面，以及只读的文件（不含其 .env 文件和凭据）。",
   "disc.scopePlanAllows": "在此项目中做规划：创建和编辑其任务。其文件仍为只读（不含其 .env 文件和凭据）。",
-  "disc.scopeCodeAllows": "做规划，并在其检出中像自己的项目一样编辑此项目的文件（仅限 Claude Code）。其 .env 文件、MCP 配置和凭据仍然关闭，其 Git 配置和钩子以及智能体设置（.claude、.cursor、说明文件）也一样。",
+  "disc.scopeCodeAllows": "做规划，并在其检出中像自己的项目一样编辑此项目的文件。目前可编辑的智能体：Claude Code，以及以完全访问运行的 Codex。其 .env 文件、MCP 配置和凭据仍然关闭，其 Git 配置和钩子以及智能体设置（.claude、.cursor、说明文件）也一样；以完全访问运行的智能体只会被告知不要触碰它们。",
   "disc.scopeAllProjects": "所有项目",
   "disc.scopeAllRead": "所有项目 · 读取",
   "disc.scopeAllWrite": "所有项目 · 规划",

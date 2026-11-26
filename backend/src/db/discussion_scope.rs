@@ -9,8 +9,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 use crate::models::discussion_scope::{
-    DiscussionProjectGrant, DiscussionScope, DiscussionScopeRequest, ScopeAccess, ScopeGrantSource,
-    ScopeRequestStatus, WorkflowScope, WorkflowScopeEntry,
+    edit_access, CheckoutState, DiscussionProjectGrant, DiscussionScope, DiscussionScopeRequest,
+    EditAccess, EditBlock, ScopeAccess, ScopeGrantSource, ScopeRequestStatus, WorkflowScope,
+    WorkflowScopeEntry,
 };
 
 use super::discussion_scope_grants::{
@@ -422,8 +423,59 @@ fn insert_grant(
     Ok(id)
 }
 
-fn grant_receipt(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<()> {
+/// KT-2102 — what the receipt of a `code` grant adds when the agent that asked
+/// cannot edit the project as it runs now: without it the grant read as usable
+/// and the agent worked on a copy. `asked_by` is a request's `requested_by`.
+fn cannot_edit_yet(asked_by: &str) -> Option<String> {
+    let agent = crate::db::discussions::parse_agent_type(asked_by.strip_prefix('@')?).ok()?;
+    // The agent's own saved setting, read now: its next launch runs with it.
+    let full_access = crate::core::config::saved_effective_full_access(&agent);
+    let label = crate::agents::runner::agent_settings_label(&agent);
+    // A checkout is looked at by a launch only: one it cannot open says so there.
+    let why = match edit_access(
+        &agent,
+        full_access,
+        ScopeAccess::Code,
+        CheckoutState::Openable,
+    ) {
+        EditAccess::Blocked(EditBlock::CodexSandbox) => format!(
+            "with its full access off it edits no project; enable Config › Agents › {label} › \
+             Full access, or ask another agent"
+        ),
+        EditAccess::Blocked(EditBlock::NativeBroker | EditBlock::HttpTools) => {
+            "it reaches the files of this room's own project only; ask Claude Code, or Codex \
+             with full access"
+                .to_string()
+        }
+        _ => return None,
+    };
+    Some(format!(". {label} cannot edit it yet: {why}"))
+}
+
+/// KT-2102 — what the reply of a request granted at once tells the agent that asked. One
+/// that cannot edit a `code` grant as it runs now learns it here, before it tries: the
+/// room's scope block only lists the project at its next turn.
+pub fn trust_grant_next(granted: ScopeAccess, asked_by: &str) -> &'static str {
+    if granted == ScopeAccess::Code && cannot_edit_yet(asked_by).is_some() {
+        "Granted by this room's trust level and journalled, but you cannot edit this project \
+         as you run now: the grant line in the room says why and what to do. Do not \
+         clone or copy the project elsewhere to work around it: say so and stop."
+    } else {
+        "Granted by this room's trust level and journalled. The grant shows in the room; \
+         continue."
+    }
+}
+
+fn grant_receipt(
+    conn: &Connection,
+    grant: &DiscussionProjectGrant,
+    asked_by: Option<&str>,
+) -> Result<()> {
     let target = grant_target(conn, grant)?;
+    let blocked = asked_by
+        .filter(|_| grant.access == ScopeAccess::Code && grant.source != ScopeGrantSource::General)
+        .and_then(cannot_edit_yet)
+        .unwrap_or_default();
     let what = match (grant.source, grant.access) {
         (ScopeGrantSource::General, _) => "write",
         (_, ScopeAccess::Read) => "read",
@@ -435,7 +487,7 @@ fn grant_receipt(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<()
         &grant.discussion_id,
         format!("scope-grant:{}", grant.id),
         format!(
-            "{} granted {what} access to {target} — {}",
+            "{} granted {what} access to {target} — {}{blocked}",
             grant.granted_by,
             if grant.source == ScopeGrantSource::General {
                 "no project's credentials or API configs"
@@ -469,7 +521,8 @@ pub fn grant(
         granted_by,
     )?;
     let granted = grant_by_id(&tx, &id)?;
-    grant_receipt(&tx, &granted)?;
+    // A human's direct grant has no asking agent to answer.
+    grant_receipt(&tx, &granted, None)?;
     tx.commit()?;
     Ok(granted)
 }
@@ -824,7 +877,7 @@ pub fn decide(
     };
     let grant = grant_id.map(|id| grant_by_id(&tx, &id)).transpose()?;
     match &grant {
-        Some(granted) => grant_receipt(&tx, granted)?,
+        Some(granted) => grant_receipt(&tx, granted, Some(&request.requested_by))?,
         None => {
             receipt(
                 &tx,

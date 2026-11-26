@@ -222,6 +222,15 @@ Release notes for 0.9.3 and earlier are available in the
   lane's build and data directories, its ports and its build budget, and the
   disk check before it measures that lane. A validation left unconfined keeps
   its network and the owner's package caches; only the sandbox is offline.
+- Room scope: a project granted `code` is edited by Codex running with full
+  access, as it already was by Claude Code (KT-2102). An agent that cannot edit
+  the project as it runs now is told so and why, in its room context, in the
+  grant line of the room and in the reply of a request granted at once: the
+  setting a human can change (Config › Agents › Full access for Codex), or the
+  agent to ask instead. It is told never to clone or copy the project elsewhere
+  to work around it. A room's own agent now reads its scope journal whole: a
+  grant taken back on a project the room no longer reaches stays listed, with
+  the project left blank.
 
 ## [0.15.3] - 2026-11-19
 

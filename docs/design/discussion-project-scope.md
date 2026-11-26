@@ -31,7 +31,10 @@ project, and a human decides, visibly and revocably, what else the room reaches.
     human's screen showed (a stale screen gets a 409).
 - **Requests** (`discussion_scope_requests`): an agent of the room asks for a
   project with `room_scope({project, access, reason})`. A request grants
-  nothing. The human approves, narrows write to read, or declines. At most five
+  nothing by itself, unless the human set this room, its workflow or the
+  instance to Trusted or Full access: a request on a registered project is
+  then granted at once and journalled (`granted_by_trust`). Otherwise the
+  human approves, narrows write to read, or declines. At most five
   pending requests per room; a duplicate stays one request. A name that matches
   no project is filed the same way (and can only be declined), so the reply
   never tells an agent whether a project it cannot read exists.
@@ -197,8 +200,9 @@ request) and builds a plan (`agents/room_reach.rs`):
     metadata of a linked worktree outside the checkout is not opened either, so
     nothing but a registered checkout is ever readable through a grant.
   - **Codex**: a Codex agent keeps its default sandbox: it reads the disk as it
-    is (the granted projects included, and every other one) and writes only in
-    its working directory. Nothing is opened for it, its launch arguments are
+    is (the granted projects included, and every other one) and, with its full
+    access off, edits nothing in a room, its own project included (KT-2102; a
+    task worker writes its working directory). Nothing is opened for it, its launch arguments are
     those it had before KT-1406, and no read isolation is claimed for it: a
     revoke does not close a read for Codex. A profile that denies `:root` was
     tried and dropped: it breaks `git` (the Command Line Tools and
@@ -229,7 +233,10 @@ read on disk whatever the operating system user can read, so no directory is
 added for it (narrowing it to the read-only sandbox would be a regression); it
 is still told what the room reaches and how to ask. The room scope governs Kronn
 objects through the bridge, and, for an agent that is not in full access, which
-other checkouts it may read. Reading another repository's code from a workflow
+other checkouts it may read. A `code` grant is the human's word that the room may
+edit that project: Claude Code and Codex running with full access edit it like
+their own (KT-2102), and are told never to open its secrets, which no mechanism
+closes for an unconfined launch. Reading another repository's code from a workflow
 still goes through `read_only_repos` or a copy.
 
 ## Tests

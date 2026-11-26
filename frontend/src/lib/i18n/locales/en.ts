@@ -2630,7 +2630,7 @@ const en: TranslationDict = {
   'disc.scopeCode': 'code (edits the checkout)',
   'disc.scopeReadAllows': 'Reads this project: its tasks, rooms, runs and pages, and its files read-only (not its .env files or credentials).',
   'disc.scopePlanAllows': 'Plans in this project: creates and edits its tasks. Its files stay read-only (not its .env files or credentials).',
-  'disc.scopeCodeAllows': 'Plans and edits this project’s files like its own, in its checkout (Claude Code only). Its .env files, MCP configs and credentials stay closed, and so do its Git config and hooks and its agent settings (.claude, .cursor, instruction files).',
+  'disc.scopeCodeAllows': 'Plans and edits this project’s files like its own, in its checkout. Today: Claude Code, and Codex running with full access. Its .env files, MCP configs and credentials stay closed, and so do its Git config and hooks and its agent settings (.claude, .cursor, instruction files); an agent running with full access is only told to leave them alone.',
   'disc.scopeAllProjects': 'Every project',
   'disc.scopeAllRead': 'Every project · read',
   'disc.scopeAllWrite': 'Every project · plan',

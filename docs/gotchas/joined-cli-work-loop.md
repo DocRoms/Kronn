@@ -49,8 +49,8 @@ CLI routing. It no longer promises that cursor reads can never be replayed or
 that quiet returns cost nothing. The bridge's runtime functions did not change.
 [src: file: backend/scripts/disc-introspection-mcp.py:10156-10192#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/disc-introspection-mcp.py:10524-10525#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10920-10924#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:12336#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10926-10930#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:12342#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12879-12929#JoinedRoomWorkProtocolTests]
 
 ## Deaf windows in the bridge wait (KT-703)
@@ -78,7 +78,7 @@ These fixes do not cover host behaviour. A host can still move a long wait to
 the background. Any other Kronn call ends the wait (`wait_preempted`), and an
 interactive turn that ends while the wait runs in the background is outside
 Kronn's control. A real Claude Code run is still needed to check that case.
-[src: file: backend/scripts/disc-introspection-mcp.py:12493-12501#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12499-12507#_with_wait_preempted]
 
 ## Qualification scope
 

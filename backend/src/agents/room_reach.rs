@@ -7,12 +7,15 @@
 use std::path::{Path, PathBuf};
 
 use crate::db::discussion_scope::{ReachedProject, RoomReach};
-use crate::models::discussion_scope::ScopeAccess;
+use crate::models::discussion_scope::{
+    edit_access, CheckoutState, EditAccess, EditBlock, ScopeAccess,
+};
 use crate::models::AgentType;
 
 use super::read_only_repos::VerifiedCheckout;
 
-/// What the agent can do with a granted project's files this turn.
+/// What the launch does with a granted project's files this turn. Whether the
+/// agent may edit them is [`PlannedProject::edit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Files {
     /// Opened as a read-only directory for this launch (Claude Code).
@@ -23,13 +26,13 @@ pub enum Files {
     /// A `code` grant that cannot be opened for editing because the checkout's
     /// `core.hooksPath` is the checkout itself: opened read-only instead.
     ReadOnlyCodeRefused,
-    /// Codex keeps its default sandbox: it reads the disk as it is, the
-    /// project included, and writes only in its working directory. Nothing is
-    /// opened for it and no read isolation is claimed (KT-1409).
+    /// Codex with its full access off: it reads the disk as it is, the project
+    /// included, and edits nothing. Nothing is opened for it and no read
+    /// isolation is claimed (KT-1409).
     CodexDefault,
-    /// The agent runs with full access: it reads the disk as it is and a
-    /// project's scope does not confine it. A `code` grant is not enforced for
-    /// it (nothing is opened or closed), and it is told so.
+    /// The launch runs with full access: nothing is opened or closed for it.
+    /// With a `code` grant, Claude Code and Codex edit the project like their
+    /// own (KT-2102).
     Unrestricted,
     /// No directory can be opened for it (provider, platform, or a path that
     /// is not a Git checkout root or overlaps the working directory).
@@ -43,9 +46,24 @@ pub enum Files {
 pub struct PlannedProject {
     pub project: ReachedProject,
     pub files: Files,
+    /// Whether the agent can edit the project in this launch, and what stops
+    /// it: [`edit_access`] decides, the context block words it.
+    pub edit: EditAccess,
     /// The validated checkout behind `Files::ReadOnlyDir`: what the launch
     /// opens, instead of resolving the registered path a second time.
     pub checkout: Option<VerifiedCheckout>,
+}
+
+/// What [`edit_access`] is told about the checkout behind `files`.
+fn checkout_state(files: Files) -> CheckoutState {
+    match files {
+        Files::ReadOnlyCodeRefused => CheckoutState::HooksAtRoot,
+        Files::Closed => CheckoutState::NotOpenable,
+        Files::BeyondTheSandbox => CheckoutState::LeftOut,
+        Files::ReadOnlyDir | Files::WritableDir | Files::CodexDefault | Files::Unrestricted => {
+            CheckoutState::Openable
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,6 +82,26 @@ pub struct RoomReachPlan {
 /// directory it can already read would be a regression. Codex is left with
 /// its default sandbox too: nothing is opened for it, a `code` grant included
 /// (its file sandbox is a separate work item).
+/// `full_access` is what the launch really runs with
+/// (`AgentsConfig::effective_full_access`), so the block and the process agree.
+pub fn plan_as_launched(
+    agent: &AgentType,
+    work_dir: Option<&Path>,
+    stored_full_access: bool,
+    in_container: bool,
+    reach: RoomReach,
+) -> RoomReachPlan {
+    // KT-2102 — Codex is unsandboxed in the container whatever its switch; the
+    // launch itself still receives the stored switch.
+    let (full_access, _) = crate::models::AgentsConfig::effective_full_access_of(
+        agent,
+        stored_full_access,
+        in_container,
+    );
+    plan(agent, work_dir, full_access, reach)
+}
+
+/// [`plan_as_launched`] once the access the launch really runs with is known.
 pub fn plan(
     agent: &AgentType,
     work_dir: Option<&Path>,
@@ -108,9 +146,11 @@ pub fn plan(
                 (Some(_), false, false) => Files::ReadOnlyDir,
                 (None, false, false) => Files::Closed,
             };
+            let edit = edit_access(agent, full_access, project.access, checkout_state(files));
             PlannedProject {
                 project,
                 files,
+                edit,
                 checkout,
             }
         })
@@ -209,6 +249,12 @@ pub fn plan(
             // Kept, closed: the launch denies its whole directory.
             entry.checkout = entry.checkout.take().map(VerifiedCheckout::closed);
             entry.files = Files::BeyondTheSandbox;
+            entry.edit = edit_access(
+                agent,
+                full_access,
+                entry.project.access,
+                checkout_state(entry.files),
+            );
         };
         for at in order.into_iter().skip(held) {
             leave_out(&mut granted[at]);
@@ -249,6 +295,123 @@ fn one_line(text: &str) -> String {
         .to_owned()
 }
 
+/// Ends every dead end on a `code` grant: an agent that could not edit cloned
+/// the project elsewhere and worked on the copy (#726).
+const NO_COPY: &str =
+    "Do not clone or copy the project elsewhere to work around it: say so and stop";
+
+/// No path: the launch holds no rule on a project it does not open.
+const BEYOND_THE_SANDBOX: &str = "files: NOT opened in this run: this room is granted more \
+     projects than your sandbox can protect at once; those granted for editing are opened \
+     first, then the others in this order. If you need this one, tell the human to remove \
+     from the room the projects it does not need, or to grant them read-only; use Kronn's \
+     tools meanwhile";
+
+impl PlannedProject {
+    /// Where the agent finds the files: the validated root of a checkout the
+    /// launch opens, else the registered path as the process sees it (in a
+    /// container the host path is mounted elsewhere).
+    fn location(&self) -> String {
+        let opened = matches!(
+            self.files,
+            Files::ReadOnlyDir | Files::WritableDir | Files::ReadOnlyCodeRefused
+        );
+        self.checkout
+            .as_ref()
+            .filter(|_| opened)
+            .map(|checkout| one_line(&checkout.root().display().to_string()))
+            .unwrap_or_else(|| {
+                let seen = crate::core::scanner::resolve_host_path(&self.project.path);
+                one_line(&seen.display().to_string())
+            })
+    }
+
+    fn access_label(&self) -> &'static str {
+        match (self.project.access, self.files) {
+            (ScopeAccess::Read, _) => "read",
+            (ScopeAccess::Plan, Files::BeyondTheSandbox) => "plan (planning in Kronn's tools)",
+            (ScopeAccess::Plan, _) => "plan (planning in Kronn's tools; its files are read-only)",
+            (ScopeAccess::Code, _) if self.edit.allowed() => {
+                "code (planning in Kronn's tools, and you edit its files)"
+            }
+            (ScopeAccess::Code, _) => {
+                "code (planning in Kronn's tools; its files are not opened for editing in your run)"
+            }
+        }
+    }
+
+    /// What the agent is told of the project's files. A `code` grant it cannot
+    /// use names what blocks it and what a human can change, then forbids a copy.
+    fn files_line(&self) -> String {
+        use EditAccess::Blocked;
+        let path = self.location();
+        match self.edit {
+            EditAccess::Opened => format!(
+                "files: {path} (open for you, writable: edit it like your own project; its \
+                 credentials stay closed: never open its `.env*`, `.mcp.json` or MCP \
+                 configs, never use its tokens. Its `.git`, Git hooks and hook \
+                 managers, `.envrc`, `.vscode` and agent config files are read-only \
+                 for you: you cannot run `git add`, `git commit` or `git stash` \
+                 there, so leave the change in the working tree and tell the human \
+                 to commit it, do not retry)"
+            ),
+            // Nothing is opened or closed for it: only these words keep the secrets shut.
+            EditAccess::Unconfined => format!(
+                "files: {path} (you run with full access: edit it like your own project; \
+                 never open its `.env*`, `.mcp.json` or MCP configs, never use its tokens, \
+                 and leave its Git hooks and agent config files as they are)"
+            ),
+            Blocked(EditBlock::GrantLevel) => match self.files {
+                Files::ReadOnlyDir | Files::WritableDir | Files::ReadOnlyCodeRefused => {
+                    format!("files: {path} (open for you, read-only: never edit it)")
+                }
+                Files::CodexDefault => format!(
+                    "files: {path} (readable: with its full access off, Codex reads the disk \
+                     as it is, this project included, and edits nothing, its own project \
+                     included; never edit it)"
+                ),
+                Files::Unrestricted => format!(
+                    "files: {path} (never edit it: only a code grant opens a project's files \
+                     for writing)"
+                ),
+                Files::Closed => {
+                    format!("files: {path} (not opened for you in this run; use Kronn's tools)")
+                }
+                Files::BeyondTheSandbox => BEYOND_THE_SANDBOX.to_string(),
+            },
+            Blocked(EditBlock::CodexSandbox) => format!(
+                "files: {path} (readable, not editable in this run: with its full access off, \
+                 Codex reads the disk as it is and edits nothing, its own project included. To \
+                 edit it, a human enables Config › Agents › Codex › Full access, or asks \
+                 another agent. {NO_COPY})"
+            ),
+            Blocked(EditBlock::NativeBroker) => format!(
+                "files: {path} (not editable by you yet: Kronn's permission broker refuses \
+                 your runtime every file outside this room's own project, whatever the grant; \
+                 never open its `.env*`, `.mcp.json` or MCP configs; another agent can edit \
+                 it (Claude Code, or Codex with full access). {NO_COPY})"
+            ),
+            Blocked(EditBlock::HttpTools) => format!(
+                "files: {path} (not opened for you in this run: your file tools reach this \
+                 room's own project only, whatever the grant; another agent can edit it \
+                 (Claude Code, or Codex with full access). {NO_COPY})"
+            ),
+            Blocked(EditBlock::HooksAtRoot) => format!(
+                "files: {path} (open for you, read-only: never edit it. The code grant is not \
+                 opened because the project's `core.hooksPath` is the checkout itself, so \
+                 every file in it would be a Git hook: tell the human. {NO_COPY})"
+            ),
+            Blocked(EditBlock::NotOpenable) => format!(
+                "files: {path} (not opened for you in this run: Kronn opens for editing only \
+                 the root of a Git checkout, on macOS or Linux, reached without a symbolic \
+                 link and apart from your working directory and its own data. Tell the human; \
+                 use Kronn's tools meanwhile. {NO_COPY})"
+            ),
+            Blocked(EditBlock::BeyondTheSandbox) => format!("{BEYOND_THE_SANDBOX}. {NO_COPY}"),
+        }
+    }
+}
+
 impl RoomReachPlan {
     /// The validated checkouts to hand to the launch: read-only roots, and the
     /// writable ones of a `code` grant (`VerifiedCheckout::is_writable`).
@@ -278,93 +441,11 @@ impl RoomReachPlan {
         } else {
             out.push_str("\nGranted projects:\n");
             for entry in &self.granted {
-                let access = match (entry.project.access, entry.files) {
-                    (ScopeAccess::Read, _) => "read",
-                    (ScopeAccess::Plan, Files::BeyondTheSandbox) => "plan (planning in Kronn's tools)",
-                    (ScopeAccess::Plan, _) => {
-                        "plan (planning in Kronn's tools; its files are read-only)"
-                    }
-                    (ScopeAccess::Code, Files::WritableDir) => {
-                        "code (planning in Kronn's tools, and you edit its files)"
-                    }
-                    // Only a launch that opens the checkout enforces the file grant.
-                    (ScopeAccess::Code, _) => {
-                        "code (planning in Kronn's tools; its files are not opened for editing in your run)"
-                    }
-                };
-                let code = entry.project.access == ScopeAccess::Code;
-                let files = match entry.files {
-                    Files::WritableDir => format!(
-                        "files: {} (open for you, writable: edit it like your own project; its \
-                         credentials stay closed: never open its `.env*`, `.mcp.json` or MCP \
-                         configs, never use its tokens. Its `.git`, Git hooks and hook \
-                         managers, `.envrc`, `.vscode` and agent config files are read-only \
-                         for you: you cannot run `git add`, `git commit` or `git stash` \
-                         there, so leave the change in the working tree and tell the human \
-                         to commit it, do not retry)",
-                        entry
-                            .checkout
-                            .as_ref()
-                            .map(|checkout| one_line(&checkout.root().display().to_string()))
-                            .unwrap_or_else(|| one_line(&entry.project.path))
-                    ),
-                    Files::ReadOnlyDir => format!(
-                        "files: {} (open for you, read-only: never edit it)",
-                        entry
-                            .checkout
-                            .as_ref()
-                            .map(|checkout| one_line(&checkout.root().display().to_string()))
-                            .unwrap_or_else(|| one_line(&entry.project.path))
-                    ),
-                    Files::ReadOnlyCodeRefused => format!(
-                        "files: {} (open for you, read-only: never edit it. The code grant is not \
-                         opened because the project's `core.hooksPath` is the checkout itself, so \
-                         every file in it would be a Git hook: tell the human)",
-                        entry
-                            .checkout
-                            .as_ref()
-                            .map(|checkout| one_line(&checkout.root().display().to_string()))
-                            .unwrap_or_else(|| one_line(&entry.project.path))
-                    ),
-                    Files::CodexDefault => format!(
-                        "files: {} (readable: Codex's default sandbox reads the disk as it is, \
-                         this project included, and writes only in your working directory; \
-                         never edit it{})",
-                        one_line(&entry.project.path),
-                        if code {
-                            ": the code grant is opened for Claude Code only, so plan the change \
-                             in Kronn's tools or tell the human"
-                        } else {
-                            ""
-                        }
-                    ),
-                    Files::Unrestricted if code => format!(
-                        "files: {} (you run with full access, which ignores a project's scope: the \
-                         code grant is not enforced for you and opens nothing; never edit it, and \
-                         never open its `.env*`, `.mcp.json` or MCP configs: plan the change in \
-                         Kronn's tools or tell the human)",
-                        one_line(&entry.project.path)
-                    ),
-                    Files::Unrestricted => format!(
-                        "files: {} (never edit it: only a code grant opens a project's files for writing)",
-                        one_line(&entry.project.path)
-                    ),
-                    Files::Closed => format!(
-                        "files: {} (not opened for you in this run; use Kronn's tools)",
-                        one_line(&entry.project.path)
-                    ),
-                    // No path: the launch holds no rule on a project it does not open.
-                    Files::BeyondTheSandbox => "files: NOT opened in this run: this room is \
-                         granted more projects than your sandbox can protect at once; those \
-                         granted for editing are opened first, then the others in this order. \
-                         If you need this one, tell the human to remove from the room the \
-                         projects it does not need, or to grant them read-only; use Kronn's \
-                         tools meanwhile"
-                        .to_string(),
-                };
                 out.push_str(&format!(
-                    "- {} — access: {access} — {files}\n",
-                    one_line(&entry.project.name)
+                    "- {} — access: {} — {}\n",
+                    one_line(&entry.project.name),
+                    entry.access_label(),
+                    entry.files_line()
                 ));
             }
         }
@@ -379,9 +460,10 @@ impl RoomReachPlan {
         out.push_str(
             "\nTo reach a project that is not granted, or for more than you have, call \
              `room_scope({project, access, reason})` with access `read`, `plan` (plan in Kronn's \
-             tools) or `code` (edit its checkout). A request grants nothing: the human \
-             approves, narrows or declines it in Kronn's UI, and an approved project applies \
-             from your next turn.\n\
+             tools) or `code` (edit its checkout). A request grants nothing by itself: the \
+             human approves, narrows or declines it in Kronn's UI, unless this room's trust \
+             level grants it at once (the reply says so); an approved project applies from \
+             your next turn.\n\
              If a read outside your working directories is refused, say which project it \
              belongs to and which case applies: the project is granted but its files are not \
              open to you in this run (say so); or it is not granted (call `room_scope`, then \
@@ -787,9 +869,13 @@ mod tests {
             .granted
             .iter()
             .all(|entry| entry.files == Files::CodexDefault));
-        assert!(codex
-            .prompt()
-            .contains("the code grant is opened for Claude Code only"));
+        // It is told which setting stops it, and not to work on a copy instead.
+        let told = codex.prompt();
+        assert!(
+            told.contains("Config › Agents › Codex › Full access") && told.contains(NO_COPY),
+            "{told}"
+        );
+        assert!(!told.contains("Claude Code only"), "{told}");
         // Claude Code: only the real checkout; the other is closed, not opened by
         // another route.
         let claude = plan(&AgentType::ClaudeCode, Some(&work), false, reach());
@@ -809,41 +895,252 @@ mod tests {
         assert!(ReadOnlyRepos::resolve_room(&AgentType::ClaudeCode, &work, &checkouts).is_err());
     }
 
+    // KT-2102 (#726) — a full-access launch is not confined: told "never edit" a
+    // project granted `code`, the agent cloned it elsewhere and worked on the copy.
     #[test]
-    fn a_full_access_agent_is_told_a_code_grant_is_not_enforced_for_it() {
+    fn a_full_access_agent_edits_a_project_granted_code() {
         let temp = tempfile::tempdir().unwrap();
         let work = temp.path().join("work");
         std::fs::create_dir(&work).unwrap();
         let repo = checkout(temp.path(), "repo");
-        let plan = plan(
-            &AgentType::ClaudeCode,
-            Some(&work),
-            true,
-            RoomReach {
-                granted: vec![reached("p1", "repo", &repo, ScopeAccess::Code)],
-                requestable: vec![],
-            },
+        let planned = |agent: AgentType, access: ScopeAccess| {
+            plan(
+                &agent,
+                Some(&work),
+                true,
+                RoomReach {
+                    granted: vec![reached("p1", "repo", &repo, access)],
+                    requestable: vec![],
+                },
+            )
+        };
+        for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+            let plan = planned(agent.clone(), ScopeAccess::Code);
+            // Nothing is opened or closed for it: the launch stays as it was.
+            assert!(plan.checkouts().is_empty());
+            assert_eq!(plan.granted[0].files, Files::Unrestricted);
+            assert_eq!(plan.granted[0].edit, EditAccess::Unconfined);
+            let prompt = plan.prompt();
+            assert!(
+                prompt.contains("code (planning in Kronn's tools, and you edit its files)")
+                    && prompt.contains("you run with full access: edit it like your own project")
+                    && prompt.contains("never open its `.env*`, `.mcp.json` or MCP configs")
+                    && prompt.contains("never use its tokens"),
+                "{agent:?}: {prompt}"
+            );
+            assert!(
+                !prompt.contains("never edit")
+                    && !prompt.contains("not enforced")
+                    && !prompt.contains("not opened for editing"),
+                "{agent:?}: {prompt}"
+            );
+            // A weaker grant still forbids the edit.
+            for access in [ScopeAccess::Read, ScopeAccess::Plan] {
+                let plan = planned(agent.clone(), access);
+                assert_eq!(
+                    plan.granted[0].edit,
+                    EditAccess::Blocked(EditBlock::GrantLevel)
+                );
+                let prompt = plan.prompt();
+                assert!(
+                    prompt.contains("never edit it"),
+                    "{agent:?} {access:?}: {prompt}"
+                );
+                assert!(!prompt.contains("edit it like your own"), "{prompt}");
+            }
+        }
+    }
+
+    // KT-2102 — the block says "edit" exactly when the launch lets the agent
+    // edit, and a `code` grant that leads nowhere names what blocks it.
+    #[test]
+    fn the_block_forbids_an_edit_only_where_the_launch_does_not_allow_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let repo = checkout(temp.path(), "repo");
+        let agents = [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::OpenCode,
+            AgentType::GeminiCli,
+            AgentType::CopilotCli,
+            AgentType::Kiro,
+            AgentType::Vibe,
+            AgentType::Ollama,
+            AgentType::LiteLlm,
+            AgentType::Nvidia,
+            AgentType::Custom,
+        ];
+        let mut editable = 0;
+        for agent in &agents {
+            for full_access in [false, true] {
+                for access in [ScopeAccess::Read, ScopeAccess::Plan, ScopeAccess::Code] {
+                    let case = format!("{agent:?}, full access {full_access}, {access:?}");
+                    let plan = plan(
+                        agent,
+                        Some(&work),
+                        full_access,
+                        RoomReach {
+                            granted: vec![reached("p1", "repo", &repo, access)],
+                            requestable: vec![],
+                        },
+                    );
+                    let entry = &plan.granted[0];
+                    let prompt = plan.prompt();
+                    let line = prompt
+                        .lines()
+                        .find(|line| line.starts_with("- repo"))
+                        .unwrap_or_else(|| panic!("{case}: {prompt}"));
+                    let edits = line.contains("you edit its files")
+                        && line.contains("edit it like your own project");
+                    let forbidden = line.contains("never edit")
+                        || line.contains("not editable")
+                        || line.contains("not opened for you in this run");
+                    assert_eq!(edits, entry.edit.allowed(), "{case}: {line}");
+                    assert_eq!(forbidden, !entry.edit.allowed(), "{case}: {line}");
+                    // One decision: the plan carries what `edit_access` answers.
+                    assert_eq!(
+                        entry.edit,
+                        edit_access(agent, full_access, access, checkout_state(entry.files)),
+                        "{case}"
+                    );
+                    if entry.edit.allowed() {
+                        editable += 1;
+                        assert_eq!(access, ScopeAccess::Code, "{case}");
+                        // Whoever edits is told where the project's secrets stay shut.
+                        assert!(line.contains("never use its tokens"), "{case}: {line}");
+                    }
+                    // A dead end on `code` names itself and forbids the copy; a
+                    // weaker grant is no dead end and says nothing of a copy.
+                    let dead_end = access == ScopeAccess::Code && !entry.edit.allowed();
+                    assert_eq!(line.contains(NO_COPY), dead_end, "{case}: {line}");
+                    let unsandboxed =
+                        full_access && matches!(agent, AgentType::ClaudeCode | AgentType::Codex);
+                    if unsandboxed && access == ScopeAccess::Code {
+                        assert_eq!(entry.edit, EditAccess::Unconfined, "{case}");
+                        assert!(!line.contains("never edit"), "{case}: {line}");
+                    }
+                    let block = match agent {
+                        AgentType::Codex => EditBlock::CodexSandbox,
+                        AgentType::OpenCode
+                        | AgentType::GeminiCli
+                        | AgentType::CopilotCli
+                        | AgentType::Kiro
+                        | AgentType::Vibe => EditBlock::NativeBroker,
+                        AgentType::Ollama
+                        | AgentType::LiteLlm
+                        | AgentType::Nvidia
+                        | AgentType::Custom => EditBlock::HttpTools,
+                        // Its `code` grant depends on the checkout: pinned elsewhere.
+                        AgentType::ClaudeCode => continue,
+                    };
+                    if dead_end {
+                        assert_eq!(entry.edit, EditAccess::Blocked(block), "{case}");
+                    }
+                    // Full access does not open another project for a runtime whose
+                    // broker or tools stop at the room's own.
+                    if block != EditBlock::CodexSandbox {
+                        assert!(!entry.edit.allowed(), "{case}");
+                    }
+                }
+            }
+        }
+        // Claude Code and Codex with full access, and nobody else here: Claude
+        // Code without it opens a checkout only where the sandbox exists.
+        let sandboxed_claude = usize::from(cfg!(unix));
+        assert_eq!(editable, 2 + sandboxed_claude);
+    }
+
+    /// KT-2102 — the block follows what the process runs with, not the stored switch:
+    /// in the container Codex edits a `code` project whatever its switch says.
+    #[test]
+    fn the_block_of_a_launch_follows_the_access_the_process_really_has() {
+        let reach = || RoomReach {
+            granted: vec![reached("p1", "repo", "/srv/repo", ScopeAccess::Code)],
+            requestable: vec![],
+        };
+        let codex = AgentType::Codex;
+        let on_host = plan_as_launched(&codex, None, false, false, reach());
+        assert_eq!(
+            on_host.granted[0].edit,
+            EditAccess::Blocked(EditBlock::CodexSandbox)
         );
-        assert!(plan.checkouts().is_empty());
-        assert_eq!(plan.granted[0].files, Files::Unrestricted);
-        // Nothing is opened or closed for it, so it is not told it may edit: the
-        // grant is not enforced for a launch that ignores a project's scope.
-        let prompt = plan.prompt();
+        assert!(on_host.prompt().contains(NO_COPY));
+        let in_container = plan_as_launched(&codex, None, false, true, reach());
+        assert_eq!(in_container.granted[0].edit, EditAccess::Unconfined);
+        assert!(!in_container.prompt().contains(NO_COPY));
+        // The container forces nothing for another agent.
+        let open_code = plan_as_launched(&AgentType::OpenCode, None, false, true, reach());
+        assert!(!open_code.granted[0].edit.allowed());
+    }
+
+    /// KT-2102 — a `code` project the launch leaves out of its sandbox: the plan itself
+    /// says the agent cannot edit it, forbids the copy and does not name its path.
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
+    #[serial_test::serial] // the hand-over writes under KRONN_DATA_DIR
+    #[test]
+    fn a_code_project_left_out_of_the_sandbox_is_a_named_dead_end() {
+        let room = launched_room(60, ScopeAccess::Code);
+        let open = opened(&room.plan);
+        assert!(!open.is_empty() && open.len() < 60, "{} opened", open.len());
+        let entry = &room.plan.granted[open.len()];
+        assert_eq!(entry.files, Files::BeyondTheSandbox);
+        assert_eq!(entry.edit, EditAccess::Blocked(EditBlock::BeyondTheSandbox));
+        let prompt = room.plan.prompt();
+        let name = format!("- project-{} ", open.len());
+        let line = prompt
+            .lines()
+            .find(|line| line.starts_with(&name))
+            .unwrap_or_else(|| panic!("{prompt}"));
         assert!(
-            prompt.contains("full access, which ignores a project's scope")
-                && prompt.contains("code grant is not enforced for you")
-                && prompt.contains("never edit it")
-                && prompt.contains("`.env*`"),
-            "{prompt}"
+            line.contains("more projects than your sandbox can protect") && line.contains(NO_COPY),
+            "{line}"
         );
-        assert!(
-            !prompt.contains("and you edit its files") && !prompt.contains("edit it like your own"),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("its files are not opened for editing in your run"),
-            "{prompt}"
-        );
+        assert!(!prompt.contains(room.repos[open.len()].as_str()), "{line}");
+    }
+
+    #[test]
+    fn a_code_grant_the_launch_cannot_open_says_why_and_forbids_a_copy() {
+        let project = |files: Files, access: ScopeAccess| {
+            let agent = AgentType::ClaudeCode;
+            PlannedProject {
+                project: reached("p1", "repo", "/srv/repo", access),
+                files,
+                edit: edit_access(&agent, false, access, checkout_state(files)),
+                checkout: None,
+            }
+        };
+        for (files, block, names) in [
+            (
+                Files::ReadOnlyCodeRefused,
+                EditBlock::HooksAtRoot,
+                "`core.hooksPath` is the checkout itself",
+            ),
+            (
+                Files::Closed,
+                EditBlock::NotOpenable,
+                "only the root of a Git checkout",
+            ),
+            (
+                Files::BeyondTheSandbox,
+                EditBlock::BeyondTheSandbox,
+                "more projects than your sandbox can protect",
+            ),
+        ] {
+            let entry = project(files, ScopeAccess::Code);
+            assert_eq!(entry.edit, EditAccess::Blocked(block));
+            let line = entry.files_line();
+            assert!(line.contains(names) && line.contains(NO_COPY), "{line}");
+            assert!(entry.access_label().contains("not opened for editing"));
+            // The same files under a weaker grant are no dead end.
+            let weaker = project(files, ScopeAccess::Plan).files_line();
+            assert!(!weaker.contains(NO_COPY), "{weaker}");
+        }
+        // A project the launch leaves out is still not named by its path.
+        let left_out = project(Files::BeyondTheSandbox, ScopeAccess::Code).files_line();
+        assert!(!left_out.contains("/srv/repo"), "{left_out}");
     }
 
     #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform

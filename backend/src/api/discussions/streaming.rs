@@ -4134,10 +4134,13 @@ pub(super) async fn make_agent_stream_inner(
                     let work_dir =
                         runner::resolve_agent_work_dir(workspace_path.as_deref(), &project_path)
                             .ok();
-                    crate::agents::room_reach::plan(
+                    // The block states what the process really runs with (KT-2102);
+                    // the launch below still receives the stored switch.
+                    crate::agents::room_reach::plan_as_launched(
                         &agent_type,
                         work_dir.as_deref(),
                         full_access,
+                        crate::core::env::is_docker(),
                         reach,
                     )
                 }

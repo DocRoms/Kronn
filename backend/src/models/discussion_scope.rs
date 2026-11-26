@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::AgentType;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -64,6 +66,90 @@ impl ScopeAccess {
         } else {
             self
         }
+    }
+}
+
+/// What a launch found at a granted project's registered path. Asked before any
+/// launch (a grant receipt), nothing is known yet: [`Self::Openable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutState {
+    /// A Git checkout root the launch can open for editing.
+    Openable,
+    /// Its `core.hooksPath` is the checkout itself: every file would be a hook.
+    HooksAtRoot,
+    /// No checkout the launch can open: a link, a plain folder, the working
+    /// directory, Kronn's data, or a host without the sandbox.
+    NotOpenable,
+    /// Granted beyond what the launch's sandbox carries (KT-1971).
+    LeftOut,
+}
+
+/// Why an agent cannot edit a granted project in one launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditBlock {
+    /// The grant is `read` or `plan`: only `code` lets an agent edit.
+    GrantLevel,
+    /// Codex with its full access off: its sandbox writes no project.
+    CodexSandbox,
+    /// A native ACP runtime: its permission broker refuses every file outside
+    /// the session's own project, full access or not (KT-2103).
+    NativeBroker,
+    /// An HTTP model: its file tools reach the room's own project only.
+    HttpTools,
+    /// [`CheckoutState::HooksAtRoot`].
+    HooksAtRoot,
+    /// [`CheckoutState::NotOpenable`].
+    NotOpenable,
+    /// [`CheckoutState::LeftOut`].
+    BeyondTheSandbox,
+}
+
+/// Whether an agent can edit a granted project in one launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAccess {
+    /// Its checkout is opened writable for this launch (Claude Code).
+    Opened,
+    /// The launch is not sandboxed: it writes the project as it writes its own.
+    Unconfined,
+    Blocked(EditBlock),
+}
+
+impl EditAccess {
+    pub fn allowed(self) -> bool {
+        !matches!(self, Self::Blocked(_))
+    }
+}
+
+/// KT-2102 — the one place that decides whether `agent` can edit a project
+/// granted at `access`, and what stops it: the room's scope block and the grant
+/// receipt are both worded from it. `full_access` is what the launch really
+/// runs with (`AgentsConfig::effective_full_access`), not the stored switch.
+pub fn edit_access(
+    agent: &AgentType,
+    full_access: bool,
+    access: ScopeAccess,
+    checkout: CheckoutState,
+) -> EditAccess {
+    if access != ScopeAccess::Code {
+        return EditAccess::Blocked(EditBlock::GrantLevel);
+    }
+    match agent {
+        AgentType::OpenCode
+        | AgentType::GeminiCli
+        | AgentType::CopilotCli
+        | AgentType::Kiro
+        | AgentType::Vibe => EditAccess::Blocked(EditBlock::NativeBroker),
+        AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
+            EditAccess::Blocked(EditBlock::HttpTools)
+        }
+        AgentType::ClaudeCode | AgentType::Codex if full_access => EditAccess::Unconfined,
+        AgentType::Codex => EditAccess::Blocked(EditBlock::CodexSandbox),
+        AgentType::ClaudeCode => match checkout {
+            CheckoutState::Openable => EditAccess::Opened,
+            CheckoutState::HooksAtRoot => EditAccess::Blocked(EditBlock::HooksAtRoot),
+            CheckoutState::NotOpenable => EditAccess::Blocked(EditBlock::NotOpenable),
+            CheckoutState::LeftOut => EditAccess::Blocked(EditBlock::BeyondTheSandbox),
+        },
     }
 }
 

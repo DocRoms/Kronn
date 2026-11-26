@@ -1025,6 +1025,123 @@ fn responses_are_scoped_at_any_depth() {
     assert_eq!(unknown.as_array().unwrap().len(), 1);
 }
 
+/// KT-2102 — a room's own agent keeps every row of its room's scope journal,
+/// without the project a row names when the token does not reach it. Any
+/// other token loses the row, as before.
+#[test]
+fn a_rooms_own_agent_keeps_its_scope_journal_without_the_projects_it_does_not_reach() {
+    let get = route("GET", "/api/discussions/{id}/scope");
+    let known = residences(&[(Kind::Discussion, "a-room")]);
+    let journal = || {
+        json!({
+            "discussion_id": "a-room",
+            "primary_project_id": "p1",
+            "grants": [],
+            "revoked": [
+                {
+                    "id": "grant-1", "discussion_id": "a-room", "project_id": "p2",
+                    "project_name": "infra", "access": "code", "source": "request",
+                    "revoked_at": "2026-11-26T10:00:00Z", "revoked_reason": "trust level lowered"
+                },
+                {
+                    "id": "grant-2", "discussion_id": "a-room", "project_id": "p1",
+                    "project_name": "own", "access": "read", "source": "link"
+                },
+            ],
+            "requests": [
+                {
+                    "id": "request-1", "discussion_id": "a-room", "project_id": "p2",
+                    "project_name": "infra", "requested_name": "the infra repo",
+                    "status": "pending"
+                },
+                {
+                    "id": "request-2", "discussion_id": "a-room", "project_id": null,
+                    "project_name": null, "requested_name": "ghost", "status": "pending"
+                },
+            ],
+            "fingerprint": "f",
+        })
+    };
+    let rows = |data: &serde_json::Value, list: &str| data[list].as_array().unwrap().len();
+    let only_p1 = Reach::bound_only(Some("p1"));
+
+    let mut own = grant(&["a-room"]);
+    own.scope.room_grant_discussions = vec!["a-room".into()];
+    let mut data = journal();
+    scope_response_in(get, &mut data, &own, &only_p1, &known).unwrap();
+    assert_eq!(
+        (rows(&data, "revoked"), rows(&data, "requests")),
+        (2, 2),
+        "{data}"
+    );
+    let revoked = &data["revoked"][0];
+    assert!(revoked["project_id"].is_null() && revoked["project_name"].is_null());
+    // What the agent needs to say « the grant was revoked at T » is all there.
+    assert_eq!(revoked["access"], "code");
+    assert_eq!(revoked["revoked_at"], "2026-11-26T10:00:00Z");
+    assert_eq!(revoked["revoked_reason"], "trust level lowered");
+    // Its own project is named as before; the request keeps the words it was filed with.
+    assert_eq!(data["revoked"][1]["project_id"], "p1");
+    assert!(data["requests"][0]["project_id"].is_null());
+    assert_eq!(data["requests"][0]["requested_name"], "the infra repo");
+    let text = data.to_string();
+    assert!(
+        !text.contains("p2") && !text.contains("\"infra\""),
+        "{text}"
+    );
+
+    // A project the room reaches is named, as it always was.
+    let mut reaches_p2 = Reach::bound_only(Some("p1"));
+    reaches_p2.granted.read.insert("p2".into());
+    let mut data = journal();
+    scope_response_in(get, &mut data, &own, &reaches_p2, &known).unwrap();
+    assert_eq!(data["revoked"][0]["project_id"], "p2");
+    assert_eq!(data["revoked"][0]["project_name"], "infra");
+
+    // An active grant the token does not reach is dropped, never blanked: in
+    // `grants` a blank project means every project.
+    for reach in [Reach::bound_only(Some("p1")), Reach::bound_only(None)] {
+        let mut data = journal();
+        data["grants"] = json!([{
+            "id": "grant-3", "discussion_id": "a-room", "project_id": "p2",
+            "project_name": "infra", "access": "code", "source": "link"
+        }]);
+        scope_response_in(get, &mut data, &own, &reach, &known).unwrap();
+        assert_eq!(rows(&data, "grants"), 0, "{data}");
+    }
+    // A row stored without a project (every project, or the general scope) is
+    // left as stored, active or revoked: its source says what it was.
+    let mut data = journal();
+    data["grants"] = json!([{
+        "id": "grant-4", "discussion_id": "a-room", "project_id": null,
+        "project_name": null, "access": "plan", "source": "all"
+    }]);
+    data["revoked"] = json!([{
+        "id": "grant-5", "discussion_id": "a-room", "project_id": null,
+        "project_name": null, "access": "plan", "source": "general",
+        "revoked_at": "2026-11-01T00:00:00Z"
+    }]);
+    let stored = (data["grants"].clone(), data["revoked"].clone());
+    scope_response_in(get, &mut data, &own, &only_p1, &known).unwrap();
+    assert_eq!((data["grants"].clone(), data["revoked"].clone()), stored);
+
+    // A launch that holds no room grant (a step, a worker), and the agent of
+    // another room, still lose the rows whole.
+    let worker = grant(&["a-room"]);
+    let mut sibling = grant(&["a-other"]);
+    sibling.scope.room_grant_discussions = vec!["a-other".into()];
+    for other in [&worker, &sibling] {
+        let mut data = journal();
+        scope_response_in(get, &mut data, other, &only_p1, &known).unwrap();
+        assert_eq!(
+            (rows(&data, "revoked"), rows(&data, "requests")),
+            (1, 1),
+            "{data}"
+        );
+        assert!(!data.to_string().contains("p2"), "{data}");
+    }
+}
+
 /// C-01 — a project-less discussion not owned is absent from lists.
 #[test]
 fn a_general_discussion_is_dropped_from_lists() {

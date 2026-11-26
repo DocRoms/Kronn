@@ -1310,3 +1310,149 @@ fn a_run_of_a_wider_workflow_does_not_open_a_request_the_room_would_not() {
     assert!(matches!(filed, Filed::New(_)));
     assert_eq!(granted, None);
 }
+
+// ── KT-2102: a `code` grant the asking agent cannot use says so ──────────
+
+/// The journal line of the `code` grant a request filed by `asked_by` ends in:
+/// approved by a human, or granted by the instance's Full level.
+fn code_receipt(asked_by: &str, by_trust: bool) -> String {
+    use crate::models::{TrustLevel, TrustScope};
+    let conn = connection();
+    let level = if by_trust {
+        TrustLevel::Full
+    } else {
+        TrustLevel::Standard
+    };
+    trust(&conn, TrustScope::Instance, None, level);
+    let (filed, by) = file_request_with_trust(
+        &conn,
+        "room",
+        Some("p2"),
+        "p2",
+        ScopeAccess::Code,
+        "needed",
+        asked_by,
+    )
+    .unwrap();
+    let grant_id = if by_trust {
+        assert_eq!(by, Some(TrustLevel::Full));
+        scope_of(&conn, "room").unwrap().unwrap().grants[0]
+            .id
+            .clone()
+    } else {
+        let Filed::New(request) = filed else {
+            panic!("a new request")
+        };
+        let (_, granted) =
+            decide(&conn, "room", &request.id, Some(ScopeAccess::Code), "romu").unwrap();
+        granted.unwrap().id
+    };
+    conn.query_row(
+        "SELECT content FROM messages WHERE id = ?1",
+        [format!("scope-grant:{grant_id}")],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// The reply of a request granted at once: an asker that cannot edit the project it was
+/// just granted is told so, and told not to work on a copy.
+#[test]
+fn a_request_granted_at_once_tells_an_asker_that_cannot_edit() {
+    use crate::core::config::test_saved_access;
+    use crate::models::AgentType;
+    let _native = test_saved_access::set(&AgentType::OpenCode, true);
+    let blocked = trust_grant_next(ScopeAccess::Code, "@OpenCode");
+    assert!(
+        blocked.contains("you cannot edit this project") && blocked.contains("say so and stop"),
+        "{blocked}"
+    );
+    for (access, asked_by) in [
+        (ScopeAccess::Plan, "@OpenCode"),
+        (ScopeAccess::Code, "@ClaudeCode"),
+        (ScopeAccess::Code, "@agent"),
+    ] {
+        let next = trust_grant_next(access, asked_by);
+        assert!(next.ends_with("continue."), "{asked_by}: {next}");
+    }
+}
+
+#[test]
+fn a_code_grant_says_when_the_agent_that_asked_cannot_edit_yet() {
+    use crate::core::config::test_saved_access;
+    use crate::models::AgentType;
+    const NOTE: &str = "cannot edit it yet";
+    // Codex with its full access off edits no project: the line names the switch.
+    let off = test_saved_access::set(&AgentType::Codex, false);
+    for by_trust in [false, true] {
+        let line = code_receipt("@Codex", by_trust);
+        if crate::core::env::is_docker() {
+            // In a container Codex runs unsandboxed whatever its switch.
+            assert!(!line.contains(NOTE), "{line}");
+        } else {
+            assert!(
+                line.contains("Codex cannot edit it yet")
+                    && line.contains("Config › Agents › Codex › Full access"),
+                "{line}"
+            );
+        }
+        // Still one journal line, closed by its own bracket only.
+        assert!(
+            line.starts_with("[kronn-scope: ")
+                && line.ends_with(']')
+                && line.matches(']').count() == 1
+                && !line.contains('\n'),
+            "{line}"
+        );
+    }
+    drop(off);
+    let _on = test_saved_access::set(&AgentType::Codex, true);
+    assert!(!code_receipt("@Codex", false).contains(NOTE));
+    // Claude Code edits the project whatever its switch.
+    assert!(!code_receipt("@ClaudeCode", false).contains(NOTE));
+    let _full = test_saved_access::set(&AgentType::ClaudeCode, true);
+    assert!(!code_receipt("@ClaudeCode", true).contains(NOTE));
+    // Full access does not move a runtime that stops at the room's own project.
+    let _native = test_saved_access::set(&AgentType::OpenCode, true);
+    for (asked_by, label) in [("@OpenCode", "OpenCode"), ("@Ollama", "Ollama")] {
+        let line = code_receipt(asked_by, false);
+        assert!(
+            line.contains(&format!("{label} cannot edit it yet"))
+                && line.contains("ask Claude Code, or Codex with full access"),
+            "{line}"
+        );
+    }
+    // An asker that names no agent type adds nothing.
+    for asked_by in ["@agent", "@claude", "Codex"] {
+        assert!(!code_receipt(asked_by, false).contains(NOTE), "{asked_by}");
+    }
+}
+
+#[test]
+fn only_a_code_grant_answers_the_agent_that_asked() {
+    use crate::core::config::test_saved_access;
+    let _off = test_saved_access::set(&crate::models::AgentType::OpenCode, false);
+    let conn = connection();
+    let Filed::New(request) = file_request(
+        &conn,
+        "room",
+        Some("p2"),
+        "p2",
+        ScopeAccess::Code,
+        "needed",
+        "@OpenCode",
+    )
+    .unwrap() else {
+        panic!("a new request")
+    };
+    // Narrowed to plan, nobody edits: there is nothing to warn about.
+    let (_, granted) = decide(&conn, "room", &request.id, Some(ScopeAccess::Plan), "romu").unwrap();
+    let line: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id = ?1",
+            [format!("scope-grant:{}", granted.unwrap().id)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!line.contains("cannot edit it yet"), "{line}");
+}

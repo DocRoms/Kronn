@@ -4326,6 +4326,131 @@ async fn an_agent_request_grants_nothing_until_a_human_approves_it() {
     assert_eq!(status, 200, "an agent sees its room's reach: {scope}");
 }
 
+/// KT-2102 (#726) — the agent of a room reads its room's whole scope journal,
+/// whichever agent holds the room. A grant taken back, or a request on a
+/// project the room does not reach, was dropped from the reply: the agent saw
+/// an empty scope and could not say its grant had been revoked.
+#[tokio::test]
+async fn a_room_s_agent_reads_its_scope_journal_across_a_handoff() {
+    use kronn::core::api_access::AgentIdentity;
+    use kronn::models::discussion_scope::{ScopeAccess, ScopeGrantSource};
+    use kronn::models::AgentType;
+    let (app, _repos, db) = fixture_with_db().await;
+    let granted = db
+        .with_conn(|conn| {
+            kronn::db::discussion_scope::grant(
+                conn,
+                "room-a",
+                Some("p2"),
+                ScopeAccess::Code,
+                ScopeGrantSource::Link,
+                "romu",
+            )
+        })
+        .await
+        .unwrap();
+    let agent_of = |agent_type: AgentType| {
+        mint(BridgeScope {
+            discussion_ids: vec!["room-a".into()],
+            room_grant_discussions: vec!["room-a".into()],
+            agent: Some(AgentIdentity {
+                agent_type,
+                model: None,
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let scope_as = |token: Option<String>| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "GET",
+                "/api/discussions/room-a/scope",
+                token.as_deref(),
+                None,
+            )
+            .await
+        }
+    };
+    // Claude Code hands the room to Codex, which hands it back: the room is the
+    // same, and each of its agents lists the grant.
+    for agent in [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::ClaudeCode,
+    ] {
+        let guard = agent_of(agent.clone());
+        let (status, scope) = scope_as(Some(guard.value().to_owned())).await;
+        assert_eq!(status, 200, "{agent:?}: {scope}");
+        let grants = scope["data"]["grants"].as_array().unwrap();
+        assert_eq!(grants.len(), 1, "{agent:?}: {scope}");
+        assert_eq!(grants[0]["project_id"], "p2", "{agent:?}: {scope}");
+        assert_eq!(grants[0]["access"], "code", "{agent:?}: {scope}");
+    }
+
+    // The grant is taken back, then the agent asks again.
+    let grant_id = granted.id.clone();
+    db.with_conn(move |conn| {
+        kronn::db::discussion_scope::revoke(
+            conn,
+            "room-a",
+            &grant_id,
+            "romu",
+            Some("trust level lowered"),
+        )
+    })
+    .await
+    .unwrap();
+    let guard = agent_of(AgentType::ClaudeCode);
+    let token = guard.value().to_owned();
+    let (status, filed) = call(
+        &app,
+        "POST",
+        "/api/discussions/room-a/scope/requests",
+        Some(&token),
+        Some(json!({"project": "p2", "access": "plan", "reason": "the same change there"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{filed}");
+    assert_eq!(filed["data"]["status"], "pending", "{filed}");
+
+    let (status, scope) = scope_as(Some(token.clone())).await;
+    assert_eq!(status, 200, "{scope}");
+    let data = &scope["data"];
+    assert!(data["grants"].as_array().unwrap().is_empty(), "{scope}");
+    let revoked = data["revoked"].as_array().unwrap();
+    assert_eq!(revoked.len(), 1, "the grant taken back is listed: {scope}");
+    assert_eq!(revoked[0]["id"], granted.id.as_str(), "{scope}");
+    assert_eq!(revoked[0]["access"], "code", "{scope}");
+    assert_eq!(revoked[0]["revoked_reason"], "trust level lowered");
+    assert!(revoked[0]["revoked_at"].is_string(), "{scope}");
+    let requests = data["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 1, "its pending request is listed: {scope}");
+    assert_eq!(requests[0]["status"], "pending", "{scope}");
+    // The project the room no longer reaches is not named by either row.
+    for row in [&revoked[0], &requests[0]] {
+        assert!(
+            row["project_id"].is_null() && row["project_name"].is_null(),
+            "{scope}"
+        );
+    }
+
+    // The human's screen names it, and another room's agent gets neither row.
+    let (_, human) = scope_as(None).await;
+    assert_eq!(human["data"]["revoked"][0]["project_id"], "p2", "{human}");
+    assert_eq!(human["data"]["requests"][0]["project_id"], "p2", "{human}");
+    let sibling = bridge_for("room-a2");
+    let (status, seen) = scope_as(Some(sibling.value().to_owned())).await;
+    assert_eq!(status, 200, "{seen}");
+    assert!(
+        seen["data"]["revoked"].as_array().unwrap().is_empty()
+            && seen["data"]["requests"].as_array().unwrap().is_empty(),
+        "{seen}"
+    );
+}
+
 #[tokio::test]
 async fn a_grant_belongs_to_its_room_and_never_spreads() {
     let (app, _repos) = fixture().await;
