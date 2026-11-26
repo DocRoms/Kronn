@@ -5798,6 +5798,17 @@ pub(super) async fn make_agent_stream_inner(
                 match state
                     .db
                     .with_conn(move |conn| {
+                        // Recorded before the message that carries the question: only this
+                        // record lets an answer raise a budget, and makes its key Kronn's.
+                        if let Some((key, ceilings)) = ceiling_request.as_ref() {
+                            crate::db::discussion_ceiling_requests::record(
+                                conn,
+                                &did,
+                                key,
+                                &crate::db::discussions::format_agent_type(&source_agent),
+                                ceilings,
+                            )?;
+                        }
                         let outcome =
                             crate::db::discussions::insert_native_agent_message_with_audit_documents(
                                 conn,
@@ -5819,17 +5830,6 @@ pub(super) async fn make_agent_stream_inner(
                             crate::db::message_usage::record(conn, &msg.id, &usage_record)
                         {
                             tracing::warn!("Failed to record message usage: {error}");
-                        }
-                        // Recorded with the message that carries the question:
-                        // only this record lets an answer raise a budget.
-                        if let Some((key, ceilings)) = ceiling_request.as_ref() {
-                            crate::db::discussion_ceiling_requests::record(
-                                conn,
-                                &did,
-                                key,
-                                &crate::db::discussions::format_agent_type(&source_agent),
-                                ceilings,
-                            )?;
                         }
                         Ok(outcome)
                     })

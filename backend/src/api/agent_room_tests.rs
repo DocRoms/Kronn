@@ -249,6 +249,42 @@ async fn the_room_tools_refuse_every_other_discussion() {
     active.finish().await;
 }
 
+/// KT-2085 — a refused card names its cause (a key still pending, a card Kronn
+/// owns): the tool says to fix that cause, not to repost it as it was.
+#[test]
+fn the_append_tool_says_to_fix_a_refused_card_before_reposting_it() {
+    let append = declarations()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == "disc_append")
+        .unwrap();
+    let description = append["function"]["description"].as_str().unwrap();
+    assert!(
+        description.contains("fix what the reason says, then repost"),
+        "{description}"
+    );
+}
+
+/// KT-2085 — the read tool says which cards are refused in the bridge
+/// manual's words: a pending key, Kronn's cards posted again under any key,
+/// and the elevation key prefix.
+#[test]
+fn the_read_tool_names_the_cards_an_agent_never_asks_again() {
+    let read = declarations()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == "disc_question_list")
+        .unwrap();
+    let description = read["function"]["description"].as_str().unwrap();
+    assert!(
+        description.contains("a key still pending is refused")
+            && description.contains(
+                "Kronn's ceiling, dispute, briefing and elevation cards are never posted again by \
+                 an agent, under any key, and `kronn-elevation-docker` keys are Kronn's only."
+            )
+            && !description.contains("a card Kronn posted"),
+        "{description}"
+    );
+}
+
 /// The three schemas are closed, and an extra field is refused rather than
 /// ignored: nothing runs, nothing is posted.
 #[tokio::test]
@@ -488,4 +524,81 @@ async fn the_room_tools_stop_with_the_step_and_at_boot() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(refused, "a dropped step keeps no tools");
+}
+
+/// KT-2085 — while a card waits, its key is refused back to the poster with the
+/// reason; once answered, the same key opens a new round, which the read by key
+/// returns with the answered round as history.
+#[tokio::test]
+async fn a_key_asked_again_reads_back_as_its_latest_round() {
+    let state = state().await;
+    let active = activation(&state, AgentType::LiteLlm).await;
+    let tools = executor(&state, &active);
+    let ask = || {
+        call(
+            tools.as_ref(),
+            "disc_append",
+            json!({"content": question("scope")}),
+        )
+    };
+    assert!(ask().await.ok);
+
+    let refused = ask().await;
+    assert!(
+        refused.ok,
+        "the message itself is posted: {}",
+        refused.content
+    );
+    assert_eq!(refused.content["invalid_cards"][0]["key"], "scope");
+    assert!(
+        refused.content["invalid_cards"][0]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("still waiting for an answer"),
+        "{}",
+        refused.content
+    );
+
+    let first = state
+        .db
+        .with_conn(|conn| {
+            let id = crate::db::discussion_questions::list(conn, "room-a")?.questions[0]
+                .id
+                .clone();
+            let request = crate::db::discussion_questions::AnswerDiscussionQuestionRequest {
+                selected_option_ids: vec!["a".into()],
+                item_answers: vec![],
+                text: None,
+                idempotency_key: "answer-1".into(),
+            };
+            Ok(crate::db::discussion_questions::answer(
+                conn, "room-a", &id, &request, "Romu", None,
+            )?)
+        })
+        .await
+        .unwrap();
+
+    let asked_again = ask().await;
+    assert!(asked_again.ok, "{}", asked_again.content);
+    assert!(
+        asked_again.content.get("invalid_cards").is_none(),
+        "{}",
+        asked_again.content
+    );
+    let read_back = call(
+        tools.as_ref(),
+        "disc_question_list",
+        json!({"key": "scope"}),
+    )
+    .await;
+    assert!(read_back.ok, "{}", read_back.content);
+    assert_eq!(read_back.content["matching_count"], 1);
+    assert_eq!(read_back.content["questions"][0]["state"], "pending");
+    assert_ne!(read_back.content["questions"][0]["id"], first.id.as_str());
+    assert_eq!(
+        read_back.content["previous_rounds"][0]["id"],
+        first.id.as_str()
+    );
+    assert_eq!(read_back.content["previous_rounds"][0]["state"], "answered");
+    active.finish().await;
 }

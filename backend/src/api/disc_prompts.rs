@@ -481,7 +481,7 @@ fn build_agent_prompt_inner(
         "```kronn-question\n",
         "{\"version\":1,\"key\":\"decision-key\",\"question\":\"Which option should we use?\",\"options\":[{\"id\":\"a\",\"label\":\"Option A\"},{\"id\":\"b\",\"label\":\"Option B\"}]}\n",
         "```\n",
-        "Only the human answers; recommendations are never consent. Reuse the stable key on retry.\n",
+        "Only the human answers; recommendations are never consent. Never re-post a card already recorded; to ask again after its answer, post its key again on purpose (a new round).\n",
         "If `disc_question_list` is available, read pending questions first, then read back this exact key after publication and verify that it was recorded.\n",
         "An absent row is NOT a pending or answered decision: correct the invalid JSON and republish with the same key.\n",
         "If the reader is unavailable, do not invent a tool call or claim verification; wait for the durable human answer.\n",
@@ -1257,12 +1257,16 @@ mod tests {
                         "An absent row is NOT a pending or answered decision",
                         "If the reader is unavailable, do not invent a tool call",
                         "Do not execute, delegate or complete the affected lot before that answer",
+                        // KT-2085 — a key reused on purpose opens a new round.
+                        "Never re-post a card already recorded",
+                        "post its key again on purpose",
                     ] {
                         assert!(
                             prompt.contains(contract),
                             "{agent:?}/{language}/{turns}: {contract}"
                         );
                     }
+                    assert!(!prompt.contains("Reuse the stable key on retry"));
                 }
             }
         }

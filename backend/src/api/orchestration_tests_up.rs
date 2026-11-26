@@ -8698,7 +8698,10 @@ async fn a_docker_refusal_is_held_with_an_elevation_card_and_a_grant_lands_the_d
         })
         .await
         .unwrap();
-    assert_eq!(question.0, "kronn-elevation-docker");
+    assert_eq!(
+        question.0,
+        format!("kronn-elevation-docker.{}", execution.id)
+    );
     assert_eq!(question.1, "pending");
 
     let card_id = card.clone();

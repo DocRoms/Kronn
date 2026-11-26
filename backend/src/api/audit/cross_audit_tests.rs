@@ -1092,6 +1092,180 @@ async fn a_card_outside_the_recorded_dispute_discussion_moves_nothing() {
     assert_eq!(found, (true, false));
 }
 
+/// An agent message in the dispute discussion carrying `content`.
+fn agent_message(id: &str, content: String) -> crate::models::DiscussionMessage {
+    crate::models::DiscussionMessage {
+        id: id.into(),
+        role: crate::models::MessageRole::Agent,
+        channel: crate::models::MessageChannel::Main,
+        content,
+        agent_type: Some(CLAUDE),
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        auth_mode: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+        kind: Default::default(),
+        model: None,
+        lint_report: None,
+    }
+}
+
+/// Post Kronn's dispute card again as an agent: the number of cards stored
+/// under its key afterwards, and the message's lint report.
+async fn repost_dispute_card(d: &Disputed, message_id: &'static str) -> (i64, String) {
+    let (did, qid) = (d.disc_id.clone(), d.question_id.clone());
+    d.state
+        .db
+        .with_conn(move |conn| {
+            let (key, payload): (String, String) = conn.query_row(
+                "SELECT question_key, payload_json FROM discussion_questions WHERE id=?1",
+                [&qid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let fence = format!("```kronn-question\n{payload}\n```");
+            crate::db::discussions::insert_message(conn, &did, &agent_message(message_id, fence))?;
+            let stored: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM discussion_questions
+                  WHERE discussion_id=?1 AND (question_key=?2 OR question_key LIKE ?2 || '~%')",
+                [&did, &key],
+                |row| row.get(0),
+            )?;
+            let report: Option<String> = conn.query_row(
+                "SELECT lint_report FROM messages WHERE id=?1",
+                [message_id],
+                |row| row.get(0),
+            )?;
+            Ok((stored, report.unwrap_or_default()))
+        })
+        .await
+        .unwrap()
+}
+
+/// KT-2085 review round — a dispute card is Kronn's: posted again by an agent,
+/// pending or decided, it is refused with the reason; and a later round under
+/// its key, answered or declined, never reaches the finding.
+#[tokio::test]
+async fn a_dispute_card_asked_again_is_refused_and_a_later_round_never_moves_the_finding() {
+    let d = disputed_project().await;
+    let before = (sheet_of(&d), index_of(&d));
+    let (stored, report) = repost_dispute_card(&d, "agent-repost").await;
+    assert_eq!(stored, 1, "{report}");
+    let parsed: crate::core::anti_halluc::LintReport = serde_json::from_str(&report).unwrap();
+    assert_eq!(parsed.invalid_cards.len(), 1, "{report}");
+    let (key, reason) = (
+        parsed.invalid_cards[0].key.as_deref().unwrap_or_default(),
+        &parsed.invalid_cards[0].reason,
+    );
+    assert!(
+        key.starts_with("cross-audit.")
+            && reason.starts_with(&format!("key `{key}` is still waiting for an answer"))
+            && reason.contains("dispute card Kronn posted")
+            && reason.contains("under any key")
+            && !reason.contains("new key"),
+        "{report}"
+    );
+
+    // Later rounds stored the way an ingest before this round could: only the
+    // answer paths stand between them and the finding.
+    let (did, qid) = (d.disc_id.clone(), d.question_id.clone());
+    let later = d
+        .state
+        .db
+        .with_conn(move |conn| {
+            let (key, payload): (String, String) = conn.query_row(
+                "SELECT question_key, payload_json FROM discussion_questions WHERE id=?1",
+                [&qid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let mut ids = Vec::new();
+            for round in [2_i64, 3] {
+                let id = format!("question:agent-repost:{}", round - 2);
+                conn.execute(
+                    "INSERT INTO discussion_questions (id, discussion_id, source_message_id,
+                         fence_index, question_key, payload_json, created_at, updated_at)
+                     VALUES (?1, ?2, 'agent-repost', ?3, ?4, ?5, ?6, ?6)",
+                    rusqlite::params![
+                        id,
+                        did,
+                        round - 2,
+                        format!("{key}~{round}"),
+                        payload,
+                        Utc::now().to_rfc3339()
+                    ],
+                )?;
+                ids.push(id);
+            }
+            Ok(ids)
+        })
+        .await
+        .unwrap();
+    let answered = crate::api::discussion_questions::answer(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path((d.disc_id.clone(), later[0].clone())),
+        axum::Json(
+            crate::db::discussion_questions::AnswerDiscussionQuestionRequest {
+                selected_option_ids: vec!["dismiss".to_string()],
+                item_answers: vec![],
+                text: None,
+                idempotency_key: "answer-later".into(),
+            },
+        ),
+    )
+    .await
+    .0;
+    let declined = crate::api::discussion_questions::decline(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path((d.disc_id.clone(), later[1].clone())),
+        axum::Json(
+            crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
+                idempotency_key: "decline-later".into(),
+                reason: None,
+            },
+        ),
+    )
+    .await
+    .0;
+    assert_eq!(
+        (answered, declined),
+        (axum::http::StatusCode::OK, axum::http::StatusCode::OK)
+    );
+    assert_eq!(
+        (sheet_of(&d), index_of(&d)),
+        before,
+        "a later round moved the finding"
+    );
+    assert_eq!(pending(&d).await.len(), 1, "Kronn's card still waits");
+    let rid = d.run_id.clone();
+    let rows = d
+        .state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_cross::list_findings(conn, &rid))
+        .await
+        .unwrap();
+    assert_eq!(rows[0].1.human_decision, None);
+
+    // Kronn's own card decides; posted again afterwards, it is still refused.
+    assert_eq!(answer_card(&d, "dismiss").await, axum::http::StatusCode::OK);
+    assert!(pending(&d).await.is_empty());
+    let (stored, report) = repost_dispute_card(&d, "agent-repost-after").await;
+    assert_eq!(stored, 3, "no round beyond the stored ones: {report}");
+    assert!(
+        report.contains("dispute card Kronn posted") && !report.contains("new key"),
+        "{report}"
+    );
+}
+
 #[tokio::test]
 async fn a_rerun_keeps_undetected_and_settled_rows_and_reports_unchanged() {
     let dir = repo();
