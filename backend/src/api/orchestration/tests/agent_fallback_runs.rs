@@ -492,6 +492,277 @@ async fn a_rate_limited_or_unauthenticated_worker_continues_on_the_fallback_too(
     }
 }
 
+/// KT-1992 — a provider that says its rate limit clears in thirteen minutes.
+const SHORT_RATE_LIMIT: &str = "HTTP 429 Too Many Requests: rate_limit_exceeded, retry-after: 780";
+
+/// The prelocalised economy worker with its dispatch claimed: a turn that ran
+/// and was refused, the only kind of dispatch a wait can queue again.
+async fn the_running_prelocalised_worker() -> (
+    tempfile::TempDir,
+    std::sync::Arc<Database>,
+    TaskExecution,
+    crate::db::agent_dispatch::AgentDispatchJob,
+) {
+    let (repo, db, was, job) = the_prelocalised_economy_worker().await;
+    let job = claim_when_due(&db, &job.id).await;
+    assert_eq!(job.turn_attempts, 1, "the first run of the turn");
+    (repo, db, was, job)
+}
+
+/// The line the parent room gets when the worker waits for its agent's reset.
+async fn wait_notice(db: &Database, was: &TaskExecution, dispatch: &str) -> Option<String> {
+    stop_line(
+        db,
+        &was.parent_discussion_id,
+        format!("agent-fallback-wait:{dispatch}"),
+    )
+    .await
+}
+
+/// KT-1992 — a worker five seconds into its turn was moved to another agent for
+/// a limit announced as thirteen minutes long: it now waits on its own agent.
+#[tokio::test]
+async fn a_worker_rate_limited_with_a_short_announced_reset_waits_on_the_same_agent() {
+    let (_repo, db, was, job) = the_running_prelocalised_worker().await;
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
+    let child = was.sub_discussion_id.clone().expect("the worker's room");
+    // The refused reply: a re-claimed dispatch must not find it again.
+    let (room, dispatch) = (child.clone(), job.id.clone());
+    db.with_conn(move |conn| {
+        let mut reply = crate::api::orchestration::orchestrator_message(
+            "the-refused-reply".into(),
+            SHORT_RATE_LIMIT.into(),
+        );
+        reply.role = crate::models::MessageRole::System;
+        crate::db::discussions::insert_message(conn, &room, &reply)?;
+        conn.execute(
+            "UPDATE messages SET agent_dispatch_job_id = ?2 WHERE id = ?1",
+            rusqlite::params!["the-refused-reply", dispatch],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let before = chrono::Utc::now();
+
+    assert!(
+        intercept_failed_turn_among(&state, &job, SHORT_RATE_LIMIT, Some(usable())).await,
+        "the turn waits: nothing is left to settle"
+    );
+
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(
+        after.worker_agent_type.as_deref(),
+        Some("ClaudeCode"),
+        "same agent"
+    );
+    assert_eq!(after.dispatch_job_id, was.dispatch_job_id, "same dispatch");
+    assert_eq!(after.status, was.status, "the status is not touched");
+    let waiting = dispatch_of(&db, job.id.clone()).await;
+    assert_eq!(
+        waiting.status,
+        crate::db::agent_dispatch::DispatchStatus::Pending
+    );
+    let ahead = (waiting.available_at - before).num_seconds();
+    assert!(
+        (13 * 60..=15 * 60).contains(&ahead),
+        "the announced thirteen minutes and a minute of margin, got {ahead}s"
+    );
+    let marker = waiting.last_error.clone().unwrap_or_default();
+    assert!(
+        marker.starts_with("rate_limit_wait: redispatch at ") && marker.ends_with(" UTC"),
+        "{marker}"
+    );
+
+    // The principal's room: who waits, until when, and within which limit.
+    let parent = wait_notice(&db, &was, &job.id)
+        .await
+        .expect("the principal's room is told");
+    assert!(
+        parent.starts_with(&format!(
+            "Task worker execution {}: Claude Code · eco mode: rate limited until ",
+            was.id
+        )) && parent.contains(
+            " → waiting for the reset on the same agent (13 min, limit 15 min); the turn restarts at "
+        ),
+        "{parent}"
+    );
+    assert!(
+        fallback_notice(&db, &was, &job.id).await.is_none(),
+        "the worker did not move"
+    );
+    let id = was.id.clone();
+    assert!(
+        db.with_conn(move |conn| fallback::get_execution_origin(conn, &id))
+            .await
+            .unwrap()
+            .is_none(),
+        "no move, so no origin"
+    );
+
+    // The worker's room: the refused reply is gone and the wait is said.
+    let room = messages_of(&db, &child).await;
+    assert!(
+        room.iter().all(|message| message.id != "the-refused-reply"),
+        "the refused reply is dropped"
+    );
+    let notice = room
+        .iter()
+        .find(|message| {
+            message
+                .content
+                .starts_with("**Rate limited — waiting for the announced reset.**")
+        })
+        .expect("the worker's room is told");
+    assert!(
+        notice.content.contains("Claude Code refused this turn")
+            && notice.content.contains(
+                "13 min from now, within the 15-min wait limit (`workers.rate_limit_wait_max_min`)"
+            )
+            && notice.content.contains("on the same agent")
+            && notice.content.contains("the fallback chain applies"),
+        "{}",
+        notice.content
+    );
+}
+
+/// KT-1992 — the threshold: a reset announced beyond the Workers wait limit is
+/// not waited for, the worker moves along its chain as before.
+#[tokio::test]
+async fn a_reset_announced_beyond_the_wait_limit_still_moves_the_worker() {
+    let (_repo, db, was, job) = the_running_prelocalised_worker().await;
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
+
+    assert!(
+        intercept_failed_turn_among(
+            &state,
+            &job,
+            "HTTP 429 Too Many Requests: rate_limit_exceeded, retry-after: 7800",
+            Some(usable())
+        )
+        .await
+    );
+
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
+    assert_ne!(
+        after.dispatch_job_id, was.dispatch_job_id,
+        "a fresh dispatch"
+    );
+    assert!(fallback_notice(&db, &was, &job.id).await.is_some());
+    assert!(wait_notice(&db, &was, &job.id).await.is_none());
+}
+
+/// KT-1992 — `rate_limit_wait_max_min = 0` turns the wait off: even a reset a
+/// minute away moves the worker at once.
+#[tokio::test]
+async fn a_wait_limit_of_zero_keeps_switching_at_once() {
+    let (_repo, db, was, job) = the_running_prelocalised_worker().await;
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
+    state.config.write().await.workers.rate_limit_wait_max_min = 0;
+
+    assert!(
+        intercept_failed_turn_among(
+            &state,
+            &job,
+            "HTTP 429 Too Many Requests: rate_limit_exceeded, retry-after: 60",
+            Some(usable())
+        )
+        .await
+    );
+
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
+    assert!(fallback_notice(&db, &was, &job.id).await.is_some());
+    assert!(wait_notice(&db, &was, &job.id).await.is_none());
+}
+
+/// KT-1992 — one wait per turn: the redispatched turn that is refused again
+/// follows the chain, whatever reset is announced.
+#[tokio::test]
+async fn a_second_refusal_after_the_wait_follows_the_chain() {
+    let (_repo, db, was, job) = the_running_prelocalised_worker().await;
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
+    assert!(intercept_failed_turn_among(&state, &job, SHORT_RATE_LIMIT, Some(usable())).await);
+    assert_eq!(
+        exec_of(&db, &was.id).await.worker_agent_type.as_deref(),
+        Some("ClaudeCode"),
+        "the first refusal is waited out"
+    );
+
+    // The reset has passed: the same dispatch runs again and is refused again.
+    let again = claim_when_due(&db, &job.id).await;
+    assert_eq!(again.turn_attempts, 2);
+    assert!(intercept_failed_turn_among(&state, &again, SHORT_RATE_LIMIT, Some(usable())).await);
+
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
+    assert_ne!(after.dispatch_job_id, was.dispatch_job_id);
+    let moved = fallback_notice(&db, &was, &job.id)
+        .await
+        .expect("the move is said");
+    assert!(
+        moved.contains(": rate limited until ")
+            && moved.ends_with(" → continued with Ollama · eco mode [Local]"),
+        "{moved}"
+    );
+}
+
+/// KT-1992 — a principal that polls reads the wait and its end, not a silent
+/// « in progress »; once the turn runs again nothing is left of it.
+#[tokio::test]
+async fn status_says_the_worker_waits_for_the_announced_reset() {
+    let (_repo, db, was, job) = the_running_prelocalised_worker().await;
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
+    assert!(intercept_failed_turn_among(&state, &job, SHORT_RATE_LIMIT, Some(usable())).await);
+
+    let id = was.id.clone();
+    let detail = db
+        .with_conn(move |conn| execution_detail(conn, &id))
+        .await
+        .unwrap();
+    assert_eq!(
+        detail.progress.phase,
+        crate::models::TaskExecutionProgressPhase::Queued
+    );
+    let marker = dispatch_of(&db, job.id.clone())
+        .await
+        .last_error
+        .expect("the wait is written on the dispatch");
+    assert_eq!(detail.progress.reason.as_deref(), Some(marker.as_str()));
+    let restart = marker
+        .strip_prefix("rate_limit_wait: redispatch at ")
+        .unwrap_or_else(|| panic!("{marker}"));
+    let compact = compact_execution_status(&detail, None);
+    assert_eq!(
+        compact.queued.as_deref(),
+        Some(
+            format!(
+                "waiting for the announced rate-limit reset on the same agent: redispatch at {restart}"
+            )
+            .as_str()
+        )
+    );
+    assert!(
+        compact_status_chars(&compact) <= COMPACT_STATUS_MAX_CHARS,
+        "the sentence stays inside the compact budget"
+    );
+
+    // The redispatch is due: the turn runs again and the wait is no longer said.
+    claim_when_due(&db, &job.id).await;
+    let id = was.id.clone();
+    let running = db
+        .with_conn(move |conn| execution_detail(conn, &id))
+        .await
+        .unwrap();
+    assert!(running
+        .progress
+        .reason
+        .as_deref()
+        .is_none_or(|reason| !reason.starts_with("rate_limit_wait")));
+    assert!(compact_execution_status(&running, None).queued.is_none());
+}
+
 /// KT-1758 — the outage chain takes the worker over from `Working`: the
 /// principal is not told to « reassign or cancel » an execution Kronn is
 /// reassigning. The replacement that later ends without a delivery posts its

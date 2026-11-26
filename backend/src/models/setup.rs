@@ -143,6 +143,10 @@ pub struct WorkersConfig {
     /// which cuts the whole turn whatever a command is allowed.
     #[serde(default = "default_workers_bash_max_timeout_min")]
     pub bash_max_timeout_min: u32,
+    /// KT-1992 — a rate-limit reset the provider announces at most this many
+    /// minutes away is waited out on the worker's own agent. `0`: never wait.
+    #[serde(default = "default_workers_rate_limit_wait_max_min")]
+    pub rate_limit_wait_max_min: u32,
     /// KT-1750 — file names an operating system or a file manager drops in any
     /// folder (`.DS_Store`, `Thumbs.db`, …): they never count as a worker's
     /// changes, so they block neither a delivery nor the cleanup of a checkout,
@@ -184,6 +188,7 @@ impl Default for WorkersConfig {
             heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
             bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
             bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
+            rate_limit_wait_max_min: DEFAULT_RATE_LIMIT_WAIT_MAX_MIN,
             os_junk_patterns: default_workers_os_junk_patterns(),
             managed_worktree_roots: Vec::new(),
             commit: super::ProjectCommitSettings::default(),
@@ -303,6 +308,10 @@ fn default_workers_bash_max_timeout_min() -> u32 {
     DEFAULT_BASH_MAX_TIMEOUT_MIN
 }
 
+fn default_workers_rate_limit_wait_max_min() -> u32 {
+    DEFAULT_RATE_LIMIT_WAIT_MAX_MIN
+}
+
 fn default_workers_max_concurrent_task_workers() -> u32 {
     DEFAULT_MAX_CONCURRENT_TASK_WORKERS
 }
@@ -335,6 +344,13 @@ impl WorkersConfig {
             .clamp(1, MAX_BASH_TIMEOUT_MIN_LIMIT);
         let default = self.bash_default_timeout_min.clamp(1, max);
         (u64::from(default) * 60_000, u64::from(max) * 60_000)
+    }
+
+    /// The rate-limit wait limit in minutes, whatever a hand-edited
+    /// `config.toml` holds: never above the form's bound. `0`: no wait.
+    pub fn effective_rate_limit_wait_max_min(&self) -> u32 {
+        self.rate_limit_wait_max_min
+            .min(MAX_RATE_LIMIT_WAIT_MIN_LIMIT)
     }
 
     /// Refuse what the Settings form must never persist.
@@ -377,6 +393,11 @@ impl WorkersConfig {
             return Err(format!(
                 "bash_default_timeout_min must be between 1 and bash_max_timeout_min ({})",
                 self.bash_max_timeout_min
+            ));
+        }
+        if self.rate_limit_wait_max_min > MAX_RATE_LIMIT_WAIT_MIN_LIMIT {
+            return Err(format!(
+                "rate_limit_wait_max_min must be between 0 and {MAX_RATE_LIMIT_WAIT_MIN_LIMIT}"
             ));
         }
         if !(1..=MAX_CONCURRENT_TASK_WORKERS_LIMIT).contains(&self.max_concurrent_task_workers) {
@@ -774,6 +795,10 @@ pub const DEFAULT_BASH_MAX_TIMEOUT_MIN: u32 = 60;
 /// limit (`clamp_agent_global_timeout_min`), since a command outliving the
 /// generation is cut with it.
 pub const MAX_BASH_TIMEOUT_MIN_LIMIT: u32 = 240;
+/// KT-1992 — default longest announced rate-limit reset a worker waits out (min).
+pub const DEFAULT_RATE_LIMIT_WAIT_MAX_MIN: u32 = 15;
+/// Longest such wait accepted: past an hour the fallback chain is the faster way.
+pub const MAX_RATE_LIMIT_WAIT_MIN_LIMIT: u32 = 60;
 /// Default cap on local task workers running at once (KT-1632). Builds, not
 /// agent processes, are what loads the machine: two lanes is what it carries.
 pub const DEFAULT_MAX_CONCURRENT_TASK_WORKERS: u32 = 2;

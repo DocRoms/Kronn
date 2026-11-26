@@ -13263,6 +13263,11 @@ bash_default_timeout_min: number,
  */
 bash_max_timeout_min: number,
 /**
+ * KT-1992 — a rate-limit reset the provider announces at most this many
+ * minutes away is waited out on the worker's own agent. `0`: never wait.
+ */
+rate_limit_wait_max_min: number,
+/**
  * KT-1750 — file names an operating system or a file manager drops in any
  * folder (`.DS_Store`, `Thumbs.db`, …): they never count as a worker's
  * changes, so they block neither a delivery nor the cleanup of a checkout,

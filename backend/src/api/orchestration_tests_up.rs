@@ -18108,6 +18108,54 @@ async fn the_return_replaces_a_fallback_that_has_not_started() {
     );
 }
 
+/// KT-1992 — a fallback worker that waits for an announced rate-limit reset has
+/// run and said so in the room: it is not announced as "has not started".
+#[tokio::test]
+async fn a_fallback_worker_waiting_for_a_reset_is_not_announced_as_not_started() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let was = economy_claude_executions(&db, repo.path(), 1)
+        .await
+        .remove(0);
+    let state = quota_test_state(&db);
+    let limits = default_dispatch_limits(&state).await;
+    let old = was.dispatch_job_id.clone().unwrap();
+    run_then_refuse(&db, &limits, &old, true).await;
+    let moved = fall_back_to_codex(
+        &state,
+        &db,
+        &was,
+        chrono::Utc::now() + chrono::Duration::hours(2),
+    )
+    .await;
+    let dispatch = moved.dispatch_job_id.unwrap();
+    let set_last_error = |last_error: Option<&'static str>| {
+        let dispatch = dispatch.clone();
+        let stale = (chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET created_at = ?2, last_error = ?3 WHERE id = ?1",
+                rusqlite::params![dispatch, stale, last_error],
+            )?;
+            Ok(())
+        })
+    };
+
+    set_last_error(Some("rate_limit_wait: redispatch at 15:41 UTC"))
+        .await
+        .unwrap();
+    assert!(
+        notify_waiting_fallback_dispatches(&state).await.is_empty(),
+        "the wait already told the room"
+    );
+    // Without the wait's marker the same dispatch is one that has not started.
+    set_last_error(None).await.unwrap();
+    assert_eq!(
+        notify_waiting_fallback_dispatches(&state).await,
+        vec![dispatch.clone()]
+    );
+}
+
 /// KT-1758 — a fallback dispatch that waits more than the notice delay is
 /// announced once in the parent room, with the reason it is held.
 #[tokio::test]
