@@ -7400,9 +7400,9 @@ fn reports_failed_file(output_lower: &str) -> bool {
 
 /// KT-1753 review — did a test runner run and report a failure? The markers
 /// above, vitest / jest's `FAIL path`, pytest's `FAILED|ERROR path::test` and
-/// its `=== 1 failed in 0.1s ===` summary, mocha's `N failing` and jest's
-/// `Tests: 1 failed` summary. `output` is as printed (pytest's prefixes are
-/// upper-case), `lower` the same lower-cased.
+/// its `=== 1 failed in 0.1s ===` summary, mocha's `N failing`, jest's
+/// `Tests: 1 failed` summary and cargo-nextest's `Summary` line. `output` is
+/// as printed (pytest's prefixes are upper-case), `lower` the same lower-cased.
 fn test_runner_failed(output: &str, lower: &str) -> bool {
     TEST_FAILURE_MARKERS
         .iter()
@@ -7421,7 +7421,12 @@ fn test_runner_failed(output: &str, lower: &str) -> bool {
                 !count.is_empty() && count.chars().all(|c| c.is_ascii_digit())
             });
             let jest = line.starts_with("tests:") && line.contains(" failed");
-            pytest_summary || mocha || jest
+            // KT-2040 — `Summary [ 1.2s] 3 tests run: 1 passed, 1 failed, 1 timed out`,
+            // or `… 3 stress run iterations: 2 passed, 1 failed`.
+            let nextest = line.starts_with("summary [")
+                && (line.contains(" run: ") || line.contains(" stress run "))
+                && (line.contains(" failed") || line.contains(" timed out"));
+            pytest_summary || mocha || jest || nextest
         })
         || unittest_failed(lower)
 }
@@ -8229,21 +8234,17 @@ where
                 quick_exec::MAX_TIMEOUT_SECS
             )
         });
+    let argv: Vec<String> = parts.map(str::to_string).collect();
+    let summariser = quick_exec::Summariser::for_command(binary, &argv);
     let quick = quick_exec::QuickExecSpec {
         binary: binary.to_string(),
-        argv: parts.map(str::to_string).collect(),
+        argv,
         cwd: cwd.to_path_buf(),
         timeout_secs: effective_timeout,
         // A validation reads nothing: leaving stdin open would make a command that
         // waits for input indistinguishable from one that hangs.
         stdin: None,
-        summariser: match spec.command.split_whitespace().next() {
-            Some("cargo") if spec.command.contains("clippy") => quick_exec::Summariser::Clippy,
-            Some("cargo") => quick_exec::Summariser::CargoTest,
-            Some("tsc") => quick_exec::Summariser::Tsc,
-            Some("vitest") => quick_exec::Summariser::Vitest,
-            _ => quick_exec::Summariser::Generic,
-        },
+        summariser,
     };
     // KT-1751: what the project of this tree lists for its validations.
     let project_executables =
@@ -22943,6 +22944,80 @@ pub mod tests {
                     "panicked at src/core/preflight.rs:100:9",
                     "the connection was not callable 0",
                     "left: Refused(\"connection 0\")",
+                ] {
+                    assert!(message.contains(expected), "{expected} missing: {message}");
+                }
+            }
+        }
+    }
+
+    /// KT-2040: a red `cargo nextest` validation sends the worker and the
+    /// principal the failed tests, the first panic and the run's `Summary`.
+    #[test]
+    fn a_red_cargo_nextest_validation_reaches_the_rework_messages_with_its_failure() {
+        use crate::core::quick_exec::{summarise, QuickExecStatus, Summariser};
+        let failing = 70;
+        let status = |index: usize| {
+            format!("        FAIL [   0.004s] kronn::it core::preflight::case_{index}_is_refused\n")
+        };
+        let mut stderr = String::from("    Starting 71 tests across 2 binaries\n");
+        for index in 0..failing {
+            stderr.push_str(&status(index));
+            stderr.push_str(&format!(
+                "  stdout ───\n\n    running 1 test\n    test core::preflight::case_{index}_is_refused ... FAILED\n\n\
+                 \x20 stderr ───\n\
+                 \x20   thread 'core::preflight::case_{index}_is_refused' panicked at src/core/preflight.rs:{}:9:\n\
+                 \x20   the connection was not callable {index}\n\
+                 \x20   assertion `left == right` failed\n\
+                 \x20     left: Refused(\"connection {index}\")\n\
+                 \x20    right: Callable\n\n",
+                100 + index
+            ));
+        }
+        stderr.push_str("        PASS [   0.012s] my-crate::bin/my-tool cli::parses_flags\n");
+        stderr.push_str("────────────\n");
+        stderr.push_str("     Summary [   1.204s] 71 tests run: 1 passed, 70 failed, 0 skipped\n");
+        for index in 0..failing {
+            stderr.push_str(&status(index));
+        }
+        stderr.push_str("error: test run failed\n");
+        let summary = summarise(
+            Summariser::CargoNextest,
+            "",
+            &stderr,
+            QuickExecStatus::Failed,
+            true,
+        )
+        .summary;
+        let report = ReworkReport::validation(ValidationFailure {
+            command: "cargo nextest run --manifest-path backend/Cargo.toml --partition slice:1/6"
+                .into(),
+            exit_code: Some(100),
+            output: summary,
+        });
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            let worker = build_integration_rework_message(
+                "exec-1",
+                2,
+                "KT-1",
+                "title",
+                Some("main"),
+                &report,
+                lang,
+            )
+            .content;
+            let principal = build_integration_rework_notice(
+                "exec-1", 2, "KT-1", "title", "child-1", &report, lang,
+            )
+            .content;
+            for message in [worker, principal] {
+                for expected in [
+                    "FAIL [   0.004s] kronn::it core::preflight::case_0_is_refused",
+                    "panicked at src/core/preflight.rs:100:9",
+                    "the connection was not callable 0",
+                    "left: Refused(\"connection 0\")",
+                    "Summary [   1.204s] 71 tests run: 1 passed, 70 failed, 0 skipped",
+                    "kronn::it core::preflight::case_49_is_refused",
                 ] {
                     assert!(message.contains(expected), "{expected} missing: {message}");
                 }

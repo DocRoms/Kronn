@@ -1189,11 +1189,14 @@ fn a_pretty_debug_secret_in_a_failure_block_is_redacted() {
 async fn a_stream_cut_at_the_cap_drops_its_last_partial_line() {
     let token = "ghp_Fake0123456789abcdefghijABCDEFGHIJ";
     let stream = format!("first line\nthread panicked: bad credential {token}\nlast\n");
-    // Keeps `ghp_Fake012`, shorter than the 30 characters the GitHub shape needs.
+    // A cap that falls inside the token, as the GitHub shape needs 30 characters.
     let cap = stream.find(token).unwrap() + 11;
     let (kept, total) = drain_capped(stream.as_bytes(), cap).await;
-    assert_eq!(kept.len(), cap);
-    let text = whole_lines(&kept, total);
+    assert!(
+        (kept.len() as u64) < total,
+        "a cut stream reads as truncated"
+    );
+    let text = whole_lines(&kept);
     assert_eq!(text, "first line\n");
     let extracted = summarise(
         Summariser::Generic,
@@ -1210,13 +1213,967 @@ async fn a_stream_cut_at_the_cap_drops_its_last_partial_line() {
 
     // A stream kept whole is read as it is, its last line included.
     let (kept, total) = drain_capped(stream.as_bytes(), 1 << 20).await;
-    assert_eq!(whole_lines(&kept, total), stream);
+    assert_eq!(kept.len() as u64, total);
+    assert_eq!(whole_lines(&kept), stream);
     let unterminated = "no newline at the end";
-    let (kept, total) = drain_capped(unterminated.as_bytes(), 1 << 20).await;
-    assert_eq!(whole_lines(&kept, total), unterminated);
+    let (kept, _) = drain_capped(unterminated.as_bytes(), 1 << 20).await;
+    assert_eq!(whole_lines(&kept), unterminated);
     // A capped stream of a single line keeps nothing of it.
-    let (kept, total) = drain_capped(unterminated.as_bytes(), 5).await;
-    assert_eq!(whole_lines(&kept, total), "");
+    let (kept, _) = drain_capped(unterminated.as_bytes(), 5).await;
+    assert_eq!(whole_lines(&kept), "");
+}
+
+/// KT-2116 — a stream longer than the cap keeps whole lines of its start and of
+/// its end, with one line saying what is missing, and never more than the cap.
+#[tokio::test]
+async fn a_stream_over_the_cap_keeps_its_start_and_its_end() {
+    let lines: Vec<String> = (0..2_000).map(|n| format!("line {n:04}\n")).collect();
+    let stream = lines.concat();
+    let cap = 4_096;
+    let (kept, total) = drain_capped(stream.as_bytes(), cap).await;
+    assert_eq!(total, stream.len() as u64);
+    assert!(kept.len() <= cap, "{} bytes kept", kept.len());
+    let text = whole_lines(&kept);
+    assert!(text.starts_with("line 0000\nline 0001\n"), "{text}");
+    assert!(text.ends_with("line 1998\nline 1999\n"), "{text}");
+    let markers: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.starts_with("line "))
+        .collect();
+    assert_eq!(markers.len(), 1, "{markers:?}");
+    assert!(markers[0].ends_with(" bytes not kept …"), "{markers:?}");
+    for line in text.lines().filter(|line| line.starts_with("line ")) {
+        assert_eq!(
+            line.len(),
+            "line 0000".len(),
+            "a cut line was kept: {line:?}"
+        );
+    }
+    let omitted: u64 = markers[0]
+        .trim_start_matches("… ")
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(omitted + (text.len() - markers[0].len() - 1) as u64, total);
+}
+
+/// KT-2116 — the output of a whole-workspace run exceeds the capture: the tests
+/// that failed late and the run's Summary line still reach the summary.
+#[tokio::test]
+async fn a_red_nextest_run_longer_than_the_capture_still_names_its_late_failure() {
+    let mut stream = String::from("    Starting 3000 tests across 9 binaries\n");
+    for n in 0..2_998 {
+        stream.push_str(&format!(
+            "        PASS [   0.010s] ({:>4}/3000) kronn-l1 core::sample::tests::case_{n:04}\n",
+            n + 1
+        ));
+    }
+    stream.push_str(
+        "        FAIL [   0.020s] (2999/3000) kronn-l1 core::sample::tests::the_late_one\n\
+         \x20 stderr ───\n\
+         \n\
+         \x20   thread 'core::sample::tests::the_late_one' panicked at src/core/sample.rs:9:5:\n\
+         \x20   late assertion failed\n\
+         \n\
+         \x20       PASS [   0.010s] (3000/3000) kronn-l1 core::sample::tests::case_2999\n\
+         ────────────\n\
+         \x20    Summary [  12.000s] 3000 tests run: 2999 passed, 1 failed, 0 skipped\n\
+         \x20       FAIL [   0.020s] (2999/3000) kronn-l1 core::sample::tests::the_late_one\n\
+         error: test run failed\n",
+    );
+    let cap = 16_384;
+    assert!(stream.len() > 10 * cap);
+    let (kept, total) = drain_capped(stream.as_bytes(), cap).await;
+    assert!((kept.len() as u64) < total);
+    let extracted = summarise(
+        Summariser::CargoNextest,
+        "",
+        &whole_lines(&kept),
+        QuickExecStatus::Failed,
+        false,
+    );
+    assert!(
+        extracted
+            .failed_tests
+            .iter()
+            .any(|name| name.contains("the_late_one")),
+        "{:?}",
+        extracted.failed_tests
+    );
+    assert!(
+        extracted
+            .summary
+            .contains("3000 tests run: 2999 passed, 1 failed"),
+        "{}",
+        extracted.summary
+    );
+    assert!(
+        extracted.summary.contains("late assertion failed"),
+        "{}",
+        extracted.summary
+    );
+}
+
+/// KT-2039 with KT-2116 — a credential cut where the kept end begins is dropped
+/// with its line, like one cut where the kept start ends.
+#[tokio::test]
+async fn a_credential_cut_where_the_kept_end_begins_is_not_kept() {
+    let token = "ghp_Fake0123456789abcdefghijABCDEFGHIJ";
+    let cap = 1_024;
+    let filler = "x".repeat(60);
+    let mut stream = String::new();
+    for _ in 0..40 {
+        stream.push_str(&filler);
+        stream.push('\n');
+    }
+    // The kept end starts inside this line, wherever the cut falls in it.
+    let long_line = format!("bad credential {} {token}\n", "y".repeat(cap));
+    stream.push_str(&long_line);
+    stream.push_str("the end\n");
+    let (kept, _) = drain_capped(stream.as_bytes(), cap).await;
+    let text = whole_lines(&kept);
+    assert!(text.ends_with("the end\n"), "{text}");
+    assert!(!text.contains("ghp_"), "{text}");
+    assert!(!text.contains("yyyy"), "{text}");
+}
+
+// ── KT-2040: a red `cargo nextest` run says which tests failed and why ──
+
+/// A nextest status line: the status right-aligned on 12 columns, the
+/// duration, then `<binary id> <test>`.
+fn nextest_status(status: &str, seconds: &str, name: &str) -> String {
+    format!("{status:>12} [{seconds:>8}s] {name}")
+}
+
+/// One failed test as cargo-nextest prints it: the status line, then each
+/// captured stream, indented, under its `stdout ───` / `stderr ───` header.
+/// The stdout is libtest's report of the one test the process ran.
+fn nextest_failure(status: &str, name: &str, stderr: &str) -> String {
+    let test = name.rsplit(' ').next().unwrap();
+    let indent = |text: &str| -> String {
+        text.lines()
+            .map(|line| {
+                if line.is_empty() {
+                    "\n".to_string()
+                } else {
+                    format!("    {line}\n")
+                }
+            })
+            .collect()
+    };
+    let libtest = format!(
+        "\nrunning 1 test\ntest {test} ... FAILED\n\nfailures:\n\nfailures:\n    {test}\n\n\
+         test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s\n\n"
+    );
+    format!(
+        "{}\n  stdout ───\n{}  stderr ───\n{}\n",
+        nextest_status(status, "0.004", name),
+        indent(&libtest),
+        indent(stderr),
+    )
+}
+
+/// The lines nextest prints before its first test.
+const NEXTEST_HEADER: &[&str] = &[
+    "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s",
+    "────────────",
+    " Nextest run ID 7f1c1c0e-6a52-4d0f-9d3c-0c5b6a1f2e11 with nextest profile: default",
+    "    Starting 4 tests across 2 binaries (1 test skipped)",
+];
+
+/// A whole red run on stderr: passes around the failures, the `Summary` line,
+/// then nextest's closing recap of the failed tests.
+fn red_nextest_run(failures: &[String], summary: &str) -> String {
+    let mut stderr = String::new();
+    for line in NEXTEST_HEADER {
+        stderr.push_str(line);
+        stderr.push('\n');
+    }
+    let pass = |name: &str| format!("{}\n", nextest_status("PASS", "0.012", name));
+    stderr.push_str(&pass("my-crate::bin/my-tool cli::parses_flags"));
+    for failure in failures {
+        stderr.push_str(failure);
+    }
+    stderr.push_str(&pass("kronn::it core::preflight::accepted"));
+    stderr.push_str("────────────\n");
+    stderr.push_str(&format!("     Summary [   0.035s] {summary}\n"));
+    for failure in failures {
+        stderr.push_str(failure.lines().next().unwrap());
+        stderr.push('\n');
+    }
+    stderr.push_str("error: test run failed\n");
+    stderr
+}
+
+const NEXTEST_PANIC: &str =
+    "thread 'core::preflight::refused' panicked at src/core/preflight.rs:12:5:\n\
+     assertion `left == right` failed\n\
+     \x20 left: 1\n\
+     \x20right: 2\n\
+     note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n";
+
+fn nextest_summary_of(stderr: &str, status: QuickExecStatus) -> Extracted {
+    summarise(Summariser::CargoNextest, "", stderr, status, true)
+}
+
+/// One panic among passes: the `Summary` line, the failed test named once
+/// (nextest prints it live and in its recap) and the panic, without libtest's
+/// one-test report or the stream headers.
+#[test]
+fn a_red_nextest_run_names_the_failed_test_and_keeps_its_panic() {
+    let name = "kronn::it core::preflight::refused";
+    let stderr = red_nextest_run(
+        &[nextest_failure("FAIL", name, NEXTEST_PANIC)],
+        "3 tests run: 2 passed, 1 failed, 1 skipped",
+    );
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(extracted.failed_tests, vec![name]);
+    assert!(
+        summary.starts_with(
+            "Failed — 1 failing\nfailure details:\n        FAIL [   0.004s] kronn::it core::preflight::refused\n"
+        ),
+        "{summary}"
+    );
+    for expected in [
+        "panicked at src/core/preflight.rs:12:5",
+        "assertion `left == right` failed",
+        "left: 1",
+        "right: 2",
+        "Summary [   0.035s] 3 tests run: 2 passed, 1 failed, 1 skipped",
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+    for noise in [
+        "RUST_BACKTRACE",
+        "running 1 test",
+        "test result:",
+        "failures:",
+        "stderr ───",
+        "stdout ───",
+    ] {
+        assert!(!summary.contains(noise), "{noise} is noise: {summary}");
+    }
+    assert!(summary.len() <= SUMMARY_MAX_BYTES);
+}
+
+/// A timed-out test and an aborted one are named with their status and keep
+/// their output, in the `--- STDERR: <binary> <test> ---` layout too.
+#[test]
+fn a_nextest_timeout_and_an_abort_are_named_with_their_status() {
+    let slow = "kronn::it api::slow::never_returns";
+    let abort = "my-crate::bin/my-tool ffi::double_free";
+    let stderr = [
+        "    Starting 3 tests across 2 binaries".to_string(),
+        nextest_status("TIMEOUT", "300.012", slow),
+        String::new(),
+        format!("--- STDOUT:              {slow} ---"),
+        String::new(),
+        "running 1 test".to_string(),
+        String::new(),
+        format!("--- STDERR:              {slow} ---"),
+        "waiting for the server on 127.0.0.1:4010".to_string(),
+        String::new(),
+        nextest_status("SIGABRT", "0.153", abort),
+        String::new(),
+        format!("--- STDOUT:              {abort} ---"),
+        String::new(),
+        "running 1 test".to_string(),
+        String::new(),
+        format!("--- STDERR:              {abort} ---"),
+        "thread 'ffi::double_free' panicked at src/ffi.rs:40:9:".to_string(),
+        "panic in a function that cannot unwind".to_string(),
+        "thread caused non-unwinding panic. aborting.".to_string(),
+        String::new(),
+        nextest_status("PASS", "0.020", "kronn::it core::preflight::accepted"),
+        "------------".to_string(),
+        "     Summary [ 300.214s] 3 tests run: 1 passed, 1 failed, 1 timed out, 0 skipped"
+            .to_string(),
+        nextest_status("TIMEOUT", "300.012", slow),
+        nextest_status("SIGABRT", "0.153", abort),
+        "error: test run failed".to_string(),
+    ]
+    .join("\n");
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(
+        extracted.failed_tests,
+        vec![format!("{slow} (TIMEOUT)"), format!("{abort} (SIGABRT)")]
+    );
+    for expected in [
+        "Failed — 2 failing",
+        "     TIMEOUT [ 300.012s] kronn::it api::slow::never_returns",
+        "waiting for the server on 127.0.0.1:4010",
+        "     SIGABRT [   0.153s] my-crate::bin/my-tool ffi::double_free",
+        "panicked at src/ffi.rs:40:9",
+        "panic in a function that cannot unwind",
+        "Summary [ 300.214s] 3 tests run: 1 passed, 1 failed, 1 timed out, 0 skipped",
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+    for noise in ["--- STDERR", "--- STDOUT", "running 1 test"] {
+        assert!(!summary.contains(noise), "{noise} is noise: {summary}");
+    }
+}
+
+/// A compile error that stops the run before any test keeps the compiler's
+/// error lines, as a `cargo test` run does.
+#[test]
+fn a_nextest_run_stopped_by_a_compile_error_keeps_the_error() {
+    let stderr = "   Compiling kronn v0.15.4 (/work/backend)\n\
+                  error[E0308]: mismatched types\n\
+                  \x20 --> src/core/preflight.rs:12:18\n\
+                  \x20  |\n\
+                  12 |     let attempts: u32 = \"one\";\n\
+                  \x20  |                   ---   ^^^^^ expected `u32`, found `&str`\n\
+                  \n\
+                  error: could not compile `kronn` (lib test) due to 1 previous error\n\
+                  error: command `cargo test --no-run --message-format json-render-diagnostics` exited with code 101\n";
+    let extracted = nextest_summary_of(stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert!(extracted.failed_tests.is_empty(), "{summary}");
+    assert!(summary.starts_with("Failed\n"), "{summary}");
+    for expected in [
+        "error[E0308]: mismatched types",
+        "error: could not compile `kronn` (lib test) due to 1 previous error",
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+}
+
+/// A green run is its `Summary` line: a test that passed while leaking a
+/// handle is not a failure.
+#[test]
+fn a_green_nextest_summary_is_its_summary_line() {
+    let stderr = [
+        "    Starting 3 tests across 2 binaries".to_string(),
+        nextest_status("PASS", "0.012", "my-crate::bin/my-tool cli::parses_flags"),
+        nextest_status("LEAK", "0.120", "kronn::it api::server::spawns_a_child"),
+        nextest_status("PASS", "0.020", "kronn::it core::preflight::accepted"),
+        "────────────".to_string(),
+        "     Summary [   0.152s] 3 tests run: 3 passed (1 leaky), 0 skipped".to_string(),
+    ]
+    .join("\n");
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Passed);
+    assert_eq!(
+        extracted.summary,
+        "Passed\nSummary [   0.152s] 3 tests run: 3 passed (1 leaky), 0 skipped\n"
+    );
+    assert!(extracted.failed_tests.is_empty());
+}
+
+/// More failures than the cap: the names are capped and unique, the first
+/// panics and the `Summary` line stay within the summary cap.
+#[test]
+fn many_red_nextest_tests_are_named_once_and_capped() {
+    let failing = MAX_FAILED_TESTS + 20;
+    let failures: Vec<String> = (0..failing)
+        .map(|index| {
+            nextest_failure(
+                "FAIL",
+                &format!("kronn::it core::preflight::case_{index}_is_refused"),
+                &format!(
+                    "thread 'core::preflight::case_{index}_is_refused' panicked at src/core/preflight.rs:{}:9:\n{} {index}\n",
+                    100 + index,
+                    "why it failed ".repeat(40),
+                ),
+            )
+        })
+        .collect();
+    let counts = format!(
+        "{} tests run: 2 passed, {failing} failed, 0 skipped",
+        failing + 2
+    );
+    let stderr = red_nextest_run(&failures, &counts);
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(extracted.failed_tests.len(), MAX_FAILED_TESTS);
+    assert_eq!(
+        extracted.failed_tests[0],
+        "kronn::it core::preflight::case_0_is_refused"
+    );
+    let unique: std::collections::HashSet<&String> = extracted.failed_tests.iter().collect();
+    assert_eq!(
+        unique.len(),
+        MAX_FAILED_TESTS,
+        "{:?}",
+        extracted.failed_tests
+    );
+    assert!(summary.len() <= SUMMARY_MAX_BYTES, "{}", summary.len());
+    let summary_line = format!("Summary [   0.035s] {counts}");
+    for expected in [
+        "panicked at src/core/preflight.rs:100:9",
+        "why it failed",
+        summary_line.as_str(),
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+}
+
+/// The kept output of a failed nextest test goes through the redaction of
+/// the other failure blocks: a connection string, a bearer, the KT-2039 shapes.
+#[test]
+fn the_kept_nextest_failure_output_is_redacted() {
+    let run = |panic_line: &str| {
+        red_nextest_run(
+            &[nextest_failure(
+                "FAIL",
+                "kronn::it db::pool::connects",
+                &format!(
+                    "thread 'db::pool::connects' panicked at src/db/pool.rs:31:9:\n{panic_line}\n"
+                ),
+            )],
+            "3 tests run: 2 passed, 1 failed, 1 skipped",
+        )
+    };
+    let extracted = nextest_summary_of(
+        &run("could not connect to postgres://app:Sup3rS3cretPw@db.internal:5432/kronn with Authorization: Bearer abc123def456ghi789jkl"),
+        QuickExecStatus::Failed,
+    );
+    let summary = &extracted.summary;
+    assert!(
+        summary.contains("could not connect to postgres://app:"),
+        "{summary}"
+    );
+    for secret in ["Sup3rS3cretPw", "abc123def456ghi789jkl"] {
+        assert!(!summary.contains(secret), "{secret} leaked: {summary}");
+    }
+    for (shape, secret) in KT_2039_SHAPES {
+        let extracted = nextest_summary_of(&run(shape), QuickExecStatus::Failed);
+        assert_no_kt_2039_secret(&extracted, secret, shape);
+        assert!(
+            extracted
+                .summary
+                .contains("panicked at src/db/pool.rs:31:9"),
+            "{}",
+            extracted.summary
+        );
+    }
+}
+
+fn summariser_of(command: &str) -> Summariser {
+    let mut parts = command.split_whitespace();
+    let binary = parts.next().unwrap();
+    let argv: Vec<&str> = parts.collect();
+    Summariser::for_command(binary, &argv)
+}
+
+/// The command lines that select the nextest summariser, and those that keep
+/// the one they had: `cargo test`, clippy, tsc, vitest, a wrapper.
+#[test]
+fn a_cargo_nextest_command_selects_the_nextest_summariser() {
+    for command in [
+        "cargo nextest run",
+        "cargo nextest run --manifest-path backend/Cargo.toml --workspace --partition slice:1/6",
+        "cargo --locked nextest run --profile ci",
+        "cargo llvm-cov nextest --lib",
+        // A test filter named after the other subcommand.
+        "cargo nextest run clippy",
+        // A global option's value is not the subcommand.
+        "cargo --config net.offline=true nextest run",
+        "cargo +nightly -Z unstable-options -C backend nextest run",
+        // No test runs: read as any command when red (see `for_command`).
+        "cargo nextest list",
+        "cargo nextest archive --archive-file tests.tar.zst",
+    ] {
+        assert_eq!(
+            summariser_of(command),
+            Summariser::CargoNextest,
+            "{command}"
+        );
+    }
+    for (command, expected) in [
+        ("cargo test", Summariser::CargoTest),
+        (
+            "cargo test --manifest-path backend/Cargo.toml --lib preflight",
+            Summariser::CargoTest,
+        ),
+        // `nextest` inside a longer word is a filter, not the subcommand.
+        ("cargo test --lib nextest_summary", Summariser::CargoTest),
+        // So is the exact word after the subcommand: a filter, a test target,
+        // a package, the value of an option.
+        ("cargo test --lib nextest", Summariser::CargoTest),
+        (
+            "cargo test --manifest-path backend/Cargo.toml --lib nextest",
+            Summariser::CargoTest,
+        ),
+        ("cargo test -- nextest", Summariser::CargoTest),
+        ("cargo test --test nextest", Summariser::CargoTest),
+        ("cargo test -p nextest", Summariser::CargoTest),
+        ("cargo --color nextest test", Summariser::CargoTest),
+        ("cargo test clippy", Summariser::CargoTest),
+        ("cargo llvm-cov --lib nextest", Summariser::CargoTest),
+        ("cargo +nightly --color never clippy", Summariser::Clippy),
+        ("cargo", Summariser::CargoTest),
+        ("cargo check", Summariser::CargoTest),
+        (
+            "cargo clippy --all-targets -- -D warnings",
+            Summariser::Clippy,
+        ),
+        ("cargo clippy -p nextest", Summariser::Clippy),
+        ("tsc --noEmit", Summariser::Tsc),
+        ("vitest run", Summariser::Vitest),
+        ("make test", Summariser::Generic),
+        // As for `cargo test`, a wrapper is summarised by its own name.
+        ("rtk cargo nextest run", Summariser::Generic),
+    ] {
+        assert_eq!(summariser_of(command), expected, "{command}");
+    }
+}
+
+/// With retries, a test that passed on a later try is not a failure; one that
+/// failed every try is named once.
+#[test]
+fn a_nextest_test_that_passed_on_a_retry_is_not_named_as_failing() {
+    let flaky = "kronn::it api::ws::reconnects";
+    let broken = "kronn::it core::preflight::refused";
+    let stderr = [
+        "    Starting 2 tests across 1 binary".to_string(),
+        nextest_status("TRY 1 FAIL", "0.004", flaky),
+        nextest_status("TRY 1 FAIL", "0.004", broken),
+        nextest_status("FLAKY 2/3", "0.005", flaky),
+        nextest_status("TRY 2 FAIL", "0.004", broken),
+        nextest_status("TRY 3 FAIL", "0.004", broken),
+        "────────────".to_string(),
+        "     Summary [   0.035s] 2 tests run: 1 passed (1 flaky), 1 failed, 0 skipped".to_string(),
+        nextest_status("FLAKY 2/3", "0.005", flaky),
+        nextest_status("TRY 3 FAIL", "0.004", broken),
+        "error: test run failed".to_string(),
+    ]
+    .join("\n");
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    assert_eq!(extracted.failed_tests, vec![broken]);
+}
+
+/// A profile that prints the failures' output only after the `Summary` line
+/// (`failure-output = "final"`) still gives the panic.
+#[test]
+fn a_nextest_failure_printed_after_the_summary_keeps_its_panic() {
+    let name = "kronn::it core::preflight::refused";
+    let mut stderr = String::from("    Starting 2 tests across 1 binary\n");
+    stderr.push_str(&format!("{}\n", nextest_status("FAIL", "0.004", name)));
+    stderr.push_str("────────────\n");
+    stderr.push_str("     Summary [   0.035s] 2 tests run: 1 passed, 1 failed, 0 skipped\n");
+    stderr.push_str(&nextest_failure("FAIL", name, NEXTEST_PANIC));
+    stderr.push_str("error: test run failed\n");
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(extracted.failed_tests, vec![name]);
+    assert!(
+        summary.contains("panicked at src/core/preflight.rs:12:5"),
+        "{summary}"
+    );
+    assert!(summary.contains("right: 2"), "{summary}");
+    assert!(!summary.contains("error: test run failed"), "{summary}");
+}
+
+/// A failed test that logged more lines than a block keeps still shows its
+/// panic: the log gives way to it.
+#[test]
+fn a_chatty_failed_nextest_test_still_shows_its_panic() {
+    let mut output: String = (0..40)
+        .map(|attempt| format!("retrying the connection, attempt {attempt}\n"))
+        .collect();
+    output.push_str(NEXTEST_PANIC);
+    let stderr = red_nextest_run(
+        &[nextest_failure(
+            "FAIL",
+            "kronn::it core::preflight::refused",
+            &output,
+        )],
+        "3 tests run: 2 passed, 1 failed, 1 skipped",
+    );
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    for expected in [
+        "        FAIL [   0.004s] kronn::it core::preflight::refused",
+        "panicked at src/core/preflight.rs:12:5",
+        "left: 1",
+        "right: 2",
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+}
+
+/// The status lines nextest prints are told from a test's own output: the
+/// label is right-aligned on 12 columns, a counter may precede the name.
+#[test]
+fn a_nextest_status_line_is_read_with_its_label_and_name() {
+    for (line, expected) in [
+        (
+            "        FAIL [   1.000s] my-binary-id test1",
+            Some(("FAIL", "my-binary-id test1")),
+        ),
+        (
+            "   FLAKY 2/2 [   2.000s] [3/3] (  20/5000) my-binary-id test1",
+            Some(("FLAKY 2/2", "my-binary-id test1")),
+        ),
+        (
+            "        SLOW [> 30.000s] kronn::it api::slow::never_returns",
+            Some(("SLOW", "kronn::it api::slow::never_returns")),
+        ),
+        // A retried try: the short status (a signal without `SIG`), the
+        // counter padded; a label over 12 columns starts at the margin.
+        (
+            "  TRY 3 SEGV [   0.153s] (─────) my-crate::bin/my-tool ffi::double_free",
+            Some(("TRY 3 SEGV", "my-crate::bin/my-tool ffi::double_free")),
+        ),
+        (
+            "TRY 10 LKFAIL [   0.153s] my-crate::bin/my-tool ffi::double_free",
+            Some(("TRY 10 LKFAIL", "my-crate::bin/my-tool ffi::double_free")),
+        ),
+        (
+            "     Summary [   2.000s] 5 tests run: 5 passed, 0 skipped",
+            None,
+        ),
+        // A test's own output: not aligned, or no duration.
+        ("FAIL [   1.000s] my-binary-id test1", None),
+        ("    FAIL [   1.000s] my-binary-id test1", None),
+        ("   LOG LEVEL [debug] handlers ready", None),
+        ("    assertion failed: [1, 2] == [1, 3]", None),
+    ] {
+        assert_eq!(nextest_status_line(line), expected, "{line}");
+    }
+}
+
+/// A red run its summariser reads nothing from is not left as the bare
+/// verdict: it keeps the redacted end of its output. A green one is unchanged.
+#[test]
+fn a_red_run_its_summariser_reads_nothing_from_keeps_the_end_of_its_output() {
+    let stderr = "error: no such command: `nextest`\n\n\
+                  \tView all installed commands with `cargo --list`\n\
+                  \tlast login used password=Fake2Tail3Value4\n";
+    for summariser in [
+        Summariser::CargoNextest,
+        Summariser::CargoTest,
+        Summariser::Clippy,
+        Summariser::Tsc,
+        Summariser::Vitest,
+    ] {
+        let extracted = summarise(summariser, "", stderr, QuickExecStatus::Failed, true);
+        let summary = &extracted.summary;
+        assert!(summary.starts_with("Failed\n"), "{summariser:?}: {summary}");
+        assert!(
+            summary.contains("error: no such command: `nextest`"),
+            "{summariser:?}: {summary}"
+        );
+        assert!(
+            !summary.contains("Fake2Tail3Value4"),
+            "{summariser:?}: {summary}"
+        );
+        let green = summarise(summariser, "", stderr, QuickExecStatus::Passed, true);
+        assert_eq!(green.summary, "Passed\n", "{summariser:?}");
+    }
+}
+
+// ── KT-2040 review: codeless compile errors, retries, leaks, setup scripts ──
+
+/// A nextest build stopped by an error without a code (a lint denied by
+/// `-D warnings`) keeps each error and the `-->` location under it, not only
+/// cargo's `could not compile`.
+#[test]
+fn a_nextest_build_stopped_by_a_codeless_compile_error_keeps_the_error_and_its_location() {
+    let mut stderr = String::from("   Compiling kronn v0.15.4 (/work/backend)\n");
+    for index in 0..4 {
+        let line = 12 + index;
+        stderr.push_str(&format!(
+            "error: unused variable: `attempts_{index}`\n\
+             \x20 --> src/core/preflight.rs:{line}:9\n\
+             \x20  |\n\
+             {line} |     let attempts_{index} = 3;\n\
+             \x20  |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attempts_{index}`\n"
+        ));
+        if index == 0 {
+            stderr.push_str(
+                "\x20  |\n\
+                 \x20  = note: `-D unused-variables` implied by `-D warnings`\n\
+                 \x20  = help: to override `-D warnings` add `#[allow(unused_variables)]`\n",
+            );
+        }
+        stderr.push('\n');
+    }
+    stderr.push_str(
+        "error: could not compile `kronn` (lib test) due to 4 previous errors\n\
+         error: command `cargo test --no-run --message-format json-render-diagnostics` exited with code 101\n",
+    );
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert!(extracted.failed_tests.is_empty(), "{summary}");
+    assert!(summary.starts_with("Failed\n"), "{summary}");
+    // The first error is above the kept end of the output: it is there too.
+    for index in 0..4 {
+        let error = format!(
+            "error: unused variable: `attempts_{index}`\n--> src/core/preflight.rs:{}:9",
+            12 + index
+        );
+        assert!(summary.contains(&error), "{error} missing: {summary}");
+    }
+    assert!(
+        summary.contains("error: could not compile `kronn` (lib test) due to 4 previous errors"),
+        "{summary}"
+    );
+    assert!(summary.len() <= SUMMARY_MAX_BYTES, "{}", summary.len());
+}
+
+/// With retries nextest prints a signal as its bare name (`TRY 3 ABRT`, not
+/// `SIGABRT`): the crashing test is named once with that status and keeps the
+/// output of one try.
+#[test]
+fn a_nextest_test_that_crashes_on_every_try_is_named_with_its_status() {
+    let name = "my-crate::bin/my-tool ffi::double_free";
+    let attempt = |label: &str, seconds: &str, counter: &str| {
+        format!(
+            "{}\n\
+             \x20 stdout ───\n\
+             \n\
+             \x20   running 1 test\n\
+             \x20 stderr ───\n\
+             \n\
+             \x20   thread 'ffi::double_free' panicked at src/ffi.rs:40:9:\n\
+             \x20   panic in a function that cannot unwind\n\
+             \x20   thread caused non-unwinding panic. aborting.\n\
+             \n\
+             \x20   (test aborted with signal 6: SIGABRT)\n\
+             \n",
+            nextest_status(label, seconds, &format!("{counter} {name}"))
+        )
+    };
+    let last = nextest_status("TRY 3 ABRT", "0.151", &format!("(1/2) {name}"));
+    let stderr = [
+        "────────────\n".to_string(),
+        " Nextest run ID 7f1c1c0e-6a52-4d0f-9d3c-0c5b6a1f2e11 with nextest profile: ci\n"
+            .to_string(),
+        "    Starting 2 tests across 1 binary (12 tests skipped)\n".to_string(),
+        attempt("TRY 1 ABRT", "0.153", "(───)"),
+        attempt("TRY 2 ABRT", "0.150", "(───)"),
+        attempt("TRY 3 ABRT", "0.151", "(1/2)"),
+        format!(
+            "{}\n",
+            nextest_status(
+                "PASS",
+                "0.012",
+                "(2/2) my-crate::bin/my-tool cli::parses_flags"
+            )
+        ),
+        "────────────\n".to_string(),
+        "     Summary [   0.600s] 2 tests run: 1 passed, 1 failed, 12 skipped\n".to_string(),
+        format!("{last}\n"),
+        "error: test run failed\n".to_string(),
+    ]
+    .concat();
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(extracted.failed_tests, vec![format!("{name} (ABRT)")]);
+    assert!(
+        summary.starts_with(&format!(
+            "Failed — 1 failing\nfailure details:\n  TRY 1 ABRT [   0.153s] (───) {name}\n"
+        )),
+        "{summary}"
+    );
+    for expected in [
+        "panic in a function that cannot unwind",
+        "(test aborted with signal 6: SIGABRT)",
+        "Summary [   0.600s] 2 tests run: 1 passed, 1 failed, 12 skipped",
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+    assert_eq!(
+        summary.matches("panicked at src/ffi.rs:40:9").count(),
+        1,
+        "one try's output is enough: {summary}"
+    );
+
+    // Every short status of a failed try names its test; a try that is slow,
+    // being terminated, or that passed does not.
+    let test = "kronn::it api::slow::never_returns";
+    for (label, seconds, named) in [
+        ("TRY 3 SEGV", "0.153", Some("SEGV")),
+        ("TRY 2 KILL", "0.153", Some("KILL")),
+        ("TRY 2 SIG 42", "0.153", Some("SIG 42")),
+        ("TRY 2 ABORT", "0.153", Some("ABORT")),
+        ("TRY 2 FL+LK", "0.153", Some("FL+LK")),
+        ("TRY 2 LKFAIL", "0.153", Some("LKFAIL")),
+        ("TRY 2 XFAIL", "0.153", Some("XFAIL")),
+        ("TRY 2 TMT", "60.004", Some("TIMEOUT")),
+        ("TRY 2 SLOW", "> 30.000", None),
+        ("TRY 1 TRMNTG", "> 60.000", None),
+        ("TRY 2 PASS", "0.153", None),
+    ] {
+        let stderr = nextest_status(label, seconds, &format!("(───) {test}"));
+        let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+        let expected: Vec<String> = named
+            .iter()
+            .map(|status| format!("{test} ({status})"))
+            .collect();
+        assert_eq!(extracted.failed_tests, expected, "{label}");
+    }
+}
+
+/// A test that passed while leaking a handle (`LEAK`) is a pass: a red run
+/// neither counts nor names it, and its count agrees with the `Summary` line.
+#[test]
+fn a_leaked_nextest_test_is_not_a_failure_of_a_red_run() {
+    let name = "kronn::it core::preflight::refused";
+    let status = |label: &str, name: &str| format!("{}\n", nextest_status(label, "0.120", name));
+    let header: String = NEXTEST_HEADER
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let counts = "4 tests run: 3 passed (2 leaky), 1 failed, 1 skipped";
+    let stderr = [
+        header.clone(),
+        status("LEAK", "(1/4) kronn::it api::server::spawns_a_child"),
+        nextest_failure("FAIL", &format!("(2/4) {name}"), NEXTEST_PANIC),
+        status("LEAK", "(3/4) kronn::it api::server::spawns_a_watcher"),
+        status("PASS", "(4/4) kronn::it core::preflight::accepted"),
+        "────────────\n".to_string(),
+        format!("     Summary [   0.152s] {counts}\n"),
+        status("FAIL", &format!("(2/4) {name}")),
+        "error: test run failed\n".to_string(),
+    ]
+    .concat();
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(extracted.failed_tests, vec![name]);
+    assert!(summary.starts_with("Failed — 1 failing\n"), "{summary}");
+    assert!(summary.contains(counts), "{summary}");
+    assert!(
+        summary.contains("panicked at src/core/preflight.rs:12:5"),
+        "{summary}"
+    );
+    for leaked in ["LEAK", "spawns_a_child", "spawns_a_watcher"] {
+        assert!(!summary.contains(leaked), "{leaked} is a pass: {summary}");
+    }
+
+    // Red with nothing but leaks: no test is named, the `Summary` line stays.
+    let counts = "2 tests run: 2 passed (1 leaky), 3 skipped";
+    let stderr = [
+        header,
+        status("LEAK", "(1/2) kronn::it api::server::spawns_a_child"),
+        status("PASS", "(2/2) kronn::it core::preflight::accepted"),
+        "────────────\n".to_string(),
+        format!("     Summary [   0.152s] {counts}\n"),
+    ]
+    .concat();
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert!(extracted.failed_tests.is_empty(), "{summary}");
+    assert!(summary.starts_with("Failed\n"), "{summary}");
+    assert_eq!(summary.matches(counts).count(), 1, "{summary}");
+}
+
+/// With retries, a test that failed a try and then passed takes no failure
+/// block: the details go to the test that finally failed, once.
+#[test]
+fn a_flaky_nextest_test_leaves_the_failure_details_to_the_real_failure() {
+    let broken = "kronn::it core::preflight::refused";
+    let flaky = [
+        "api::ws::reconnects",
+        "api::sse::resumes",
+        "api::poll::retries",
+    ];
+    let mut stderr = String::from("    Starting 4 tests across 1 binary\n");
+    for (index, test) in flaky.iter().enumerate() {
+        stderr.push_str(&nextest_failure(
+            "TRY 1 FAIL",
+            &format!("(───) kronn::it {test}"),
+            &format!("thread '{test}' panicked at src/api/stream.rs:8{index}:9:\nthe peer closed the stream early\n"),
+        ));
+        stderr.push_str(&format!(
+            "{}\n",
+            nextest_status(
+                "TRY 2 PASS",
+                "0.005",
+                &format!("({}/4) kronn::it {test}", index + 1)
+            )
+        ));
+    }
+    for (label, counter) in [
+        ("TRY 1 FAIL", "(───)"),
+        ("TRY 2 FAIL", "(───)"),
+        ("TRY 3 FAIL", "(4/4)"),
+    ] {
+        stderr.push_str(&nextest_failure(
+            label,
+            &format!("{counter} {broken}"),
+            NEXTEST_PANIC,
+        ));
+    }
+    stderr.push_str("────────────\n");
+    stderr.push_str(
+        "     Summary [   0.035s] 4 tests run: 3 passed (3 flaky), 1 failed, 0 skipped\n",
+    );
+    for (index, test) in flaky.iter().enumerate() {
+        stderr.push_str(&format!(
+            "{}\n",
+            nextest_status(
+                "FLAKY 2/3",
+                "0.005",
+                &format!("({}/4) kronn::it {test}", index + 1)
+            )
+        ));
+    }
+    stderr.push_str(&format!(
+        "{}\n",
+        nextest_status("TRY 3 FAIL", "0.004", &format!("(4/4) {broken}"))
+    ));
+    stderr.push_str("error: test run failed\n");
+
+    let extracted = nextest_summary_of(&stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(extracted.failed_tests, vec![broken]);
+    assert!(
+        summary.starts_with(&format!(
+            "Failed — 1 failing\nfailure details:\n  TRY 1 FAIL [   0.004s] (───) {broken}\n"
+        )),
+        "{summary}"
+    );
+    assert_eq!(
+        summary
+            .matches("panicked at src/core/preflight.rs:12:5")
+            .count(),
+        1,
+        "{summary}"
+    );
+    assert!(summary.contains("right: 2"), "{summary}");
+    for recovered in ["the peer closed the stream early", "api::ws", "api::sse"] {
+        assert!(
+            !summary.contains(recovered),
+            "{recovered} passed on a retry: {summary}"
+        );
+    }
+}
+
+/// A setup script that failed (`SETUP FAIL`) is named with that status and
+/// keeps what it printed.
+#[test]
+fn a_failed_nextest_setup_script_is_named_with_its_status() {
+    let stderr = "────────────\n\
+                  \x20Nextest run ID 7f1c1c0e-6a52-4d0f-9d3c-0c5b6a1f2e11 with nextest profile: ci\n\
+                  \x20      SETUP [      1/1] services: scripts/start-services.sh\n\
+                  \x20 SETUP FAIL [   0.412s] services: scripts/start-services.sh\n\
+                  \x20 stderr ───\n\
+                  \x20   the database did not come up after 30 s\n\
+                  \n\
+                  \x20   (script failed with exit code 2)\n\
+                  \n\
+                  \x20 Cancelling due to setup script failure\n";
+    let extracted = nextest_summary_of(stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(
+        extracted.failed_tests,
+        vec!["services: scripts/start-services.sh (SETUP FAIL)"]
+    );
+    for expected in [
+        "Failed — 1 failing",
+        "the database did not come up after 30 s",
+        "(script failed with exit code 2)",
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+    assert!(!summary.contains("Cancelling"), "{summary}");
 }
 
 // ── idempotency key ─────────────────────────────────────────────────
@@ -1465,4 +2422,36 @@ fn a_background_validation_runs_behind_the_priority_launcher() {
         .map(|arg| arg.to_os_string())
         .collect();
     assert_eq!(args, expected_args);
+}
+
+/// A real red run, captured from cargo-nextest 0.9.148 (status lines carry
+/// the `( 1/11)` counter): the six failed tests are named once each, with the
+/// first panic and the `Summary` line.
+#[test]
+fn a_captured_nextest_run_names_its_six_failed_tests_and_the_first_panic() {
+    let stderr = include_str!("fixtures/nextest_0_9_148_red_run.txt");
+    let extracted = nextest_summary_of(stderr, QuickExecStatus::Failed);
+    let summary = &extracted.summary;
+    assert_eq!(
+        extracted.failed_tests,
+        vec![
+            "kronn-l2 db::orchestration::tests::a_stopped_worker_reason_is_an_undelivered_worker_reason",
+            "kronn-l3 api::discussions::messaging::tests::the_room_stop_interrupts_the_working_execution_of_that_room",
+            "kronn-l3 api::discussions::runtime::chain_render_tests::a_cancelled_task_worker_dispatch_interrupts_its_execution_when_its_stream_ends",
+            "kronn-l3 api::discussions::messaging::tests::stopping_a_task_worker_dispatch_interrupts_its_execution_in_the_same_request",
+            "kronn::it api_tests::stop_route_parks_the_task_worker_execution",
+            "kronn uptests::api__orchestration__tests::tests::a_restart_keeps_a_stopped_worker_parked",
+        ],
+        "{summary}"
+    );
+    for expected in [
+        "assertion failed: is_undelivered_worker_reason(\"worker_stopped_without_delivery\")",
+        "Summary [   1.155s] 11 tests run: 5 passed, 6 failed, 15711 skipped",
+    ] {
+        assert!(summary.contains(expected), "{expected} missing: {summary}");
+    }
+    for noise in ["running 1 test", "test result:", "PASS ["] {
+        assert!(!summary.contains(noise), "{noise} is noise: {summary}");
+    }
+    assert!(summary.len() <= SUMMARY_MAX_BYTES);
 }

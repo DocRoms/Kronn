@@ -4495,6 +4495,59 @@ fn a_red_test_run_of_any_runner_never_reads_as_the_environment() {
     }
 }
 
+/// KT-2040 — a red `cargo nextest` run stays the worker's when the failed
+/// test's own output, which its summary now carries, quotes a sandbox refusal.
+#[test]
+fn a_red_nextest_run_never_reads_as_the_environment() {
+    use crate::core::quick_exec::{summarise, QuickExecStatus, Summariser};
+    use crate::models::ValidationsAccess::Sandbox;
+    let stderr = "    Starting 2 tests across 1 binary\n\
+                  \x20    SIGABRT [   0.153s] kronn::it core::lock::releases\n\
+                  \x20 stderr ───\n\
+                  \x20   fatal: unlock failed: Operation not permitted (os error 1)\n\
+                  \n\
+                  \x20       PASS [   0.020s] kronn::it core::lock::acquires\n\
+                  ────────────\n\
+                  \x20    Summary [   0.180s] 2 tests run: 1 passed, 1 failed, 0 skipped\n\
+                  \x20    SIGABRT [   0.153s] kronn::it core::lock::releases\n\
+                  error: test run failed\n";
+    let output = summarise(
+        Summariser::CargoNextest,
+        "",
+        stderr,
+        QuickExecStatus::Failed,
+        true,
+    )
+    .summary;
+    assert!(output.contains("Operation not permitted"), "{output}");
+    assert!(
+        environment_cause(Sandbox, None, &failure(Some(100), &output)).is_none(),
+        "a red nextest run stays the worker's: {output}"
+    );
+    // The same refusal with no test result is still the environment's, read
+    // from what the summary of the refused nextest build stores.
+    let refused = "   Compiling kronn v0.15.4 (/work/backend)\n\
+                   error: failed to create directory `target/debug`: Operation not permitted (os error 1)\n\
+                   error: could not compile `kronn` (lib test) due to 1 previous error\n\
+                   error: command `cargo test --no-run --message-format json-render-diagnostics` exited with code 101\n";
+    let stored = summarise(
+        Summariser::CargoNextest,
+        "",
+        refused,
+        QuickExecStatus::Failed,
+        true,
+    )
+    .summary;
+    assert!(
+        environment_cause(Sandbox, None, &failure(Some(101), &stored)).is_some(),
+        "{stored}"
+    );
+    // A `Summary [` line that is not nextest's verdict reports no failed test.
+    let other = "Summary [cache] 2 entries failed to refresh\n\
+                 mkdir /srv/cache: Operation not permitted";
+    assert!(environment_cause(Sandbox, None, &failure(Some(1), other)).is_some());
+}
+
 /// The launch of a directory no test registered stays the plain one, and a
 /// registered mechanism is the one the confinement is built from.
 #[test]

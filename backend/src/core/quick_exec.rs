@@ -34,8 +34,11 @@ const _: () = assert!(
 );
 
 /// Per-stream artifact cap. Beyond it the stream is still DRAINED (so the child
-/// never blocks on a full pipe) but not kept.
+/// never blocks on a full pipe) and only its start and its end are kept.
 pub const ARTIFACT_MAX_BYTES: usize = 1_048_576;
+
+/// Room left for the line that says how much of a cut stream was not kept.
+const CUT_MARKER_RESERVE: usize = 64;
 
 pub const MAX_FAILED_TESTS: usize = 50;
 pub const MAX_DIAGNOSTICS: usize = 50;
@@ -108,6 +111,9 @@ pub struct ValidatedSpec {
 #[serde(rename_all = "snake_case")]
 pub enum Summariser {
     CargoTest,
+    /// KT-2040: `cargo nextest` prints none of libtest's lines, but a status
+    /// line per test, a failure's output under it and a closing `Summary`.
+    CargoNextest,
     Clippy,
     Tsc,
     Vitest,
@@ -117,6 +123,49 @@ pub enum Summariser {
     /// the point — a JSON page of review comments must not enter a context just
     /// because something had to fetch it.
     Collected,
+}
+
+impl Summariser {
+    /// The summariser of a command line: one mapping for a task validation
+    /// and a Quick Exec job (KT-2040).
+    pub fn for_command<S: AsRef<str>>(binary: &str, args: &[S]) -> Self {
+        match binary {
+            "cargo" => {
+                // Only the subcommand decides: a later `nextest` or `clippy` is
+                // a test filter or a package. These options take a value.
+                const VALUED: &[&str] = &[
+                    "--color",
+                    "--config",
+                    "--explain",
+                    "--manifest-path",
+                    "-C",
+                    "-Z",
+                ];
+                let mut args = args.iter().map(|arg| arg.as_ref());
+                let mut subcommand: Option<&str> = None;
+                while let Some(arg) = args.next() {
+                    if VALUED.contains(&arg) {
+                        args.next();
+                    } else if !arg.starts_with(['-', '+']) {
+                        subcommand = Some(arg);
+                        break;
+                    }
+                }
+                match (subcommand, args.next()) {
+                    (Some("clippy"), _) => Self::Clippy,
+                    // `nextest list` / `archive` run no test: green they have
+                    // no `Summary` line, red they are read as any command.
+                    (Some("nextest"), _) | (Some("llvm-cov"), Some("nextest")) => {
+                        Self::CargoNextest
+                    }
+                    _ => Self::CargoTest,
+                }
+            }
+            "tsc" => Self::Tsc,
+            "vitest" => Self::Vitest,
+            _ => Self::Generic,
+        }
+    }
 }
 
 pub use crate::models::agent_jobs::{ArtifactRef, Diagnostic, QuickExecResult, QuickExecStatus};
@@ -508,11 +557,18 @@ pub fn spec_fingerprint(spec: &ValidatedSpec) -> String {
 /// Keeps reading past the cap on purpose: stopping would fill the pipe and block
 /// the child, and a command that stalls because we stopped listening would be
 /// reported as a timeout of its own making.
+///
+/// KT-2116 — a stream over the cap keeps its first quarter and its end, on whole
+/// lines: a test runner prints its verdict last. KT-2039 — a line cut by the cap
+/// is dropped, because a token cut below its pattern's minimum length is no
+/// longer recognised by the redaction.
 async fn drain_capped<R>(mut reader: R, cap: usize) -> (Vec<u8>, u64)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut kept = Vec::new();
+    // What came after the first `cap` bytes, its newest `cap` bytes only.
+    let mut overflow: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
     let mut total: u64 = 0;
     let mut chunk = [0u8; 8_192];
     loop {
@@ -520,29 +576,62 @@ where
             Ok(0) | Err(_) => break,
             Ok(read) => {
                 total += read as u64;
-                if kept.len() < cap {
-                    let room = cap - kept.len();
-                    kept.extend_from_slice(&chunk[..read.min(room)]);
+                let room = cap.saturating_sub(kept.len()).min(read);
+                kept.extend_from_slice(&chunk[..room]);
+                overflow.extend(&chunk[room..read]);
+                if overflow.len() > cap {
+                    overflow.drain(..overflow.len() - cap);
                 }
             }
         }
     }
-    (kept, total)
+    if total <= kept.len() as u64 {
+        return (kept, total);
+    }
+    (
+        start_and_end_of_cut_stream(&kept, overflow, total, cap),
+        total,
+    )
 }
 
-/// The text of a drained stream, for extraction. KT-2039: a stream cut at the
-/// cap (`total` above what was kept) ends mid-line, and a token cut below its
-/// pattern's minimum length is no longer recognised by the redaction: that
-/// last partial line is dropped. The artifact still keeps every byte.
-fn whole_lines(kept: &[u8], total: u64) -> String {
-    let whole = if total > kept.len() as u64 {
-        kept.iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(&kept[..0], |end| &kept[..=end])
-    } else {
-        kept
-    };
-    String::from_utf8_lossy(whole).into_owned()
+/// The kept form of a stream longer than `cap`: whole lines of its start, one
+/// line saying how many bytes are missing, whole lines of its end. Always
+/// shorter than the stream, so the caller still reads it as truncated.
+fn start_and_end_of_cut_stream(
+    first: &[u8],
+    overflow: std::collections::VecDeque<u8>,
+    total: u64,
+    cap: usize,
+) -> Vec<u8> {
+    let head_len = (cap / 4).min(first.len());
+    let head = first[..head_len]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(&first[..0], |end| &first[..=end]);
+    let budget = cap
+        .saturating_sub(head.len())
+        .saturating_sub(CUT_MARKER_RESERVE);
+    let mut rest: Vec<u8> = first[head_len..].to_vec();
+    rest.extend(overflow);
+    let newest = &rest[rest.len().saturating_sub(budget)..];
+    // The newest bytes start mid-line: the end begins after their first newline.
+    let tail = newest
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(&newest[..0], |start| &newest[start + 1..]);
+    let mut out = head.to_vec();
+    if !tail.is_empty() {
+        let omitted = total.saturating_sub((head.len() + tail.len()) as u64);
+        out.extend_from_slice(format!("… {omitted} bytes not kept …\n").as_bytes());
+        out.extend_from_slice(tail);
+    }
+    out
+}
+
+/// The text of a drained stream, for extraction: `drain_capped` already cut a
+/// long stream on whole lines.
+fn whole_lines(kept: &[u8]) -> String {
+    String::from_utf8_lossy(kept).into_owned()
 }
 
 enum Outcome {
@@ -742,8 +831,8 @@ async fn run_with(
     };
     let exit_code = exit.and_then(|status| status.code());
 
-    let stdout_text = whole_lines(&stdout_kept, stdout_total);
-    let stderr_text = whole_lines(&stderr_kept, stderr_total);
+    let stdout_text = whole_lines(&stdout_kept);
+    let stderr_text = whole_lines(&stderr_kept);
     // KT-2044: `summarise` redacts both streams whole (up to the artifact cap
     // each), CPU work that stays off the async workers.
     let summariser = spec.summariser;
@@ -877,6 +966,26 @@ pub fn summarise(
                 details = failure_details(cargo_test_failure_blocks(stdout, stderr));
             }
         }
+        Summariser::CargoNextest => {
+            for line in stdout.lines().chain(stderr.lines()) {
+                // The run's verdict.
+                if is_nextest_summary(line) {
+                    push_capped(&mut lines, line.trim().to_string(), MAX_DIAGNOSTICS);
+                }
+            }
+            // A green run names no test: one that leaked or was retried passed.
+            if status != QuickExecStatus::Passed {
+                failed_tests = nextest_failed_tests(stdout.lines().chain(stderr.lines()));
+                details = failure_details(nextest_failure_blocks(stdout, stderr));
+                // No test to name: the build or the runner stopped the run (a
+                // compile error, a refusal), read as any other command's output.
+                if failed_tests.is_empty() && details.is_none() {
+                    let generic = generic_lines(stdout, stderr, status);
+                    lines.retain(|line| !generic.iter().any(|kept| kept.contains(line.as_str())));
+                    lines.extend(generic);
+                }
+            }
+        }
         Summariser::Clippy => {
             let mut pending: Option<String> = None;
             for line in stderr.lines() {
@@ -943,46 +1052,17 @@ pub fn summarise(
                 lines.push(line.trim().to_string());
             }
         }
-        Summariser::Generic => {
-            let source = if stderr.trim().is_empty() {
-                stdout
-            } else {
-                stderr
-            };
-            let mut tail: Vec<String> = source
-                .lines()
-                .rev()
-                .filter(|l| !l.trim().is_empty())
-                .take(20)
-                .map(|line| line.trim().to_string())
-                .collect();
-            tail.reverse();
-            // KT-1438: a wrapper (`make`, `docker compose`) prints its own
-            // verdict on stderr and the real failure (a phpunit diff, a Twig
-            // exception) on stdout, far above the tail: the tail alone sent a
-            // worker back with "Error 1" and a platform warning. A red run
-            // also keeps the first error lines of BOTH streams.
-            let first_errors = if status == QuickExecStatus::Passed {
-                Vec::new()
-            } else {
-                first_error_lines(stdout, stderr, &tail)
-            };
-            if !first_errors.is_empty() {
-                lines.push(cap_bytes_keeping_start(
-                    &format!("first errors:\n{}", first_errors.join("\n")),
-                    FIRST_ERRORS_MAX_BYTES,
-                ));
-                lines.push("… (the rest is in the artifact)".to_string());
-            }
-            if !tail.is_empty() {
-                // Redacted before the cut, which keeps the end: cut right after
-                // a secret's name, the value left behind is no assignment.
-                lines.push(cap_bytes_keeping_end(
-                    &redact(&tail.join("\n")),
-                    TAIL_MAX_BYTES,
-                ));
-            }
-        }
+        Summariser::Generic => lines = generic_lines(stdout, stderr, status),
+    }
+    // KT-2040: a red run the passes above read nothing from (another runner's
+    // format, a tool that died first) is not left as its bare verdict.
+    if status != QuickExecStatus::Passed
+        && lines.is_empty()
+        && failed_tests.is_empty()
+        && diagnostics.is_empty()
+        && details.is_none()
+    {
+        lines = generic_lines(stdout, stderr, status);
     }
 
     let mut summary = String::new();
@@ -1037,6 +1117,51 @@ fn redact(text: &str) -> String {
     crate::core::redact::redact_stored_text(text)
 }
 
+/// What the generic summary keeps of a run: the first error lines of a red
+/// one, then the last lines of stderr, or of stdout when stderr is empty.
+fn generic_lines(stdout: &str, stderr: &str, status: QuickExecStatus) -> Vec<String> {
+    let mut lines = Vec::new();
+    let source = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let mut tail: Vec<String> = source
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(20)
+        .map(|line| line.trim().to_string())
+        .collect();
+    tail.reverse();
+    // KT-1438: a wrapper (`make`, `docker compose`) prints its own
+    // verdict on stderr and the real failure (a phpunit diff, a Twig
+    // exception) on stdout, far above the tail: the tail alone sent a
+    // worker back with "Error 1" and a platform warning. A red run
+    // also keeps the first error lines of BOTH streams.
+    let first_errors = if status == QuickExecStatus::Passed {
+        Vec::new()
+    } else {
+        first_error_lines(stdout, stderr, &tail)
+    };
+    if !first_errors.is_empty() {
+        lines.push(cap_bytes_keeping_start(
+            &format!("first errors:\n{}", first_errors.join("\n")),
+            FIRST_ERRORS_MAX_BYTES,
+        ));
+        lines.push("… (the rest is in the artifact)".to_string());
+    }
+    if !tail.is_empty() {
+        // Redacted before the cut, which keeps the end: cut right after
+        // a secret's name, the value left behind is no assignment.
+        lines.push(cap_bytes_keeping_end(
+            &redact(&tail.join("\n")),
+            TAIL_MAX_BYTES,
+        ));
+    }
+    lines
+}
+
 /// What the generic summary keeps of a red run's first error lines, and of its
 /// last lines, so that neither can push the other out of [`SUMMARY_MAX_BYTES`].
 const FIRST_ERRORS_MAX_BYTES: usize = 1_800;
@@ -1047,6 +1172,7 @@ const ERROR_LINE_MAX_CHARS: usize = 300;
 /// The first lines of the output that name a failure (an error, an exception,
 /// a failed assertion, a panic), stdout then stderr, minus those the tail
 /// already shows. A line that merely says a count of `0 errors` is not one.
+/// The `--> file:line` a compiler prints under its error comes with it.
 fn first_error_lines(stdout: &str, stderr: &str, tail: &[String]) -> Vec<String> {
     const MARKERS: &[&str] = &[
         "error",
@@ -1058,6 +1184,7 @@ fn first_error_lines(stdout: &str, stderr: &str, tail: &[String]) -> Vec<String>
         "failure",
         "assert",
     ];
+    let mut after_error = false;
     stdout
         .lines()
         .chain(stderr.lines())
@@ -1065,10 +1192,12 @@ fn first_error_lines(stdout: &str, stderr: &str, tail: &[String]) -> Vec<String>
         .filter(|line| !line.is_empty())
         .filter(|line| {
             let lower = line.to_ascii_lowercase();
-            MARKERS.iter().any(|marker| lower.contains(marker))
+            let location = after_error && line.starts_with("--> ");
+            after_error = MARKERS.iter().any(|marker| lower.contains(marker))
                 && !["0 error", "no error", "0 failed", "0 failure"]
                     .iter()
-                    .any(|benign| lower.contains(benign))
+                    .any(|benign| lower.contains(benign));
+            after_error || location
         })
         .filter(|line| !tail.iter().any(|shown| shown == line))
         .take(FIRST_ERROR_LINES)
@@ -1095,8 +1224,8 @@ const FAILURE_BLOCK_LINES: usize = 12;
 
 /// The failure blocks of a libtest run: from `---- <test> stdout ----` up to
 /// the next block, the `failures:` list of names or the verdict. A runner that
-/// prints no such block (`cargo nextest`, a custom harness) still prints the
-/// panic: then each `panicked at` line and the lines under it, up to a blank.
+/// prints no such block (a custom harness) still prints the panic: then each
+/// `panicked at` line and the lines under it, up to a blank.
 fn cargo_test_failure_blocks<'a>(stdout: &'a str, stderr: &'a str) -> Vec<Vec<&'a str>> {
     let lines = || stdout.lines().chain(stderr.lines());
     let libtest = failure_blocks(
@@ -1133,12 +1262,237 @@ fn vitest_failure_blocks<'a>(stdout: &'a str, stderr: &'a str) -> Vec<Vec<&'a st
     )
 }
 
+/// nextest's closing line:
+/// `     Summary [   0.035s] 3 tests run: 2 passed, 1 failed, 0 skipped`.
+fn is_nextest_summary(line: &str) -> bool {
+    line.starts_with("     Summary [")
+}
+
+/// A nextest status line, `        FAIL [   0.004s] my-crate::bin/name a::test`:
+/// its status label and its `<binary id> <test>` name. The label is
+/// right-aligned on 12 columns, which a test's own output is not.
+fn nextest_status_line(line: &str) -> Option<(&str, &str)> {
+    let (label, rest) = line.split_once(" [")?;
+    let aligned = label.len() == 12 || (label.len() > 12 && !label.starts_with(' '));
+    let label = label.trim_start();
+    let known = label.starts_with(|c: char| c.is_ascii_uppercase())
+        && label
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || " +-/".contains(c));
+    if !aligned || !known {
+        return None;
+    }
+    let (duration, rest) = rest.split_once("s] ")?;
+    if duration.is_empty()
+        || !duration
+            .chars()
+            .all(|c| c.is_ascii_digit() || " .>".contains(c))
+    {
+        return None;
+    }
+    // A stress index `[3/3]` and a counter `(  20/5000)` may precede the name.
+    let mut name = rest.trim();
+    loop {
+        let close = match name.chars().next() {
+            Some('[') => ']',
+            Some('(') => ')',
+            _ => break,
+        };
+        name = name.split_once(close)?.1.trim_start();
+    }
+    (!name.is_empty()).then_some((label, name))
+}
+
+/// What a status label says of its test.
+enum NextestOutcome<'a> {
+    /// It failed, with the status to show: `FAIL`, `SIGABRT`, `TIMEOUT`…
+    Failed(&'a str),
+    /// It passed on a retry.
+    Recovered,
+    Other,
+}
+
+fn nextest_outcome(label: &str) -> NextestOutcome<'_> {
+    // A try of a retried test (`TRY <n> <status>`, the last one included) and
+    // a setup script (`SETUP <status>`) carry nextest's short status.
+    let (short, shown) = match label.strip_prefix("TRY ") {
+        Some(rest) => {
+            let status = rest
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .trim_start();
+            (Some(status), status)
+        }
+        None => (label.strip_prefix("SETUP "), label),
+    };
+    if let Some(status) = short {
+        // A short status is a failure (a signal is its bare name: `ABRT`,
+        // `SEGV`) unless it passed or the try is still running.
+        return match status {
+            "PASS" => NextestOutcome::Recovered,
+            "" | "LEAK" | "TMPASS" | "SLOW" | "TRMNTG" | "START" => NextestOutcome::Other,
+            _ => NextestOutcome::Failed(shown),
+        };
+    }
+    // `LEAK` alone is a pass that leaked a handle: nextest counts it as passed.
+    const FAILED_PREFIXES: &[&str] = &["FAIL", "SIG", "ABORT", "XFAIL", "FLKY-FL", "LEAK-FAIL"];
+    if FAILED_PREFIXES
+        .iter()
+        .any(|prefix| label.starts_with(*prefix))
+        || label == "TIMEOUT"
+    {
+        NextestOutcome::Failed(label)
+    } else if label.starts_with("FLAKY") {
+        NextestOutcome::Recovered
+    } else {
+        NextestOutcome::Other
+    }
+}
+
+/// The tests (and setup scripts) a red nextest run finally failed, in the
+/// order they first failed, each with its last failing status. A test that
+/// passed on a retry is not one.
+fn nextest_failures<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<(&'a str, &'a str)> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut failing: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (label, name) in lines.filter_map(nextest_status_line) {
+        match nextest_outcome(label) {
+            NextestOutcome::Failed(status) => {
+                if failing.insert(name, status).is_none() {
+                    order.push(name);
+                }
+            }
+            NextestOutcome::Recovered => {
+                failing.remove(name);
+            }
+            NextestOutcome::Other => {}
+        }
+    }
+    order
+        .into_iter()
+        // Taken out of the map: a name retried after it recovered is listed twice.
+        .filter_map(|name| failing.remove(name).map(|status| (name, status)))
+        .collect()
+}
+
+/// The names of [`nextest_failures`], each once (nextest prints a failure
+/// live and again in its closing recap), with the status of those that did
+/// not simply fail.
+fn nextest_failed_tests<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+    nextest_failures(lines)
+        .into_iter()
+        .take(MAX_FAILED_TESTS)
+        .map(|(name, status)| {
+            // A test name is a Rust path, but a binary id comes from a path.
+            redact(&match status {
+                "FAIL" => name.to_string(),
+                "TMT" => format!("{name} (TIMEOUT)"),
+                status => format!("{name} ({status})"),
+            })
+        })
+        .collect()
+}
+
+/// What closes the output of a failed test: the next test, or the end of the
+/// run (the rule above the summary, the summary, a cancellation).
+fn closes_nextest_failure(line: &str) -> bool {
+    nextest_status_line(line).is_some()
+        || is_nextest_summary(line)
+        || line.starts_with("  Cancelling due to")
+        || line.starts_with("   Canceling due to")
+        || line.trim_end() == "error: test run failed"
+        || (line.len() >= 12 && line.chars().all(|c| matches!(c, '─' | '-')))
+}
+
+/// What nextest and libtest print around a failed test's own output: the
+/// stream headers (`  stderr ───`, formerly `--- STDERR: <binary> <test> ---`)
+/// and libtest's report of the one test the process ran. `line` is trimmed.
+fn nextest_output_noise(line: &str, test: &str) -> bool {
+    let stream = |name: &str| {
+        ["stdout", "stderr", "output", "execfail", "exec fail"]
+            .iter()
+            .any(|known| name.eq_ignore_ascii_case(known))
+    };
+    let header = match line
+        .strip_prefix("--- ")
+        .and_then(|inner| inner.strip_suffix(" ---"))
+    {
+        Some(inner) => stream(inner.split(':').next().unwrap_or(inner).trim()),
+        None => {
+            let bare = line.trim_matches(['─', '-', ' ']);
+            bare.len() < line.len() && stream(bare)
+        }
+    };
+    header
+        || line == test
+        || line == "failures:"
+        || line.starts_with("test result:")
+        || (line.starts_with("running ") && (line.ends_with(" test") || line.ends_with(" tests")))
+        || (line.starts_with("test ") && line.contains(" ... "))
+}
+
+/// The failure blocks of one part of a nextest run, before its `Summary` line
+/// or after it (`recap`): from the status line of each failed test up to the
+/// next test, without [`nextest_output_noise`]. Only a test in `failed` (those
+/// that finally failed) opens a block, and one: with retries every try prints
+/// its output, a flaky test's included.
+fn nextest_section_blocks<'a>(
+    stdout: &'a str,
+    stderr: &'a str,
+    recap: bool,
+    mut failed: std::collections::HashSet<&'a str>,
+) -> Vec<Vec<&'a str>> {
+    let mut after_summary = false;
+    // The test whose output follows: libtest repeats its name under `failures:`.
+    let mut test: &'a str = "";
+    let lines = stdout.lines().chain(stderr.lines()).filter(move |&line| {
+        after_summary = after_summary || is_nextest_summary(line);
+        if after_summary != recap {
+            return false;
+        }
+        if let Some((_, name)) = nextest_status_line(line) {
+            test = name.rsplit(' ').next().unwrap_or(name);
+            return true;
+        }
+        !nextest_output_noise(line.trim(), test)
+    });
+    failure_blocks(
+        lines,
+        |line| {
+            nextest_status_line(line).is_some_and(|(label, name)| {
+                matches!(nextest_outcome(label), NextestOutcome::Failed(_)) && failed.remove(name)
+            })
+        },
+        closes_nextest_failure,
+    )
+}
+
+/// The failure blocks of a nextest run. A failure's output is printed as the
+/// test ends, after the `Summary` line, or both, as the profile's
+/// `failure-output` says: the first part that holds some is kept.
+fn nextest_failure_blocks<'a>(stdout: &'a str, stderr: &'a str) -> Vec<Vec<&'a str>> {
+    let has_output = |blocks: &[Vec<&str>]| blocks.iter().any(|block| block.len() > 1);
+    let failed: std::collections::HashSet<&str> =
+        nextest_failures(stdout.lines().chain(stderr.lines()))
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+    let live = nextest_section_blocks(stdout, stderr, false, failed.clone());
+    if has_output(&live) {
+        return live;
+    }
+    let recap = nextest_section_blocks(stdout, stderr, true, failed);
+    if has_output(&recap) || live.is_empty() {
+        return recap;
+    }
+    live
+}
+
 /// The first [`FAILURE_BLOCKS`] blocks that `starts` opens and `ends` (or the
 /// next opening) closes, each without its blank lines, a runner's backtrace
 /// hint and beyond [`FAILURE_BLOCK_LINES`] lines.
 fn failure_blocks<'a>(
     lines: impl Iterator<Item = &'a str>,
-    starts: impl Fn(&str) -> bool,
+    mut starts: impl FnMut(&str) -> bool,
     ends: impl Fn(&str) -> bool,
 ) -> Vec<Vec<&'a str>> {
     let mut blocks: Vec<Vec<&'a str>> = Vec::new();
@@ -1158,7 +1512,17 @@ fn failure_blocks<'a>(
                 || line
                     .trim_start()
                     .starts_with("note: run with `RUST_BACKTRACE");
-            if !noise && block.len() < FAILURE_BLOCK_LINES {
+            if noise {
+                continue;
+            }
+            if block.len() < FAILURE_BLOCK_LINES {
+                block.push(line);
+            } else if line.contains("panicked at")
+                && !block.iter().any(|kept| kept.contains("panicked at"))
+            {
+                // KT-2040: a test that logged a full block before it panicked:
+                // the panic is why it failed, the log gives way to it.
+                block.truncate(1);
                 block.push(line);
             }
         }
