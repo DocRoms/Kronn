@@ -73,7 +73,8 @@ channels now refuse an argument the tool does not declare, naming it and listing
 the Python bridge checks against its own `inputSchema` and the native tool layer against its catalogue.
 `[src: file: backend/scripts/disc-introspection-mcp.py:6147#_refuse_unknown_arguments]`
 `[src: file: backend/src/api/agent_tools.rs:1454#unknown_argument_refusal]`
-Note that `task_exec_prepare` does not declare `base_rev` / `idempotency_key`: those belong to the launch.
+Note that `task_exec_prepare` does not declare `idempotency_key`: it belongs to the launch. It takes `base_rev`,
+to check the branch the launch will name.
 
 **Absent is not `null`.** Omitting `max_review_rounds` takes the setting; an explicit `null` is refused
 like any other non-integer, never defaulted. The Python bridge forwards the key when it is present (even as

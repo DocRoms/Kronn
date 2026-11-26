@@ -1567,7 +1567,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/planning/tasks/{id}",
-            get(api::planning::get_task).patch(api::planning::update_task),
+            get(api::planning::read_task).patch(api::planning::update_task),
         )
         .route(
             "/api/planning/tasks/{id}/dod/{dod_id}",
@@ -1591,7 +1591,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/discussions/{id}/plan",
-            get(api::planning::get_discussion_plan),
+            get(api::planning::read_discussion_plan),
         )
         .route(
             "/api/discussions/{id}/plan/changes",

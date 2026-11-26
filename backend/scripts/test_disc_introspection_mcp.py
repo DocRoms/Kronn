@@ -1365,6 +1365,38 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.assertIn("invalid worker_scope", str(backend_error.exception))
         self.assertIn(manual_call, str(backend_error.exception))
 
+    def test_prepare_forwards_the_integration_branch_it_is_given(self):
+        """KT-2112: a joined CLI principal names the branch it will launch with,
+        so the preflight checks that branch and not the room's declared one."""
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
+        worker = {"kind": "discussion_agent", "agent_type": "Ollama"}
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-durable-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_prepare({
+                "task_reference": "KT-324", "worker": worker,
+                "worker_scope_intent": "generic", "base_rev": "integ/lot",
+            })
+            self.mod.call_task_exec_prepare({
+                "task_reference": "KT-324", "worker": worker,
+                "worker_scope_intent": "generic",
+            })
+        sent = [call.args[2] for call in http.call_args_list]
+        self.assertEqual(sent[0]["base_rev"], "integ/lot")
+        self.assertNotIn("base_rev", sent[1])
+
+        for name in ("task_exec_prepare", "task_exec_launch"):
+            declared = next(
+                item for item in self.mod.TOOLS if item["name"] == name
+            )["inputSchema"]["properties"]["base_rev"]
+            self.assertEqual(declared["type"], "string")
+            self.assertNotIn("main", declared.get("description", ""), name)
+        self.assertIn(
+            "task_exec_launch refuses: it never defaults to `main`",
+            self.mod.TOOL_MANUALS["task_exec_prepare"],
+        )
+
     def test_prepare_and_launch_are_scoped_to_current_room(self):
         http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
         worker = {"kind": "discussion_agent", "agent_type": "Ollama"}
@@ -11124,14 +11156,98 @@ class PlanningToolTests(unittest.TestCase):
         resp = self.mod._handle(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         )
-        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.11")
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.13")
 
     def test_plan_get_defaults_to_current_discussion(self):
+        # KT-2110 — the bridge reads the bounded compact view, never the full
+        # plan the UI's panel reads on the same route.
         with mock.patch.object(self.mod, "_http", self.fake_http):
             self.mod.call_plan_get({})
         self.fake_http.assert_called_once_with(
-            "GET", "/api/discussions/disc-plan/plan"
+            "GET", "/api/discussions/disc-plan/plan?view=compact"
         )
+
+        self.fake_http.reset_mock()
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_plan_get({"discussion_id": "disc/other"})
+        self.fake_http.assert_called_once_with(
+            "GET", "/api/discussions/disc%2Fother/plan?view=compact"
+        )
+
+    def test_plan_get_is_sent_as_one_line_of_json_and_other_tools_stay_indented(self):
+        # KT-2110 — the plan's byte budget is counted on compact JSON: the
+        # bridge must not indent it back. Every other tool keeps its rendering.
+        plan = {
+            "discussion_id": "disc-plan",
+            "tasks": [{"reference": "KT-1", "title": "Écrire le plan", "actionable": True}],
+            "complete": True,
+        }
+
+        def call(tool):
+            with mock.patch.dict(self.mod.DISPATCH, {tool: lambda args: dict(plan)}), \
+                    mock.patch.object(self.mod, "_room_peek_for_tool_result", lambda name: None), \
+                    mock.patch.object(
+                        self.mod, "_ensure_workflow_step_membership", lambda: None):
+                response = self.mod._handle({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": tool, "arguments": {}},
+                })
+            return response["result"]["content"][0]["text"]
+
+        compact = call("plan_get")
+        self.assertEqual(
+            compact, json.dumps(plan, ensure_ascii=False, separators=(",", ":")),
+        )
+        self.assertNotIn("\n", compact)
+        self.assertIn("Écrire", compact)
+        self.assertEqual(json.loads(compact), plan)
+
+        indented = call("task_get")
+        self.assertIn("\n", indented)
+        self.assertEqual(json.loads(indented), plan)
+
+    def test_plan_get_description_states_the_bound_and_the_way_to_the_rest(self):
+        # KT-2110 — an agent is never told "the plan" while reading a part of
+        # it without knowing: the declaration names the bound and task_list.
+        plan_get = next(tool for tool in self.mod.TOOLS if tool["name"] == "plan_get")
+        for needle in ("compact", "byte budget", "left out", "task_list"):
+            self.assertIn(needle, plan_get["description"])
+        self.assertEqual(list(plan_get["inputSchema"]["properties"]), ["discussion_id"])
+
+    def test_task_get_reads_the_compact_view_unless_full_events_is_true(self):
+        # KT-1984 — each past edit repeats the description it replaced: the
+        # default read asks for the view without event bodies, and only the
+        # boolean `full_events: true` reads the route the UI reads.
+        for args, path in (
+            ({"task_id": "KT-142"}, "/api/planning/tasks/KT-142?view=compact"),
+            ({"task_id": "KT-142", "full_events": False},
+             "/api/planning/tasks/KT-142?view=compact"),
+            ({"task_id": "KT-142", "full_events": "true"},
+             "/api/planning/tasks/KT-142?view=compact"),
+            ({"task_id": "KT/142", "full_events": True}, "/api/planning/tasks/KT%2F142"),
+        ):
+            self.fake_http.reset_mock()
+            with mock.patch.object(self.mod, "_http", self.fake_http):
+                self.mod.call_task_get(args)
+            self.fake_http.assert_called_once_with("GET", path)
+
+        task_get = next(tool for tool in self.mod.TOOLS if tool["name"] == "task_get")
+        self.assertEqual(task_get["inputSchema"]["properties"], {
+            "task_id": {"type": "string"},
+            "full_events": {"type": "boolean"},
+        })
+        self.assertEqual(task_get["inputSchema"]["required"], ["task_id"])
+        self.assertIn("full_events: true", task_get["description"])
+
+    def test_task_exec_prepare_manual_says_what_the_answer_holds(self):
+        # KT-1984 — the preflight no longer answers the task's description and
+        # history; the manual names what it answers and where the rest is.
+        manual = self.mod.TOOL_MANUALS["task_exec_prepare"]
+        for field in (
+            "`launchable`", "`reasons`", "`warnings`", "`default_max_review_rounds`",
+            "task header", "`task_get`",
+        ):
+            self.assertIn(field, manual)
 
     def test_task_list_encodes_filters_and_boolean_lowercase(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):

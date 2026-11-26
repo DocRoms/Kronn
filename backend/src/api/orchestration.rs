@@ -18387,7 +18387,7 @@ pub async fn task_exec_prepare(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(mut request): Json<TaskExecPrepareRequest>,
-) -> Json<ApiResponse<crate::models::TaskExecutionPreparation>> {
+) -> Json<ApiResponse<crate::models::TaskExecutionPreparationBrief>> {
     let caller = match principal_caller(
         &request.source_agent,
         &request.source_session_id,
@@ -18458,7 +18458,10 @@ pub async fn task_exec_prepare(
         })
         .await;
     match result {
-        Ok(preparation) => Json(ApiResponse::ok(preparation)),
+        // KT-1984 — the verdict and a task header, not the task's history.
+        Ok(preparation) => Json(ApiResponse::ok(
+            crate::models::TaskExecutionPreparationBrief::from(preparation),
+        )),
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             error.to_string(),

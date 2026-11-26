@@ -3244,6 +3244,95 @@ async fn prepare_and_launch_refuse_a_validation_quick_exec_can_never_run() {
     );
 }
 
+/// KT-1984 — a preflight answers the verdict and a task header (reference,
+/// title, status, DoD), never the description or the history, and says so.
+#[tokio::test]
+async fn prepare_answers_the_verdict_and_a_task_header_without_description_or_events() {
+    use crate::agents::tools::ToolCall;
+
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (exec, task_ref, parent_id) = native_principal_with_launchable_task(&db, repo.path()).await;
+    // An edited task: each `updated` event stores the description it was given.
+    {
+        let task_ref = task_ref.clone();
+        db.with_conn(move |conn| {
+            for round in 0..3 {
+                let request: crate::models::UpdatePlanningTaskRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "description": format!("MARKER-DESCRIPTION round {round}"),
+                        "actor": test_actor(),
+                    }))?;
+                crate::db::planning::update_task(conn, &task_ref, &request)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    let arguments = serde_json::json!({
+        "task_reference": task_ref,
+        "worker": serde_json::to_value(native_worker()).unwrap(),
+        "worker_scope_intent": "generic",
+    });
+
+    let prepared = exec
+        .execute(&ToolCall {
+            id: "c1".into(),
+            name: "task_exec_prepare".into(),
+            arguments: arguments.clone(),
+        })
+        .await;
+    assert!(prepared.ok, "{:?}", prepared.content);
+    let answer = &prepared.content;
+    assert_eq!(answer["launchable"], true, "{:?}", answer["reasons"]);
+    assert!(answer["reasons"].is_array());
+    assert!(!answer["default_max_review_rounds"].is_null());
+    assert_eq!(answer["task"]["reference"], task_ref.as_str());
+    assert_eq!(answer["task"]["title"], "Faire la chose");
+    assert_eq!(answer["task"]["status"], "todo");
+    let dod = answer["task"]["definition_of_done"].as_array().unwrap();
+    assert_eq!(dod.len(), 1);
+    assert!(dod[0]["id"].is_string());
+    assert_eq!(
+        dod[0]["sentence"],
+        "Le module compile et les tests passent."
+    );
+    assert_eq!(dod[0]["completed"], true);
+    let task = answer["task"].as_object().unwrap();
+    for dropped in ["description", "events", "links", "blockers", "id"] {
+        assert!(!task.contains_key(dropped), "`{dropped}` is in the header");
+    }
+    let wire = answer.to_string();
+    assert!(!wire.contains("MARKER-DESCRIPTION"), "{wire}");
+    assert!(!wire.contains("\"changes\""), "{wire}");
+    assert!(answer["omitted"].as_str().unwrap().contains("task_get"));
+
+    // The bridge's route answers the same brief.
+    let state = AppState::new_defaults(
+        std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        )),
+        db.clone(),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    seed_cli_session(&db, 9101, &parent_id, "principal").await;
+    let mut body = arguments;
+    body["parent_discussion_id"] = parent_id.as_str().into();
+    body["source_agent"] = "ClaudeCode".into();
+    body["source_session_id"] = "principal".into();
+    let Json(routed) = task_exec_prepare(
+        State(state),
+        None,
+        Json(serde_json::from_value(body).expect("prepare request")),
+    )
+    .await;
+    let routed = serde_json::to_value(routed.data.expect("a preflight answers")).unwrap();
+    assert_eq!(routed["task"], answer["task"]);
+    assert_eq!(routed["omitted"], answer["omitted"]);
+    assert!(!routed.to_string().contains("MARKER-DESCRIPTION"));
+}
+
 /// KT-839 — the HTTP launch route (the CLI principals' path) has no tool
 /// layer in front of it: the shared provisioning boundary is what refuses.
 #[tokio::test]

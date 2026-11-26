@@ -465,3 +465,120 @@ fn the_card_that_gates_a_review_is_explained_the_same_on_both_sides() {
         "the bridge's manual lacks: {SENTENCE}"
     );
 }
+
+/// KT-2112 — a joined CLI principal names the integration branch at the
+/// preflight like the room's agent does, and no side promises a default branch.
+#[test]
+fn task_exec_prepare_takes_the_integration_branch_on_both_sides() {
+    const SENTENCE: &str = "task_exec_launch refuses: it never defaults to `main`";
+
+    let native = full_discussion_catalogue()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == "task_exec_prepare")
+        .expect("task_exec_prepare in the native catalogue");
+    assert_eq!(
+        native["function"]["parameters"]["properties"]["base_rev"]["type"],
+        "string"
+    );
+    assert!(tool_manual(Some("task_exec_prepare"), None)["manual"]
+        .as_str()
+        .expect("the native task_exec_prepare manual")
+        .contains(SENTENCE));
+
+    let script = include_str!("../../scripts/disc-introspection-mcp.py");
+    for tool in ["task_exec_prepare", "task_exec_launch"] {
+        let declaration = script
+            .split(&format!("\"name\": \"{tool}\","))
+            .nth(1)
+            .and_then(|rest| rest.split("\"required\": [").next())
+            .unwrap_or_else(|| panic!("{tool} in the bridge"));
+        assert!(
+            declaration.contains("\"base_rev\": {\"type\": \"string\""),
+            "the bridge's {tool} does not take `base_rev`"
+        );
+        assert!(
+            !declaration.contains("default main"),
+            "the bridge's {tool} promises a default branch"
+        );
+    }
+    let bridge_manual = script
+        .split("\n    \"task_exec_prepare\": (")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    ),\n").next())
+        .expect("the bridge's task_exec_prepare manual");
+    assert!(
+        bridge_manual.contains(SENTENCE),
+        "the bridge's manual lacks: {SENTENCE}"
+    );
+    assert!(
+        script.contains("for optional in (\"base_rev\", \"validations\"):"),
+        "the bridge's preflight does not forward `base_rev`"
+    );
+}
+
+/// KT-1984 — `task_get` declares the same opt-in for the full history on both
+/// sides, and the bridge asks the backend for the view the native tool applies.
+#[test]
+fn task_get_declares_full_events_on_both_sides() {
+    let native = full_discussion_catalogue()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == "task_get")
+        .expect("task_get in the native catalogue");
+    let properties = native["function"]["parameters"]["properties"]
+        .as_object()
+        .expect("native properties");
+    assert_eq!(
+        properties
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["full_events", "task_id"])
+    );
+    assert_eq!(properties["full_events"]["type"], "boolean");
+
+    let script = include_str!("../../scripts/disc-introspection-mcp.py");
+    let block = script
+        .split("\"name\": \"task_get\",")
+        .nth(1)
+        .and_then(|rest| rest.split("\"required\": [\"task_id\"]").next())
+        .expect("task_get in the bridge");
+    assert!(block.contains("\"task_id\": {\"type\": \"string\"}"));
+    assert!(block.contains("\"full_events\": {\"type\": \"boolean\"}"));
+    assert!(script.contains("/api/planning/tasks/{encoded}?view=compact"));
+}
+
+/// KT-2110 — both audiences read the same bounded plan: the bridge asks the
+/// backend for the compact view the native tool applies and sends it as one
+/// line, and both declarations name the bound and the way to the rest.
+#[test]
+fn plan_get_reads_the_same_compact_plan_on_both_sides() {
+    let script = include_str!("../../scripts/disc-introspection-mcp.py");
+    assert!(script.contains("/api/discussions/{discussion_id}/plan?view=compact"));
+    assert!(script.contains("_COMPACT_RESULT_TOOLS = frozenset({\"plan_get\"})"));
+
+    let native = full_discussion_catalogue()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == "plan_get")
+        .expect("plan_get in the native catalogue");
+    let native = native["function"]["description"]
+        .as_str()
+        .expect("native description");
+    let bridge = script
+        .split("\"name\": \"plan_get\",")
+        .nth(1)
+        .and_then(|rest| rest.split("\"inputSchema\"").next())
+        .expect("plan_get in the bridge")
+        .lines()
+        .map(|line| line.trim().trim_matches('"'))
+        .collect::<String>();
+    for needle in ["compact", "byte budget", "left out", "task_list"] {
+        assert!(
+            native.contains(needle),
+            "the native description lacks: {needle}"
+        );
+        assert!(
+            bridge.contains(needle),
+            "the bridge description lacks: {needle}"
+        );
+    }
+}

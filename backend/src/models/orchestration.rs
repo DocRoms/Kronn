@@ -1795,6 +1795,76 @@ pub struct TaskExecutionPreparation {
     pub default_max_review_rounds: Option<serde_json::Value>,
 }
 
+/// What `task_exec_prepare` answers (KT-1984): the verdict and a task header.
+/// The description and the history made every preflight weigh as much as the
+/// task's edits; they stay one `task_get` away, and `omitted` says so.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskExecutionPreparationBrief {
+    pub task: TaskExecutionTaskHeader,
+    pub parent_discussion_id: String,
+    pub worker: MessageTarget,
+    pub project_id: Option<String>,
+    pub launchable: bool,
+    pub reasons: Vec<CampaignTaskReason>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<CampaignTaskReason>,
+    pub active_execution: Option<TaskExecution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_max_review_rounds: Option<serde_json::Value>,
+    pub omitted: &'static str,
+}
+
+/// The task as a preflight shows it: what names it and what "done" means.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskExecutionTaskHeader {
+    pub reference: String,
+    pub title: String,
+    pub status: super::PlanningTaskStatus,
+    pub definition_of_done: Vec<TaskExecutionDodLine>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskExecutionDodLine {
+    pub id: String,
+    pub sentence: String,
+    pub completed: bool,
+}
+
+/// Named in the answer: silence about a dropped field reads as "there was none".
+pub const TASK_EXEC_PREPARE_OMITTED: &str =
+    "task description, links, blockers, events — call task_get for them";
+
+impl From<TaskExecutionPreparation> for TaskExecutionPreparationBrief {
+    fn from(preparation: TaskExecutionPreparation) -> Self {
+        let task = preparation.task;
+        Self {
+            task: TaskExecutionTaskHeader {
+                reference: task.summary.reference,
+                title: task.summary.title,
+                status: task.summary.status,
+                definition_of_done: task
+                    .definition_of_done
+                    .into_iter()
+                    .map(|item| TaskExecutionDodLine {
+                        id: item.id,
+                        sentence: item.sentence,
+                        completed: item.completed,
+                    })
+                    .collect(),
+            },
+            parent_discussion_id: preparation.parent_discussion_id,
+            worker: preparation.worker,
+            project_id: preparation.project_id,
+            launchable: preparation.launchable,
+            reasons: preparation.reasons,
+            warnings: preparation.warnings,
+            active_execution: preparation.active_execution,
+            default_max_review_rounds: preparation.default_max_review_rounds,
+            omitted: TASK_EXEC_PREPARE_OMITTED,
+        }
+    }
+}
+
 /// A review-round limit as an agent reads it: the integer, or `"unlimited"`
 /// for the [`UNLIMITED_REVIEW_ROUNDS`](super::setup::UNLIMITED_REVIEW_ROUNDS) sentinel.
 pub fn review_limit_json(limit: u32) -> serde_json::Value {
