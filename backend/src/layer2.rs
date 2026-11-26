@@ -59,6 +59,7 @@ pub mod core {
     pub use kronn_l1::core::*;
     pub mod agent_fallback;
     pub mod approved_scripts;
+    pub mod argv_roles;
     pub mod audit_validation;
     pub mod binding_bundle;
     pub mod briefing_docs;
@@ -67,6 +68,7 @@ pub mod core {
     pub mod cross_audit;
     pub mod cross_audit_decision;
     pub mod export_report;
+    pub mod inline_code;
     pub mod project_profile;
     pub mod repo_facts;
     pub mod run_notify;
