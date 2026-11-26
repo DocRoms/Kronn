@@ -1,0 +1,94 @@
+/* A Page's declared dressing for ITS action card (see lib/live-page-action-skin).
+   The wrapper carries validated `--kac-*` custom properties and nothing else;
+   every rule below reads them with a fallback on the value the card has
+   without a skin, so a dropped token simply leaves Kronn's design. Only the
+   card opened from a Page is wrapped: discussion cards never match.
+
+   What a skin never reaches: the texts (labels come from Kronn's i18n), the
+   state chip and diagnostics (they keep Kronn's own background so a status
+   colour stays readable), the run-status card, and the visibility or
+   position of the Launch button. */
+.live-page-action-skin .discussion-action-card {
+  border: var(--kac-border-width, 1px) solid var(--kac-border, color-mix(in srgb, var(--kr-accent) 24%, var(--kr-border)));
+  border-radius: var(--kac-radius, var(--kr-r-lg));
+  background: var(--kac-surface, linear-gradient(145deg, color-mix(in srgb, var(--kr-accent) 7%, var(--kr-bg-surface)), var(--kr-bg-surface)));
+  color: var(--kac-text, inherit);
+  font-family: var(--kac-font, inherit);
+}
+
+.live-page-action-skin .discussion-action-card__toggle { font-family: inherit; }
+
+.live-page-action-skin .discussion-action-card[data-expanded='true'] .discussion-action-card__header {
+  border-bottom-color: var(--kac-border, var(--kr-border-subtle));
+}
+
+.live-page-action-skin .discussion-action-card__eyebrow { color: var(--kac-accent-ink, var(--kac-text, var(--kr-accent))); }
+.live-page-action-skin .discussion-action-card__title-row strong,
+.live-page-action-skin .discussion-action-card__label,
+.live-page-action-skin .discussion-action-card__resolved-list strong { color: var(--kac-text, var(--kr-text-primary)); }
+
+.live-page-action-skin .discussion-action-card__chevron,
+.live-page-action-skin .discussion-action-card__field small,
+.live-page-action-skin .discussion-action-card__resolved-list span,
+.live-page-action-skin .discussion-action-card__resolved-list small,
+.live-page-action-skin .discussion-action-card__step-agent-head small,
+.live-page-action-skin .discussion-action-card__starting,
+.live-page-action-skin .discussion-action-card__project { color: var(--kac-text-muted, var(--kr-text-dim)); }
+
+.live-page-action-skin .discussion-action-card__row {
+  color: var(--kac-text, var(--kr-text-secondary));
+  border-color: var(--kac-border, color-mix(in srgb, var(--kr-accent) 45%, transparent));
+  border-radius: var(--kac-radius, var(--kr-r-pill));
+}
+
+.live-page-action-skin .discussion-action-card__project {
+  border-color: var(--kac-border, var(--kr-border-ghost));
+  border-radius: var(--kac-radius, var(--kr-r-pill));
+}
+
+.live-page-action-skin .discussion-action-card__details {
+  background: var(--kac-surface-alt, var(--kr-bg-raised));
+  border: var(--kac-border-width, 1px) solid var(--kac-border, var(--kr-border-subtle));
+  border-radius: var(--kac-radius, var(--kr-radius-md));
+}
+.live-page-action-skin .discussion-action-card__details > summary { color: var(--kac-text, var(--kr-text-secondary)); }
+
+.live-page-action-skin .discussion-action-card__reset { color: var(--kac-accent-ink, var(--kac-text, var(--kr-accent))); }
+.live-page-action-skin .discussion-action-card__step-agents li { border-top-color: var(--kac-border, var(--kr-border-subtle)); }
+.live-page-action-skin .discussion-action-card__step-agents li[data-changed='true'] strong {
+  color: var(--kac-accent-ink, var(--kac-text, var(--kr-accent)));
+}
+
+/* Fields inherit the card's font; the colour pair is checked together. */
+.live-page-action-skin .discussion-action-card input,
+.live-page-action-skin .discussion-action-card textarea,
+.live-page-action-skin .discussion-action-card select {
+  font-family: inherit;
+  border-color: var(--kac-border, var(--kr-border));
+  border-radius: var(--kac-radius, var(--kr-radius-md));
+}
+.live-page-action-skin .discussion-action-card input,
+.live-page-action-skin .discussion-action-card textarea,
+.live-page-action-skin .discussion-action-card select {
+  background: var(--kac-field-bg, var(--kr-bg-input));
+  color: var(--kac-field-text, var(--kr-text-primary));
+}
+
+/* The state chip and the diagnostics keep Kronn's own opaque backgrounds. */
+.live-page-action-skin .discussion-action-card__state { border-radius: var(--kac-radius, 999px); }
+.live-page-action-skin .discussion-action-card__diagnostic {
+  background: color-mix(in srgb, var(--kr-danger) 8%, var(--kr-bg-surface));
+  border-radius: var(--kac-radius, var(--kr-radius-md));
+}
+
+.live-page-action-skin .discussion-action-card__actions button {
+  border-width: var(--kac-border-width, 1px);
+  border-radius: var(--kac-radius, var(--kr-radius-md));
+  font-family: inherit;
+}
+.live-page-action-skin .discussion-action-card__actions button.discussion-action-card__launch,
+.live-page-action-skin .discussion-action-card__actions button.discussion-action-card__open {
+  color: var(--kac-accent-text, var(--kr-text-on-accent));
+  background: var(--kac-accent, var(--kr-accent));
+  border-color: var(--kac-border, var(--kac-accent, var(--kr-accent))) !important;
+}

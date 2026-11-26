@@ -32,7 +32,7 @@ project's run. A missing version remains unknown.
 [src: file: backend/src/agents/provenance.rs:23-34#record_npx_fallback]
 [src: file: backend/src/models/workflows.rs:2368-2402#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/steps.rs:1610-1631#npx_fallback_command]
-[src: file: backend/src/workflows/template.rs:157-198#set_step_provenance]
+[src: file: backend/src/workflows/template.rs:193-234#set_step_provenance]
 [src: file: backend/src/agents/mod.rs:44-45#RUNTIME_CACHE]
 [src: file: backend/src/agents/mod.rs:1257#cache_key]
 [src: file: backend/src/agents/mod.rs:1187-1207#probe_runtime]

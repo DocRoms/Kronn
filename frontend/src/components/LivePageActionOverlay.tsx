@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { LivePageAction } from '../types/generated';
 import type { LivePageActiveActionState } from '../hooks/useLivePageActions';
+import { resolveActionSkin, skinThemeFor, type ActionSkin } from '../lib/live-page-action-skin';
 import { useT } from '../lib/I18nContext';
 import { LivePageActionCard } from './LivePageActionCard';
 import './LivePageActionOverlay.css';
@@ -11,6 +12,8 @@ export interface LivePageActionOverlayProps {
   action: LivePageAction | null;
   /** The Page's offer for this click, whatever the card currently shows. */
   offer?: LivePageAction | null;
+  /** The Page's declared card skin; validated here, per host theme. */
+  skin?: ActionSkin | null;
   onChanged: (action: LivePageAction, activation: number) => void;
   onClose: () => void;
   onOpenDiscussion: (discussionId: string) => void;
@@ -23,11 +26,21 @@ export interface LivePageActionOverlayProps {
  * Place the host action card in the row slot reported by the iframe bridge.
  * Updated anchors keep it aligned while the Page scrolls.
  */
-export function LivePageActionOverlay({ active, action, offer, onChanged, onClose, onOpenDiscussion, onHeightChange }: LivePageActionOverlayProps) {
+export function LivePageActionOverlay({ active, action, offer, skin, onChanged, onClose, onOpenDiscussion, onHeightChange }: LivePageActionOverlayProps) {
   const { t } = useT();
   const cardRef = useRef<HTMLDivElement | null>(null);
   const reportHeight = useRef(onHeightChange);
   useEffect(() => { reportHeight.current = onHeightChange; });
+  const [dataTheme, setDataTheme] = useState(() => document.documentElement.getAttribute('data-theme'));
+  useEffect(() => {
+    if (!skin) return undefined;
+    const sync = () => setDataTheme(document.documentElement.getAttribute('data-theme'));
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => observer.disconnect();
+  }, [skin]);
+  const skinVars = useMemo(() => resolveActionSkin(skin ?? null, skinThemeFor(dataTheme)), [skin, dataTheme]);
   const activation = active?.activation ?? 0;
   // Stable per click: the card restarts its polling whenever this changes.
   const handleChanged = useCallback(
@@ -111,6 +124,7 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
         bindings={active.bindings}
         bindingLabels={active.bindingLabels}
         prefill={active.prefill}
+        skin={skinVars}
         onChanged={handleChanged}
         onOpenDiscussion={onOpenDiscussion}
       />

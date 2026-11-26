@@ -9,6 +9,7 @@ import {
   type LivePageEmbedPlacement,
   runtimeData,
 } from '../lib/live-page-sandbox';
+import { extractActionSkin } from '../lib/live-page-action-skin';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
 import { createRequestSequence, refreshLivePageDetail, replacesShown } from '../lib/live-page-refresh';
 import {
@@ -122,6 +123,7 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
     () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme(), hostThemeTokens()) : '',
     [bridgeChannel, detail],
   );
+  const actionSkin = useMemo(() => extractActionSkin(detail?.revision.html ?? ''), [detail]);
   const publishToFrame = useCallback(() => {
     if (!detail) return;
     const target = iframeRef.current?.contentWindow ?? null;
@@ -204,6 +206,7 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
           active={pageActiveAction}
           action={pageSelectedAction}
           offer={pageSelectedOffer}
+          skin={actionSkin}
           onClose={closePageAction}
           onChanged={handlePageActionChanged}
           onOpenDiscussion={openStandaloneDiscussion}

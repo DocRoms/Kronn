@@ -14,7 +14,7 @@ import { test, expect, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import type { DiscussionAction } from '../../src/types/generated';
 
-const DARK_THEMES = ['dark', 'arcade', 'gotham', 'matrix'] as const;
+import { DARK_THEMES } from '../../src/styles/darkThemes';
 const SECRET_THEMES = ['arcade', 'matrix', 'sakura', 'gotham', 'euronews'];
 
 interface Route {

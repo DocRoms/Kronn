@@ -75,6 +75,16 @@ Release notes for 0.9.3 and earlier are available in the
   label). A non-secret query value of 8 bytes or more inside a URL secret
   (`?mode=production&token=…`) is masked in the data of a successful call too,
   and a part under 8 bytes is not masked alone, the password excepted.
+### Added
+
+- Live Pages: a Page can dress its own action card with a `kronn-action-skin`
+  JSON block of validated tokens (colours, radius, border width, one of three
+  local fonts), one set per host theme (`light`, `dark`). Kronn drops any
+  token that is not numeric or fails 4.5:1 contrast, checks the text and the
+  accent against every surface the card paints (the expandable details block
+  takes the Page's surface when it declares no `surface-alt`), and never lets
+  the Page change a label or the Launch button. A card without a skin renders
+  as before.
 
 ### Changed
 
@@ -88,6 +98,15 @@ Release notes for 0.9.3 and earlier are available in the
   reason, the worker's brief says the Rust target is cold, and adding a gate
   that needs a build to such a lane is refused: relaunch instead. See
   `docs/operations/worktree-build-artifacts.md`.
+
+### Fixed
+
+- Workflows: `{{name ?? "text"}}` now renders the fallback when an optional
+  launch variable is left blank, as it already did when the variable was
+  absent. Before, a blank optional variable rendered `""` and the fallback was
+  ignored. Only declared optional launch variables change: a blank step output,
+  trigger field or undeclared launch value is still a present value, and a
+  blank required variable is still refused before the run starts.
 
 ## [0.15.3] - 2026-11-19
 

@@ -360,9 +360,9 @@ categories only temporarily.
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:2699-2704#isGroupCollapsed]`
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
-`[src: file: frontend/src/pages/PagesPage.tsx:85#PAGE_NAVIGATION_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:86#PAGE_NAVIGATION_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:109-118#readPageNavigation]`
-`[src: file: frontend/src/pages/PagesPage.tsx:330-336#PAGE_COLLAPSED_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:331-337#PAGE_COLLAPSED_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:396-438#refresh]`
 `[src: file: frontend/src/pages/PagesPage.tsx:889-892#isSectionCollapsed]`
 Project detail restores the last valid tab across project switches and falls back to Overview

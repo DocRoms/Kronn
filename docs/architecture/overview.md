@@ -413,7 +413,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
   CLI's own sandbox and permission rules
   ([Workflow Agent read-only repositories](../operations/workflow-read-only-repos.md)).
 - Steps can use `mode: debate` for multi-agent discussion at any point.
-- Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`, `{{run.id}}`. It is not Liquid; its only filters are the run-anchored `time.now` grammar and `|sh`, which renders a value as one POSIX single-quoted shell word. Runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible. `{{path ?? "text"}}` (or `'text'`) is the one explicit fallback: it renders the literal when the path is absent or JSON null, such as a step a `Goto` skipped. An `Exec` step's `---STATE:` and `---ARTIFACT:` markers are read from its raw stdout, where a `STATE` value may span lines. `[src: file: backend/src/workflows/template.rs:360-378#render]`
+- Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`, `{{run.id}}`. It is not Liquid; its only filters are the run-anchored `time.now` grammar and `|sh`, which renders a value as one POSIX single-quoted shell word. Runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible. `{{path ?? "text"}}` (or `'text'`) is the one explicit fallback: it renders the literal when the path is absent or JSON null, such as a step a `Goto` skipped, or when it names an optional launch variable left blank (omitted, or submitted `""` by a launch form or action card); a present empty value from anything else stays empty. An `Exec` step's `---STATE:` and `---ARTIFACT:` markers are read from its raw stdout, where a `STATE` value may span lines. `[src: file: backend/src/workflows/template.rs:396-414#render] [src: file: backend/src/workflows/template.rs:91-112#set_launch_variables]`
 - Deterministic Page pipelines can fan out over saved Quick APIs and
   shell-free, allowlisted CLI collectors with `CollectApiData`, reshape typed JSON with a bounded JSONPath recipe in
   `TransformData`, then atomically publish datasets with `PublishPageData`.
@@ -671,7 +671,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
 
   Isolation itself stays the workflow's decision: inheriting a recipe never
   turns a read-only fan-out into an isolated run.
-  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5674-5686#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
+  [src: file: backend/src/workflows/runner.rs:454-478#resolved_workspace_hooks] [src: file: backend/src/workflows/runner.rs:5672-5684#a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none]
 
 **MCP injection:**
 - `read_all_mcp_contexts()` reads `.mcp.json` and per-project MCP context files (`docs/operations/mcp-servers/*.md`).

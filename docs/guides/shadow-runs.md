@@ -222,7 +222,7 @@ not tool calling.
   mosaic: the main execution first, then the shadows in the order they started.
   Each tile names its Artifact above the page.
   [src: file: backend/src/api/step_artifacts.rs:292-321#mosaic]
-  [src: file: frontend/src/pages/StandaloneLivePageMosaic.tsx:133#standalone-live-page-mosaic-caption]
+  [src: file: frontend/src/pages/StandaloneLivePageMosaic.tsx:135#standalone-live-page-mosaic-caption]
 - **One Artifact per execution.** The link Artifact ↔ (run, step result,
   execution) is stored in `step_execution_artifacts` (migration 302), unique per
   execution: after a reload the button opens the Artifact already made, never a
@@ -350,7 +350,7 @@ step is. A `PublishPageData` step writes it into a dataset with
 `value_from: "steps.advise.shadows"`, and the Page then shows the merged shadow
 and the identical one beside the step's own agent.
 [src: file: backend/src/workflows/shadow_summary.rs:297#summarize]
-[src: file: backend/src/workflows/template.rs:202-206#set_step_shadows]
+[src: file: backend/src/workflows/template.rs:236-240#set_step_shadows]
 
 ```json
 { "step": "advise",

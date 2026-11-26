@@ -10,7 +10,7 @@ warns; it never refuses a run.
 - `StepResult.output_bytes`: UTF-8 bytes of the step's `output`, stamped by
   `apply_step_snapshot` when the step completes. Absent on a run recorded before
   KT-1525; the run view then measures the stored output.
-  `[src: file: backend/src/workflows/runner.rs:4975]`
+  `[src: file: backend/src/workflows/runner.rs:4973]`
 - A CollectApiData step adds `output_bytes` per source to its envelope
   (`data.meta.sources[]`), 0 for a failed source, so the heavy source is
   obvious (Quick API and Quick Exec sources alike).

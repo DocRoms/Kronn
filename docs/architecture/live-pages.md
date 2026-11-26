@@ -148,7 +148,7 @@ Workflow run when that provenance still exists. A publication that changes no
 dataset at all writes no ledger entry (KT-1819), so the timeline lists data
 updates; the "Synced" time next to it is the Page's `last_published_at`, which
 every successful publication moves, changed or not.
-`[src: file: frontend/src/pages/PagesPage.tsx:904-905#lastRefreshAt]`
+`[src: file: frontend/src/pages/PagesPage.tsx:906-907#lastRefreshAt]`
 Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
@@ -187,7 +187,7 @@ single standalone Page, so combining reports does not merge their HTML, CSS or
 JavaScript contexts. Each tile names its Artifact in a one-line caption above
 the frame (KT-1990); before, the title was only the frame's `title` attribute,
 which a reader does not see.
-[src: file: frontend/src/pages/StandaloneLivePageMosaic.tsx:133#standalone-live-page-mosaic-caption]
+[src: file: frontend/src/pages/StandaloneLivePageMosaic.tsx:135#standalone-live-page-mosaic-caption]
 
 A Page may also be linked to one or more Discussions. `created_from` records
 the room where an agent authored the Page; `attached` is an explicit later
@@ -509,6 +509,55 @@ wins, as before.
 `[src: file: frontend/src/pages/PagesPage.tsx:643-670#persistHtml]`
 `[src: file: frontend/src/pages/PagesPage.tsx:622-639#readConflictingHtml]`
 
+## Dressing the action card (`kronn-action-skin`)
+
+The card a click opens is drawn by the host, outside the sandbox, and its
+Launch button is a trust boundary. A Page may therefore dress that card but
+never write into it: it declares **tokens**, validated one by one, and Kronn
+paints them. Discussion cards never read a skin.
+
+```html
+<script type="application/json" kronn-action-skin>
+{ "surface": "#1a1330", "text": "#f3ecff", "accent": "#ffcc33", "accent-text": "#1a1330",
+  "radius": 0, "border-width": 3, "font": "pixel",
+  "light": { "surface": "#fff7e0", "text": "#1a1330" } }
+</script>
+```
+
+- **Contract.** One block, `type="application/json"` plus the bare attribute
+  `kronn-action-skin`, at most 4 KiB; the first one wins. The HTML is parsed,
+  never executed. Top-level tokens apply to both themes; `light` / `dark`
+  objects override them for that theme, picked from the host's `data-theme`
+  and followed live (`dark`, `arcade`, `gotham`, `matrix` are dark).
+  `[src: file: frontend/src/lib/live-page-action-skin.ts:126-147#extractActionSkin]`
+  `[src: file: frontend/src/components/LivePageActionOverlay.tsx:43]`
+- **Allow-list.** Colours `surface`, `surface-alt`, `text`, `text-muted`,
+  `accent`, `accent-text`, `border`, `field-bg`, `field-text`; `radius`
+  (0 to 16 px); `border-width` (0 to 4 px); `font` in `system`, `mono`,
+  `pixel` (fixed local stacks, nothing is loaded). Colours are `#rgb`,
+  `#rgba`, `#rrggbb`, `#rrggbbaa` or numeric `rgb()` / `rgba()`. Anything
+  else (names, `var()`, `url()`, `;`, `}`, unknown keys) is ignored for that
+  token only. Kronn re-emits normalised values, never the Page's string.
+  `[src: file: frontend/src/lib/live-page-action-skin.ts:12-15#ACTION_SKIN_COLOR_TOKENS]`
+  `[src: file: frontend/src/lib/live-page-action-skin.ts:67-87#parseSkinColor]`
+- **Fallbacks (WCAG 4.5:1).** `surface`, `surface-alt` and `text` stand or
+  fall together (text must read on both; `text` and `surface` are both
+  required); `text-muted` is dropped alone and reuses `text`;
+  `accent` / `accent-text` and `field-bg` / `field-text` are pairs. A failed
+  group returns to Kronn's values. Surfaces, accent and field background must
+  be opaque. Without `surface-alt`, the expandable details block takes
+  `surface`, so the Page's text never lands on a Kronn background. The accent
+  is printed as text (eyebrow) only if it reads on both surfaces. Each theme
+  is checked on its own.
+  `[src: file: frontend/src/lib/live-page-action-skin.ts:154-206#resolveActionSkin]`
+- **Never skinned.** Labels and every text (Kronn i18n), the project, state
+  and values, the state chip and diagnostics (own opaque background), the run
+  card, and the Launch button's presence and position. The stylesheet only
+  reads `--kac-*` with fallbacks on the plain card, and every rule is scoped
+  under the Page wrapper.
+  `[src: file: frontend/src/components/LivePageActionSkin.css:11-18]`
+  `[src: file: frontend/src/components/LivePageActionCard.tsx:47]`
+
 ## « Ma Todo », the default board (KT-1030)
 
 Kronn installs one board Page and six workflows at boot, once
@@ -788,7 +837,7 @@ fence carries one intention.
 [src: file: frontend/src/lib/live-page-sandbox.ts:339-342#ACTION_STATE_STYLE]
 [src: file: frontend/src/hooks/useLivePageActions.ts:174-218#handleIntent]
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
-[src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
+[src: file: frontend/src/components/LivePageActionOverlay.tsx:53#Escape]
 [src: file: frontend/src/components/DiscussionActionCard.tsx:35-37#relaunch]
 
 When authoring a local row move after an action succeeds, preserve the row's
@@ -880,7 +929,7 @@ even when two tiles share the same `action_ref` string for different Pages.
 `[src: file: frontend/src/hooks/useLivePageActions.ts:83-96#useLivePageActions]`
 `[src: file: frontend/src/hooks/useLivePageActions.ts:174-179#handleIntent]`
 `[src: file: frontend/src/hooks/useLivePageActions.ts:220-227#handleChanged]`
-`[src: file: frontend/src/components/LivePageActionOverlay.tsx:105-116#LivePageActionCard]`
+`[src: file: frontend/src/components/LivePageActionOverlay.tsx:118-130#LivePageActionCard]`
 The standalone tab and mosaic tiles have no Dashboard shell to navigate
 within, so a terminal action's "open discussion" jump opens the
 discussion's own address in a fresh same-origin tab (`noopener,noreferrer`)

@@ -13,17 +13,19 @@
 // the stylesheet can clamp, never as a hard `left`, and the stylesheet decides
 // the width before it looks at the anchor.
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // The card's own rendering is covered by LivePageActionCard.test.tsx. This file
 // is about where the box sits and how wide it is, so the card is a stub — a
 // thin fixture would otherwise fail inside the real card and say nothing about
 // positioning.
 vi.mock('../LivePageActionCard', () => ({
-  LivePageActionCard: () => <div data-testid="card" />,
+  LivePageActionCard: ({ skin }: { skin?: Record<string, string> | null }) => (
+    <div data-testid="card" data-skin={JSON.stringify(skin ?? {})} />
+  ),
 }));
 import { readFileSync } from 'node:fs';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { LivePageActionOverlay } from '../LivePageActionOverlay';
 import type { LivePageAction } from '../../types/generated';
 import type { LivePageActiveActionState } from '../../hooks/useLivePageActions';
@@ -153,5 +155,54 @@ describe('LivePageActionOverlay', () => {
       />,
     );
     expect(screen.queryByTestId('page-action-overlay-previous')).toBeNull();
+  });
+});
+
+describe('LivePageActionOverlay — the Page skin', () => {
+  const skin = {
+    shared: { surface: '#1a1330', text: '#f3ecff' },
+    light: { surface: '#fff7e0', text: '#1a1330' },
+    dark: {},
+  };
+  const cardSkin = () => JSON.parse(screen.getByTestId('card').dataset.skin ?? '{}') as Record<string, string>;
+
+  afterEach(() => document.documentElement.removeAttribute('data-theme'));
+
+  it('hands the card the set of the host theme and follows a theme change', async () => {
+    document.documentElement.setAttribute('data-theme', 'light');
+    render(
+      <LivePageActionOverlay
+        active={activeAt(8)}
+        action={action}
+        skin={skin}
+        onChanged={() => {}}
+        onClose={() => {}}
+        onOpenDiscussion={() => {}}
+      />,
+    );
+    expect(cardSkin()['--kac-surface']).toBe('rgb(255, 247, 224)');
+
+    await act(async () => {
+      document.documentElement.setAttribute('data-theme', 'gotham');
+      await Promise.resolve();
+    });
+    expect(cardSkin()['--kac-surface']).toBe('rgb(26, 19, 48)');
+  });
+
+  it('hands the card no skin when the Page declares none', () => {
+    overlayAt(8);
+    expect(cardSkin()).toEqual({});
+  });
+});
+
+describe('Live Page screens', () => {
+  it.each([
+    'src/pages/PagesPage.tsx',
+    'src/pages/StandaloneLivePage.tsx',
+    'src/pages/StandaloneLivePageMosaic.tsx',
+  ])('%s reads the revision skin and hands it to the overlay', file => {
+    const source = readFileSync(file, 'utf8');
+    expect(source).toMatch(/const actionSkin = useMemo\(\(\) => extractActionSkin\(/);
+    expect(source).toMatch(/<LivePageActionOverlay[^>]*\bskin=\{actionSkin\}/s);
   });
 });
