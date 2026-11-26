@@ -317,6 +317,19 @@ pub async fn reconcile_at_boot_with_agents(
     available_agents: &[AgentType],
 ) -> OrchestrationBootReport {
     let mut report = OrchestrationBootReport::default();
+    // Sessions idle past the abandon threshold (no `disc_leave`) are retired
+    // first: the recovery below reads who is still in a room (KT-2022).
+    match state
+        .db
+        .with_conn(crate::db::discussion_sessions::reap_abandoned_sessions)
+        .await
+    {
+        Ok(n) if n > 0 => {
+            tracing::info!("Reaped {n} abandoned discussion session(s) (idle > 24h, no disc_leave)")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Abandoned-session reap failed: {}", e),
+    }
     let moved = match state
         .db
         .with_conn(crate::db::orchestration::reconcile_stale_task_executions)
@@ -1506,6 +1519,17 @@ pub async fn classify_interrupted_execution(
             | TaskExecutionStatus::Applying
     );
 
+    // KT-2022 — a delivered execution waits for its review or its integration,
+    // not for its worker: a joined CLI worker that left does not park it.
+    let needs_worker = !matches!(
+        origin,
+        TaskExecutionStatus::AwaitingReview
+            | TaskExecutionStatus::Approved
+            | TaskExecutionStatus::Integrating
+            | TaskExecutionStatus::Validating
+            | TaskExecutionStatus::Applying
+    );
+
     // KT-1540 — an undelivered worker is parked as a pending `resume_worker` for
     // the principal; a restart must still not wake it on its own.
     let durable_human_gate = prior_recovery.as_ref().filter(|recovery| {
@@ -1538,7 +1562,7 @@ pub async fn classify_interrupted_execution(
             ExecutionRecoveryAction::BlockMissingWorkspace,
             "the managed task worktree is missing".to_string(),
         )
-    } else if !cli_available {
+    } else if !cli_available && needs_worker {
         (
             ExecutionRecoveryAction::BlockAgentUnavailable,
             "the exact CLI worker session is no longer available; reassign explicitly".to_string(),
@@ -2069,18 +2093,54 @@ pub async fn wake_recovered_principal(db: &Database, exec_id: &str) -> Result<St
             tx.commit()?;
             return Ok("left to the delegating workflow step".into());
         }
-        if crate::db::agent_dispatch::has_active_for_discussion(
-            &tx,
-            &execution.parent_discussion_id,
-        )? {
+        // KT-2022 — a review that waits on the owner's card is not proposed
+        // again: whoever asked continues once the card is settled.
+        let cards = match crate::db::planning::get_task(&tx, &execution.task_id)? {
+            Some(task) => crate::db::orchestration::pending_decision_cards_for_task(
+                &tx,
+                &execution.parent_discussion_id,
+                &task.summary.reference,
+            )?,
+            None => Vec::new(),
+        };
+        if !cards.is_empty() {
+            let keys = cards.join(", ");
+            crate::db::orchestration::record_execution_event(
+                &tx,
+                &id,
+                crate::db::orchestration::REVIEW_WAKE_HELD_ACTION,
+                None,
+                None,
+                &backend_actor(),
+                serde_json::json!({ "cards": cards }),
+            )?;
             tx.commit()?;
-            return Ok("existing principal dispatch resumed".into());
+            return Ok(format!("review waits for decision card {keys}"));
         }
         let principal = crate::db::discussions::get_discussion(
             &tx,
             &execution.parent_discussion_id,
         )?
         .context("principal discussion vanished")?;
+        // KT-2022 — the notice goes to the principal that reviews: the pinned CLI
+        // session while it is in the room, else the room's agent.
+        let target = crate::db::orchestration::principal_notice_target(
+            &tx,
+            &id,
+            principal.agent.clone(),
+        )?;
+        let wakes_cli = target.kind == MessageTargetKind::Cli;
+        // A running room-agent turn stands for a native principal only: a CLI
+        // principal reads nothing of it and still needs its own notice.
+        if !wakes_cli
+            && crate::db::agent_dispatch::has_active_for_discussion(
+                &tx,
+                &execution.parent_discussion_id,
+            )?
+        {
+            tx.commit()?;
+            return Ok("existing principal dispatch resumed".into());
+        }
         let message_id = format!("orch-recovery-review:{}:{}", id, execution.attempt_no);
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
@@ -2105,7 +2165,19 @@ pub async fn wake_recovered_principal(db: &Database, exec_id: &str) -> Result<St
                     ),
                 },
             );
-            crate::db::discussions::insert_message(&tx, &execution.parent_discussion_id, &message)?;
+            crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+                &tx,
+                &execution.parent_discussion_id,
+                &message,
+                std::slice::from_ref(&target),
+                &[],
+                None,
+            )?;
+        }
+        // A joined CLI is woken by the turn aimed at its session, not by a dispatch.
+        if wakes_cli {
+            tx.commit()?;
+            return Ok("pinned CLI principal notified".into());
         }
         let dispatch_id = Uuid::new_v4().to_string();
         let dedupe = format!("orch-recovery-review:{}:{}", id, execution.attempt_no);

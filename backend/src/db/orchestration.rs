@@ -6838,6 +6838,75 @@ pub fn principal_notice_target(
     })
 }
 
+/// Keys of the pending decision cards of `discussion_id` whose `task_ref` is
+/// `task_ref`. Read in SQL: the card module sits in the layer above this one.
+pub fn pending_decision_cards_for_task(
+    conn: &Connection,
+    discussion_id: &str,
+    task_ref: &str,
+) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT question_key FROM discussion_questions \
+         WHERE discussion_id = ?1 AND state = 'pending' \
+           AND json_extract(payload_json, '$.task_ref') = ?2 \
+         ORDER BY created_at, id",
+    )?;
+    let keys = statement
+        .query_map(params![discussion_id, task_ref], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(keys)
+}
+
+/// Journal action of a review notice held back by a pending decision card.
+pub const REVIEW_WAKE_HELD_ACTION: &str = "review_wake_held";
+
+/// Executions of `discussion_id` whose review a card about `task_ref` held, once
+/// no pending card holds it. A hold stands until the execution's next
+/// transition, so a review that was never held is never listed.
+pub fn held_reviews_released_for_task(
+    conn: &Connection,
+    discussion_id: &str,
+    task_ref: &str,
+) -> Result<Vec<String>> {
+    if !pending_decision_cards_for_task(conn, discussion_id, task_ref)?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let held: Vec<(String, String)> = {
+        let mut statement = conn.prepare(
+            "SELECT e.id, e.task_id FROM task_executions e \
+             WHERE e.parent_discussion_id = ?1 AND e.status = ?2 \
+               AND EXISTS (SELECT 1 FROM task_execution_events h \
+                           WHERE h.task_execution_id = e.id AND h.action = ?3 \
+                             AND h.rowid > COALESCE((SELECT MAX(t.rowid) \
+                                                       FROM task_execution_events t \
+                                                      WHERE t.task_execution_id = e.id \
+                                                        AND t.to_status IS NOT NULL), 0)) \
+             ORDER BY e.created_at, e.id",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    discussion_id,
+                    TaskExecutionStatus::AwaitingReview.as_str(),
+                    REVIEW_WAKE_HELD_ACTION
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut released = Vec::new();
+    for (exec_id, task_id) in held {
+        // Same reference the wake compares the card's `task_ref` with.
+        if crate::db::planning::get_task(conn, &task_id)?
+            .is_some_and(|task| task.summary.reference == task_ref)
+        {
+            released.push(exec_id);
+        }
+    }
+    Ok(released)
+}
+
 /// Every terminal child event leaves a bounded, deterministic obligation in the
 /// principal room. It carries a typed target but zero native dispatch: joined
 /// principals wake via `wait_for_peer`; KT-335 owns immediate native wakeups.

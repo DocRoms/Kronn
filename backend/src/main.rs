@@ -771,25 +771,6 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         });
     }
 
-    // Reap abandoned MCP sessions (2026-06-08). `count_live_participants` is
-    // presence-sticky — any `status='active'` session suppresses Kronn's
-    // auto-response (no per-message staleness window, which had wrongly
-    // judged idle turn-based peers as dead → double-responder). To keep
-    // 'active' honest, retire sessions idle > 24h (agents that exited
-    // without `disc_leave`) at every boot. Migration 065 does the same once;
-    // this keeps it self-maintaining across restarts.
-    match state
-        .db
-        .with_conn(kronn::db::discussion_sessions::reap_abandoned_sessions)
-        .await
-    {
-        Ok(n) if n > 0 => {
-            tracing::info!("Reaped {n} abandoned discussion session(s) (idle > 24h, no disc_leave)")
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!("Abandoned-session reap failed: {}", e),
-    }
-
     // Auto-discover and import API keys from agent config files (~/.vibe/.env, ~/.codex/auth.json, etc.)
     // Skipped while the credential store is locked: they would go to config.toml in clear.
     if kronn::core::credential_store::refuse_credential_change().is_ok() {

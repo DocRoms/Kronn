@@ -438,3 +438,30 @@ fn workflow_authoring_fields_are_the_same_on_both_sides() {
         );
     }
 }
+
+/// KT-2022 — both audiences read, word for word, how a decision card is tied
+/// to the review it gates, in the manual that carries the review contract.
+#[test]
+fn the_card_that_gates_a_review_is_explained_the_same_on_both_sides() {
+    const SENTENCE: &str = "A decision card that gates a review is posted in the principal's room and carries `task_ref`, the task reference (for example `KT-123`): while that card is pending, a restart does not propose the review again.";
+
+    let native = tool_manual(Some("task_exec_prepare"), None);
+    assert!(
+        native["manual"]
+            .as_str()
+            .expect("the native task_exec_prepare manual")
+            .contains(SENTENCE),
+        "the native manual lacks: {SENTENCE}"
+    );
+
+    let script = include_str!("../../scripts/disc-introspection-mcp.py");
+    let bridge_manual = script
+        .split("\n    \"task_exec_prepare\": (")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    ),\n").next())
+        .expect("the bridge's task_exec_prepare manual");
+    assert!(
+        bridge_manual.contains(SENTENCE),
+        "the bridge's manual lacks: {SENTENCE}"
+    );
+}

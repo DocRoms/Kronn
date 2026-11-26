@@ -34141,3 +34141,953 @@ async fn warm_skip_a_cold_lane_refuses_a_later_gate_that_needs_a_build() {
     .expect("a front gate runs on a cold lane");
     assert!(replaced.changed);
 }
+
+// ── KT-2022 — the review wake after a restart ───────────────────────────────
+
+/// The id of the notice `wake_recovered_principal` posts for `exec_id`.
+async fn recovery_review_notice(db: &Database, exec_id: &str) -> String {
+    let execution = exec_of(db, exec_id).await;
+    format!("orch-recovery-review:{exec_id}:{}", execution.attempt_no)
+}
+
+/// The native dispatch a resumed review enqueued for `exec_id`, if any.
+async fn recovery_review_dispatch(
+    db: &Database,
+    exec_id: &str,
+) -> Option<crate::db::agent_dispatch::AgentDispatchJob> {
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        let job_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM agent_dispatch_jobs WHERE dedupe_key LIKE ?1",
+                [format!("orch-recovery-review:{id}:%")],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match job_id {
+            Some(job_id) => crate::db::agent_dispatch::get(conn, &job_id),
+            None => Ok(None),
+        }
+    })
+    .await
+    .unwrap()
+}
+
+async fn room_has_active_dispatch(db: &Database, discussion_id: &str) -> bool {
+    let id = discussion_id.to_string();
+    db.with_conn(move |conn| crate::db::agent_dispatch::has_active_for_discussion(conn, &id))
+        .await
+        .unwrap()
+}
+
+async fn pinned_principal_session(db: &Database, exec_id: &str) -> Option<i64> {
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        Ok(conn.query_row(
+            "SELECT principal_cli_session_id FROM task_executions WHERE id = ?1",
+            [&id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?)
+    })
+    .await
+    .unwrap()
+}
+
+async fn task_reference_of(db: &Database, exec_id: &str) -> String {
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+            .context("the execution of the fixture")?;
+        crate::db::planning::get_task(conn, &execution.task_id)?
+            .map(|task| task.summary.reference)
+            .context("the task of the fixture")
+    })
+    .await
+    .unwrap()
+}
+
+/// A pending decision card in `room`, recorded from a `kronn-question` fence
+/// the way a posted message records it.
+async fn pending_decision_card(db: &Database, room: &str, key: &str, task_ref: Option<&str>) {
+    let (room, key, task_ref) = (
+        room.to_string(),
+        key.to_string(),
+        task_ref.map(str::to_string),
+    );
+    db.with_conn(move |conn| {
+        let payload = serde_json::json!({
+            "version": 1,
+            "key": key,
+            "question": "Faut-il intégrer cette livraison ?",
+            "options": [{"id": "yes", "label": "Oui"}, {"id": "no", "label": "Non"}],
+            "task_ref": task_ref,
+        });
+        let message = crate::api::orchestration::orchestrator_message(
+            format!("kt2022-card-{key}"),
+            format!("```kronn-question\n{payload}\n```"),
+        );
+        crate::db::discussions::insert_message(conn, &room, &message)?;
+        let invalid = crate::db::discussion_questions::ingest_message_questions(
+            conn,
+            &room,
+            &message.id,
+            &message.content,
+        )?;
+        anyhow::ensure!(
+            invalid.is_empty(),
+            "the fixture card was refused: {invalid:?}"
+        );
+        let state: String = conn.query_row(
+            "SELECT state FROM discussion_questions \
+             WHERE discussion_id = ?1 AND question_key = ?2",
+            rusqlite::params![room, key],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(state == "pending", "the fixture card is `{state}`");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Every `review_wake_held` event of `exec_id`, as its `cards` list.
+async fn review_wake_holds(db: &Database, exec_id: &str) -> Vec<serde_json::Value> {
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        Ok(crate::db::orchestration::list_execution_events(conn, &id)?
+            .into_iter()
+            .filter(|event| event.action == "review_wake_held")
+            .map(|event| event.changes["cards"].clone())
+            .collect())
+    })
+    .await
+    .unwrap()
+}
+
+/// KT-2022 (DoD 1) — the incident: the principal that reviews is a joined CLI,
+/// and the restart started the room's native agent, which approved.
+#[tokio::test]
+async fn a_resumed_review_notifies_the_pinned_cli_principal_and_wakes_no_other_agent() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+    assert_eq!(pinned_principal_session(&db, &exec_id).await, Some(102));
+
+    let outcome = wake_recovered_principal(&db, &exec_id).await.unwrap();
+
+    assert_eq!(outcome, "pinned CLI principal notified");
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    let (room, content) = message_row(&db, &notice).await.expect("the review notice");
+    assert_eq!(room, parent);
+    assert!(
+        content.contains("Revue à reprendre après redémarrage"),
+        "{content}"
+    );
+    assert_eq!(
+        message_targets(&db, &notice).await,
+        vec![MessageTarget::cli(AgentType::ClaudeCode, 102)],
+        "the notice is aimed at the session that reviews"
+    );
+    assert!(
+        recovery_review_dispatch(&db, &exec_id).await.is_none(),
+        "no native agent is started to review in its place"
+    );
+    assert!(!room_has_active_dispatch(&db, &parent).await);
+    assert_eq!(
+        exec_of(&db, &exec_id).await.status,
+        TaskExecutionStatus::AwaitingReview
+    );
+}
+
+/// KT-2022 — with no CLI principal the review still goes to the room's agent.
+#[tokio::test]
+async fn a_resumed_review_starts_the_room_agent_when_no_cli_principal_is_pinned() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    assert_eq!(pinned_principal_session(&db, &exec_id).await, None);
+
+    let outcome = wake_recovered_principal(&db, &exec_id).await.unwrap();
+
+    assert_eq!(outcome, "principal review obligation re-dispatched");
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    let (room, _content) = message_row(&db, &notice).await.expect("the review notice");
+    assert_eq!(room, parent);
+    assert!(
+        message_targets(&db, &notice)
+            .await
+            .iter()
+            .all(|target| target.kind != MessageTargetKind::Cli),
+        "no CLI session is addressed"
+    );
+    let job = recovery_review_dispatch(&db, &exec_id)
+        .await
+        .expect("the room agent's review turn");
+    assert_eq!(job.discussion_id, parent);
+    assert_eq!(job.agent_override, Some(AgentType::ClaudeCode));
+    assert!(matches!(
+        job.status,
+        crate::db::agent_dispatch::DispatchStatus::Pending
+    ));
+}
+
+/// KT-2022 (owner decision 1) — a pinned CLI principal that left the room is
+/// not waited for: the notice falls back to the room's agent, as every other
+/// principal notice does.
+#[tokio::test]
+async fn a_resumed_review_starts_the_room_agent_when_the_pinned_principal_left() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+    assert_eq!(pinned_principal_session(&db, &exec_id).await, Some(102));
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE discussion_sessions SET status = 'left' WHERE id = 102",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let outcome = wake_recovered_principal(&db, &exec_id).await.unwrap();
+
+    assert_eq!(outcome, "principal review obligation re-dispatched");
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(
+        message_targets(&db, &notice)
+            .await
+            .iter()
+            .all(|target| target.kind != MessageTargetKind::Cli),
+        "a session that left is not addressed"
+    );
+    let job = recovery_review_dispatch(&db, &exec_id)
+        .await
+        .expect("the room agent's review turn");
+    assert_eq!(job.discussion_id, parent);
+    assert_eq!(job.agent_override, Some(AgentType::ClaudeCode));
+}
+
+/// KT-2022 — a turn the room's agent is running says nothing to a CLI
+/// principal: its notice is posted all the same, and no second turn is queued.
+#[tokio::test]
+async fn a_busy_room_agent_does_not_swallow_the_pinned_cli_principals_review_notice() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+    let room = parent.clone();
+    db.with_conn(move |conn| {
+        let turn = crate::api::orchestration::orchestrator_message(
+            "kt2022-other-turn".into(),
+            "Un autre sujet pour l'agent de la room.".into(),
+        );
+        crate::db::discussions::insert_message(conn, &room, &turn)?;
+        crate::db::agent_dispatch::enqueue_for_latest_user(
+            conn,
+            crate::db::agent_dispatch::NewLatestUserDispatch {
+                id: "kt2022-other-dispatch",
+                discussion_id: &room,
+                dedupe_key: "kt2022-other-dispatch",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(room_has_active_dispatch(&db, &parent).await);
+
+    let outcome = wake_recovered_principal(&db, &exec_id).await.unwrap();
+
+    assert_eq!(outcome, "pinned CLI principal notified");
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert_eq!(
+        message_targets(&db, &notice).await,
+        vec![MessageTarget::cli(AgentType::ClaudeCode, 102)]
+    );
+    assert!(recovery_review_dispatch(&db, &exec_id).await.is_none());
+}
+
+/// KT-2022 (DoD 2) — the review waits on the owner's card: a restart posts no
+/// review notice, starts no agent, and the journal says which card holds it.
+#[tokio::test]
+async fn a_review_waiting_on_a_pending_card_is_not_proposed_again() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    pending_decision_card(&db, &parent, "kt2022-gate", Some(&task_ref)).await;
+
+    let outcome = wake_recovered_principal(&db, &exec_id).await.unwrap();
+
+    assert_eq!(outcome, "review waits for decision card kt2022-gate");
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(
+        message_row(&db, &notice).await.is_none(),
+        "no review notice while the card is pending"
+    );
+    assert!(recovery_review_dispatch(&db, &exec_id).await.is_none());
+    assert!(!room_has_active_dispatch(&db, &parent).await);
+    assert_eq!(
+        review_wake_holds(&db, &exec_id).await,
+        vec![serde_json::json!(["kt2022-gate"])]
+    );
+    assert_eq!(
+        exec_of(&db, &exec_id).await.status,
+        TaskExecutionStatus::AwaitingReview,
+        "the review is held, not dropped"
+    );
+}
+
+/// KT-2022 — once the card is settled the next resume proposes the review.
+/// The states are written directly: the wake reads the stored state only.
+#[tokio::test]
+async fn an_answered_or_declined_card_no_longer_holds_the_review() {
+    for settled in ["answered", "declined"] {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let task_ref = task_reference_of(&db, &exec_id).await;
+        pending_decision_card(&db, &parent, "kt2022-gate", Some(&task_ref)).await;
+        let held = wake_recovered_principal(&db, &exec_id).await.unwrap();
+        assert_eq!(
+            held, "review waits for decision card kt2022-gate",
+            "{settled}"
+        );
+
+        let room = parent.clone();
+        let changed = db
+            .with_conn(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE discussion_questions SET state = ?2 \
+                     WHERE discussion_id = ?1 AND question_key = 'kt2022-gate'",
+                    rusqlite::params![room, settled],
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(changed, 1, "{settled}");
+
+        let outcome = wake_recovered_principal(&db, &exec_id).await.unwrap();
+
+        assert_eq!(
+            outcome, "principal review obligation re-dispatched",
+            "{settled}"
+        );
+        let notice = recovery_review_notice(&db, &exec_id).await;
+        assert!(message_row(&db, &notice).await.is_some(), "{settled}");
+        assert!(
+            recovery_review_dispatch(&db, &exec_id).await.is_some(),
+            "{settled}"
+        );
+        assert_eq!(review_wake_holds(&db, &exec_id).await.len(), 1, "{settled}");
+    }
+}
+
+/// KT-2022 (owner decision 2) — only a card whose `task_ref` is the task holds
+/// its review: a card about another task, or about none, holds nothing.
+#[tokio::test]
+async fn a_card_about_another_task_does_not_hold_the_review() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    let other = format!("{task_ref}0");
+    pending_decision_card(&db, &parent, "kt2022-other-task", Some(&other)).await;
+    pending_decision_card(&db, &parent, "kt2022-no-task", None).await;
+
+    let outcome = wake_recovered_principal(&db, &exec_id).await.unwrap();
+
+    assert_eq!(outcome, "principal review obligation re-dispatched");
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(message_row(&db, &notice).await.is_some());
+    assert!(recovery_review_dispatch(&db, &exec_id).await.is_some());
+    assert!(review_wake_holds(&db, &exec_id).await.is_empty());
+}
+
+// ── KT-2022 — a held review is proposed once its card is settled ────────────
+
+async fn decision_card_id(db: &Database, room: &str, key: &str) -> String {
+    let (room, key) = (room.to_string(), key.to_string());
+    db.with_conn(move |conn| {
+        Ok(conn.query_row(
+            "SELECT id FROM discussion_questions \
+             WHERE discussion_id = ?1 AND question_key = ?2",
+            rusqlite::params![room, key],
+            |row| row.get(0),
+        )?)
+    })
+    .await
+    .unwrap()
+}
+
+/// Answers the card `key` of `room` through the HTTP handler, as the owner does.
+async fn answer_card(
+    state: &AppState,
+    room: &str,
+    key: &str,
+) -> crate::db::discussion_questions::DiscussionQuestion {
+    let id = decision_card_id(&state.db, room, key).await;
+    let (status, axum::Json(response)) = crate::api::discussion_questions::answer(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((room.to_string(), id)),
+        axum::Json(
+            crate::db::discussion_questions::AnswerDiscussionQuestionRequest {
+                selected_option_ids: vec!["yes".into()],
+                item_answers: vec![],
+                text: None,
+                idempotency_key: format!("kt2022-answer-{key}"),
+            },
+        ),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{:?}", response.error);
+    let card = response.data.expect("the answered card");
+    assert_eq!(
+        card.state,
+        crate::db::discussion_questions::DiscussionQuestionState::Answered
+    );
+    card
+}
+
+/// Declines the card `key` of `room` through the HTTP handler.
+async fn decline_card(state: &AppState, room: &str, key: &str) {
+    let id = decision_card_id(&state.db, room, key).await;
+    let (status, axum::Json(response)) = crate::api::discussion_questions::decline(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((room.to_string(), id)),
+        axum::Json(
+            crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
+                idempotency_key: format!("kt2022-decline-{key}"),
+                reason: None,
+            },
+        ),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{:?}", response.error);
+    assert_eq!(
+        response.data.expect("the declined card").state,
+        crate::db::discussion_questions::DiscussionQuestionState::Declined
+    );
+}
+
+/// A pending decision card about `task_ref` posted in `room` by an agent: the
+/// CLI session `cli_session` when given, else the room's native agent.
+async fn agent_decision_card(
+    db: &Database,
+    room: &str,
+    key: &str,
+    task_ref: &str,
+    cli_session: Option<i64>,
+) {
+    let (room, key, task_ref) = (room.to_string(), key.to_string(), task_ref.to_string());
+    db.with_conn(move |conn| {
+        let payload = serde_json::json!({
+            "version": 1,
+            "key": key,
+            "question": "Faut-il intégrer cette livraison ?",
+            "options": [{"id": "yes", "label": "Oui"}, {"id": "no", "label": "Non"}],
+            "task_ref": task_ref,
+        });
+        let message = DiscussionMessage {
+            role: MessageRole::Agent,
+            agent_type: Some(AgentType::ClaudeCode),
+            author_pseudo: None,
+            kind: Default::default(),
+            ..crate::api::orchestration::orchestrator_message(
+                format!("kt2022-card-{key}"),
+                format!("```kronn-question\n{payload}\n```"),
+            )
+        };
+        // An agent message records its cards when it is inserted.
+        match cli_session {
+            Some(session) => {
+                crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
+                    conn,
+                    &room,
+                    &message,
+                    &[],
+                    &[],
+                    session,
+                )?;
+            }
+            None => {
+                crate::db::discussions::insert_message(conn, &room, &message)?;
+            }
+        }
+        let state: String = conn.query_row(
+            "SELECT state FROM discussion_questions \
+             WHERE discussion_id = ?1 AND question_key = ?2",
+            rusqlite::params![room, key],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(state == "pending", "the fixture card is `{state}`");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Agent turns queued or running in `discussion_id`.
+async fn room_active_dispatch_count(db: &Database, discussion_id: &str) -> i64 {
+    let id = discussion_id.to_string();
+    db.with_conn(move |conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM agent_dispatch_jobs \
+             WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')",
+            [&id],
+            |row| row.get(0),
+        )?)
+    })
+    .await
+    .unwrap()
+}
+
+async fn room_message_count(db: &Database, discussion_id: &str) -> i64 {
+    let id = discussion_id.to_string();
+    db.with_conn(move |conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1",
+            [&id],
+            |row| row.get(0),
+        )?)
+    })
+    .await
+    .unwrap()
+}
+
+async fn session_status(db: &Database, session_pk: i64) -> String {
+    db.with_conn(move |conn| {
+        Ok(conn.query_row(
+            "SELECT status FROM discussion_sessions WHERE id = ?1",
+            [session_pk],
+            |row| row.get(0),
+        )?)
+    })
+    .await
+    .unwrap()
+}
+
+/// KT-2022 — answering the card that held a review posts the review notice at
+/// once, aimed at the pinned CLI principal, and starts no agent.
+#[tokio::test]
+async fn answering_the_card_that_held_a_review_notifies_the_reviewing_principal() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    pending_decision_card(&db, &parent, "kt2022-gate", Some(&task_ref)).await;
+    let held = wake_recovered_principal(&db, &exec_id).await.unwrap();
+    assert_eq!(held, "review waits for decision card kt2022-gate");
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(message_row(&db, &notice).await.is_none());
+
+    answer_card(&state, &parent, "kt2022-gate").await;
+
+    let (room, content) = message_row(&db, &notice)
+        .await
+        .expect("the review notice once the card is answered");
+    assert_eq!(room, parent);
+    assert!(
+        content.contains("Revue à reprendre après redémarrage"),
+        "{content}"
+    );
+    assert_eq!(
+        message_targets(&db, &notice).await,
+        vec![MessageTarget::cli(AgentType::ClaudeCode, 102)],
+        "the notice is aimed at the session that reviews"
+    );
+    assert_eq!(
+        room_active_dispatch_count(&db, &parent).await,
+        0,
+        "no agent is started for a CLI principal"
+    );
+    assert_eq!(
+        review_wake_holds(&db, &exec_id).await.len(),
+        1,
+        "the release journals no second hold"
+    );
+    assert_eq!(
+        exec_of(&db, &exec_id).await.status,
+        TaskExecutionStatus::AwaitingReview
+    );
+}
+
+/// KT-2022 — declining the card that held a review releases it too: with no
+/// CLI principal the room's agent gets the notice and its review turn.
+#[tokio::test]
+async fn declining_the_card_that_held_a_review_starts_the_room_agents_review() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    pending_decision_card(&db, &parent, "kt2022-gate", Some(&task_ref)).await;
+    let held = wake_recovered_principal(&db, &exec_id).await.unwrap();
+    assert_eq!(held, "review waits for decision card kt2022-gate");
+    assert_eq!(room_active_dispatch_count(&db, &parent).await, 0);
+
+    decline_card(&state, &parent, "kt2022-gate").await;
+
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    let (room, _content) = message_row(&db, &notice)
+        .await
+        .expect("the review notice once the card is declined");
+    assert_eq!(room, parent);
+    assert!(
+        message_targets(&db, &notice)
+            .await
+            .iter()
+            .all(|target| target.kind != MessageTargetKind::Cli),
+        "no CLI session is addressed"
+    );
+    let job = recovery_review_dispatch(&db, &exec_id)
+        .await
+        .expect("the room agent's review turn");
+    assert_eq!(job.discussion_id, parent);
+    assert_eq!(job.agent_override, Some(AgentType::ClaudeCode));
+    assert_eq!(room_active_dispatch_count(&db, &parent).await, 1);
+}
+
+/// KT-2022 — a review held by two cards stays held while one is pending, and
+/// is proposed when the last one is answered.
+#[tokio::test]
+async fn a_review_held_by_two_cards_is_released_by_the_last_one() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    pending_decision_card(&db, &parent, "kt2022-gate-a", Some(&task_ref)).await;
+    pending_decision_card(&db, &parent, "kt2022-gate-b", Some(&task_ref)).await;
+    let held = wake_recovered_principal(&db, &exec_id).await.unwrap();
+    assert!(held.starts_with("review waits for decision card"), "{held}");
+    let notice = recovery_review_notice(&db, &exec_id).await;
+
+    answer_card(&state, &parent, "kt2022-gate-a").await;
+
+    assert!(
+        message_row(&db, &notice).await.is_none(),
+        "the second card still holds the review"
+    );
+    assert!(recovery_review_dispatch(&db, &exec_id).await.is_none());
+    assert_eq!(
+        review_wake_holds(&db, &exec_id).await.len(),
+        1,
+        "a card answered while another holds journals nothing"
+    );
+
+    answer_card(&state, &parent, "kt2022-gate-b").await;
+
+    assert!(
+        message_row(&db, &notice).await.is_some(),
+        "the last card releases the review"
+    );
+    assert!(recovery_review_dispatch(&db, &exec_id).await.is_some());
+}
+
+/// KT-2022 — a CLI principal that asked the card itself gets its answer and one
+/// review notice, both aimed at its session, and no agent is started.
+#[tokio::test]
+async fn a_cli_principal_that_asked_the_card_gets_one_notice_and_no_agent_turn() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    agent_decision_card(&db, &parent, "kt2022-gate", &task_ref, Some(102)).await;
+    let held = wake_recovered_principal(&db, &exec_id).await.unwrap();
+    assert_eq!(held, "review waits for decision card kt2022-gate");
+
+    let card = answer_card(&state, &parent, "kt2022-gate").await;
+
+    let principal = vec![MessageTarget::cli(AgentType::ClaudeCode, 102)];
+    let resolution = card.answer.expect("the recorded answer").message_id;
+    assert_eq!(
+        message_targets(&db, &resolution).await,
+        principal,
+        "the answer goes to the session that asked"
+    );
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert_eq!(message_targets(&db, &notice).await, principal);
+    assert_eq!(
+        room_active_dispatch_count(&db, &parent).await,
+        0,
+        "neither the answer nor the release starts an agent"
+    );
+}
+
+/// KT-2022 — a room agent that asked the card itself is woken by its answer
+/// only: the release queues no second turn and posts no notice over it.
+#[tokio::test]
+async fn a_room_agent_that_asked_the_card_is_woken_once_by_its_answer() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    agent_decision_card(&db, &parent, "kt2022-gate", &task_ref, None).await;
+    let held = wake_recovered_principal(&db, &exec_id).await.unwrap();
+    assert_eq!(held, "review waits for decision card kt2022-gate");
+    assert_eq!(room_active_dispatch_count(&db, &parent).await, 0);
+
+    answer_card(&state, &parent, "kt2022-gate").await;
+
+    assert_eq!(
+        room_active_dispatch_count(&db, &parent).await,
+        1,
+        "the answer's own turn is the only one"
+    );
+    assert!(recovery_review_dispatch(&db, &exec_id).await.is_none());
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(
+        message_row(&db, &notice).await.is_none(),
+        "the agent reads its answer, not a second notice"
+    );
+}
+
+/// KT-2022 — a card answered for a review no restart ever held posts no
+/// "review to resume after restart" notice and starts nobody.
+#[tokio::test]
+async fn answering_a_card_of_a_review_that_was_never_held_proposes_nothing() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    pending_decision_card(&db, &parent, "kt2022-gate", Some(&task_ref)).await;
+    assert!(review_wake_holds(&db, &exec_id).await.is_empty());
+
+    answer_card(&state, &parent, "kt2022-gate").await;
+
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(message_row(&db, &notice).await.is_none());
+    assert_eq!(room_active_dispatch_count(&db, &parent).await, 0);
+}
+
+/// KT-2022 — a hold is spent by the execution's next transition: a card
+/// answered after it proposes no restart review.
+#[tokio::test]
+async fn a_hold_from_before_the_last_transition_releases_nothing() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    pending_decision_card(&db, &parent, "kt2022-gate", Some(&task_ref)).await;
+    let held = wake_recovered_principal(&db, &exec_id).await.unwrap();
+    assert_eq!(held, "review waits for decision card kt2022-gate");
+    let id = exec_id.clone();
+    db.with_conn(move |conn| {
+        for status in [
+            TaskExecutionStatus::Interrupted,
+            TaskExecutionStatus::AwaitingReview,
+        ] {
+            let moved = crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                status,
+                &backend_actor(),
+                serde_json::json!({ "test": "a later stay in review" }),
+            )?;
+            anyhow::ensure!(moved, "the fixture transition to {status:?} was refused");
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    answer_card(&state, &parent, "kt2022-gate").await;
+
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(message_row(&db, &notice).await.is_none());
+    assert_eq!(room_active_dispatch_count(&db, &parent).await, 0);
+}
+
+/// KT-2022 — the boot retires a pinned CLI principal idle for two days before
+/// the review wake reads it: the room's agent gets the review.
+#[tokio::test]
+async fn a_boot_retires_a_long_dead_cli_principal_before_proposing_the_review() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+    assert_eq!(pinned_principal_session(&db, &exec_id).await, Some(102));
+    db.with_conn(|conn| {
+        let stale = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?1, joined_at = ?1 WHERE id = 102",
+            [stale],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(session_status(&db, 102).await, "active");
+
+    let report =
+        reconcile_at_boot_with_agents(&recovery_test_state(&db), &[AgentType::ClaudeCode]).await;
+
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.resumed_or_parked, 1);
+    assert_eq!(session_status(&db, 102).await, "left");
+    assert_eq!(
+        exec_of(&db, &exec_id).await.status,
+        TaskExecutionStatus::AwaitingReview
+    );
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(
+        message_targets(&db, &notice)
+            .await
+            .iter()
+            .all(|target| target.kind != MessageTargetKind::Cli),
+        "a session the boot retired is not addressed"
+    );
+    let job = recovery_review_dispatch(&db, &exec_id)
+        .await
+        .expect("the room agent's review turn");
+    assert_eq!(job.discussion_id, parent);
+    assert_eq!(job.agent_override, Some(AgentType::ClaudeCode));
+}
+
+/// KT-2022 — a delivered execution no longer needs its worker: when the joined
+/// CLI worker has been silent for two days, the boot retires that session and
+/// still proposes the review instead of asking for a reassignment.
+#[tokio::test]
+async fn a_boot_proposes_the_review_of_a_delivery_whose_cli_worker_is_long_gone() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let worker = exec_of(&db, &exec_id)
+        .await
+        .worker_cli_session_id
+        .expect("the fixture's worker is a joined CLI session");
+    db.with_conn(move |conn| {
+        let stale = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?1, joined_at = ?1 WHERE id = ?2",
+            rusqlite::params![stale, worker],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let report =
+        reconcile_at_boot_with_agents(&recovery_test_state(&db), &[AgentType::ClaudeCode]).await;
+
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(session_status(&db, worker).await, "left");
+    assert_eq!(
+        exec_of(&db, &exec_id).await.status,
+        TaskExecutionStatus::AwaitingReview,
+        "a delivery is reviewed, not parked for a worker it no longer needs"
+    );
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(
+        message_row(&db, &notice).await.is_some(),
+        "the review is proposed at this boot"
+    );
+    let job = recovery_review_dispatch(&db, &exec_id)
+        .await
+        .expect("the room agent's review turn");
+    assert_eq!(job.discussion_id, parent);
+}
+
+/// KT-2022 — the incident through a real boot: a pending card and a live pinned
+/// CLI principal hold the review, with no notice and no agent started.
+#[tokio::test]
+async fn a_boot_holds_the_review_of_a_cli_principal_waiting_on_its_card() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    agent_decision_card(&db, &parent, "kt2022-gate", &task_ref, Some(102)).await;
+
+    let report =
+        reconcile_at_boot_with_agents(&recovery_test_state(&db), &[AgentType::ClaudeCode]).await;
+
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.resumed_or_parked, 1);
+    assert_eq!(session_status(&db, 102).await, "active");
+    assert_eq!(
+        exec_of(&db, &exec_id).await.status,
+        TaskExecutionStatus::AwaitingReview,
+        "the review is held, not dropped"
+    );
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(
+        message_row(&db, &notice).await.is_none(),
+        "no review notice while the card is pending"
+    );
+    assert_eq!(room_active_dispatch_count(&db, &parent).await, 0);
+    assert_eq!(
+        review_wake_holds(&db, &exec_id).await,
+        vec![serde_json::json!(["kt2022-gate"])]
+    );
+}
+
+/// KT-2022 — a review a boot held is proposed by the answer to its card: the
+/// hold a restart journals is the one the answer path reads.
+#[tokio::test]
+async fn a_review_held_by_a_boot_is_released_by_the_answer_to_its_card() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    pending_decision_card(&db, &parent, "kt2022-gate", Some(&task_ref)).await;
+    let report = reconcile_at_boot_with_agents(&state, &[AgentType::ClaudeCode]).await;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(message_row(&db, &notice).await.is_none());
+
+    answer_card(&state, &parent, "kt2022-gate").await;
+
+    assert_eq!(
+        message_targets(&db, &notice).await,
+        vec![MessageTarget::cli(AgentType::ClaudeCode, 102)]
+    );
+    assert_eq!(room_active_dispatch_count(&db, &parent).await, 0);
+}
+
+/// KT-2022 — two restarts with the same pinned CLI principal post its review
+/// notice once.
+#[tokio::test]
+async fn a_review_notice_to_a_pinned_cli_principal_is_posted_once() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    pin_cli_principal(&db, &exec_id, "ClaudeCode", "sess-b").await;
+
+    let first = wake_recovered_principal(&db, &exec_id).await.unwrap();
+    let posted = room_message_count(&db, &parent).await;
+    let second = wake_recovered_principal(&db, &exec_id).await.unwrap();
+
+    assert_eq!(first, "pinned CLI principal notified");
+    assert_eq!(second, first);
+    assert_eq!(
+        room_message_count(&db, &parent).await,
+        posted,
+        "the second wake posts nothing"
+    );
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert_eq!(
+        message_targets(&db, &notice).await,
+        vec![MessageTarget::cli(AgentType::ClaudeCode, 102)]
+    );
+    assert_eq!(room_active_dispatch_count(&db, &parent).await, 0);
+}
