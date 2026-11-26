@@ -73,11 +73,17 @@ pub fn render_key(
     values: &HashMap<String, String>,
 ) -> Result<Option<String>, String> {
     let mut ctx = crate::workflows::template::TemplateContext::new();
-    for variable in variables.iter().filter(|variable| is_user_input(variable)) {
-        if let Some(value) = values.get(&variable.name) {
-            ctx.set(variable.name.clone(), value.clone());
-        }
-    }
+    ctx.set_launch_variables(
+        variables,
+        variables
+            .iter()
+            .filter(|variable| is_user_input(variable))
+            .filter_map(|variable| {
+                values
+                    .get(&variable.name)
+                    .map(|value| (variable.name.clone(), value.clone()))
+            }),
+    );
     let rendered = ctx
         .render_strict(template)
         .map_err(|error| format!("`concurrency_key` could not be rendered: {error}"))?;
@@ -350,6 +356,26 @@ pub mod tests {
         let no_limit = validate_key(Some("{{ticketKey}}"), None, &vars).unwrap_err();
         assert!(no_limit.contains("needs `concurrency_limit`"), "{no_limit}");
         assert!(validate_key(Some("{{ticketKey"), Some(1), &vars).is_err());
+    }
+
+    #[test]
+    fn a_blank_optional_input_takes_the_key_fallback() {
+        let mut optional = variable("depot", None);
+        optional.required = false;
+        let vars = vec![optional];
+        let template = "fix-{{depot ?? \"front\"}}";
+        for blank in ["", "  "] {
+            let values = HashMap::from([("depot".to_string(), blank.to_string())]);
+            assert_eq!(
+                render_key(template, &vars, &values).unwrap().as_deref(),
+                Some("fix-front")
+            );
+        }
+        let values = HashMap::from([("depot".to_string(), "api".to_string())]);
+        assert_eq!(
+            render_key(template, &vars, &values).unwrap().as_deref(),
+            Some("fix-api")
+        );
     }
 
     #[test]

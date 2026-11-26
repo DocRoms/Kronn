@@ -2178,9 +2178,7 @@ async fn execute_run_body(
             .ok_or_else(|| {
                 anyhow::anyhow!("Workflow execution variable snapshot unavailable or expired")
             })?;
-        for (name, value) in values {
-            ctx.set(name, value);
-        }
+        ctx.set_launch_variables(&workflow.variables, values);
     }
     // After trigger fields and variables, so neither can stand in for the run.
     ctx.set_builtin("run.id", run.id.clone());

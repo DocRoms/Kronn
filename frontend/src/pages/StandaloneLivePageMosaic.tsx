@@ -9,6 +9,7 @@ import {
   type LivePageEmbedPlacement,
   runtimeData,
 } from '../lib/live-page-sandbox';
+import { extractActionSkin } from '../lib/live-page-action-skin';
 import type { LivePageMosaicLayout } from '../lib/live-page-navigation';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
 import {
@@ -69,6 +70,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
     () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme(), hostThemeTokens()) : '',
     [bridgeChannel, detail],
   );
+  const actionSkin = useMemo(() => extractActionSkin(detail?.revision.html ?? ''), [detail]);
   const publishToFrame = useCallback(() => {
     if (!detail) return;
     const target = iframeRef.current?.contentWindow ?? null;
@@ -151,6 +153,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
         active={pageActiveAction}
         action={pageSelectedAction}
         offer={pageSelectedOffer}
+        skin={actionSkin}
         onClose={closePageAction}
         onChanged={handlePageActionChanged}
         onOpenDiscussion={openStandaloneDiscussion}

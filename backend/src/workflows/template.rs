@@ -8,7 +8,8 @@
 //! Liquid filters remain unsupported. Preview rendering keeps unresolved placeholders visible to the
 //! author; execution rendering is strict so a typo can never be sent to an
 //! agent or an external command/API. `{{path ?? "text"}}` is the one explicit
-//! way to accept an absent (or JSON null) path, e.g. a step skipped by a Goto.
+//! way to accept an absent (or JSON null) path, e.g. a step skipped by a Goto,
+//! or a declared optional launch variable left blank.
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration, SecondsFormat, TimeZone, Timelike, Utc};
@@ -31,9 +32,12 @@ pub struct TemplateContext {
     previous_step_name: Option<String>,
     /// Zone of `{{time.now}}` without `tz:`: Kronn's global one (KT-1103).
     default_timezone: Tz,
+    /// Optional launch variables left blank: known names that render empty,
+    /// but count as absent for `{{name ?? "text"}}`.
+    blank_optional: std::collections::HashSet<String>,
 }
 
-crate::debug_without_secrets!(TemplateContext { builtins, time_anchor, step_kinds, previous_step_name, default_timezone; masked: values });
+crate::debug_without_secrets!(TemplateContext { builtins, time_anchor, step_kinds, previous_step_name, default_timezone, blank_optional; masked: values });
 
 impl Default for TemplateContext {
     fn default() -> Self {
@@ -54,6 +58,7 @@ impl TemplateContext {
             step_kinds: HashMap::new(),
             previous_step_name: None,
             default_timezone: crate::core::timezone::current(),
+            blank_optional: std::collections::HashSet::new(),
         }
     }
 
@@ -78,7 +83,36 @@ impl TemplateContext {
         if is_reserved_name(&key) {
             return;
         }
+        self.blank_optional.remove(&key);
         self.values.insert(key, value.into());
+    }
+
+    /// Set a run's launch variables from its snapshot. An optional one left
+    /// blank — omitted, or submitted empty by a form or action card — stays a
+    /// known name rendering `""` (#213), yet `{{name ?? "text"}}` falls back
+    /// for it as for an absent path. A required one is never blank here: the
+    /// preflight refused it.
+    pub fn set_launch_variables(
+        &mut self,
+        declarations: &[crate::models::PromptVariable],
+        values: impl IntoIterator<Item = (String, String)>,
+    ) {
+        for (name, value) in values {
+            let blank_optional = value.trim().is_empty()
+                && declarations
+                    .iter()
+                    .any(|declaration| declaration.name == name && !declaration.required);
+            self.set(name.clone(), value);
+            if blank_optional && self.values.contains_key(&name) {
+                self.blank_optional.insert(name);
+            }
+        }
+    }
+
+    /// Whether `path` counts as absent for a `??` fallback: JSON null, or an
+    /// optional launch variable left blank.
+    fn falls_back(&self, path: &str) -> bool {
+        self.blank_optional.contains(path) || self.is_json_null(path)
     }
 
     /// Set a value Kronn produces itself (`run.id`, `run.artifacts_dir`).
@@ -321,6 +355,9 @@ impl TemplateContext {
     /// value is returned as `Value::String` (so scalars stay scalars).
     pub fn resolve_value(&self, key: &str) -> Option<serde_json::Value> {
         let (path, fallback) = split_fallback(key).ok()?;
+        if let Some(literal) = fallback.filter(|_| self.blank_optional.contains(path)) {
+            return Some(serde_json::Value::String(literal.to_string()));
+        }
         // Typed resolution FIRST so a `.data` / `.data_json` (whole or nested)
         // yields the PARSED value, not the flat unwrapped string. Non-data keys
         // (launch vars, `current_task.<field>`, …) fall through to the flat
@@ -420,7 +457,7 @@ impl TemplateContext {
                     }
                 };
                 let (path, quote) = split_shell_filter(path);
-                let value = if fallback.is_some() && self.is_json_null(path) {
+                let value = if fallback.is_some() && self.falls_back(path) {
                     None
                 } else {
                     self.lookup(path, strict)?
@@ -714,7 +751,8 @@ pub fn shell_quote(value: &str) -> String {
 
 /// Split `path ?? "text"` (or `'text'`) into the path and its fallback. The
 /// literal is taken verbatim, without escapes; it applies when the path is
-/// absent or JSON null, never to hide a syntax error.
+/// absent, JSON null or a blank optional launch variable, never to hide a
+/// syntax error.
 fn split_fallback(key: &str) -> Result<(&str, Option<&str>)> {
     let Some((path, literal)) = key.split_once("??") else {
         return Ok((key, None));
@@ -3718,6 +3756,115 @@ mod tests {
         );
         // Only absence or JSON null falls back: a present empty value stays.
         assert_eq!(ctx.render_strict(r#"{{ticket ?? "x"}}"#).unwrap(), "");
+    }
+
+    fn launch_input(name: &str, required: bool) -> crate::models::PromptVariable {
+        crate::models::PromptVariable {
+            name: name.into(),
+            label: name.into(),
+            placeholder: String::new(),
+            description: None,
+            required,
+            pattern: None,
+            source: Some(crate::models::PromptVariableSource::UserInput),
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }
+    }
+
+    /// A Page action card submitted `depot = ""` for an optional variable it
+    /// did not bind; the step's `{{depot ?? "front_euronews"}}` must fall back
+    /// exactly as when the key is omitted (both reach the snapshot as `""`).
+    #[test]
+    fn a_blank_optional_launch_variable_falls_back_like_an_absent_one() {
+        let declarations = vec![
+            launch_input("pr_number", true),
+            launch_input("depot", false),
+        ];
+        let template = r#"repos/acme/{{depot ?? "front_euronews"}}/pulls/{{pr_number}}"#;
+        for supplied in [
+            HashMap::from([("pr_number".to_string(), "2088".to_string())]),
+            HashMap::from([
+                ("pr_number".to_string(), "2088".to_string()),
+                ("depot".to_string(), String::new()),
+            ]),
+            HashMap::from([
+                ("pr_number".to_string(), "2088".to_string()),
+                ("depot".to_string(), "  ".to_string()),
+            ]),
+        ] {
+            let resolved = crate::core::execution_variables::resolve(
+                &declarations,
+                &supplied,
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                "manual",
+            )
+            .unwrap();
+            let resolved_depot = resolved.values.get("depot").cloned();
+            let mut ctx = TemplateContext::new();
+            ctx.set_launch_variables(&declarations, resolved.values);
+            assert_eq!(
+                ctx.render_strict(template).unwrap(),
+                "repos/acme/front_euronews/pulls/2088",
+                "{supplied:?}"
+            );
+            assert_eq!(
+                ctx.resolve_value(r#"depot ?? "front_euronews""#),
+                Some(serde_json::Value::String("front_euronews".into()))
+            );
+            // Still a known name (#213): without a fallback it renders verbatim.
+            let blank = resolved_depot.unwrap_or_default();
+            assert_eq!(
+                ctx.render_strict("[{{depot}}]").unwrap(),
+                format!("[{blank}]")
+            );
+        }
+
+        // A value the human typed always wins over the fallback.
+        let mut ctx = TemplateContext::new();
+        ctx.set_launch_variables(
+            &declarations,
+            [
+                ("pr_number".to_string(), "2088".to_string()),
+                ("depot".to_string(), "front_api".to_string()),
+            ],
+        );
+        assert_eq!(
+            ctx.render_strict(template).unwrap(),
+            "repos/acme/front_api/pulls/2088"
+        );
+
+        // Only optional launch variables: a plain empty value still stays.
+        let mut ctx = TemplateContext::new();
+        ctx.set_launch_variables(&declarations, [("depot".to_string(), String::new())]);
+        ctx.set("depot", "");
+        assert_eq!(ctx.render_strict(r#"{{depot ?? "x"}}"#).unwrap(), "");
+    }
+
+    /// Only a declared, optional launch variable falls back: a required one, a
+    /// name the workflow never declared, or a reserved name keeps its value.
+    #[test]
+    fn a_blank_launch_value_falls_back_only_for_a_declared_optional_variable() {
+        let declarations = vec![
+            launch_input("pr_number", true),
+            launch_input("run.id", false),
+        ];
+        let mut ctx = TemplateContext::new();
+        ctx.set_builtin("run.id", "run-42");
+        ctx.set_launch_variables(
+            &declarations,
+            [
+                ("pr_number".to_string(), String::new()),
+                ("extra".to_string(), "  ".to_string()),
+                ("run.id".to_string(), String::new()),
+            ],
+        );
+        assert_eq!(ctx.render_strict(r#"{{pr_number ?? "x"}}"#).unwrap(), "");
+        assert_eq!(ctx.render_strict(r#"{{extra ?? "x"}}"#).unwrap(), "  ");
+        assert_eq!(ctx.render_strict(r#"{{run.id ?? "x"}}"#).unwrap(), "run-42");
     }
 
     #[test]

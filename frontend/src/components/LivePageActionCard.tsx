@@ -1,6 +1,7 @@
-import { useMemo } from 'react';
+import { useMemo, type CSSProperties } from 'react';
 import { pages as pagesApi } from '../lib/api';
 import type { LivePageAction } from '../types/generated';
+import './LivePageActionSkin.css';
 import { KronnActionCard, type KronnActionOperations } from './DiscussionActionCard';
 
 export interface LivePageActionCardProps {
@@ -12,6 +13,8 @@ export interface LivePageActionCardProps {
   bindingLabels?: Record<string, string>;
   /** Starting values drawn from the Page's data for the clicked row. */
   prefill?: Record<string, string>;
+  /** The Page's validated skin (`--kac-*` custom properties); see lib/live-page-action-skin. */
+  skin?: Record<string, string> | null;
   onChanged: (action: LivePageAction) => void;
   onOpenDiscussion: (discussionId: string) => void;
 }
@@ -22,6 +25,7 @@ export function LivePageActionCard({
   bindings,
   bindingLabels,
   prefill,
+  skin,
   onChanged,
   onOpenDiscussion,
 }: LivePageActionCardProps) {
@@ -38,7 +42,9 @@ export function LivePageActionCard({
     launch: (actionId, request) => pagesApi.launchAction(actionId, request),
     ...(offer ? { relaunch: () => Promise.resolve(offer) } : {}),
   }), [offer]);
+  const skinned = skin !== undefined && skin !== null && Object.keys(skin).length > 0;
   return (
+    <div className="live-page-action-skin" data-skinned={skinned ? 'true' : undefined} style={skinned ? (skin as CSSProperties) : undefined}>
     <KronnActionCard
       action={action}
       operations={operations}
@@ -50,5 +56,6 @@ export function LivePageActionCard({
       initiallyExpanded
       testIdPrefix="live-page-action"
     />
+    </div>
   );
 }

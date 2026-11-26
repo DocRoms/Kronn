@@ -38,7 +38,7 @@ normalizing arbitrary author schemas. Making an optional string required and
 nullable would allow a null that the original schema rejects during local
 validation. The validator checks present properties recursively and compares
 their actual type to the authored string type.
-[src: file: backend/src/workflows/template.rs:1407-1510#validate_value]
+[src: file: backend/src/workflows/template.rs:1444-1547#validate_value]
 
 Ollama still receives the same envelope through its native `format` field,
 with a non-streaming request. No change to its decoding schema is required.
@@ -55,7 +55,7 @@ for full provider-enforced validation. For example, it does not enforce
 `additionalProperties` or resolve `$ref`.
 [src: file: backend/src/workflows/steps.rs:587-610#validate_envelope_against_schema]
 [src: file: backend/src/workflows/steps.rs:812-830#on_invalid]
-[src: file: backend/src/workflows/template.rs:1355-1375#validate_envelope_against_schema]
+[src: file: backend/src/workflows/template.rs:1393-1413#validate_envelope_against_schema]
 
 Body regressions cover explicit `strict: false`, preservation of nested optional
 properties, array items and dictionary schemas, both streaming settings, and

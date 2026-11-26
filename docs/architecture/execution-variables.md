@@ -57,6 +57,16 @@ renderer remains strict. Existing encrypted snapshots are immutable and are
 not rewritten; a new launch obtains the corrected snapshot. Resuming an
 already affected run retains its original snapshot.
 
+A blank optional input stays a known template name rendering `""`, but a
+workflow step's `{{name ?? "text"}}` falls back for it exactly as for an absent
+path. This holds whether the key was omitted or submitted empty, so an action
+card in a discussion or a Live Page, which posts `""` for an optional field
+the human left empty or no binding filled, launches like a manual trigger
+without the key. A present empty value from any other source (a step output,
+a trigger field) still does not fall back.
+[src: file: backend/src/workflows/template.rs:91-112#set_launch_variables]
+[src: file: backend/src/workflows/runner.rs:1944]
+
 [src: file: backend/src/core/execution_variables.rs:54-188#resolve]
 [src: file: backend/src/api/execution_variables.rs:23-101#preview]
 [src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:75-136#revealTimers]

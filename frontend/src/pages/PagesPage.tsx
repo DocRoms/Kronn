@@ -28,6 +28,7 @@ import {
   requestRenderedPageHtml,
   runtimeData,
 } from '../lib/live-page-sandbox';
+import { extractActionSkin } from '../lib/live-page-action-skin';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
 import { ExportNotCarriedDialog } from '../components/ExportNotCarriedDialog';
@@ -900,6 +901,7 @@ export function PagesPage({
   }, []);
 
   const revisionHtml = detail?.revision.html ?? '';
+  const actionSkin = useMemo(() => extractActionSkin(revisionHtml), [revisionHtml]);
   const latestPublication = recentPublications[0] ?? null;
   // A refresh that changes nothing is not journaled: the Page's own date still moves.
   const lastRefreshAt = detail?.last_published_at ?? latestPublication?.published_at ?? null;
@@ -1603,6 +1605,7 @@ export function PagesPage({
                   active={pageActiveAction}
                   action={pageSelectedAction}
                   offer={pageSelectedOffer}
+                  skin={actionSkin}
                   onClose={closePageAction}
                   onChanged={handlePageActionChanged}
                   onOpenDiscussion={discussionId => onNavigateDiscussion?.(discussionId)}

@@ -8,8 +8,9 @@ export type ThemeTokens = Map<string, string>;
 export type Source = { file: string; text: string };
 export type Finding = { file: string; line: number; detail: string };
 
-/** Themes whose surfaces are dark. */
-export const DARK_THEMES: ReadonlySet<string> = new Set(['dark', 'arcade', 'gotham', 'matrix']);
+import { DARK_THEMES } from './darkThemes.ts';
+
+export { DARK_THEMES };
 
 /** Opaque surface ramp the text roles sit on. */
 export const SURFACE_TOKENS = [
