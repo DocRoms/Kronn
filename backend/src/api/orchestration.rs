@@ -1731,7 +1731,14 @@ pub fn handoff_notice_in(
         crate::api::worker_time_limit::handoff_note(tx, exec_id, lang == RoomLang::Fr)
     });
     let Some(limit_note) = limit_note else {
-        return handoff_notice_base_in(lang, has_delivered, generation, tx, execution_id);
+        let base = handoff_notice_base_in(lang, has_delivered, generation, tx, execution_id);
+        // KT-2037 — the agent that runs now may have another limit than the brief states.
+        return match tx.zip(execution_id).and_then(|(tx, exec_id)| {
+            crate::api::worker_time_limit::run_budget_line(tx, exec_id, lang == RoomLang::Fr)
+        }) {
+            Some(budget) => format!("{base}\n\n{budget}"),
+            None => base,
+        };
     };
     if has_delivered {
         let base = handoff_notice_base_in(lang, has_delivered, generation, tx, execution_id);
@@ -11586,6 +11593,23 @@ pub fn build_brief(
             crate::core::project_toolchains::detect_toolchains(std::path::Path::new(worktree_path));
         content = insert_toolchain_section_in(content, toolchain, Some(&profile), lang);
     }
+    // KT-2037 — the run's budget, from the saved setting: this path holds no
+    // `AppState`. An execution without a typed worker is told nothing.
+    if let Some(agent) = prepared
+        .execution
+        .worker_agent_type
+        .as_deref()
+        .and_then(|agent| crate::db::orchestration::agent_type_from_db(agent).ok())
+    {
+        let (hosted, local) = crate::core::config::saved_agent_global_timeouts();
+        let section = crate::api::worker_time_limit::brief_section(
+            crate::api::worker_time_limit::global_limit(&agent, hosted, local),
+            agent == AgentType::Ollama,
+            can_run_shell,
+            lang == RoomLang::Fr,
+        );
+        content = insert_before_tests(content, &section);
+    }
     let content = brief_for_agent(
         content,
         prepared.execution.worker_agent_type.as_deref(),
@@ -11795,7 +11819,14 @@ fn insert_toolchain_section_in(
     profile: Option<&[crate::core::project_toolchains::PackageRoot]>,
     lang: RoomLang,
 ) -> String {
-    let section = toolchain_brief_section_in(toolchain, profile, lang);
+    insert_before_tests(
+        content,
+        &toolchain_brief_section_in(toolchain, profile, lang),
+    )
+}
+
+/// Put `section` right before the brief's `## Tests` section.
+fn insert_before_tests(content: String, section: &str) -> String {
     match content.find("## Tests\n") {
         Some(at) => format!("{}{section}{}", &content[..at], &content[at..]),
         None => format!("{content}\n\n{section}"),
@@ -13265,16 +13296,17 @@ pub fn worker_brief_markdown_in(
     let time_limit_rule = match (mediated_host_commit, fr) {
         (false, _) => "",
         (true, false) => {
-            "- The execution has a time limit. Commit as you go; when it nears, the results of \
-             `task_exec_status` and `task_exec_commit` carry a `time_limit` notice — then commit \
-             and deliver at once. Uncommitted work at the limit is only checkpointed (WIP), \
-             never delivered.\n"
+            "- The execution has a time limit. Commit as you go; when it nears, the `time_limit` \
+             in the results of `task_exec_status` and `task_exec_commit` moves to `stage: near`, \
+             then `imminent`, with a `notice` — then commit and deliver at once. Uncommitted \
+             work at the limit is only checkpointed (WIP), never delivered.\n"
         }
         (true, true) => {
             "- L'exécution a une limite de temps. Commite au fil de l'eau ; quand elle approche, \
-             les résultats de `task_exec_status` et `task_exec_commit` portent un avis \
-             `time_limit` — commite et livre alors sans attendre. Le travail non commité à la \
-             limite est seulement sauvegardé (WIP), jamais livré.\n"
+             le `time_limit` des résultats de `task_exec_status` et `task_exec_commit` passe à \
+             `stage: near`, puis `imminent`, avec un `notice` — commite et livre alors sans \
+             attendre. Le travail non commité à la limite est seulement sauvegardé (WIP), jamais \
+             livré.\n"
         }
     };
     let target_integration = if !can_run_shell {
@@ -18646,6 +18678,21 @@ pub fn compact_next_action(
                     | Action::IdempotentClose
             )
     });
+    // KT-2037 — stopped at the run time limit: a resume runs under the same limit.
+    if execution.status == Interrupted
+        && detail.recovery.as_ref().is_some_and(|recovery| {
+            recovery.pending
+                && recovery.recovery_action == Action::ResumeWorker
+                && recovery
+                    .recovery_reason
+                    .starts_with(crate::db::orchestration::WORKER_TIMED_OUT_REASON)
+        })
+    {
+        return Some(CompactNextAction {
+            tool: Some("task_exec_resume"),
+            reason: "stopped at the run time limit (see last_error); a resume gets the same limit: resume only if the rest fits, or reassign with a reason naming what not to rerun, or cancel",
+        });
+    }
     // KT-1540 — a worker that ended without delivering is parked for one resume.
     if execution.status == Interrupted
         && detail.recovery.as_ref().is_some_and(|recovery| {

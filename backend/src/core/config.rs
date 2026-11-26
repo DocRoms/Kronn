@@ -274,6 +274,42 @@ pub fn saved_max_prompt_bytes_in(content: &str) -> Option<usize> {
     usize::try_from(bytes).ok()
 }
 
+/// KT-2037 — `server.agent_global_timeout_min` and its local-agent twin as saved
+/// in config.toml, for a caller that holds no `AppState`. A key that is absent
+/// or unreadable gives its default; a test never reads the developer's file.
+pub fn saved_agent_global_timeouts() -> (u32, u32) {
+    if crate::core::test_mode::on() {
+        return saved_agent_global_timeouts_in("");
+    }
+    let content = config_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    saved_agent_global_timeouts_in(&content)
+}
+
+/// `(hosted, local)` minutes read from the text of a config.toml.
+pub fn saved_agent_global_timeouts_in(content: &str) -> (u32, u32) {
+    let table = content.parse::<toml::Table>().ok();
+    let minutes = |key: &str, default: u32| {
+        table
+            .as_ref()
+            .and_then(|table| table.get("server")?.get(key)?.as_integer())
+            .and_then(|minutes| u32::try_from(minutes).ok())
+            .unwrap_or(default)
+    };
+    (
+        minutes(
+            "agent_global_timeout_min",
+            crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,
+        ),
+        minutes(
+            "local_agent_global_timeout_min",
+            crate::models::DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN,
+        ),
+    )
+}
+
 /// Full path to config.toml
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join(CONFIG_FILE))
@@ -1547,6 +1583,40 @@ mod tests {
         assert_eq!(
             saved_max_prompt_bytes_in("[server]\nmax_prompt_bytes = \"big\"\n"),
             None
+        );
+    }
+
+    /// KT-2037 — the saved run time limits are read as written, and a key that
+    /// is absent or unreadable gives its default.
+    #[test]
+    fn the_saved_run_time_limits_fall_back_to_their_defaults() {
+        let defaults = (
+            crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,
+            crate::models::DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN,
+        );
+        assert_eq!(
+            saved_agent_global_timeouts_in(
+                "[server]\nagent_global_timeout_min = 240\nlocal_agent_global_timeout_min = 90\n"
+            ),
+            (240, 90)
+        );
+        assert_eq!(
+            saved_agent_global_timeouts_in("[server]\nagent_global_timeout_min = 120\n"),
+            (120, defaults.1)
+        );
+        assert_eq!(
+            saved_agent_global_timeouts_in("[server]\nport = 3140\n"),
+            defaults
+        );
+        assert_eq!(saved_agent_global_timeouts_in("not toml ["), defaults);
+        assert_eq!(
+            saved_agent_global_timeouts_in("[server]\nagent_global_timeout_min = -5\n"),
+            defaults
+        );
+        assert_eq!(
+            saved_agent_global_timeouts(),
+            defaults,
+            "a test reads no file"
         );
     }
 
