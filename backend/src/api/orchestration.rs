@@ -18600,6 +18600,16 @@ pub fn compact_next_action(
             reason: "integration hold: resume once its cause is fixed",
         });
     }
+    // KT-1782 — a failed or cancelled dispatch delivers nothing: waiting on it
+    // is not progress, even while a fallback may still take the work over.
+    if execution.status == Working
+        && detail.progress.phase == crate::models::TaskExecutionProgressPhase::Failed
+    {
+        return Some(CompactNextAction {
+            tool: None,
+            reason: "the worker's dispatch has ended without a delivery (see last_error): if it stays so, task_exec_reassign or task_exec_cancel",
+        });
+    }
     let (tool, reason) = match execution.status {
         Done | Failed | Cancelled => return None,
         AwaitingReview => (Some("task_exec_review"), "review the delivery at head_sha"),

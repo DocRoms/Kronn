@@ -153,6 +153,7 @@ describe('requiresUserAction', () => {
       'orch-disk-pressure:now',
       'orch-integration-refused:exec-1:2',
       'orch-worker-undelivered:exec-1',
+      'orch-worker-stopped:exec-1:job-1',
       'orch-principal-timeout:exec-1:review_wait_timeout:job',
     ]) {
       expect(requiresUserAction(orch(id)), id).toBe(true);

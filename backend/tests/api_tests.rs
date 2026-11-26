@@ -11391,6 +11391,125 @@ async fn discussions_targeted_stop_preserves_a_sibling_dispatch() {
         .unwrap();
 }
 
+/// KT-1782 — the targeted stop route, end to end: the request that stops a
+/// task worker parks its execution and tells the principal room.
+#[tokio::test]
+async fn stop_route_parks_the_task_worker_execution() {
+    let state = test_state();
+    let execution_id = state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for id in ["stop-route-parent", "stop-route-child"] {
+                conn.execute(
+                    "INSERT INTO discussions (id, title, agent, created_at, updated_at)
+                     VALUES (?1, ?1, 'ClaudeCode', ?2, ?2)",
+                    rusqlite::params![id, now],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO planning_tasks
+                 (id, task_number, title, status, created_at, updated_at)
+                 VALUES ('stop-route-task', 9920, 'Stopped through the route', 'todo', ?1, ?1)",
+                [&now],
+            )?;
+            let actor = kronn::models::PlanningActor {
+                kind: kronn::models::PlanningActorKind::Backend,
+                id: Some("api-test".into()),
+                session_id: None,
+                source_message_id: None,
+                token_declared: false,
+            };
+            let execution = kronn::db::orchestration::launch_single_task(
+                conn,
+                &kronn::models::LaunchSingleTaskInput::new("stop-route-task", "stop-route-parent"),
+                &actor,
+            )?
+            .execution;
+            for status in [
+                kronn::models::TaskExecutionStatus::Provisioning,
+                kronn::models::TaskExecutionStatus::Working,
+            ] {
+                kronn::db::orchestration::transition_execution(
+                    conn,
+                    &execution.id,
+                    status,
+                    &actor,
+                    serde_json::json!({}),
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, channel, content, timestamp, sort_order)
+                 VALUES ('stop-route-brief', 'stop-route-child', 'User', 'main', 'go', ?1, 1)",
+                [&now],
+            )?;
+            kronn::db::agent_dispatch::enqueue(
+                conn,
+                kronn::db::agent_dispatch::NewAgentDispatchJob {
+                    id: "stop-route-job",
+                    discussion_id: "stop-route-child",
+                    trigger_message_id: "stop-route-brief",
+                    trigger_sort_order: 1,
+                    dedupe_key: "stop-route-job",
+                    agent_override: Some(&kronn::models::AgentType::ClaudeCode),
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            kronn::db::agent_dispatch::claim(conn, "stop-route-job")?;
+            kronn::db::orchestration::attach_execution_dispatch(
+                conn,
+                &execution.id,
+                "stop-route-job",
+            )?;
+            kronn::db::orchestration::set_execution_sub_discussion(
+                conn,
+                &execution.id,
+                "stop-route-child",
+            )?;
+            Ok(execution.id)
+        })
+        .await
+        .unwrap();
+
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/discussions/stop-route-child/agent-dispatches/stop-route-job/stop",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true, "{json}");
+    assert_eq!(json["data"]["cancelled"], true, "{json}");
+
+    state
+        .db
+        .with_conn(move |conn| {
+            let execution =
+                kronn::db::orchestration::get_task_execution(conn, &execution_id)?.unwrap();
+            assert_eq!(
+                execution.status,
+                kronn::models::TaskExecutionStatus::Interrupted
+            );
+            let recovery = kronn::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                .expect("a stopped worker is parked for a decision");
+            assert_eq!(recovery.recovery_reason, "worker_stopped_without_delivery");
+            assert!(recovery.pending);
+            let room: String = conn.query_row(
+                "SELECT discussion_id FROM messages WHERE id = ?1",
+                [format!("orch-worker-stopped:{execution_id}:stop-route-job")],
+                |row| row.get(0),
+            )?;
+            assert_eq!(room, "stop-route-parent");
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 // ─── Partial response recovery — HTTP layer ─────────────────────────────────
 // DB-level behavior is covered in backend/src/db/tests.rs. These tests cover
 // the HTTP contract: dismiss-partial endpoint, WS broadcast, and the

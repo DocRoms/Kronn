@@ -39,8 +39,8 @@ const QUESTION_FENCE = /^[ \t]*```+[ \t]*kronn-question\b/m;
 const HUMAN_GATE_ID = /^orch-campaign-gate:[^:]*:[^:]*:awaiting:/;
 /** Generated notices that ask a person to decide: an escalation, an exhausted
  * provider quota, disk pressure, a refused integration, a worker that left
- * without delivering, a review waiting too long. */
-const HUMAN_DECISION_ID = /^(orch-escalation|provider-quota-escalation|orch-disk-pressure|orch-integration-refused|orch-worker-undelivered|orch-principal-timeout):/;
+ * without delivering or was stopped before it did, a review waiting too long. */
+const HUMAN_DECISION_ID = /^(orch-escalation|provider-quota-escalation|orch-disk-pressure|orch-integration-refused|orch-worker-undelivered|orch-worker-stopped|orch-principal-timeout):/;
 
 /** KT-1664 — an exhausted-quota escalation (`provider-quota-escalation:{job}`)
  *  closes itself when the provider answers again: the orchestrator then posts
