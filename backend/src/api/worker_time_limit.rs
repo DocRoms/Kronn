@@ -12,7 +12,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use rusqlite::Connection;
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::models::{AgentType, TaskExecutionStatus, WorkerCommitHooks};
@@ -111,7 +112,26 @@ pub fn time_limit_notice(limit: Duration, elapsed: Duration) -> Option<Value> {
     }))
 }
 
-/// The notice for the worker running `dispatch_job_id`, measured from the moment
+/// KT-2037 — the `time_limit` object of a tool result: the notice when the limit
+/// is near, else the plain clock (`stage: ok`), always with the time the run ends.
+pub fn time_limit_clock(limit: Duration, elapsed: Duration, started: DateTime<Utc>) -> Value {
+    let mut clock = time_limit_notice(limit, elapsed).unwrap_or_else(|| {
+        json!({
+            "stage": "ok",
+            "elapsed_min": minutes(elapsed),
+            "limit_min": minutes(limit),
+            "remaining_min": minutes(limit.saturating_sub(elapsed)),
+        })
+    });
+    let ends_at = chrono::Duration::from_std(limit)
+        .ok()
+        .and_then(|limit| started.checked_add_signed(limit))
+        .unwrap_or(started);
+    clock["ends_at"] = json!(crate::core::agent_fallback::stamp(ends_at));
+    clock
+}
+
+/// The clock of the worker running `dispatch_job_id`, measured from the moment
 /// its agent actually started (queue time is not worker time).
 pub async fn worker_time_limit_notice(
     state: &crate::AppState,
@@ -126,7 +146,7 @@ pub async fn worker_time_limit_notice(
         .ok()
         .flatten()?;
     let started = dispatch.agent_started_at.or(dispatch.claimed_at)?;
-    let elapsed = (chrono::Utc::now() - started).to_std().unwrap_or_default();
+    let elapsed = (Utc::now() - started).to_std().unwrap_or_default();
     let limit = {
         let config = state.config.read().await;
         global_limit(
@@ -135,7 +155,49 @@ pub async fn worker_time_limit_notice(
             config.server.local_agent_global_timeout_min,
         )
     };
-    time_limit_notice(limit, elapsed)
+    Some(time_limit_clock(limit, elapsed, started))
+}
+
+/// KT-2037 — the brief's time budget, in minutes: a launch can wait in the worker
+/// queue, so the end time is read from `task_exec_status`, not printed here.
+pub fn brief_section(limit: Duration, local_agent: bool, spawned_cli: bool, fr: bool) -> String {
+    let budget = minutes(limit);
+    // A local agent's limit is a setting of its own: name the field that holds it.
+    let setting = match (local_agent, fr) {
+        (false, true) => "Durée maximale d'une exécution agent",
+        (true, true) => "Durée maximale des agents locaux (Ollama)",
+        (false, false) => "Maximum agent execution duration",
+        (true, false) => "Maximum local-agent duration (Ollama)",
+    };
+    let mut section = if fr {
+        format!(
+            "## Limite de temps\n\
+             Ce run peut durer {budget} min, comptées à partir du démarrage de ton processus \
+             (Config > Serveur > {setting}). Kronn arrête alors le processus, et une commande \
+             encore en cours est tuée avec lui."
+        )
+    } else {
+        format!(
+            "## Time limit\n\
+             This run may last {budget} min, counted from the start of your process (Config > \
+             Server > {setting}). Kronn then stops the process, and a command still running is \
+             killed with it."
+        )
+    };
+    // Only a spawned CLI worker has `task_exec_status`.
+    if spawned_cli {
+        section.push_str(if fr {
+            " `task_exec_status` renvoie `time_limit` avec les minutes restantes et l'heure de \
+             fin du run : lis-le avant toute commande qui peut durer plus de 10 minutes, et ne \
+             lance jamais une commande qui ne peut pas finir dans le temps restant."
+        } else {
+            " `task_exec_status` returns `time_limit` with the minutes left and the time the run \
+             ends: read it before any command that may run longer than 10 minutes, and never \
+             start a command that cannot finish in the time left."
+        });
+    }
+    section.push_str("\n\n");
+    section
 }
 
 /// What the limit stop left in the worktree.
@@ -415,6 +477,125 @@ pub async fn checkpoint_stopped_worker(
     }
 }
 
+/// KT-2037 — a limit stop read back from the journal for one run of a dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitStop {
+    pub elapsed: Duration,
+    pub limit: Duration,
+    /// How many paths were uncommitted when the worker was stopped.
+    pub files: usize,
+    /// The WIP commit that holds them, when one could be made.
+    pub checkpoint_commit: Option<String>,
+}
+
+impl LimitStop {
+    /// What the stop left of the worker's work, as one sentence.
+    pub fn kept(&self, fr: bool) -> String {
+        let files = self.files;
+        match (self.checkpoint_commit.as_deref(), files, fr) {
+            (Some(commit), _, false) => format!(
+                "Its commits are kept and its {files} uncommitted file(s) are saved in WIP \
+                 commit `{commit}`."
+            ),
+            (Some(commit), _, true) => format!(
+                "Ses commits sont conservés et ses {files} fichier(s) non commités sont dans le \
+                 commit WIP `{commit}`."
+            ),
+            (None, 0, false) => "Its commits are kept; the worktree was clean.".to_string(),
+            (None, 0, true) => "Ses commits sont conservés ; le worktree était propre.".to_string(),
+            (None, _, false) => format!(
+                "Its commits are kept; {files} uncommitted file(s) stayed in the worktree (no \
+                 WIP commit could be made)."
+            ),
+            (None, _, true) => format!(
+                "Ses commits sont conservés ; {files} fichier(s) non commités sont restés dans \
+                 le worktree."
+            ),
+        }
+    }
+}
+
+/// The limit stop of the current run of `dispatch_job_id`, when the limit is what
+/// ended it. A stop older than the dispatch's claim belongs to an earlier run of
+/// the same dispatch (a requeue) and is not this run's.
+pub fn limit_stop_of_dispatch(
+    conn: &Connection,
+    dispatch_job_id: &str,
+) -> Result<Option<LimitStop>> {
+    // Both stamps are `to_rfc3339()` of UTC: their string order is time order.
+    let changes: Option<String> = conn
+        .query_row(
+            "SELECT e.changes_json FROM task_execution_events e \
+             JOIN agent_dispatch_jobs j \
+               ON j.id = json_extract(e.changes_json, '$.dispatch_job_id') \
+             WHERE j.id = ?1 AND e.action = ?2 AND e.created_at >= j.claimed_at \
+             ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1",
+            rusqlite::params![dispatch_job_id, TIME_LIMIT_EVENT],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(changes) = changes else {
+        return Ok(None);
+    };
+    let stop: Value = serde_json::from_str(&changes)?;
+    Ok(Some(LimitStop {
+        elapsed: Duration::from_secs(stop["elapsed_secs"].as_u64().unwrap_or(0)),
+        limit: Duration::from_secs(stop["limit_secs"].as_u64().unwrap_or(0)),
+        files: stop["files"].as_array().map_or(0, Vec::len),
+        checkpoint_commit: stop["checkpoint_commit"].as_str().map(str::to_string),
+    }))
+}
+
+/// The dispatch `last_error` of a run the limit stopped. The cause sits in the
+/// first 160 characters, which is all the compact status shows.
+pub fn stop_diagnostic(stop: &LimitStop) -> String {
+    format!(
+        "task worker stopped by Kronn: failure_kind=execution_time_limit; ran {} of {} min, the \
+         limit of one run of its agent (Config > Server). The worker reported no failure and \
+         had not delivered. {} A resumed worker gets the same limit again: use \
+         `task_exec_resume`, or `task_exec_reassign` with a `reason` that tells it which long \
+         command not to run again.",
+        minutes(stop.elapsed),
+        minutes(stop.limit),
+        stop.kept(false),
+    )
+}
+
+/// The budget, in minutes, of the run the execution's current agent starts: a
+/// reassignment or a fallback may have moved it to an agent with another limit.
+/// `None` for a joined CLI worker: Kronn runs no process for it and stops none.
+pub fn run_budget_minutes(
+    conn: &Connection,
+    execution_id: &str,
+    (hosted_min, local_min): (u32, u32),
+) -> Option<u64> {
+    let agent: Option<String> = conn
+        .query_row(
+            "SELECT worker_agent_type FROM task_executions \
+             WHERE id = ?1 AND worker_target_kind IS NOT 'cli'",
+            [execution_id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let agent = crate::db::orchestration::agent_type_from_db(&agent?).ok()?;
+    Some(minutes(global_limit(&agent, hosted_min, local_min)))
+}
+
+/// The handoff line that restates the budget: the pinned brief states the one of
+/// the agent the execution was launched with.
+pub fn run_budget_line(conn: &Connection, execution_id: &str, fr: bool) -> Option<String> {
+    let budget = run_budget_minutes(
+        conn,
+        execution_id,
+        crate::core::config::saved_agent_global_timeouts(),
+    )?;
+    Some(if fr {
+        format!("**Limite de temps** — ce run peut durer {budget} min.")
+    } else {
+        format!("**Time limit** — this run may last {budget} min.")
+    })
+}
+
 /// What the resume handoff says about the earlier generations: how long each
 /// ran and what the limit left behind. `None` when no limit ever stopped this
 /// execution.
@@ -503,20 +684,36 @@ pub fn handoff_note(conn: &Connection, execution_id: &str, fr: bool) -> Option<S
         });
     }
     let list = lines.join("\n");
+    let budget = run_budget_minutes(
+        conn,
+        execution_id,
+        crate::core::config::saved_agent_global_timeouts(),
+    );
+    // No budget is stated to a worker Kronn does not stop (a joined CLI).
+    let advice = match (budget, fr) {
+        (Some(budget), true) => format!("Ce run peut durer {budget} min : ne relance pas"),
+        (Some(budget), false) => format!("This run may last {budget} min: do not start again"),
+        (None, true) => "Ne relance pas".to_string(),
+        (None, false) => "Do not start again".to_string(),
+    };
     Some(if fr {
         format!(
             "**Limite de temps** — les générations précédentes ont été arrêtées par la limite \
              d'exécution :\n{list}\n\
              Relis ce travail (`git show` du commit WIP, ou `git diff`), poursuis-le sans \
              réécrire l'historique, commite avec l'outil de commit déclaré et livre avec \
-             `task_exec_deliver` bien avant la limite."
+             `task_exec_deliver` bien avant la limite. {advice} la commande longue qui \
+             tournait quand une génération a été arrêtée par la limite ; lance seulement les \
+             tests ciblés, puis livre."
         )
     } else {
         format!(
             "**Time limit** — earlier generations were stopped by the execution limit:\n{list}\n\
              Review that work (`git show` of the WIP commit, or `git diff`), carry on without \
              rewriting history, commit with the declared commit tool and deliver with \
-             `task_exec_deliver` well before the limit."
+             `task_exec_deliver` well before the limit. {advice} the long command that was \
+             running when a generation was stopped by the limit; run the targeted tests only, \
+             then deliver."
         )
     })
 }

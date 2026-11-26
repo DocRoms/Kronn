@@ -28618,16 +28618,142 @@ fn the_cli_worker_brief_announces_the_time_limit_notice() {
         )
     };
     let en = brief(RoomLang::En, true, true);
-    assert!(en.contains("`time_limit` notice"), "{en}");
+    assert!(en.contains("moves to `stage: near`"), "{en}");
     assert!(en.contains("checkpointed (WIP)"), "{en}");
     let fr = brief(RoomLang::Fr, true, true);
-    assert!(fr.contains("avis `time_limit`"), "{fr}");
+    assert!(fr.contains("passe à `stage: near`"), "{fr}");
     for self_committing in [
         brief(RoomLang::En, false, false),
         brief(RoomLang::Fr, true, false),
     ] {
         assert!(!self_committing.contains("time_limit"), "{self_committing}");
     }
+}
+
+/// KT-2037 — the brief of a launched worker states its time budget before the
+/// tests section, and points only a spawned CLI at `task_exec_status`.
+#[test]
+fn the_brief_of_a_launched_worker_contains_its_time_budget() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    crate::db::migrations::run(&conn).unwrap();
+    let repo = "/tmp/whatever";
+    crate::db::projects::insert_project(&conn, &test_project("p", repo)).unwrap();
+    crate::db::discussions::insert_discussion(&conn, &plain_discussion("parent", "p")).unwrap();
+    let task = create_todo_task(&conn, "p", "Task");
+    let mut launch = crate::models::LaunchSingleTaskInput::new(&task.summary.id, "parent");
+    launch.project_id = Some("p".into());
+    launch.worker_target_kind = Some(MessageTargetKind::Agent);
+    launch.worker_agent_type = Some("ClaudeCode".into());
+    let outcome =
+        crate::db::orchestration::launch_single_task(&conn, &launch, &test_actor()).unwrap();
+    let execution = advance_to_provisioning(&conn, outcome.execution, &test_actor()).unwrap();
+
+    let brief_of = |agent: &str, lang: RoomLang| {
+        let mut execution = execution.clone();
+        execution.worker_agent_type = Some(agent.to_string());
+        let prepared = Prepared {
+            execution,
+            project_id: "p".into(),
+            repo_path: repo.into(),
+            task_reference: task.summary.reference.clone(),
+            task_title: task.summary.title.clone(),
+            task_description: "x".into(),
+            dod: task.definition_of_done.clone(),
+            target_branch: "main".into(),
+            already_launched: false,
+        };
+        build_brief(
+            &prepared,
+            "/tmp/wt",
+            "kronn/task/kt-x",
+            "deadbeef",
+            None,
+            lang,
+        )
+        .content
+    };
+    // A test reads no config file: the budgets are the defaults.
+    let hosted = crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN;
+    let local = crate::models::DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN;
+
+    let en = brief_of("ClaudeCode", RoomLang::En);
+    let section = en.find("## Time limit\n").expect("the budget section");
+    assert!(section < en.find("## Tests\n").unwrap(), "{en}");
+    assert!(
+        en.contains(&format!("This run may last {hosted} min")),
+        "{en}"
+    );
+    assert!(
+        en.contains("`task_exec_status` returns `time_limit`"),
+        "{en}"
+    );
+
+    let fr = brief_of("ClaudeCode", RoomLang::Fr);
+    assert!(
+        fr.contains(&format!(
+            "## Limite de temps\nCe run peut durer {hosted} min"
+        )),
+        "{fr}"
+    );
+    assert!(
+        fr.contains("`task_exec_status` renvoie `time_limit`"),
+        "{fr}"
+    );
+
+    // An HTTP worker has no `task_exec_status`; its budget is the local one.
+    let ollama = brief_of("Ollama", RoomLang::En);
+    assert!(
+        ollama.contains(&format!("This run may last {local} min")),
+        "{ollama}"
+    );
+    assert!(!ollama.contains("`task_exec_status` returns"), "{ollama}");
+}
+
+/// KT-2037 — after a limit stop the compact status tells the principal that a
+/// resume runs under the same limit, instead of the generic "resume it once".
+#[tokio::test]
+async fn status_says_a_resume_gets_the_same_limit_after_a_time_limit_stop() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+    let execution = provision_single_task_execution(
+        &db,
+        ProvisionInput {
+            task_reference: task_ref,
+            parent_discussion_id: parent_id,
+            worker: native_worker(),
+            base_rev: Some("main".into()),
+            idempotency_key: Some("status-time-limit".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let dispatch_id = execution.dispatch_job_id.clone().unwrap();
+    let exec_id = execution.id.clone();
+    let next = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::interrupt_undelivered_execution_for_dispatch(
+                conn,
+                &dispatch_id,
+                crate::db::orchestration::WORKER_TIMED_OUT_REASON,
+                &backend_actor(),
+            )?
+            .context("the limit stop parks the execution")?;
+            Ok(compact_next_action(&execution_detail(conn, &exec_id)?))
+        })
+        .await
+        .unwrap()
+        .expect("a next action");
+
+    assert_eq!(next.tool, Some("task_exec_resume"), "{}", next.reason);
+    assert!(next.reason.contains("run time limit"), "{}", next.reason);
+    assert!(next.reason.contains("same limit"), "{}", next.reason);
+    assert!(
+        next.reason.contains("reassign") && next.reason.contains("cancel"),
+        "{}",
+        next.reason
+    );
 }
 
 #[tokio::test]

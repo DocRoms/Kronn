@@ -447,6 +447,68 @@ fn a_stopped_worker_reason_is_an_undelivered_worker_reason() {
     );
 }
 
+/// KT-2037 — a worker stopped at the run time limit is parked under the same
+/// rule as the other undelivered ends: its consumed resume is armed again.
+#[test]
+fn a_timed_out_worker_reason_is_an_undelivered_worker_reason() {
+    assert_eq!(WORKER_TIMED_OUT_REASON, "worker_timed_out_without_delivery");
+    assert!(is_undelivered_worker_reason(WORKER_TIMED_OUT_REASON));
+    assert!(is_undelivered_worker_reason(
+        "worker_timed_out_without_delivery: last task_exec_deliver was refused: no manifest"
+    ));
+    assert!(!is_undelivered_worker_reason("worker_timed_out"));
+
+    let conn = setup();
+    let exec_id = launch_and_drive(
+        &conn,
+        "t-timed-out",
+        2037,
+        &[
+            TaskExecutionStatus::Provisioning,
+            TaskExecutionStatus::Working,
+        ],
+    );
+    conn.execute(
+        "INSERT INTO messages
+         (id, discussion_id, role, content, timestamp, sort_order, received_at)
+         VALUES ('message-timed-out', ?1, 'User', 'go', ?2, 1, ?2)",
+        params![DISC, chrono::Utc::now().to_rfc3339()],
+    )
+    .unwrap();
+    crate::db::agent_dispatch::enqueue_for_latest_user(
+        &conn,
+        crate::db::agent_dispatch::NewLatestUserDispatch {
+            id: "dispatch-timed-out",
+            discussion_id: DISC,
+            dedupe_key: "message:message-timed-out",
+            agent_override: None,
+            chain_prompt_ids: &[],
+            batch_item: None,
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+    attach_execution_dispatch(&conn, &exec_id, "dispatch-timed-out").unwrap();
+    interrupt_undelivered_execution_for_dispatch(
+        &conn,
+        "dispatch-timed-out",
+        WORKER_TIMED_OUT_REASON,
+        &backend_actor(),
+    )
+    .unwrap()
+    .expect("a worker stopped at the limit must be checkpointed");
+    let parked = get_execution_recovery(&conn, &exec_id).unwrap().unwrap();
+    assert_eq!(parked.recovery_reason, WORKER_TIMED_OUT_REASON);
+    assert!(parked.pending);
+
+    clear_execution_recovery(&conn, &exec_id, "resume_worker").unwrap();
+    assert!(
+        rearm_consumed_recovery(&conn, &exec_id).unwrap(),
+        "the consumed resume of a timed-out worker is armed again as is"
+    );
+}
+
 #[test]
 fn a_follow_up_turn_in_a_worker_room_is_not_a_worker_launch() {
     // Why the worker-scope guard was wrong: it asked whether the ROOM hosts a

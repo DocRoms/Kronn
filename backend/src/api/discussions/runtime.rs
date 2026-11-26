@@ -101,11 +101,15 @@ pub(super) enum UndeliveredCause {
     Failed,
     /// KT-1782 — cancelled before it ended: a Stop, or any other cancel.
     Stopped,
+    /// KT-2037 — stopped by Kronn at the run time limit. Callers pass `Failed`:
+    /// the journal of the dispatch tells the two apart.
+    TimedOut,
 }
 
 /// The execution a terminal dispatch leaves without a delivery is parked as
 /// `Interrupted` and the principal is told once (`orch-worker-undelivered:<exec>`,
-/// or `orch-worker-stopped:<exec>:<dispatch>` for a stop).
+/// or `orch-worker-stopped:<exec>:<dispatch>` for a stop and
+/// `orch-worker-timed-out:<exec>:<dispatch>` for a run stopped at its time limit).
 /// A no-op when the dispatch belongs to no `Working` execution.
 ///
 /// KT-1758 — kept apart from the settlement so a link that takes the work over
@@ -118,10 +122,30 @@ pub(super) fn interrupt_undelivered_with_notice(
     discussion_id: &str,
     cause: UndeliveredCause,
 ) -> anyhow::Result<()> {
+    // KT-2037 — a failure that follows a limit stop of this very run is Kronn's
+    // stop, not the worker's failure. An unreadable journal keeps the failure.
+    let limit_stop = match cause {
+        UndeliveredCause::Failed | UndeliveredCause::TimedOut => {
+            crate::api::worker_time_limit::limit_stop_of_dispatch(transaction, job_id)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(dispatch_job_id = %job_id, "time-limit stop unreadable: {error:#}");
+                    None
+                })
+        }
+        UndeliveredCause::Completed | UndeliveredCause::Stopped => None,
+    };
+    let cause = match (cause, &limit_stop) {
+        (UndeliveredCause::Failed | UndeliveredCause::TimedOut, Some(_)) => {
+            UndeliveredCause::TimedOut
+        }
+        (UndeliveredCause::TimedOut, None) => UndeliveredCause::Failed,
+        (cause, _) => cause,
+    };
     let interruption_reason = match cause {
         UndeliveredCause::Completed => "worker_completed_without_delivery",
         UndeliveredCause::Failed => "worker_failed_without_delivery",
         UndeliveredCause::Stopped => "worker_stopped_without_delivery",
+        UndeliveredCause::TimedOut => crate::db::orchestration::WORKER_TIMED_OUT_REASON,
     };
     let actor = crate::models::PlanningActor {
         kind: crate::models::PlanningActorKind::Backend,
@@ -146,28 +170,17 @@ pub(super) fn interrupt_undelivered_with_notice(
             &interrupted.execution_id,
             parent.agent,
         )?;
-        let (title, ended, instruction) = match cause {
-            UndeliveredCause::Failed => (
-                "Worker échoué sans livraison durable",
-                "s'est terminé sans appel valide à",
-                "Examine l'erreur du dispatch dans la sous-discussion, puis réaffecte ou annule explicitement l'exécution.",
-            ),
-            UndeliveredCause::Completed => (
-                "Worker terminé sans livraison durable",
-                "s'est terminé sans appel valide à",
-                "Relis le bilan du worker dans la sous-discussion, puis reprends l'exécution une fois (`task_exec_resume`, le worktree est conservé), ou réaffecte / annule-la explicitement.",
-            ),
-            UndeliveredCause::Stopped => (
-                "Worker arrêté sans livraison durable",
-                "a été arrêté avant tout appel valide à",
-                "Reprends l'exécution une fois (`task_exec_resume`, le worktree est conservé), réaffecte-la (`task_exec_reassign`) ou annule-la (`task_exec_cancel`).",
-            ),
-        };
         // A stop is told per dispatch: the execution's `orch-worker-undelivered`
         // id may be spent already, and a resumed worker can be stopped again.
         let message_id = match cause {
             UndeliveredCause::Stopped => {
                 format!("orch-worker-stopped:{}:{job_id}", interrupted.execution_id)
+            }
+            UndeliveredCause::TimedOut => {
+                format!(
+                    "orch-worker-timed-out:{}:{job_id}",
+                    interrupted.execution_id
+                )
             }
             UndeliveredCause::Completed | UndeliveredCause::Failed => {
                 format!("orch-worker-undelivered:{}", interrupted.execution_id)
@@ -186,21 +199,43 @@ pub(super) fn interrupt_undelivered_with_notice(
         )?;
         if !already_posted {
             let refused = refused_tool_calls_sentence(transaction, discussion_id)?;
-            let message = crate::api::orchestration::orchestrator_message(
-                message_id,
-                format!(
-                    "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{}` {ended} `task_exec_deliver`. L'exécution `{}` est maintenant `Interrupted` au lieu de rester faussement `Working`.{refused}{refusal} {instruction}",
-                    interrupted.task_id,
-                    interrupted.execution_id,
-                    refusal = interrupted
-                        .delivery_refusal
-                        .as_deref()
-                        .map(|detail| format!(
-                            " Cause : la livraison du worker a été refusée — {detail}"
-                        ))
-                        .unwrap_or_default(),
+            let refusal = interrupted
+                .delivery_refusal
+                .as_deref()
+                .map(|detail| format!(" Cause : la livraison du worker a été refusée — {detail}"))
+                .unwrap_or_default();
+            let (task_id, execution_id) = (&interrupted.task_id, &interrupted.execution_id);
+            let content = match (cause, &limit_stop) {
+                (UndeliveredCause::TimedOut, Some(stop)) => format!(
+                    "**Worker arrêté par la limite de temps, sans livraison**\n\nKronn a arrêté le dispatch `{job_id}` de la tâche `{task_id}` après {elapsed} min : il a atteint la durée maximale d'une exécution agent ({limit} min, Config > Serveur). Le worker n'a déclaré aucun échec et n'avait pas encore livré. L'exécution `{execution_id}` est maintenant `Interrupted`. {kept}{refused}{refusal} Reprends-la (`task_exec_resume`) ou réaffecte-la (`task_exec_reassign`, dont le champ `reason` est lu par le worker) : le worker repart avec la limite de son agent ({limit} min s'il reste le même), donc indique-lui quelle commande longue ne pas relancer. Sinon annule-la (`task_exec_cancel`).",
+                    elapsed = stop.elapsed.as_secs() / 60,
+                    limit = stop.limit.as_secs() / 60,
+                    kept = stop.kept(true),
                 ),
-            );
+                _ => {
+                    let (title, ended, instruction) = match cause {
+                        UndeliveredCause::Failed | UndeliveredCause::TimedOut => (
+                            "Worker échoué sans livraison durable",
+                            "s'est terminé sans appel valide à",
+                            "Examine l'erreur du dispatch dans la sous-discussion, puis réaffecte ou annule explicitement l'exécution.",
+                        ),
+                        UndeliveredCause::Completed => (
+                            "Worker terminé sans livraison durable",
+                            "s'est terminé sans appel valide à",
+                            "Relis le bilan du worker dans la sous-discussion, puis reprends l'exécution une fois (`task_exec_resume`, le worktree est conservé), ou réaffecte / annule-la explicitement.",
+                        ),
+                        UndeliveredCause::Stopped => (
+                            "Worker arrêté sans livraison durable",
+                            "a été arrêté avant tout appel valide à",
+                            "Reprends l'exécution une fois (`task_exec_resume`, le worktree est conservé), réaffecte-la (`task_exec_reassign`) ou annule-la (`task_exec_cancel`).",
+                        ),
+                    };
+                    format!(
+                        "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{task_id}` {ended} `task_exec_deliver`. L'exécution `{execution_id}` est maintenant `Interrupted` au lieu de rester faussement `Working`.{refused}{refusal} {instruction}"
+                    )
+                }
+            };
+            let message = crate::api::orchestration::orchestrator_message(message_id, content);
             crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
                 transaction,
                 &interrupted.parent_discussion_id,
@@ -1160,6 +1195,28 @@ async fn finish_dispatch_turn(
     response: String,
     execution_succeeded: bool,
 ) {
+    // KT-2037 — a run Kronn stopped at its time limit is settled as that, before
+    // its prose can be read as a provider refusal and moved to a fallback.
+    if !execution_succeeded {
+        let dispatch_id = job.id.clone();
+        let limit_stop = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::api::worker_time_limit::limit_stop_of_dispatch(conn, &dispatch_id)
+            })
+            .await
+            .ok()
+            .flatten();
+        if let Some(stop) = limit_stop {
+            fail_dispatch_job(
+                state,
+                &job,
+                &crate::api::worker_time_limit::stop_diagnostic(&stop),
+            )
+            .await;
+            return;
+        }
+    }
     // KT-1518 — a provider that could not serve the turn (rate limit, quota,
     // outage past its retries, not authenticated) hands it to the agent's
     // fallback chain; a failure of the work itself never does.
@@ -3475,6 +3532,285 @@ mod chain_render_tests {
         .unwrap();
     }
 
+    fn backend_actor() -> crate::models::PlanningActor {
+        crate::models::PlanningActor {
+            kind: crate::models::PlanningActorKind::Backend,
+            id: Some("orchestrator".into()),
+            session_id: None,
+            source_message_id: None,
+            token_declared: false,
+        }
+    }
+
+    /// A claimed dispatch `job` of the room `d-limit-child`, attached to
+    /// `execution_id`: the worker's first run, or the run after a resume.
+    fn attach_claimed_dispatch(
+        conn: &rusqlite::Connection,
+        execution_id: &str,
+        job: &str,
+    ) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO messages
+             (id, discussion_id, role, content, timestamp, sort_order, received_at)
+             VALUES (?1, 'd-limit-child', 'User', 'go', ?2,
+                     (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM messages
+                       WHERE discussion_id = 'd-limit-child'), ?2)",
+            rusqlite::params![format!("u-{job}"), now],
+        )?;
+        crate::db::agent_dispatch::enqueue_for_latest_user(
+            conn,
+            crate::db::agent_dispatch::NewLatestUserDispatch {
+                id: job,
+                discussion_id: "d-limit-child",
+                dedupe_key: &format!("message:u-{job}"),
+                agent_override: Some(&crate::models::AgentType::Ollama),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )?;
+        crate::db::agent_dispatch::claim(conn, job)?;
+        crate::db::orchestration::attach_execution_dispatch(conn, execution_id, job)?;
+        Ok(())
+    }
+
+    /// A `Working` execution launched from `d-limit-parent`, whose worker runs
+    /// the claimed dispatch `job` in `d-limit-child`.
+    fn working_execution(conn: &rusqlite::Connection, job: &str) -> anyhow::Result<String> {
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, title) in [("d-limit-parent", "Parent"), ("d-limit-child", "Child")] {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?3)",
+                rusqlite::params![id, title, now],
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO planning_tasks
+             (id, task_number, title, status, created_at, updated_at)
+             VALUES ('t-limit', 9904, 'Limit', 'todo', ?1, ?1)",
+            [&now],
+        )?;
+        let execution = crate::db::orchestration::launch_single_task(
+            conn,
+            &crate::models::LaunchSingleTaskInput::new("t-limit", "d-limit-parent"),
+            &backend_actor(),
+        )?
+        .execution;
+        for status in [
+            crate::models::TaskExecutionStatus::Provisioning,
+            crate::models::TaskExecutionStatus::Working,
+        ] {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution.id,
+                status,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?;
+        }
+        attach_claimed_dispatch(conn, &execution.id, job)?;
+        Ok(execution.id)
+    }
+
+    /// The worker of `execution_id` is resumed on a new claimed dispatch `job`.
+    fn resume_on(conn: &rusqlite::Connection, execution_id: &str, job: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            crate::db::orchestration::transition_execution(
+                conn,
+                execution_id,
+                crate::models::TaskExecutionStatus::Working,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?,
+            "the parked execution goes back to Working"
+        );
+        attach_claimed_dispatch(conn, execution_id, job)
+    }
+
+    /// The limit stops the run of `job` after 240 of 240 minutes, then its
+    /// dispatch settles as failed, the way the end of the stream does.
+    fn stop_at_the_limit_and_settle(
+        conn: &rusqlite::Connection,
+        execution_id: &str,
+        job: &str,
+    ) -> anyhow::Result<()> {
+        let limit = std::time::Duration::from_secs(240 * 60);
+        crate::api::worker_time_limit::record_stop_event(
+            conn,
+            execution_id,
+            job,
+            limit,
+            limit,
+            None,
+        )?;
+        let settled = persist_dispatch_settlement(
+            conn,
+            job,
+            "d-limit-child",
+            None,
+            crate::db::workflows::BatchChildOutcome::Failed,
+            Some("task worker stopped by Kronn"),
+            None,
+        )?;
+        anyhow::ensure!(settled.changed, "the dispatch settles");
+        Ok(())
+    }
+
+    /// The notices of `d-limit-parent` whose id starts with `prefix`, oldest first.
+    fn parent_notices(
+        conn: &rusqlite::Connection,
+        prefix: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let mut statement = conn.prepare(
+            "SELECT id, content FROM messages
+             WHERE discussion_id = 'd-limit-parent' AND id LIKE ?1 || '%'
+             ORDER BY sort_order",
+        )?;
+        let notices = statement
+            .query_map([prefix], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(notices)
+    }
+
+    /// KT-2037 — a worker Kronn stopped at the run time limit is parked with
+    /// that cause, and the principal is told the limit, not "worker failed".
+    #[tokio::test]
+    async fn a_worker_stopped_by_the_time_limit_is_parked_with_that_cause() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let execution_id = working_execution(conn, "j-limit")?;
+            stop_at_the_limit_and_settle(conn, &execution_id, "j-limit")?;
+
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            assert_eq!(
+                execution.status,
+                crate::models::TaskExecutionStatus::Interrupted
+            );
+            let recovery = crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                .expect("a limit stop leaves a decision to the principal");
+            assert_eq!(
+                recovery.recovery_reason,
+                "worker_timed_out_without_delivery"
+            );
+            assert!(recovery.pending);
+
+            let notices = parent_notices(conn, "orch-worker-")?;
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            let (notice_id, notice) = &notices[0];
+            assert_eq!(
+                notice_id,
+                &format!("orch-worker-timed-out:{execution_id}:j-limit")
+            );
+            assert!(notice.contains("limite de temps"), "{notice}");
+            assert!(notice.contains("après 240 min"), "{notice}");
+            assert!(notice.contains("240 min s'il reste le même"), "{notice}");
+            assert!(notice.contains("le worktree était propre"), "{notice}");
+            assert!(notice.contains("task_exec_resume"), "{notice}");
+            assert!(!notice.contains("Worker échoué"), "{notice}");
+            assert_eq!(
+                crate::db::discussions::list_message_targets(conn, notice_id)?.len(),
+                1,
+                "the notice is aimed at the principal"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2037 — a failure with no limit stop of its run keeps the failed
+    /// notice: only the journal of the dispatch turns it into a limit stop.
+    #[tokio::test]
+    async fn a_failed_worker_without_a_limit_stop_keeps_the_failed_notice() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let execution_id = working_execution(conn, "j-failed")?;
+            // A stop of another dispatch of the same execution is not this run's.
+            let limit = std::time::Duration::from_secs(240 * 60);
+            crate::api::worker_time_limit::record_stop_event(
+                conn,
+                &execution_id,
+                "j-earlier",
+                limit,
+                limit,
+                None,
+            )?;
+            let settled = persist_dispatch_settlement(
+                conn,
+                "j-failed",
+                "d-limit-child",
+                None,
+                crate::db::workflows::BatchChildOutcome::Failed,
+                Some("provider crashed"),
+                None,
+            )?;
+            assert!(settled.changed);
+
+            let recovery = crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                .expect("failure must leave an explicit human recovery");
+            assert_eq!(recovery.recovery_reason, "worker_failed_without_delivery");
+            let notices = parent_notices(conn, "orch-worker-")?;
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(
+                notices[0].0.starts_with("orch-worker-undelivered:"),
+                "{notices:?}"
+            );
+            assert!(
+                notices[0]
+                    .1
+                    .contains("Worker échoué sans livraison durable"),
+                "{notices:?}"
+            );
+            assert!(!notices[0].1.contains("limite de temps"), "{notices:?}");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2037 — a resumed worker the limit stops again is announced again:
+    /// the notice is per dispatch, not per execution.
+    #[tokio::test]
+    async fn a_second_time_limit_stop_is_announced_again() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let execution_id = working_execution(conn, "j-limit-1")?;
+            stop_at_the_limit_and_settle(conn, &execution_id, "j-limit-1")?;
+            resume_on(conn, &execution_id, "j-limit-2")?;
+            stop_at_the_limit_and_settle(conn, &execution_id, "j-limit-2")?;
+
+            let notices = parent_notices(conn, "orch-worker-timed-out:")?;
+            let ids: Vec<&str> = notices.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(
+                ids,
+                [
+                    format!("orch-worker-timed-out:{execution_id}:j-limit-1"),
+                    format!("orch-worker-timed-out:{execution_id}:j-limit-2"),
+                ]
+            );
+            for (notice_id, _) in &notices {
+                assert_eq!(
+                    crate::db::discussions::list_message_targets(conn, notice_id)?.len(),
+                    1,
+                    "each notice is aimed at the principal"
+                );
+            }
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            assert_eq!(
+                execution.status,
+                crate::models::TaskExecutionStatus::Interrupted
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
     /// KT-860 — a run the catalogue preflight refuses keeps the refused model
     /// and the reason in `last_error`, not only a generic sentence.
     #[tokio::test]
@@ -3946,3 +4282,7 @@ mod quota_turn_tests;
 #[cfg(test)]
 #[path = "runtime_transient_upstream_tests.rs"]
 mod transient_upstream_tests;
+
+#[cfg(test)]
+#[path = "runtime_time_limit_tests.rs"]
+mod time_limit_tests;
