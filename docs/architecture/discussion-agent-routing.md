@@ -43,7 +43,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5200-5211#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5226-5237#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -86,8 +86,8 @@ time, so any other Kronn call ends that wait; the call's result carries
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
 [src: file: backend/src/api/disc_invite.rs:1154-1158#AWARENESS_MAX_MESSAGES]
-[src: file: backend/scripts/disc-introspection-mcp.py:7420-7451#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12445-12452#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:7447-7478#_WAIT_PREEMPTED_NOTICE]
+[src: file: backend/scripts/disc-introspection-mcp.py:12493-12500#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -101,9 +101,9 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/sql/105_user_turn_catchup.sql:12-23#user_catchup_cursor]
 [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 [src: file: backend/src/api/disc_invite.rs:1449-1477#ack_awareness_upto]
-[src: file: backend/scripts/disc-introspection-mcp.py:3528-3537#_PENDING_AWARENESS_ACK_BY_DISC]
-[src: file: backend/scripts/disc-introspection-mcp.py:4037-4054#_ack_pending_read_cursors]
-[src: file: backend/scripts/disc-introspection-mcp.py:4079-4091#_stage_awareness_ack]
+[src: file: backend/scripts/disc-introspection-mcp.py:3532-3541#_PENDING_AWARENESS_ACK_BY_DISC]
+[src: file: backend/scripts/disc-introspection-mcp.py:4041-4058#_ack_pending_read_cursors]
+[src: file: backend/scripts/disc-introspection-mcp.py:4083-4095#_stage_awareness_ack]
 [src: file: backend/src/db/discussion_sessions.rs:450-484#create_session]
 
 ## Queue, restart, and edit/resend
@@ -167,9 +167,9 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/api/discussions/crud.rs:596-608#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/api/discussions/crud.rs:1032-1036#attach_discussion_participants]
-[src: file: backend/src/api/discussions/streaming.rs:2269-2381#independent_sibling_notice]
-[src: file: backend/src/api/discussions/streaming.rs:2162-2217#discussion_at_dispatch_trigger]
-[src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]
+[src: file: backend/src/api/discussions/streaming.rs:2375-2487#independent_sibling_notice]
+[src: file: backend/src/api/discussions/streaming.rs:2268-2323#discussion_at_dispatch_trigger]
+[src: file: backend/src/api/discussions/streaming.rs:2297-2332#thread_under_trigger]
 [src: file: backend/src/db/discussions.rs:2032-2056#already_scheduled]
 
 ## Joined agent turn (MCP)
@@ -180,7 +180,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5200-5286#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5226-5312#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one
@@ -268,7 +268,7 @@ Two distinctions the reason must not blur, and does not:
   the untracked path alone changes nothing a room user sees — which is exactly how the
   second producer of the generic string survived the first fix. `strings` on the built
   binary, not a source grep, is what proved a second one existed.
-[src: file: backend/src/api/discussions/streaming.rs:1270-1315#AgentExecutionOutcome] [src: file: backend/src/api/discussions/streaming.rs:1513-1528#finish_tracked_preflight]
+[src: file: backend/src/api/discussions/streaming.rs:1376-1421#AgentExecutionOutcome] [src: file: backend/src/api/discussions/streaming.rs:1619-1634#finish_tracked_preflight]
 
 ## Persistence and interruption
 
@@ -290,7 +290,7 @@ Two distinctions the reason must not blur, and does not:
 [src: file: backend/src/db/discussions.rs:1514-1557#insert_message_with_targeted_dispatch]
   [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/db/agent_dispatch.rs:1106-1255#recover_after_restart]
-[src: file: backend/src/api/discussions/streaming.rs:658-674#timeout_notice]
+[src: file: backend/src/api/discussions/streaming.rs:764-780#timeout_notice]
 
 The pure zero/single-target decision table remains in
 `backend/src/api/discussions/routing.rs`. The HTTP adapter applies it once per

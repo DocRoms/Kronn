@@ -19,7 +19,7 @@ component, so changing its identity remounted the form instead of updating props
 The form's draft, selection and in-flight guard are local state/refs.
 [src: commit: 6503ecd14af145a5f668e1afd845b6f839abc7ef]
 `[src: file: frontend/src/pages/DiscussionsPage.tsx:1200-1215#reloadDiscussion]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:997-998#reconcileLoadedDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:992-993#reconcileLoadedDiscussion]`
 `[src: file: frontend/src/components/MessageBubble.tsx:1200-1210#sources]`
 `[src: file: frontend/src/components/DiscussionQuestionCard.tsx:100-114]`
 

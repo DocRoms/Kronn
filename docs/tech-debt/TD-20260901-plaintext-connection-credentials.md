@@ -16,7 +16,7 @@
      keeps it there, next to the database it decrypts: the encryption then
      protects no more than the file permissions (`0600`).
      [src: file: backend/src/core/keystore.rs:305-325]
-     [src: file: backend/src/core/config.rs:243-291#DISK_KEYS]
+     [src: file: backend/src/core/config.rs:243-327#DISK_KEYS]
   2. **Locked or missing key at boot.** The store is not armed and
      `config.toml` is left as it is, so credentials an install had in clear
      before the migration stay there until the key is restored. No new
@@ -29,8 +29,8 @@
      kept; when the key stores cannot be read, it is moved unchanged (`0600`) and
      encrypted at the next start. Its credentials join the boot, and the notice tells the operator to
      delete the file once checked; Kronn does not delete it.
-     [src: file: backend/src/core/config.rs:470-525#set_aside_unreadable_config]
-     [src: file: backend/src/core/config.rs:1215-1227#set_aside_unreadable_config]
+     [src: file: backend/src/core/config.rs:506-561#set_aside_unreadable_config]
+     [src: file: backend/src/core/config.rs:1252-1264#set_aside_unreadable_config]
 - **Why we can't fix now (constraint)**: All three are deliberate KT-1007
   trade-offs against losing the key or a credential: dropping the file copy
   of the key without two durable copies, rewriting `config.toml` under a

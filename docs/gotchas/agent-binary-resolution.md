@@ -12,7 +12,7 @@ the resolved npx executable and arguments. The version comes from that command's
 successful `--version` output; failed or empty output leaves it unknown. Settings
 shows the command and explicitly warns about npx fallback. Refreshing detection
 also clears cached fallback versions.
-[src: file: backend/src/models/setup.rs:1987-1990#fallback_command]
+[src: file: backend/src/models/setup.rs:2021-2024#fallback_command]
 [src: file: backend/src/agents/mod.rs:757#fallback_command]
 [src: file: backend/src/agents/mod.rs:1228-1298#probe_npx_invocation]
 [src: file: backend/src/agents/mod.rs:1593-1620#version_from_output]

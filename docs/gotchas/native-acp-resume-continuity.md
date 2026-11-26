@@ -6,7 +6,7 @@ directory. The discussion layer selects the resume identity and delta together;
 `start_agent_with_config` never independently reloads a rejected identity.
 A first turn, incomplete checkpoint, missing marker or delta without a size
 saving uses the ordinary bounded full prompt and no resume identity.
-[src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
+[src: file: backend/src/api/discussions/streaming.rs:2732-2864#resume_with_delta_if_possible]
 [src: file: backend/src/agents/runner.rs:4601-4605#acp_resume_id]
 
 ## Two boundaries, one completed turn
@@ -27,7 +27,7 @@ summary/pinning indices. It never silently truncates unseen messages: if the
 complete delta is not smaller than the bounded full prompt, resume is declined.
 [src: file: backend/src/api/disc_prompts.rs:400-420#build_agent_delta_prompt]
 [src: file: backend/src/api/disc_prompts.rs:643-648#is_delta]
-[src: file: backend/src/api/discussions/streaming.rs:2559-2581#messages_not_yet_seen]
+[src: file: backend/src/api/discussions/streaming.rs:2665-2687#messages_not_yet_seen]
 [src: file: backend/src/api/discussions/streaming.rs:2670-2713#unseen]
 
 Migration 173 adds the output marker and an active turn identity, without
@@ -50,7 +50,7 @@ database failure there prevents the spawn rather than leaving a stale frontier.
 [src: file: backend/src/agents/runner.rs:2976-2983#CLI_PRINT_RUNTIME]
 [src: file: backend/src/agents/runner.rs:2992-3047#prepare_cli_print_turn]
 [src: file: backend/src/agents/runner.rs:2992-3001#prepare_cli_print_turn]
-[src: file: backend/src/api/discussions/streaming.rs:2657-2669#acp_delta]
+[src: file: backend/src/api/discussions/streaming.rs:2763-2775#acp_delta]
 
 ## Negotiated resumption
 
@@ -89,8 +89,8 @@ Each agent reply records which path its turn took in
 (resume refused by the runtime), with a reason when it did not resume. The
 discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
-[src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
-[src: file: backend/src/api/discussions/streaming.rs:2759-2769#settle_turn_continuity]
+[src: file: backend/src/api/discussions/streaming.rs:2732-2864#resume_with_delta_if_possible]
+[src: file: backend/src/api/discussions/streaming.rs:2865-2875#settle_turn_continuity]
 [src: file: backend/src/agents/runner.rs:6181-6196#resume_refused]
 
 ## Deterministic qualification boundaries
@@ -109,7 +109,7 @@ Additional tests cover scope isolation, stale turn/session events, incomplete
 legacy progress and atomic response/checkpoint rollback. Existing ACP fixtures
 cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
-[src: file: backend/src/api/discussions/streaming.rs:8958-9277#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+[src: file: backend/src/api/discussions/streaming.rs:9104-9423#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
 [src: file: backend/src/agents/runner.rs:16237-16338#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
 [src: file: backend/src/agents/runner.rs:16395-16599#run_acp_session_uses_resume_and_keeps_the_existing_fallback]

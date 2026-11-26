@@ -39,7 +39,7 @@ Such a failure is deterministic, so deferring it only repeats it. It was
 classified as a runtime outage and replayed every 30 seconds — 282 identical
 attempts in one report, diagnosing nothing. It is now a hard preflight failure
 that surfaces in the discussion.
-[src: file: backend/src/api/discussions/streaming.rs:1277-1316#agent_start_failure_outcome]
+[src: file: backend/src/api/discussions/streaming.rs:1383-1422#agent_start_failure_outcome]
 [src: url: https://github.com/DocRoms/Kronn/issues/201]
 
 ## Attachment previews and legacy history (KT-633 / issue 208)
@@ -74,8 +74,8 @@ existing hard preflight refusal rather than being silently repaired.
 [src: file: backend/src/api/disc_prompts.rs:187-260#build_synthesis_prompt]
 [src: file: backend/src/api/disc_prompts.rs:387-398#build_agent_prompt]
 [src: file: backend/src/api/disc_prompts.rs:400-420#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:2737#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:4142#build_agent_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:2843#build_agent_delta_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:4276#build_agent_prompt]
 
 The new HTTP regressions use the real Router and SQLite with temporary config
 and files: upload preserves exact disk bytes, and export/import/re-export keeps
@@ -87,8 +87,8 @@ provider or claim a browser/full-runtime end-to-end demonstration. Truly absent
 runtimes still use the existing deferral policy; this patch does not cap it.
 [src: file: backend/tests/context_file_safety.rs:82-137#upload_utf16_and_binary_keeps_original_bytes_and_safe_durable_previews]
 [src: file: backend/tests/context_file_safety.rs:139-247#imported_legacy_preview_and_history_are_safe_without_rewriting_the_archive]
-[src: file: backend/src/api/discussions/streaming.rs:7577-7607#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
-[src: file: backend/src/api/discussions/streaming.rs:7609-7701#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
+[src: file: backend/src/api/discussions/streaming.rs:7723-7753#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
+[src: file: backend/src/api/discussions/streaming.rs:7755-7847#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
 
 Initial production-path regression replay: **9 failed / 0 passed** before the
 preview/prompt corrections. Expanded focused replay: **12 passed**; two HTTP
