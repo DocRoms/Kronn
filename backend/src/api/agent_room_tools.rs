@@ -14,6 +14,9 @@ use axum::{extract::State, Json};
 /// The names the room tools are declared and dispatched under.
 pub(super) const NAMES: &[&str] = &["disc_read", "disc_append", "disc_question_list"];
 
+/// Earlier rounds a read by key returns with the latest one.
+const PREVIOUS_ROUNDS_SHOWN: usize = 10;
+
 const QUESTION_EXAMPLE: &str = "```kronn-question\n{\"version\":1,\"key\":\"stable-key\",\"question\":\"...\",\"options\":[{\"id\":\"a\",\"label\":\"...\"}]}\n```";
 
 pub(super) fn declarations() -> Vec<Value> {
@@ -22,7 +25,8 @@ pub(super) fn declarations() -> Vec<Value> {
          Markdown. When the human must arbitrate (choice, approval, ambiguous scope), put a closed \
          kronn-question fence in `content`, never prose alone: {QUESTION_EXAMPLE} `version` is the JSON \
          number 1, not \"1\". A card that could not be recorded comes back in `invalid_cards` with its \
-         reason: repost it. Then read its key back with disc_question_list."
+         reason: fix what the reason says, then repost it. Then read its key back with \
+         disc_question_list."
     );
     [
         (
@@ -43,7 +47,11 @@ pub(super) fn declarations() -> Vec<Value> {
             "Read the pending human arbitrations of THIS step's room (latest 50), or the durable answer \
              for an exact `key`. Never answers for the human. After publishing a kronn-question, read \
              its exact key back to verify it was recorded; an absent row is not an answer, correct the \
-             card and repost it with the same key.",
+             card and repost it with the same key. Asking again once a card is answered, declined or \
+             cancelled reuses the key on purpose and opens a new round (earlier ones in \
+             `previous_rounds`); a key still pending is refused. Kronn's ceiling, dispute, \
+             briefing and elevation cards are never posted again by an agent, under any key, and \
+             `kronn-elevation-docker` keys are Kronn's only.",
             json!({"key": {"type": "string", "description": "Exact question key, up to 100 characters."}}),
             json!([]),
         ),
@@ -214,13 +222,28 @@ impl KronnToolExecutor {
             Ok(Value::Array(questions)) => questions,
             _ => return fail(call, "could not serialise the room's questions"),
         };
-        let matches: Vec<Value> = questions
+        let mut matches: Vec<Value> = questions
             .into_iter()
             .filter(|question| match key {
                 Some(key) => question["key"] == key,
                 None => question["state"] == "pending",
             })
             .collect();
+        if key.is_some() {
+            // KT-2085 — the rounds of a key, oldest first: the latest is the live card.
+            let latest: Vec<Value> = matches.pop().into_iter().collect();
+            let cut = matches.len().saturating_sub(PREVIOUS_ROUNDS_SHOWN);
+            return ok(
+                call,
+                json!({
+                    "questions": latest,
+                    "previous_rounds": matches[cut..],
+                    "matching_count": latest.len(),
+                    "pending_count": pending_count,
+                    "truncated": cut > 0,
+                }),
+            );
+        }
         let shown = matches.len().saturating_sub(50);
         ok(
             call,

@@ -583,14 +583,7 @@ async fn a_granted_ceiling_wakes_the_agent_with_a_raised_budget() {
         rounds: None,
     };
     let asked = crate::api::discussions::ceilings::ceiling_question(&report, "fr");
-    insert_test_message(
-        &state,
-        "ceiling-room",
-        "Agent",
-        &format!("Voici ce que j'ai pu lire.{}", asked.markdown),
-    )
-    .await;
-    // What Kronn asked, recorded with the message that carries it.
+    // What Kronn asked, recorded before the message that carries it.
     let (key, ceilings) = (asked.key.clone(), asked.ceilings.clone());
     state
         .db
@@ -605,6 +598,13 @@ async fn a_granted_ceiling_wakes_the_agent_with_a_raised_budget() {
         })
         .await
         .unwrap();
+    insert_test_message(
+        &state,
+        "ceiling-room",
+        "Agent",
+        &format!("Voici ce que j'ai pu lire.{}", asked.markdown),
+    )
+    .await;
 
     let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
     let (_, list) = send(
@@ -690,7 +690,6 @@ async fn keeping_the_partial_answer_wakes_nobody() {
         rounds: Some(150),
     };
     let asked = crate::api::discussions::ceilings::ceiling_question(&report, "fr");
-    insert_test_message(&state, "ceiling-stop", "Agent", &asked.markdown).await;
     let (key, ceilings) = (asked.key.clone(), asked.ceilings.clone());
     state
         .db
@@ -705,6 +704,7 @@ async fn keeping_the_partial_answer_wakes_nobody() {
         })
         .await
         .unwrap();
+    insert_test_message(&state, "ceiling-stop", "Agent", &asked.markdown).await;
     let (_, list) = send(
         state.clone(),
         false,

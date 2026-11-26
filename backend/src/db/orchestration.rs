@@ -4000,10 +4000,43 @@ fn announce_integration_refusal(
 /// it, so an answer to its question is a human's decision on Kronn's request.
 pub const DOCKER_ELEVATION_PREFIX: &str = "orch-elevation:docker:";
 
+/// The key prefix of Docker elevation cards, reserved whole to Kronn (KT-2085):
+/// the UI styles any key under it as one, and an answer grants only on Kronn's.
+pub const DOCKER_ELEVATION_KEY_PREFIX: &str = "kronn-elevation-docker";
+
+/// Whether `message_id` is a Docker elevation card Kronn posted: its id prefix
+/// and the orchestration kind. Ingest and the answer path share this one test.
+pub fn is_kronn_docker_elevation_message(conn: &Connection, message_id: &str) -> Result<bool> {
+    if !message_id.starts_with(DOCKER_ELEVATION_PREFIX) {
+        return Ok(false);
+    }
+    let kind: Option<Option<String>> = conn
+        .query_row(
+            "SELECT kind FROM messages WHERE id = ?1",
+            [message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(kind.flatten().as_deref() == Some("orchestration"))
+}
+
+/// The key of an execution's Docker elevation card (KT-2087): one per
+/// execution, so two executions held in one room each get a card the human can
+/// answer, and a later refusal of the same execution opens a new round of it.
+fn docker_elevation_key(exec_id: &str) -> String {
+    let id: String = exec_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let mut key = format!("{DOCKER_ELEVATION_KEY_PREFIX}.{id}");
+    key.truncate(100);
+    key
+}
+
 /// Ask the human, on a `kronn-question` card, whether this execution's
 /// validations may reach Docker: refuse, this discussion, or the project
-/// (KT-1433). One card per refusal; answering it is handled by
-/// `api::discussion_questions::apply_elevation`.
+/// (KT-1433). One card per refusal, none while its card still waits; answering
+/// it is handled by `api::discussion_questions::apply_elevation`.
 pub fn post_docker_elevation_card(conn: &Connection, exec_id: &str) -> Result<()> {
     let Some(execution) = get_task_execution(conn, exec_id)? else {
         return Ok(());
@@ -4017,10 +4050,11 @@ pub fn post_docker_elevation_card(conn: &Connection, exec_id: &str) -> Result<()
         params![parent, format!("{DOCKER_ELEVATION_PREFIX}{exec_id}:%")],
         |row| row.get(0),
     )?;
+    let key = docker_elevation_key(exec_id);
     let lang = RoomLang::from_code(&principal.language);
     let card = serde_json::json!({
         "version": 1,
-        "key": "kronn-elevation-docker",
+        "key": key,
         "question": lang.pick(
             "Autoriser Docker pour les validations d'intégration ?",
             "Allow Docker for the integration validations?",
@@ -4067,18 +4101,46 @@ pub fn post_docker_elevation_card(conn: &Connection, exec_id: &str) -> Result<()
         session_continuity: None,
         kind: crate::models::MessageKind::Orchestration,
     };
-    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
-        conn,
-        parent,
-        &message,
-        &[],
-        &[],
-        None,
-    )?;
-    let invalid = (crate::core::uplink::required::<crate::core::uplink::MessageQuestionIngest>()?
-        .0)(conn, parent, &message.id, &message.content)?;
-    anyhow::ensure!(invalid.is_empty(), "elevation card refused: {invalid:?}");
-    Ok(())
+    // The message and its card together, or the message and the reason its
+    // card was refused: never a dead fence alone (KT-2087).
+    in_savepoint(conn, |conn| {
+        // Its card still waiting answers for this refusal too: a second one could not be recorded.
+        let waiting: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM discussion_questions
+              WHERE discussion_id = ?1 AND state = 'pending'
+                AND (question_key = ?2 OR substr(question_key, 1, length(?2) + 1) = ?2 || '~'))",
+            params![parent, key],
+            |row| row.get(0),
+        )?;
+        if waiting {
+            return Ok(());
+        }
+        crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+            conn,
+            parent,
+            &message,
+            &[],
+            &[],
+            None,
+        )?;
+        let invalid =
+            (crate::core::uplink::required::<crate::core::uplink::MessageQuestionIngest>()?.0)(
+                conn,
+                parent,
+                &message.id,
+                &message.content,
+            )?;
+        if !invalid.is_empty() {
+            tracing::warn!(execution_id = %exec_id, ?invalid, "Docker elevation card refused");
+            let mut report = crate::core::anti_halluc::LintReport::empty();
+            report.invalid_cards = invalid;
+            conn.execute(
+                "UPDATE messages SET lint_report = ?2 WHERE id = ?1",
+                params![message.id, serde_json::to_string(&report)?],
+            )?;
+        }
+        Ok(())
+    })
 }
 
 /// Record a human's answer to a Docker elevation card (KT-1433): `project`
@@ -4101,14 +4163,7 @@ pub fn record_docker_elevation(
         return Ok(None);
     }
     // Kronn's own message, not an agent's look-alike.
-    let kind: Option<Option<String>> = conn
-        .query_row(
-            "SELECT kind FROM messages WHERE id = ?1",
-            [message_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if kind.flatten().as_deref() != Some("orchestration") {
+    if !is_kronn_docker_elevation_message(conn, message_id)? {
         return Ok(None);
     }
     let Some(execution) = get_task_execution(conn, exec_id)? else {

@@ -689,8 +689,8 @@ TOOLS = [
     {
         "name": "disc_append",
         "description": (
-            "Post to the bound room. Human decision → `kronn-question` fence "
-            "(`tool_manual disc_question_list`); a refused one returns in `invalid_cards`: repost. "
+            "Post to the bound room. Human decision: `kronn-question` fence "
+            "(`tool_manual disc_question_list`); if refused, fix what `invalid_cards` says, then repost. "
             "NEVER invent a pseudo: the human is `@user`; "
             "native aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
             "`@copilot`, `@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
@@ -4691,6 +4691,11 @@ def call_disc_question_list(args):
         raise RuntimeError("Invalid discussion questions response")
     matches = [q for q in data["questions"] if
                (q.get("key") == key if key is not None else q.get("state") == "pending")]
+    if key is not None:
+        # KT-2085 — the rounds of a key, oldest first: the latest is the live card.
+        latest, earlier = matches[-1:], matches[:-1]
+        return {"questions": latest, "previous_rounds": earlier[-10:], "matching_count": len(latest),
+                "pending_count": data.get("pending_count", 0), "truncated": len(earlier) > 10}
     return {"questions": matches[-50:], "matching_count": len(matches),
             "pending_count": data.get("pending_count", 0), "truncated": len(matches) > 50}
 
@@ -10235,7 +10240,14 @@ TOOL_MANUALS = {
         "Resume accepts at most 16 variables; workflow_id is 1-128 characters, variable "
         "names are 1-64 ASCII letters/digits/-_., and values are control-free strings "
         "of at most 8000 characters. "
-        "Same key in a room keeps ONE immutable card; reuse it on retry. "
+        "A key names one decision: never re-post a card already recorded. To ask again "
+        "once the human answered, declined or cancelled it, post the card with the same "
+        "key in a new message, on purpose: it opens a new round, and a read by key returns "
+        "the latest round with the earlier ones in `previous_rounds`. A key still waiting "
+        "for an answer is refused (`invalid_cards`): wait until the human answers, "
+        "declines or cancels it, or use a new key. Kronn's ceiling, dispute, "
+        "briefing and elevation cards are never posted again by an agent, under any key, "
+        "and `kronn-elevation-docker` keys are Kronn's only. "
         "Read pending cards before asking; pass key to recover a prior answer "
         "after reconnect or handoff. After disc_append, read back this exact key "
         "with disc_question_list and verify that the card was recorded. An absent "

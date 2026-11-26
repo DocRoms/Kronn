@@ -330,6 +330,37 @@ class DiscussionQuestionReadTests(unittest.TestCase):
             self.assertEqual(self.mod.call_disc_question_list({"key": "absent"})["questions"], [])
             self.assertTrue(all(call == mock.call("GET", "/api/discussions/room/questions") for call in http.call_args_list))
 
+    def test_a_key_read_returns_its_latest_round_with_the_earlier_ones_as_history(self):
+        # KT-2085 — rows come oldest first; each round of a key is its own card.
+        rows = [
+            {"id": "q1", "key": "scope", "state": "answered", "answer": {"text": "Which cost?"}},
+            {"id": "other", "key": "other", "state": "pending"},
+            {"id": "q2", "key": "scope", "state": "declined"},
+            {"id": "q3", "key": "scope", "state": "pending"},
+        ]
+        with mock.patch.object(self.mod, "_disc_id", return_value="room"), mock.patch.object(
+            self.mod, "_http", return_value={"success": True, "data": {"questions": rows, "pending_count": 2}}
+        ):
+            read = self.mod.call_disc_question_list({"key": "scope"})
+            self.assertEqual(read["questions"], [rows[3]])
+            self.assertEqual(read["previous_rounds"], [rows[0], rows[2]])
+            self.assertEqual(read["matching_count"], 1)
+            self.assertFalse(read["truncated"])
+            pending = self.mod.call_disc_question_list({})
+            self.assertEqual(pending["questions"], [rows[1], rows[3]])
+            self.assertNotIn("previous_rounds", pending)
+        manual = self.mod.TOOL_MANUALS["disc_question_list"]
+        for contract in ["opens a new round", "previous_rounds", "still waiting for an answer is refused",
+                         "answers, declines or cancels it", "never re-post a card already recorded",
+                         "Kronn's ceiling, dispute, briefing and elevation cards are never posted again by "
+                         "an agent, under any key, and `kronn-elevation-docker` keys are Kronn's only."]:
+            self.assertIn(contract, manual)
+
+    def test_a_refused_card_is_fixed_before_it_is_reposted(self):
+        # KT-2085 — a refusal names its cause (a key still pending, a card Kronn owns).
+        append = next(tool for tool in self.mod.TOOLS if tool["name"] == "disc_append")
+        self.assertIn("fix what `invalid_cards` says, then repost", append["description"])
+
     def test_invalid_key_is_rejected_before_http(self):
         with mock.patch.object(self.mod, "_http") as http:
             for key in [False, 5, "", "x" * 101]:

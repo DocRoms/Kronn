@@ -16,7 +16,10 @@ import type { Discussion, DiscussionMessage, DiscussionQuestion } from '../../sr
 import { DashboardPage } from '../pages/DashboardPage';
 
 const DISC_ID = 'e2e-orchestrator-card';
-const MSG_ID = 'orch-elevation:docker:e2e-exec:0';
+// KT-2087 — one card per execution: the key carries the execution id.
+const EXEC_ID = '7c3d9a1e-5b24-4f8e-a6d0-1e2f3a4b5c6d';
+const MSG_ID = `orch-elevation:docker:${EXEC_ID}:0`;
+const ELEVATION_KEY = `kronn-elevation-docker.${EXEC_ID}`;
 const QUESTION_ID = `question:${MSG_ID}:0`;
 const TITLE = 'E2E Orchestrator Card';
 
@@ -29,7 +32,7 @@ const options = [
 function question(answered: boolean): DiscussionQuestion {
   return {
     id: QUESTION_ID, discussion_id: DISC_ID, source_message_id: MSG_ID, fence_index: 0,
-    key: 'kronn-elevation-docker', question: "Autoriser Docker pour les validations d'intégration ?",
+    key: ELEVATION_KEY, question: "Autoriser Docker pour les validations d'intégration ?",
     context: 'Une validation passe par Docker, que le bac à sable des validations garde fermé.',
     td_errors: null, options, items: [], multiple: false, recommended_option_ids: [], task_ref: null,
     requester_workflow_step: null, resume: null,
@@ -49,7 +52,7 @@ function orchestratorMessage(): DiscussionMessage {
       '**Élévation demandée — Docker**',
       '',
       '```kronn-question',
-      JSON.stringify({ version: 1, key: 'kronn-elevation-docker', question: question(false).question, options }),
+      JSON.stringify({ version: 1, key: ELEVATION_KEY, question: question(false).question, options }),
       '```',
     ].join('\n'),
     agent_type: null,

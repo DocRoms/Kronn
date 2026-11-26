@@ -8,7 +8,10 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import type { DiscussionMessage, DiscussionQuestion } from '../../types/generated';
 
-const MESSAGE_ID = 'orch-elevation:docker:exec-1:0';
+// KT-2087 — one card per execution: the key carries the execution id.
+const EXEC_ID = '0b9e6f4c-2d71-4a3e-9c58-7f1a2b3c4d5e';
+const MESSAGE_ID = `orch-elevation:docker:${EXEC_ID}:0`;
+const ELEVATION_KEY = `kronn-elevation-docker.${EXEC_ID}`;
 
 const { questionsMock } = vi.hoisted(() => ({ questionsMock: vi.fn() }));
 vi.mock('../../lib/api', async () => {
@@ -33,7 +36,7 @@ import { resetDiscussionQuestions } from '../../lib/discussionQuestions';
 
 const question: DiscussionQuestion = {
   id: `question:${MESSAGE_ID}:0`, discussion_id: 'disc-test', source_message_id: MESSAGE_ID,
-  fence_index: 0, key: 'kronn-elevation-docker', question: 'Autoriser Docker pour les validations ?',
+  fence_index: 0, key: ELEVATION_KEY, question: 'Autoriser Docker pour les validations ?',
   context: null, td_errors: null,
   options: [
     { id: 'deny', label: 'Refuser', description: null },
@@ -72,7 +75,7 @@ describe('orchestrator decision cards (KT-1433)', () => {
       '**Élévation demandée — Docker**',
       '',
       '```kronn-question',
-      JSON.stringify({ version: 1, key: 'kronn-elevation-docker', question: question.question, options: question.options }),
+      JSON.stringify({ version: 1, key: ELEVATION_KEY, question: question.question, options: question.options }),
       '```',
     ].join('\n');
     render(<I18nProvider><MessageBubble {...noopProps} msg={orchestratorMessage(content)} /></I18nProvider>);
@@ -90,7 +93,7 @@ describe('orchestrator decision cards (KT-1433)', () => {
       '**Élévation demandée — Docker**',
       '',
       '```kronn-question',
-      JSON.stringify({ version: 1, key: 'kronn-elevation-docker', question: question.question, options: question.options }),
+      JSON.stringify({ version: 1, key: ELEVATION_KEY, question: question.question, options: question.options }),
       '```',
     ].join('\n');
     render(<I18nProvider><MessageBubble {...noopProps} msg={orchestratorMessage(content)} /></I18nProvider>);
@@ -113,7 +116,7 @@ describe('orchestrator decision cards (KT-1433)', () => {
     const onNavigate = vi.fn();
     const content = [
       '```kronn-question',
-      JSON.stringify({ version: 1, key: 'kronn-elevation-docker', question: question.question, options: question.options }),
+      JSON.stringify({ version: 1, key: ELEVATION_KEY, question: question.question, options: question.options }),
       '```',
     ].join('\n');
     render(<I18nProvider><MessageBubble {...noopProps} onNavigate={onNavigate} msg={orchestratorMessage(content)} /></I18nProvider>);

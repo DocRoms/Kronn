@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ts_rs::TS;
@@ -464,6 +464,166 @@ fn question_fences(content: &str) -> Vec<String> {
     result
 }
 
+/// KT-2085 — round n ≥ 2 of a key is stored as `key~n` (no schema change);
+/// `stable_key` refuses `~`, so no key an agent writes can take that form.
+const ROUND_SEPARATOR: char = '~';
+
+fn round_of(stored_key: &str) -> u32 {
+    stored_key
+        .rsplit_once(ROUND_SEPARATOR)
+        .and_then(|(_, round)| round.parse().ok())
+        .unwrap_or(1)
+}
+
+/// The latest round of `key` in the discussion: its number, state and message.
+fn latest_round(
+    conn: &Connection,
+    discussion_id: &str,
+    key: &str,
+) -> Result<Option<(u32, String, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT question_key, state, source_message_id FROM discussion_questions
+          WHERE discussion_id=?1
+            AND (question_key=?2 OR substr(question_key, 1, length(?2) + 1)=?2 || ?3)",
+    )?;
+    let separator = ROUND_SEPARATOR.to_string();
+    let rows = statement.query_map(params![discussion_id, key, separator], |row| {
+        Ok((
+            round_of(&row.get::<_, String>(0)?),
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut latest: Option<(u32, String, String)> = None;
+    for row in rows {
+        let row = row?;
+        if latest.as_ref().is_none_or(|(round, ..)| row.0 > *round) {
+            latest = Some(row);
+        }
+    }
+    Ok(latest)
+}
+
+/// The states a round is over in: only then may its key be asked again.
+/// `cancelled` is the state the 0.15.4 UI adds.
+const FINISHED_STATES: [&str; 3] = ["answered", "declined", "cancelled"];
+
+/// Why `spec` cannot open a round of its key (the first, or the one after
+/// `latest`: round, state, message); `None` when it can.
+fn new_round_refusal(
+    conn: &Connection,
+    discussion_id: &str,
+    spec: &QuestionSpec,
+    latest: Option<&(u32, String, String)>,
+    from_kronn_elevation: bool,
+) -> Result<Option<String>> {
+    let key = &spec.key;
+    // A ceiling card rides the agent's own message: Kronn's is the one it recorded first.
+    let prefix = super::discussion_ceiling_requests::QUESTION_KEY_PREFIX;
+    if key.starts_with(prefix) && !ceiling_recorded(conn, discussion_id, key)? {
+        return Ok(Some(format!(
+            "keys starting with `{prefix}` are Kronn's ceiling cards; use another key"
+        )));
+    }
+    // An elevation answer grants only on Kronn's message: no other holds the key, round 1 included.
+    let owner = if key.starts_with(crate::db::orchestration::DOCKER_ELEVATION_KEY_PREFIX)
+        && !from_kronn_elevation
+    {
+        Some(ELEVATION_OWNED)
+    } else if latest.is_some() {
+        kronn_card_owner(conn, discussion_id, spec)?
+    } else {
+        None
+    };
+    let Some((_, state, source)) = latest else {
+        return Ok(owner.map(|owner| format!("key `{key}` {owner}")));
+    };
+    let state = state.as_str();
+    let waiting = format!(
+        "key `{key}` is still waiting for an answer in message {source}: wait for the human to \
+         answer, decline or cancel it"
+    );
+    // A Kronn card is never sent to a new key: nothing would read that answer.
+    Ok(match owner {
+        Some(owner) if state == "pending" => Some(format!("{waiting}; it {owner}")),
+        // A declined card cannot be answered: the form or a new launch is the way on.
+        Some(BRIEFING_OWNED) if matches!(state, "declined" | "cancelled") => Some(format!(
+            "key `{key}` was {state} in message {source}, and a {state} briefing card is not \
+             asked again: the human fills in the briefing form, or a new audit launch gives a \
+             new set; do not repost it under any key"
+        )),
+        Some(owner) => Some(format!("key `{key}` {owner}")),
+        None if FINISHED_STATES.contains(&state) => None,
+        None if state == "pending" => Some(format!("{waiting}, or use a new key")),
+        None => Some(format!(
+            "key `{key}` is `{state}` in message {source}, neither answered, declined nor \
+             cancelled: it cannot be asked again; use a new key"
+        )),
+    })
+}
+
+// Whose card a refused key is, read after "key `…` " or "it ".
+const CEILING_OWNED: &str = "belongs to a ceiling card Kronn posted, the only card that moves \
+     the budget. Kronn posts this card itself and asks again when needed: do not repost it under \
+     any key";
+const DISPUTE_OWNED: &str = "belongs to a cross-agent dispute card Kronn posted, the only card \
+     that decides the finding. Kronn posts this card itself and asks again when needed: do not \
+     repost it under any key";
+const ELEVATION_OWNED: &str = "is reserved to the Docker elevation cards Kronn posts, the only \
+     cards that grant Docker. Kronn posts this card itself and asks again when needed: do not \
+     post it under any key";
+const BRIEFING_OWNED: &str = "belongs to a briefing card, and a briefing set is read once: the \
+     human answers through the set they already have, so do not start a new set to remind them; \
+     do not repost it under any key";
+
+/// Whether Kronn recorded the ceiling question `key` of `discussion_id` (KT-2085).
+fn ceiling_recorded(conn: &Connection, discussion_id: &str, key: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM discussion_ceiling_requests
+                        WHERE discussion_id=?1 AND question_key=?2)",
+        params![discussion_id, key],
+        |row| row.get(0),
+    )?)
+}
+
+/// A card Kronn posted binds its effect to round 1 (a ceiling budget, a
+/// disputed finding, a briefing set read once): a later round would be an
+/// answer that moves nothing, so its key is never asked again.
+fn kronn_card_owner(
+    conn: &Connection,
+    discussion_id: &str,
+    spec: &QuestionSpec,
+) -> Result<Option<&'static str>> {
+    let key = &spec.key;
+    if key.starts_with(super::discussion_ceiling_requests::QUESTION_KEY_PREFIX)
+        && ceiling_recorded(conn, discussion_id, key)?
+    {
+        return Ok(Some(CEILING_OWNED));
+    }
+    if key.starts_with(crate::core::cross_audit::QUESTION_KEY_PREFIX)
+        && super::audit_cross::dispute_target(conn, discussion_id, key)?.is_some()
+    {
+        return Ok(Some(DISPUTE_OWNED));
+    }
+    // Round 1 can be gone with its message while a later round stays.
+    let first_task_ref: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(payload_json, '$.task_ref') FROM discussion_questions
+              WHERE discussion_id=?1 AND question_key=?2",
+            params![discussion_id, key],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let briefing = |task_ref: Option<&str>| {
+        task_ref.is_some_and(|r| r.starts_with(crate::api::audit::briefing_cards::TASK_REF_PREFIX))
+    };
+    if briefing(first_task_ref.as_deref()) || briefing(spec.task_ref.as_deref()) {
+        return Ok(Some(BRIEFING_OWNED));
+    }
+    Ok(None)
+}
+
 /// Record the cards of a message's `kronn-question` fences. A fence that
 /// cannot be recorded is returned with its reason — never skipped silently
 /// (KT-1401) — for the caller to report on the message.
@@ -490,6 +650,9 @@ pub fn ingest_message_questions(
         params![message_id, discussion_id],
         |row| row.get(0),
     )?;
+    let from_kronn_elevation =
+        crate::db::orchestration::is_kronn_docker_elevation_message(conn, message_id)?;
+    let mut keys_in_message = std::collections::HashSet::new();
     for (index, body) in question_fences(content).into_iter().take(64).enumerate() {
         let spec = match parse_spec(&body) {
             Ok(spec) => spec,
@@ -501,8 +664,51 @@ pub fn ingest_message_questions(
                 continue;
             }
         };
+        // One card per key and message, checked before the replay test so a
+        // replay refuses the same fences as the first ingest.
+        if !keys_in_message.insert(spec.key.clone()) {
+            invalid.push(crate::core::anti_halluc::InvalidCard {
+                key: Some(spec.key.clone()),
+                reason: format!(
+                    "key `{}` appears twice in this message: one card per key, give the other \
+                     card its own key",
+                    spec.key
+                ),
+            });
+            continue;
+        }
+        // A replayed message: this fence already has its card.
+        let recorded: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM discussion_questions
+                            WHERE source_message_id=?1 AND fence_index=?2)",
+            params![message_id, index as i64],
+            |row| row.get(0),
+        )?;
+        if recorded {
+            continue;
+        }
+        // A key asked again once its round is over opens a new round; while a
+        // round waits, the same key would be a second card nobody can tell apart.
+        let latest = latest_round(conn, discussion_id, &spec.key)?;
+        if let Some(reason) = new_round_refusal(
+            conn,
+            discussion_id,
+            &spec,
+            latest.as_ref(),
+            from_kronn_elevation,
+        )? {
+            invalid.push(crate::core::anti_halluc::InvalidCard {
+                key: Some(spec.key.clone()),
+                reason,
+            });
+            continue;
+        }
+        let stored_key = match latest {
+            None => spec.key.clone(),
+            Some((round, ..)) => format!("{}{ROUND_SEPARATOR}{}", spec.key, round + 1),
+        };
         let now = Utc::now().to_rfc3339();
-        conn.execute(
+        let inserted = conn.execute(
             "INSERT INTO discussion_questions (id, discussion_id, source_message_id, fence_index,
                  question_key, payload_json, requester_connection_id, created_at, updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)
@@ -512,12 +718,18 @@ pub fn ingest_message_questions(
                 discussion_id,
                 message_id,
                 index as i64,
-                spec.key,
+                stored_key,
                 serde_json::to_string(&spec)?,
                 connection_id,
                 now
             ],
         )?;
+        if inserted == 0 {
+            invalid.push(crate::core::anti_halluc::InvalidCard {
+                key: Some(spec.key.clone()),
+                reason: format!("key `{}` is already taken in this discussion", spec.key),
+            });
+        }
     }
     Ok(invalid)
 }
@@ -856,7 +1068,6 @@ fn room_native_agent(
     conn: &Connection,
     discussion_id: &str,
 ) -> Result<Option<(crate::models::AgentType, Option<String>)>, AnswerError> {
-    use rusqlite::OptionalExtension;
     if super::discussions::disc_is_no_agent(conn, discussion_id)? {
         return Ok(None);
     }
@@ -1152,7 +1363,8 @@ fn decline_inner(
                         sans elle, ou reformule-la si la décision reste nécessaire."
         )
     );
-    if let Some(mut target) = cross_dispute_of(conn, discussion_id, &question.key)? {
+    let kronn_key = stored_key(conn, question_id)?;
+    if let Some(mut target) = cross_dispute_of(conn, discussion_id, &kronn_key)? {
         crate::core::cross_audit_decision::apply(
             conn,
             &mut target,
@@ -1164,7 +1376,7 @@ fn decline_inner(
     let ceiling = super::discussion_ceiling_requests::decide(
         conn,
         discussion_id,
-        &question.key,
+        &kronn_key,
         &[super::discussion_ceiling_requests::OPTION_STOP.to_string()],
     )?;
     publish_human_resolution(
@@ -1197,6 +1409,19 @@ fn decline_inner(
     question.updated_at = record.answered_at.clone();
     question.answer = Some(record);
     Ok(question)
+}
+
+/// The key a card is stored under. Kronn posts a ceiling or dispute card once,
+/// as round 1, and ingest refuses a later round of it; one stored anyway moves
+/// neither a budget nor a finding.
+fn stored_key(conn: &Connection, question_id: &str) -> Result<String, AnswerError> {
+    Ok(conn
+        .query_row(
+            "SELECT question_key FROM discussion_questions WHERE id=?1",
+            [question_id],
+            |row| row.get(0),
+        )
+        .map_err(anyhow::Error::from)?)
 }
 
 /// The cross-agent finding a card decides, when the card is a dispute card
@@ -1475,7 +1700,8 @@ fn answer_inner(
     } else {
         None
     };
-    let cross_dispute = cross_dispute_of(conn, discussion_id, &question.key)?;
+    let kronn_key = stored_key(conn, question_id)?;
+    let cross_dispute = cross_dispute_of(conn, discussion_id, &kronn_key)?;
     if let Some(mut target) = cross_dispute.clone() {
         let decision = selected
             .first()
@@ -1570,7 +1796,7 @@ fn answer_inner(
         question.td_errors = None;
     }
     let ceiling =
-        super::discussion_ceiling_requests::decide(conn, discussion_id, &question.key, &selected)?;
+        super::discussion_ceiling_requests::decide(conn, discussion_id, &kronn_key, &selected)?;
     if let super::discussion_ceiling_requests::Answered::Decided(
         super::discussion_ceiling_requests::Decision::Grant
         | super::discussion_ceiling_requests::Decision::Unlimited,

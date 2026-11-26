@@ -1972,3 +1972,530 @@ fn a_resume_spec_does_not_print_its_variables_debug_without_secrets() {
         assert!(printed.contains("\"token\""), "{printed}");
     }
 }
+
+// ── KT-2085: a key asked again ──────────────────────────────────────────────
+
+fn lint_report_of(
+    conn: &Connection,
+    message_id: &str,
+) -> Option<crate::core::anti_halluc::LintReport> {
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT lint_report FROM messages WHERE id=?1",
+            [message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    json.map(|json| serde_json::from_str(&json).unwrap())
+}
+
+fn stored_keys(conn: &Connection) -> Vec<String> {
+    conn.prepare("SELECT question_key FROM discussion_questions ORDER BY created_at, id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// The real case: the human answered with a question back, the agent answered
+/// it and asked again under the same key, in a new message.
+#[test]
+fn a_key_asked_again_after_its_answer_opens_a_new_round() {
+    let conn = database();
+    insert(&conn, "m1", payload());
+    let question_back = AnswerDiscussionQuestionRequest {
+        selected_option_ids: vec![],
+        item_answers: vec![],
+        text: Some("Que coûte chaque option ?".into()),
+        idempotency_key: "answer-1".into(),
+    };
+    answer(&conn, "d", "question:m1:0", &question_back, "Romu", None).unwrap();
+
+    insert(&conn, "m2", payload());
+    assert!(
+        lint_report_of(&conn, "m2").is_none(),
+        "a new round is not an invalid card"
+    );
+    let listed = list(&conn, "d").unwrap();
+    assert_eq!(listed.pending_count, 1);
+    let rounds: Vec<_> = listed
+        .questions
+        .iter()
+        .map(|q| (q.source_message_id.as_str(), q.key.as_str(), q.state))
+        .collect();
+    assert_eq!(
+        rounds,
+        [
+            ("m1", "quota-policy", DiscussionQuestionState::Answered),
+            ("m2", "quota-policy", DiscussionQuestionState::Pending),
+        ]
+    );
+
+    // The new round is answered like any card, and the next one follows it.
+    let second = AnswerDiscussionQuestionRequest {
+        idempotency_key: "answer-2".into(),
+        ..request()
+    };
+    let answered = answer(&conn, "d", "question:m2:0", &second, "Romu", None).unwrap();
+    assert_eq!(answered.state, DiscussionQuestionState::Answered);
+    assert_eq!(answered.answer.unwrap().selected_option_ids, ["retry"]);
+    insert(&conn, "m3", payload());
+    assert_eq!(
+        stored_keys(&conn),
+        ["quota-policy", "quota-policy~2", "quota-policy~3"]
+    );
+    assert_eq!(list(&conn, "d").unwrap().pending_count, 1);
+}
+
+#[test]
+fn a_key_asked_again_after_a_refusal_opens_a_new_round() {
+    let conn = database();
+    insert(&conn, "m1", payload());
+    decline(
+        &conn,
+        "d",
+        "question:m1:0",
+        &decline_request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+
+    insert(&conn, "m2", payload());
+    assert!(lint_report_of(&conn, "m2").is_none());
+    let listed = list(&conn, "d").unwrap();
+    assert_eq!(listed.questions.len(), 2);
+    assert_eq!(listed.questions[1].source_message_id, "m2");
+    assert_eq!(listed.questions[1].state, DiscussionQuestionState::Pending);
+    let again = DeclineDiscussionQuestionRequest {
+        idempotency_key: "decline-2".into(),
+        reason: None,
+    };
+    let declined = decline(&conn, "d", "question:m2:0", &again, "Romu", None).unwrap();
+    assert_eq!(declined.state, DiscussionQuestionState::Declined);
+}
+
+#[test]
+fn a_key_still_waiting_is_refused_in_another_message_with_its_reason() {
+    let conn = database();
+    insert(&conn, "m1", payload());
+    insert(&conn, "m2", payload());
+
+    let listed = list(&conn, "d").unwrap();
+    assert_eq!(listed.questions.len(), 1);
+    assert_eq!(listed.questions[0].source_message_id, "m1");
+    let report = lint_report_of(&conn, "m2").expect("the refusal rides the message's lint report");
+    assert_eq!(report.invalid_cards.len(), 1, "{:?}", report.invalid_cards);
+    assert_eq!(report.invalid_cards[0].key.as_deref(), Some("quota-policy"));
+    let reason = &report.invalid_cards[0].reason;
+    assert!(
+        reason.contains("still waiting for an answer")
+            && reason.contains("m1")
+            && reason.contains("answer, decline or cancel it")
+            && reason.contains("new key"),
+        "{reason}"
+    );
+    assert!(lint_report_of(&conn, "m1").is_none());
+}
+
+#[test]
+fn replaying_a_message_records_nothing_twice_and_reports_nothing() {
+    let conn = database();
+    insert(&conn, "m1", payload());
+    let content = format!("```kronn-question\n{}\n```", payload());
+    assert!(ingest_message_questions(&conn, "d", "m1", &content)
+        .unwrap()
+        .is_empty());
+    answer(&conn, "d", "question:m1:0", &request(), "Romu", None).unwrap();
+    // Once answered, the replay is still the same card, not a second round.
+    assert!(ingest_message_questions(&conn, "d", "m1", &content)
+        .unwrap()
+        .is_empty());
+    assert_eq!(stored_keys(&conn), ["quota-policy"]);
+    assert!(lint_report_of(&conn, "m1").is_none());
+}
+
+#[test]
+fn a_card_never_recorded_is_recorded_when_republished_with_the_same_key() {
+    let conn = database();
+    let mut invalid = payload();
+    invalid["version"] = "1".into();
+    insert(&conn, "m1", invalid);
+    assert!(lint_report_of(&conn, "m1").is_some());
+
+    insert(&conn, "m2", payload());
+    assert!(lint_report_of(&conn, "m2").is_none());
+    let listed = list(&conn, "d").unwrap();
+    assert_eq!(listed.questions.len(), 1);
+    assert_eq!(listed.questions[0].source_message_id, "m2");
+    assert_eq!(stored_keys(&conn), ["quota-policy"]);
+}
+
+#[test]
+fn a_key_carrying_the_round_separator_is_refused_with_a_reason() {
+    let conn = database();
+    let mut value = payload();
+    value["key"] = "quota-policy~2".into();
+    insert(&conn, "m1", value);
+
+    assert!(list(&conn, "d").unwrap().questions.is_empty());
+    let report = lint_report_of(&conn, "m1").unwrap();
+    assert_eq!(
+        report.invalid_cards[0].key.as_deref(),
+        Some("quota-policy~2")
+    );
+    assert!(
+        report.invalid_cards[0].reason.contains("`key`"),
+        "{:?}",
+        report.invalid_cards[0]
+    );
+}
+
+// ── KT-2085 review round: what may open a new round ─────────────────────────
+
+/// A ceiling question Kronn recorded and its card, as Kronn posts them.
+fn ceiling_card(conn: &Connection) -> (String, serde_json::Value) {
+    use crate::db::discussion_ceiling_requests as ceilings;
+    let key = format!("{}abc", ceilings::QUESTION_KEY_PREFIX);
+    ceilings::record(
+        conn,
+        "d",
+        &key,
+        "Codex",
+        &[ceilings::Ceiling::Rounds {
+            limit: 150,
+            step: 50,
+        }],
+    )
+    .unwrap();
+    let card = serde_json::json!({"version":1,"key":key,"question":"Plafond atteint ?",
+        "options":[{"id":ceilings::OPTION_GRANT,"label":"Accorder"},{"id":ceilings::OPTION_STOP,"label":"Arrêter"}]});
+    (key, card)
+}
+
+fn ceiling_decision(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT decision FROM discussion_ceiling_requests WHERE question_key=?1",
+        [key],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// The one reason `message_id` was refused for.
+fn refusal_of(conn: &Connection, message_id: &str) -> crate::core::anti_halluc::InvalidCard {
+    let report = lint_report_of(conn, message_id).expect("the refusal rides the lint report");
+    assert_eq!(report.invalid_cards.len(), 1, "{:?}", report.invalid_cards);
+    report.invalid_cards.into_iter().next().unwrap()
+}
+
+/// A later round of `key` stored directly, as no ingest records one for a
+/// Kronn card any more: only the effects that would read it are under test.
+fn force_round(
+    conn: &Connection,
+    message_id: &str,
+    key: &str,
+    round: u32,
+    card: &serde_json::Value,
+) {
+    crate::db::discussions::insert_message(conn, "d", &message(message_id, "Encore ?".into()))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO discussion_questions (id, discussion_id, source_message_id, fence_index,
+             question_key, payload_json, created_at, updated_at)
+         VALUES (?1, 'd', ?2, 0, ?3, ?4, ?5, ?5)",
+        params![
+            format!("question:{message_id}:0"),
+            message_id,
+            format!("{key}~{round}"),
+            card.to_string(),
+            Utc::now().to_rfc3339()
+        ],
+    )
+    .unwrap();
+}
+
+/// KT-2085 — ceiling keys are Kronn's: a look-alike card an agent posts is refused at once,
+/// while the card Kronn recorded before posting it is recorded.
+#[test]
+fn a_ceiling_key_kronn_did_not_record_is_refused() {
+    use crate::db::discussion_ceiling_requests::QUESTION_KEY_PREFIX;
+    let conn = database();
+    let forged = format!("{QUESTION_KEY_PREFIX}forged");
+    let mut look_alike = payload();
+    look_alike["key"] = forged.clone().into();
+    insert(&conn, "m1", look_alike);
+    let (key, card) = ceiling_card(&conn);
+    insert(&conn, "m2", card);
+
+    assert_eq!(stored_keys(&conn), [key]);
+    let refusal = refusal_of(&conn, "m1");
+    assert_eq!(refusal.key.as_deref(), Some(forged.as_str()));
+    assert_eq!(
+        refusal.reason,
+        format!(
+            "keys starting with `{QUESTION_KEY_PREFIX}` are Kronn's ceiling cards; use another key"
+        )
+    );
+    assert!(lint_report_of(&conn, "m2").is_none());
+}
+
+/// A ceiling card is Kronn's: asked again under its key, pending or refused,
+/// it is turned back with the reason instead of opening a round the human
+/// could answer for nothing.
+#[test]
+fn a_ceiling_card_asked_again_is_refused_with_the_reason() {
+    let conn = database();
+    let (key, card) = ceiling_card(&conn);
+    insert(&conn, "m1", card.clone());
+    insert(&conn, "m2", card.clone());
+    decline(
+        &conn,
+        "d",
+        "question:m1:0",
+        &decline_request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+    assert_eq!(ceiling_decision(&conn, &key).as_deref(), Some("stop"));
+    insert(&conn, "m3", card);
+
+    assert_eq!(stored_keys(&conn), std::slice::from_ref(&key));
+    // Never "use a new key": a ceiling card under another key is an answer
+    // nothing reads.
+    for message_id in ["m2", "m3"] {
+        let refusal = refusal_of(&conn, message_id);
+        assert_eq!(refusal.key.as_deref(), Some(key.as_str()));
+        assert!(
+            refusal.reason.contains("ceiling card Kronn posted")
+                && refusal.reason.contains("do not repost it under any key")
+                && !refusal.reason.contains("new key"),
+            "{message_id}: {}",
+            refusal.reason
+        );
+    }
+    // While Kronn's card waits, the agent is told so first.
+    let waiting = refusal_of(&conn, "m2").reason;
+    assert!(
+        waiting.starts_with(&format!(
+            "key `{key}` is still waiting for an answer in message m1"
+        )),
+        "{waiting}"
+    );
+    assert!(!refusal_of(&conn, "m3").reason.contains("still waiting"));
+    assert_eq!(ceiling_decision(&conn, &key).as_deref(), Some("stop"));
+}
+
+/// Only Kronn's card, round 1, decides a ceiling: a later round under its key,
+/// answered or declined, moves no budget.
+#[test]
+fn a_later_round_of_a_ceiling_key_never_moves_the_budget() {
+    use crate::db::discussion_ceiling_requests as ceilings;
+    let conn = database();
+    let (key, card) = ceiling_card(&conn);
+    insert(&conn, "m1", card.clone());
+    let prose = AnswerDiscussionQuestionRequest {
+        selected_option_ids: vec![],
+        item_answers: vec![],
+        text: Some("Pourquoi autant d'appels ?".into()),
+        idempotency_key: "answer-1".into(),
+    };
+    answer(&conn, "d", "question:m1:0", &prose, "Romu", None).unwrap();
+    assert_eq!(ceiling_decision(&conn, &key), None, "prose decides nothing");
+
+    force_round(&conn, "m2", &key, 2, &card);
+    let grant = AnswerDiscussionQuestionRequest {
+        selected_option_ids: vec![ceilings::OPTION_GRANT.into()],
+        text: None,
+        idempotency_key: "answer-2".into(),
+        ..prose
+    };
+    let answered = answer(&conn, "d", "question:m2:0", &grant, "Romu", None).unwrap();
+    force_round(&conn, "m3", &key, 3, &card);
+    decline(
+        &conn,
+        "d",
+        "question:m3:0",
+        &decline_request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(ceiling_decision(&conn, &key), None);
+    let notice: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            [&answered.answer.unwrap().message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!notice.contains("relevé le plafond"), "{notice}");
+}
+
+/// A briefing set is read once, first card per field: a later round would be
+/// an answer nobody reads. A new briefing request gets a new set instead.
+#[test]
+fn a_briefing_card_asked_again_is_refused_with_the_reason() {
+    let conn = database();
+    let briefing = serde_json::json!({"version":1,"key":"briefing-purpose.s1",
+        "question":"What is this project for?","options":[{"id":"not_provided","label":"Not provided"}],
+        "task_ref":"audit-briefing:p1:d:s1"});
+    insert(&conn, "m1", briefing.clone());
+    decline(
+        &conn,
+        "d",
+        "question:m1:0",
+        &decline_request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+    insert(&conn, "m2", briefing.clone());
+    // Nor does an answered card of another key come back as a briefing card.
+    insert(&conn, "m3", payload());
+    answer(&conn, "d", "question:m3:0", &request(), "Romu", None).unwrap();
+    let mut disguised = briefing;
+    disguised["key"] = "quota-policy".into();
+    insert(&conn, "m4", disguised);
+
+    assert_eq!(stored_keys(&conn), ["briefing-purpose.s1", "quota-policy"]);
+    let declined = refusal_of(&conn, "m2");
+    assert_eq!(declined.key.as_deref(), Some("briefing-purpose.s1"));
+    assert!(
+        declined.reason.contains(
+            "a declined briefing card is not asked again: the human fills in the briefing \
+             form, or a new audit launch gives a new set; do not repost it under any key"
+        ) && !declined.reason.contains("new key"),
+        "{}",
+        declined.reason
+    );
+    let answered = refusal_of(&conn, "m4");
+    assert_eq!(answered.key.as_deref(), Some("quota-policy"));
+    assert!(
+        answered.reason.contains("briefing card")
+            && answered
+                .reason
+                .contains("answers through the set they already have")
+            && answered.reason.contains("do not start a new set")
+            && answered.reason.contains("do not repost it under any key")
+            && !answered.reason.contains("new key"),
+        "{}",
+        answered.reason
+    );
+}
+
+/// KT-2085 — a briefing card's refusal follows its round: still waiting, the
+/// agent is told so first; cancelled, it is not asked again either.
+#[test]
+fn a_briefing_card_refusal_follows_the_state_of_its_round() {
+    let conn = database();
+    let key = "briefing-purpose.s1";
+    let briefing = serde_json::json!({"version":1,"key":key,
+        "question":"What is this project for?","options":[{"id":"not_provided","label":"Not provided"}],
+        "task_ref":"audit-briefing:p1:d:s1"});
+    insert(&conn, "m1", briefing.clone());
+    insert(&conn, "m2", briefing.clone());
+    force_state(&conn, "question:m1:0", "cancelled");
+    insert(&conn, "m3", briefing);
+
+    assert_eq!(stored_keys(&conn), [key]);
+    let waiting = refusal_of(&conn, "m2").reason;
+    assert!(
+        waiting.starts_with(&format!(
+            "key `{key}` is still waiting for an answer in message m1"
+        )) && waiting.contains("answers through the set they already have")
+            && waiting.contains("do not repost it under any key")
+            && !waiting.contains("new key"),
+        "{waiting}"
+    );
+    let cancelled = refusal_of(&conn, "m3").reason;
+    assert!(
+        cancelled.contains(
+            "a cancelled briefing card is not asked again: the human fills in the briefing \
+             form, or a new audit launch gives a new set; do not repost it under any key"
+        ) && !cancelled.contains("new key"),
+        "{cancelled}"
+    );
+}
+
+fn force_state(conn: &Connection, question_id: &str, state: &str) {
+    conn.execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    conn.execute(
+        "UPDATE discussion_questions SET state=?2 WHERE id=?1",
+        params![question_id, state],
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA ignore_check_constraints = OFF")
+        .unwrap();
+}
+
+/// Answered, declined and cancelled (the state the 0.15.4 UI adds) are the
+/// finished states: only they open a new round; any other is refused.
+#[test]
+fn only_a_finished_round_opens_a_new_one() {
+    let conn = database();
+    insert(&conn, "m1", payload());
+    force_state(&conn, "question:m1:0", "cancelled");
+    insert(&conn, "m2", payload());
+    assert!(lint_report_of(&conn, "m2").is_none());
+    assert_eq!(stored_keys(&conn), ["quota-policy", "quota-policy~2"]);
+
+    force_state(&conn, "question:m2:0", "archived");
+    insert(&conn, "m3", payload());
+    assert_eq!(stored_keys(&conn), ["quota-policy", "quota-policy~2"]);
+    let refusal = refusal_of(&conn, "m3");
+    assert!(
+        refusal.reason.contains("`archived`") && refusal.reason.contains("new key"),
+        "{}",
+        refusal.reason
+    );
+}
+
+/// One card per key and message: after an answered round the first fence
+/// opens the next round and the second is refused with its reason, the same
+/// as for a key asked for the first time.
+#[test]
+fn the_same_key_twice_in_one_message_records_the_first_fence_only() {
+    let conn = database();
+    let twice = |value: serde_json::Value| {
+        format!("```kronn-question\n{value}\n```\n\n```kronn-question\n{value}\n```")
+    };
+    insert(&conn, "m1", payload());
+    answer(&conn, "d", "question:m1:0", &request(), "Romu", None).unwrap();
+    crate::db::discussions::insert_message(&conn, "d", &message("m2", twice(payload()))).unwrap();
+    let mut fresh = payload();
+    fresh["key"] = "fresh".into();
+    crate::db::discussions::insert_message(&conn, "d", &message("m3", twice(fresh))).unwrap();
+
+    assert_eq!(
+        stored_keys(&conn),
+        ["quota-policy", "quota-policy~2", "fresh"]
+    );
+    let recorded: Vec<_> = list(&conn, "d")
+        .unwrap()
+        .questions
+        .into_iter()
+        .map(|q| (q.source_message_id, q.fence_index, q.state))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            ("m1".to_string(), 0, DiscussionQuestionState::Answered),
+            ("m2".to_string(), 0, DiscussionQuestionState::Pending),
+            ("m3".to_string(), 0, DiscussionQuestionState::Pending),
+        ]
+    );
+    for (message_id, key) in [("m2", "quota-policy"), ("m3", "fresh")] {
+        let refusal = refusal_of(&conn, message_id);
+        assert_eq!(refusal.key.as_deref(), Some(key));
+        assert!(
+            refusal.reason.contains("twice in this message"),
+            "{message_id}: {}",
+            refusal.reason
+        );
+    }
+}
