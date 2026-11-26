@@ -204,8 +204,8 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 (`reassign_execution_worker_keeping_origin` and `extend_review_rounds` refuse a terminal one), so there is no
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
-[src: file: backend/src/api/orchestration.rs:5046-5058#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:15296-15307#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:5641-5679#cleanup_integrated_execution]
+[src: file: backend/src/api/orchestration.rs:16601-16612#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -255,7 +255,7 @@ The removal of a stalled lane is recorded on its execution (`lane_target_reclaim
 [src: file: backend/src/api/disk.rs:242-270#ownerless_entry_state]
 [src: file: backend/src/db/orchestration.rs:554-597#stalled_execution_blocker]
 [src: file: backend/src/db/orchestration.rs:620-637#workspace_row_names_path]
-[src: file: backend/src/core/worktree.rs:507-570#remove_ownerless_worktree]
+[src: file: backend/src/core/worktree.rs:514-561#remove_ownerless_worktree]
 
 ## The launch guard
 
@@ -269,7 +269,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:1132-1200#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:11270-11293#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:12519-12542#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.
@@ -297,7 +297,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:1281-1293#run_purge]
 - MCP tool **`disk_usage`** (`project_id`) — the scoped report above, read-only, bounded to the 25 largest
   entries. It never calls the purge; a leftover `purge_orphans: true` argument returns a note that purging
-  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7843-7875#call_disk_usage]
+  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7870-7902#call_disk_usage]
 - **Settings → Disk** — measure on demand (never on page open), totals by kind, the table, **Purge
   orphans**, a per-entry delete behind a confirmation, and the two thresholds.
 

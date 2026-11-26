@@ -19,7 +19,7 @@ override.
   `ProjectCommitSettings` shape): name, e-mail and sign-off (Auto / Always / Never).
   Validated on save (`WorkersConfig::validate`) and published to the process by
   `config::save` and at boot (`commit_policy::set_global_settings`).
-  [src: file: backend/src/models/setup.rs:170#commit]
+  [src: file: backend/src/models/setup.rs:174#commit]
   [src: file: backend/src/core/commit_policy.rs:221#set_global_settings]
 - **Project — the card** (Dashboard › project › *Identité et signoff des commits*)
   saves `ProjectCommitSettings` inside the project workspace
@@ -77,7 +77,7 @@ but:
   worker commits (`orch-commit-identity:<execution>:worker|principal`, so a resume
   cannot post it twice): *Ce projet n'a pas d'identité de commit : Kronn utilise
   `<email>`. Règle-la dans la carte du projet.*
-  [src: file: backend/src/api/orchestration.rs:12962-12966#announce_global_commit_identity]
+  [src: file: backend/src/api/orchestration.rs:14234-14238#announce_global_commit_identity]
 - the project card shows the same warning (`global_identity`).
 
 An identity set in Settings › Workers is a decision, so it raises no notice.
@@ -89,12 +89,12 @@ The list is **Settings › Workers › OS junk files** (`workers.os_junk_pattern
 validated on save (`WorkersConfig::validate`, `os_junk_pattern_problem`) and
 published to the process by `config::save` and at boot
 (`worktree::set_os_junk_patterns`).
-[src: file: backend/src/core/worktree.rs:1830-1831#set_os_junk_patterns]
+[src: file: backend/src/core/worktree.rs:1860-1861#set_os_junk_patterns]
 
 - Each lane Kronn creates excludes the patterns in the repository's local exclude
   (`ensure_os_junk_excluded`), without touching a tracked `.gitignore`.
-  [src: file: backend/src/core/worktree.rs:1874-1876#ensure_os_junk_excluded]
+  [src: file: backend/src/core/worktree.rs:1912-1914#ensure_os_junk_excluded]
 - A checkout that holds only junk is not dirty: delivery and cleanup go through.
   A *tracked* junk file that changed is still work.
-  [src: file: backend/src/core/worktree.rs:4730-4736#worktree_dirty_files]
+  [src: file: backend/src/core/worktree.rs:6980-6986#worktree_dirty_files]
 - A type change (`T`, a file replaced by a symlink) is delivered as *Modified*.

@@ -18,7 +18,7 @@ roots. [src: file: backend/src/api/mcps.rs:945-953#sync_pids]
 `test_state` calls a single `OnceLock<TempDir>` initializer which creates and
 installs both `KRONN_DATA_DIR` and `KRONN_HOST_HOME`; subsequent state builders
 do not mutate either process-global variable. [src: file: backend/tests/api_tests.rs:6126-6151#isolate_config_dir]
-[src: file: backend/tests/api_tests.rs:6528-6535#test_state]
+[src: file: backend/tests/api_tests.rs:6625-6632#test_state]
 
 The library test module has a different constraint: its non-serial state
 constructors do not mutate the environment, while the pre-existing config-save
@@ -83,7 +83,7 @@ and sends two ordinary concurrent create requests after initialization. The
 blocked child places a file inside the owned Codex fixture and verifies that a
 write failure leaves the outside sentinels unchanged. The parent re-executes its
 own test binary with `--exact`, has a 15-second deadline/kill path, and asserts
-that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:19428-19658#MCP_HOST_ISOLATION_CHILD]
+that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:19644-19874#MCP_HOST_ISOLATION_CHILD]
 
 The parent initializes the ordinary `OnceLock` before taking those environment
 snapshots. Otherwise a parallel non-serial router test can perform the first

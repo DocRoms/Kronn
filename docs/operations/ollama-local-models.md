@@ -33,17 +33,17 @@ references for the lifecycle actions they steer. A worker is still offered
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
 `[src: file: backend/src/api/agent_tools.rs:1679-1822#worker_room_catalogue]`
-`[src: file: backend/src/api/agent_tools.rs:2971-2995#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:4174-4196#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:2921-2954#task_exec_status]`
-`[src: file: backend/src/api/agent_tools.rs:4136-4172#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:2993-3017#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4206-4228#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2943-2976#task_exec_status]`
+`[src: file: backend/src/api/agent_tools.rs:4168-4204#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
 executor. If that lookup fails, the run is refused before provider inference;
 Kronn must never silently broaden a worker to the principal catalogue.
 `[src: file: backend/src/api/discussions/streaming.rs:92-146#native_http_tools_for_discussion]`
-`[src: file: backend/src/db/orchestration.rs:1160-1177#get_execution_for_sub_discussion]`
+`[src: file: backend/src/db/orchestration.rs:1335-1352#get_execution_for_sub_discussion]`
 
 ## Recommended subtask loop
 
@@ -169,7 +169,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_tools.rs:1897-1914#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1401-1415#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1417-1434#worker_repair_iteration_limit]`
-`[src: file: backend/src/api/orchestration.rs:10615-10629#worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:11840-11854#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:3321-3389#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:3440-3497#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:3916-3984#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:4035-4092#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -603,7 +603,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:4219-4247#count_arg] [src: file: backend/src/api/agent_tools.rs:3873-3916#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:4251-4279#count_arg] [src: file: backend/src/api/agent_tools.rs:3905-3948#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes

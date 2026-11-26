@@ -88,6 +88,114 @@ Release notes for 0.9.3 and earlier are available in the
   reason, the worker's brief says the Rust target is cold, and adding a gate
   that needs a build to such a lane is refused: relaunch instead. See
   `docs/operations/worktree-build-artifacts.md`.
+- Orchestration tools: lighter answers for an agent that orchestrates
+  (KT-1984, KT-2110, KT-2112). `task_exec_prepare` answers the verdict and a
+  task header (reference, title, status, Definition of Done lines) instead of
+  the whole task. `task_get` lists the latest events without their bodies and
+  says how many it left out; `full_events` returns the whole history.
+  `plan_get` answers compact rows within a byte budget and says what it left
+  out, so a room with hundreds of tasks no longer fills the reader's context.
+  A joined CLI principal can name the integration branch at the preflight
+  (`base_rev`), like the room's agent; the launch tool no longer promises a
+  default branch, which never existed. The interface's own routes keep their
+  full shape.
+- Workers: a short announced rate limit is waited out on the same agent
+  (KT-1992). A task worker refused for a rate limit that its provider says
+  clears within `workers.rate_limit_wait_max_min` (15 minutes by default, 60 at
+  most, 0 turns the wait off) is no longer moved to another agent: the same
+  turn restarts on the same agent one minute after the announced reset. Both
+  rooms say until when, and `task_exec_status` says it waits. One wait per
+  turn: a second refusal, a refusal that announces nothing, a reset beyond the
+  limit and a quota refusal follow the fallback chain as before. The setting
+  has no field in Settings yet; it is read from `config.toml`. See
+  `docs/operations/agent-fallback-chain.md`.
+
+### Fixed
+
+- Discussions: deleting a discussion never destroys work (KT-2084). The delete
+  is refused while the discussion is the room or the sub-discussion of an
+  unfinished task execution, and every refusal is decided before anything is
+  cancelled. A finished execution's checkout is released only when it has been
+  idle for a while and releasing it loses nothing (diff saved, branch kept). A
+  discussion's own worktree is never removed while it holds uncommitted,
+  untracked or ignored files, dirty submodules, or commits on a detached HEAD;
+  regenerable tool output (`node_modules`, `target`, `dist`, test reports…)
+  does not count, and the list is extended with the new
+  `server.regenerable_outputs` key. A worktree shared with another discussion
+  or a run, one whose submodule holds a commit no remote reaches, and one Kronn
+  did not create are kept on disk and named in the response. A branch is
+  deleted only when it is the discussion's own, nothing else names it and
+  every commit on it is reachable elsewhere. The interface shows each refusal
+  (one line per discussion in a bulk delete) and no longer cuts a live stream
+  before the delete succeeds.
+- Worktrees: Kronn removes worktrees and their records itself (KT-2084). A
+  worktree and its registration are removed by Kronn's own code, only under
+  `.kronn/worktrees`, and only when Kronn's records name that registration;
+  Kronn no longer runs `git worktree prune`. Two registrations that name the
+  same worktree are refused with both names and the one-file step that repairs
+  it. Walks and removals stay on one file system: a folder mounted inside a
+  worktree is kept and reported as a partial removal.
+- Git panel: every git call of the panel and its actions stops at a time bound
+  and says the bound is Kronn's own (KT-2084): 30 minutes for a commit, 60 for
+  a push or a pull request creation. A push names its branch as a full ref on
+  both sides, and the base of a pull request is checked as a branch name.
+- Decision cards: a card can be asked again (KT-2085). A card that reuses the
+  key of an answered or declined card opens a new round instead of being
+  dropped. A key still waiting for its answer, the same key twice in one
+  message, and an agent posting one of Kronn's own cards again (ceiling,
+  dispute, briefing, Docker elevation) are refused with the reason.
+- Orchestration: one Docker elevation card per execution (KT-2087). Two
+  executions held on Docker in one room each get their own answerable card,
+  posted with its message, and a card still waiting is not posted again.
+- Workers: stopping a worker frees its execution at once (KT-1782). A stop on
+  a task worker's dispatch parks the execution as `Interrupted` in the same
+  request, with the reason `worker_stopped_without_delivery`, and tells the
+  principal: it can be resumed or reassigned right away instead of waiting for
+  the activity deadline or a restart. A delivery that raced with the stop is
+  left untouched.
+- Workers: after a restart, the review notice goes to the principal that
+  reviews (KT-2022). A joined CLI principal gets the notice itself; the room's
+  agent is no longer started in its place. While a decision card about the
+  task waits for the owner's answer in the principal's room, the notice is
+  held, then posted as soon as the card is answered or declined. A delivery
+  whose joined CLI worker left is still proposed for review.
+- Workers: a worker stopped by the run time limit is reported as such
+  (KT-2037). The dispatch error says Kronn stopped the worker, with the minutes
+  run, the limit and what was kept, and the principal's room gets a notice of
+  its own. The worker's brief states its time budget and the setting that
+  holds it (the local-agent one for Ollama), and `task_exec_status` returns
+  the clock to the worker.
+- Workers: a red `cargo nextest` validation says what failed (KT-2040,
+  KT-2116). The stored result, the worker's rework message and the principal's
+  notice name the failed tests, the first panic and the run's Summary line,
+  with credentials masked; a compile error is shown with its location. A
+  validation whose output exceeds the capture keeps its start and its end, so
+  a failure late in a whole-workspace run is still reported.
+- Workers: every worker dispatch that ends without delivering tells the
+  principal (KT-2108). The notice was posted once per execution, so a resumed
+  or reassigned worker that ended again without delivering left the principal
+  waiting in silence.
+- Workers: an empty delivery is refused (KT-1992). A worker that delivers with
+  no commit past the execution's base and no Definition of Done item met is
+  refused: nothing is stored and no review is requested. The refusal opens
+  with the worker's own reason, credentials masked, and the principal reads it
+  in the "ended without delivery" notice.
+- Workers: a worker session that ended leaves no process behind (KT-1986,
+  KT-2021). Each CLI worker launch is recorded with the instance that launched
+  it and its agent's process group. When its dispatch ends, that group and
+  every process tagged with the dispatch are stopped, and the execution's
+  journal says what was found. At boot Kronn stops the worker sessions its
+  previous process left, for its own data directory only; a session recorded
+  by another instance is never signalled, and a reused process id is not
+  killed. A worker never starts beside a previous session of its execution,
+  whether it is launched, requeued or woken by a message: while that session
+  may still run the launch is deferred, then the execution is parked and both
+  rooms say which session it is, the processes still alive and what to do. A
+  checkout is not removed while a recorded session may still run. Approving a
+  delivery, or re-validating one the integration sent back, ends the worker's
+  turn before the integration takes the lane. On Windows Kronn cannot look for
+  a worker's processes yet: a stop is journaled as `unsupported` and nothing
+  is held. See `docs/gotchas/worker-processes-and-vite-temp.md`.
 
 ## [0.15.3] - 2026-11-19
 

@@ -35,7 +35,7 @@ The running process still reads `config.tokens.keys` and
 writes `config.toml` without them. A failure there fails the save and leaves
 the previous file untouched.
 [src: file: backend/src/core/credential_store.rs:346-403#sync_for_save]
-[src: file: backend/src/core/config.rs:571-605#save]
+[src: file: backend/src/core/config.rs:607-641#save]
 
 ## Boot order
 

@@ -287,7 +287,7 @@ Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
 model. A missing declaration never causes an image to be sent speculatively.
 [src: file: backend/src/agents/vision.rs:520-551#attach_to_chat_body]
 [src: file: backend/src/agents/vision.rs:145-169#ollama_show_vision]
-[src: file: backend/src/api/discussions/streaming.rs:2772-2813#http_context_images]
+[src: file: backend/src/api/discussions/streaming.rs:2878-2919#http_context_images]
 
 Every withheld image is named in the model's context with an explicit instruction
 not to describe its contents, and a way for the user to supply the information.
@@ -313,7 +313,7 @@ without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3615-3647#read_attached_file]
+[src: file: backend/src/api/agent_tools.rs:3647-3679#read_attached_file]
 [src: file: backend/src/api/agent_workspace_tools.rs:1493-1537#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an

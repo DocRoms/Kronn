@@ -54,7 +54,7 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:1817-1863#ModelTier]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:1851-1897#ModelTier]
 [src: file: backend/src/agents/runner.rs:3674-3708#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
@@ -70,7 +70,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:1975-2050#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:2009-2084#AgentDetection]
 
 ## Policy and precedence
 
@@ -120,7 +120,7 @@ three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
 contract. [src: file: backend/src/agents/runner.rs:4012-4013#start_agent_with_config]
-[src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
+[src: file: backend/src/api/discussions/streaming.rs:1376-1381#AgentExecutionOutcome]
 [src: file: backend/src/api/discussions/orchestration.rs:1272-1412#detect_agent_error_hint]
 
 Fallback first needs a runner-level, provider-normalized error such as:
@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:500-522#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:5139-5148#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:5151-5160#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -249,13 +249,13 @@ The current spawn audit found these distinct Kronn-owned paths:
 
 | Current spawn path | What it covers |
 |---|---|
-| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4591-4634#native_http_tools] |
+| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4730-4773#native_http_tools] |
 | Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:629-725#ToolFreeSummary] |
 | Debate participants | Starts every participant/round independently. [src: file: backend/src/api/discussions/orchestration.rs:803-1020#start_agent_with_config] |
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:966-1123#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/disc_introspection.rs:732-931#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1993-2234#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4227-4312#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1993-2234#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4239-4324#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
@@ -292,7 +292,7 @@ fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
 [src: file: backend/src/models/workflows.rs:2349-2428#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1590-1614#WorkflowAgentAttempt]
-[src: file: backend/src/workflows/runner.rs:5397-5419#selected_attempt]
+[src: file: backend/src/workflows/runner.rs:5409-5431#selected_attempt]
 
 Persist an `AgentAttempt` record (table or versioned run JSON) with:
 

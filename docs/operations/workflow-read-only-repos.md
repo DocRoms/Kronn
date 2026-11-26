@@ -289,7 +289,7 @@ async executor.
 [src: file: backend/src/workflows/run_artifacts.rs:129-145#refusal]
 [src: file: backend/src/workflows/run_artifacts.rs:166-195#open_root]
 [src: file: backend/src/workflows/run_artifacts.rs:247-257#open_run_dir]
-[src: file: backend/src/core/rooted_fd.rs:362-400#remove_child]
+[src: file: backend/src/core/rooted_fd.rs:453-519#remove_child]
 [src: file: backend/src/workflows/run_artifacts.rs:350-391#migrate_from]
 [src: file: backend/src/workflows/run_artifacts.rs:416-434#move_into]
 [src: file: backend/src/workflows/run_artifacts.rs:441-473#sweep_root]

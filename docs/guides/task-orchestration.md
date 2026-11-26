@@ -223,10 +223,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:12160#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:12197-12221#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:10115-10139#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration_tests_up.rs:22478-22588#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:13409#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:13446-13470#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:11340-11364#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration_tests_up.rs:23221-23331#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -234,7 +234,7 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:1070-1086#agent_handoff_paid_limit]
+[src: file: backend/src/models/setup.rs:1104-1120#agent_handoff_paid_limit]
 [src: file: backend/src/db/discussions.rs:1703-1704#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1711-1746#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
@@ -258,7 +258,7 @@ The activity clock default is 20 minutes
 (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
 wins). A tool call in flight (a cold build run by the worker itself) is activity
 up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
-[src: file: backend/src/db/orchestration.rs:8164-8169#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8486-8491#DEFAULT_ACTIVITY_TIMEOUT_SECS]
 
 **Queue deadline.** An execution queued longer than the queue deadline is
 reported, never interrupted: the principal room receives one orchestration
@@ -269,8 +269,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8192-8195#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8203-8205#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8514-8517#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8525-8527#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -303,9 +303,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:2796-2824#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:3594-3614#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:3539-3592#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:4675-4703#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:5477-5497#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:5422-5475#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -319,7 +319,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:3215-3222#integration_target]
+[src: file: backend/src/core/worktree.rs:5096-5103#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -368,8 +368,8 @@ integration branch stays green on the strict `docs_citations_resolve_in_the_repo
 test without a release-time sweep. A citation the lane breaks for good (symbol
 removed or renamed) is the lane's to fix; the worker brief says so. The merge a
 worker finishes with `task_exec_commit` runs the same settlement.
-[src: file: backend/src/core/worktree.rs:2839-2943#build_candidate_detailed]
-[src: file: backend/src/core/worktree.rs:3063-3126#settle_branch_docs]
+[src: file: backend/src/core/worktree.rs:4718-4822#build_candidate_detailed]
+[src: file: backend/src/core/worktree.rs:4942-5005#settle_branch_docs]
 [src: file: backend/src/core/docs_citations/merge.rs:318-334#resolve_anchor_only_conflicts]
 [src: file: backend/src/core/docs_citations/merge.rs:747-807#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]
@@ -686,13 +686,13 @@ Three rules:
   model has no shell, so it can neither build, run the tests nor commit. It is
   skipped and the next agent is tried: a mixed list gives its CLI agent. Only a
   prelocalised (`scoped`) worker continues on an HTTP model.
-  [src: file: backend/src/api/discussions/runtime.rs:932#needs_shell]
+  [src: file: backend/src/api/discussions/runtime.rs:1105#needs_shell]
   The rule covers the moves Kronn makes on its own, and the reassignment
   itself refuses such a quota fallback, whichever step chose it. An explicit
   choice of an HTTP agent for a generic worker, by a person or by the
   principal (at launch, with `task_exec_reassign` or in the UI), stays
   possible.
-  [src: file: backend/src/api/orchestration.rs:15779#QuotaFallback]
+  [src: file: backend/src/api/orchestration.rs:17109#QuotaFallback]
   When nothing is left, the worker is not moved, and what follows depends on
   the path:
   - a **failed turn** (rate limit, outage, authentication): both rooms read the

@@ -31,12 +31,12 @@ alone does not establish a user-visible duration.
 4. The frontend polls `GET /api/discussions/{id}/poll` on active-discussion
    changes, immediately and then every five seconds.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:1200-1208#fetchActive]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1030-1063#reloadDiscussion]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1025-1058#reloadDiscussion]
    The server builds the complete detail on every poll and omits it only when
    its revision matches the one the client holds; a changed response replaces
    that discussion's cached detail object.
    [src: file: backend/src/api/discussions/crud.rs:195-225#poll]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:997-998#reconcileLoadedDiscussion]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:992-993#reconcileLoadedDiscussion]
 5. The detail response also queries all message targets belonging to the
    discussion and groups them in a map.
    [src: file: backend/src/db/discussions.rs:3087-3131#list_discussion_message_targets]
@@ -58,7 +58,7 @@ alone does not establish a user-visible duration.
    the memoized element list then makes several more passes to calculate
    metadata and reply/turn anchors.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:3260-3277#transcriptIndex]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3858-3941#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3864-3947#transcriptElements]
 3. The conversation-order projection maps every message and sorts the resulting
    array; resolving a reply chain can walk up to 16 links for an eligible row.
    [src: file: frontend/src/lib/messageTargets.ts:319-367#messagesInConversationOrder]

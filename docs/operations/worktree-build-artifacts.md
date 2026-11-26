@@ -42,7 +42,7 @@ The recurrence also exposed that non-terminal old executions and unregistered
 manual worktrees do not become reclaimable merely because a planning task is
 done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
 tests, scan recursively on a failing request, or authorise deletion of active
-or unowned targets. [src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness] [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
+or unowned targets. [src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness] [src: file: backend/src/core/worktree.rs:1290-1354#ensure_build_disk_headroom]
 
 The retained maintenance record distinguishes each authorised batch. These are
 dated physical free-space observations, not quotas or reusable deletion grants:
@@ -173,11 +173,11 @@ created only at Cargo's exact target path when its immediate parent is already a
 real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
-stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:7370-7427#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:7429-7525#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:7257-7274#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:7654-7720#run_one_validation_checked_with_runner]
+stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1290-1354#ensure_build_disk_headroom]
+[src: file: backend/src/api/orchestration.rs:8564-8621#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:8623-8719#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:8451-8468#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:8848-8910#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -191,7 +191,7 @@ target and configured critical threshold, while the maintenance inventory lists
 managed candidates and their refusal reason. An operator may request a manual,
 path-specific reclaim only after the inventory's ownership and terminal-state
 checks; this document does not authorise a broad purge or deletion of unknown,
-active, or leased targets. [src: file: backend/src/core/worktree.rs:1222-1257#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
+active, or leased targets. [src: file: backend/src/core/worktree.rs:1249-1284#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
 [src: file: backend/src/api/maintenance.rs:125-190#list_build_artifacts]
 [src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness]
 
@@ -316,7 +316,7 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/task_worker_env.rs:849]
 [src: file: backend/src/core/task_worker_lane_warm.rs:843]
 [src: file: backend/src/agents/runner.rs:14754-14763#agent_launch_priority]
-[src: file: backend/src/core/quick_exec.rs:554-578#build_command]
+[src: file: backend/src/core/quick_exec.rs:643-667#build_command]
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
 [src: file: backend/src/core/config.rs:610-611]
@@ -485,7 +485,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_lane_warm.rs:1786-1798#first_build_args]
 [src: file: backend/src/core/project_toolchains.rs:609#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:11662-11693#warm_failure_notice]
+[src: file: backend/src/api/orchestration.rs:12911-12942#warm_failure_notice]
 
 ## Seed and lane agree on the C flags (KT-1742)
 
@@ -994,10 +994,10 @@ worker's own environment predates the setting), and on a warmed lane a filtered
 load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
-[src: file: backend/src/models/setup.rs:329-336#effective_bash_timeouts_ms]
+[src: file: backend/src/models/setup.rs:338-345#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:1036-1046#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15226-15228#apply_bash_timeouts]
-[src: file: backend/src/core/worktree.rs:3452-3453#set_bash_timeouts]
+[src: file: backend/src/core/worktree.rs:5335-5336#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:321-322#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]
 [src: file: backend/src/core/task_worker_lane_warm.rs:872]
@@ -1055,9 +1055,9 @@ Cargo (`pnpm tauri build`) is not detected: the rule reads binaries, not scripts
 [src: file: backend/src/core/task_worker_warm_skip.rs:81#cold_target_note]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1845#warm_worktree]
 [src: file: backend/src/core/task_worker_lane_warm.rs:507#skipped_by_validations]
-[src: file: backend/src/api/orchestration.rs:11547#warm_lane_for_validations]
-[src: file: backend/src/api/orchestration.rs:11748#record_toolchain_smoke_check_on]
-[src: file: backend/src/db/orchestration.rs:7791#refusal_for]
+[src: file: backend/src/api/orchestration.rs:12796#warm_lane_for_validations]
+[src: file: backend/src/api/orchestration.rs:12997#record_toolchain_smoke_check_on]
+[src: file: backend/src/db/orchestration.rs:8113#refusal_for]
 
 ## Maintenance command
 
