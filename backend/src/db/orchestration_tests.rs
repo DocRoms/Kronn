@@ -8102,3 +8102,93 @@ fn a_human_close_of_an_awaiting_merge_task_drops_the_marker() {
     crate::db::planning::update_task(&conn, "t-human", &request).unwrap();
     assert_eq!(task_row(&conn, "t-human"), ("done".to_string(), None, None));
 }
+
+/// One decision card of `room`, stored the way the card module stores it: the
+/// fence's JSON in `payload_json`, on a message of its own.
+fn seed_decision_card(
+    conn: &Connection,
+    room: &str,
+    order: i64,
+    key: &str,
+    state: &str,
+    task_ref: serde_json::Value,
+) {
+    let message_id = format!("card-message-{key}");
+    let stamp = format!("2026-01-01T00:00:{order:02}Z");
+    conn.execute(
+        "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+         VALUES (?1, ?2, 'Agent', 'card', ?3, ?4)",
+        params![message_id, room, stamp, 100 + order],
+    )
+    .unwrap();
+    let payload = serde_json::json!({
+        "version": 1,
+        "key": key,
+        "question": "Which way?",
+        "options": [],
+        "task_ref": task_ref,
+    });
+    conn.execute(
+        "INSERT INTO discussion_questions \
+         (id, discussion_id, source_message_id, fence_index, question_key, payload_json, \
+          state, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?7)",
+        params![
+            format!("question:{message_id}:0"),
+            room,
+            message_id,
+            key,
+            payload.to_string(),
+            state,
+            stamp
+        ],
+    )
+    .unwrap();
+}
+
+/// KT-2022 — the cards that hold a resumed review are the pending ones of the
+/// room whose `task_ref` is the task, oldest first.
+#[test]
+fn pending_decision_cards_for_task_reads_the_task_ref_of_the_payload() {
+    let conn = setup();
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) \
+         VALUES ('disc-other-room', 'O', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    let task = || serde_json::json!("KT-2022");
+    seed_decision_card(&conn, DISC, 9, "gate-second", "pending", task());
+    seed_decision_card(&conn, DISC, 1, "gate-first", "pending", task());
+    seed_decision_card(&conn, DISC, 2, "gate-answered", "answered", task());
+    seed_decision_card(&conn, DISC, 3, "gate-declined", "declined", task());
+    seed_decision_card(
+        &conn,
+        DISC,
+        4,
+        "other-task",
+        "pending",
+        serde_json::json!("KT-20220"),
+    );
+    seed_decision_card(
+        &conn,
+        DISC,
+        5,
+        "no-task",
+        "pending",
+        serde_json::Value::Null,
+    );
+    seed_decision_card(&conn, "disc-other-room", 6, "other-room", "pending", task());
+
+    assert_eq!(
+        pending_decision_cards_for_task(&conn, DISC, "KT-2022").unwrap(),
+        ["gate-first", "gate-second"]
+    );
+    assert!(pending_decision_cards_for_task(&conn, DISC, "KT-1")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        pending_decision_cards_for_task(&conn, "disc-other-room", "KT-2022").unwrap(),
+        ["other-room"]
+    );
+}

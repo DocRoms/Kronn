@@ -4653,6 +4653,9 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              campaign `token_budget` stops it). Omitted, it takes Settings > Workers (default 5), which \
              prepare reports as `default_max_review_rounds`. Anything else, and any argument \
              the tool does not declare, is refused.\n\n\
+             **Review gate** — A decision card that gates a review is posted in the principal's \
+             room and carries `task_ref`, the task reference (for example `KT-123`): while that \
+             card is pending, a restart does not propose the review again.\n\n\
              **Worker fallback** — `quota_fallback_agents` (launch) governs QUOTA refusals \
              only. A rate limit, an outage or an authentication failure follows the agent's \
              own fallback chain (Settings > Agents), even when the launch named no \

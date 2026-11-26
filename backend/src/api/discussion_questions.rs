@@ -249,6 +249,7 @@ pub async fn answer(
     });
     match result {
         Ok(Ok(question)) => {
+            release_held_reviews(&state, &discussion_id, &question).await;
             // Wake the durable queue promptly; replay never enqueues a second job.
             state.agent_dispatch_notify.notify_one();
             let question = resume_and_reload(&state, &discussion_id, question).await;
@@ -318,6 +319,7 @@ pub async fn decline(
         .await;
     match result {
         Ok(Ok(question)) => {
+            release_held_reviews(&state, &discussion_id, &question).await;
             state.agent_dispatch_notify.notify_one();
             let question = resume_and_reload(&state, &discussion_id, question).await;
             (StatusCode::OK, Json(ApiResponse::ok(question)))
@@ -647,4 +649,38 @@ fn resume_after_elevation(state: &AppState, exec_id: String) {
             tracing::warn!(execution_id = %exec_id, error = ?resumed.0.error, "integration not resumed after a Docker elevation");
         }
     });
+}
+
+/// KT-2022 — the card just settled may have been holding a review back since a
+/// restart: propose that review now. A failed wake never fails the answer.
+async fn release_held_reviews(
+    state: &AppState,
+    discussion_id: &str,
+    question: &DiscussionQuestion,
+) {
+    let Some(task_ref) = question.task_ref.clone() else {
+        return;
+    };
+    let room = discussion_id.to_string();
+    let held = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::orchestration::held_reviews_released_for_task(conn, &room, &task_ref)
+        })
+        .await;
+    let held = match held {
+        Ok(held) => held,
+        Err(error) => {
+            tracing::warn!(discussion_id, question_id = %question.id, %error, "held reviews not read after a decision card was settled");
+            return;
+        }
+    };
+    for exec_id in held {
+        // Posted once per attempt: the wake's notice id and dispatch key are fixed.
+        if let Err(error) =
+            crate::api::orchestration::wake_recovered_principal(&state.db, &exec_id).await
+        {
+            tracing::warn!(execution_id = %exec_id, %error, "review not proposed after its decision card was settled");
+        }
+    }
 }
