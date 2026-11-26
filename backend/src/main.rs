@@ -452,6 +452,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         // KT-1718 — the shell limits of a Claude task worker, before the first one.
         kronn::core::task_worker_env::set_bash_timeouts(&config.workers);
         kronn::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
+        // KT-2084 — the build outputs a discussion delete never counts as work.
+        kronn::core::worktree::set_regenerable_outputs(&config.server.regenerable_outputs);
         // KT-1750 — the commit identity and sign-off every project inherits.
         kronn::core::commit_policy::set_global_settings(&config.workers.commit);
         // KT-1748 — the managed worktree roots, before the first launch of this boot.
@@ -502,6 +504,12 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         Err(error) => tracing::warn!("Agent resume recovery failed: {error}"),
     }
 
+    // KT-2084 — a Kronn stopped mid-judgement left its private copy of a git state
+    // behind: removed before the first judgement of this boot.
+    let snapshots = kronn::core::lane_git::snapshot::sweep_leftovers();
+    if snapshots > 0 {
+        tracing::info!(snapshots, "git snapshots of an earlier run removed");
+    }
     // 0.11.0 (KT-322) — reconcile the orchestration tree before the dispatcher
     // can claim recovered worker jobs. Every in-flight execution is first made
     // visibly Interrupted, then classified against its durable lineage and the

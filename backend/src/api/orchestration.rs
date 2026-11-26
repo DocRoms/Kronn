@@ -415,99 +415,26 @@ pub async fn reconcile_at_boot_with_agents(
             Vec::new()
         });
     for orphan in orphans {
-        let Some(path) = orphan.canonical_path.clone() else {
-            report.orphan_workspaces_preserved += 1;
-            report.errors.push(format!(
-                "workspace {} has no canonical path; preserved",
-                orphan.id
-            ));
+        // A retired row (its checkout released, its execution gone) holds nothing.
+        if orphan.canonical_path.is_none() {
             continue;
-        };
-        let project_path = {
-            let project_id = orphan.project_id.clone();
-            state
-                .db
-                .with_conn(move |conn| {
-                    Ok(crate::db::projects::get_project(conn, &project_id)?.map(|p| p.path))
-                })
-                .await
-        };
-        let Ok(Some(project_path)) = project_path else {
-            report.orphan_workspaces_preserved += 1;
-            report.errors.push(format!(
-                "workspace {} project is unavailable; preserved",
-                orphan.id
-            ));
-            continue;
-        };
-        let repo = scanner::resolve_host_path(&project_path);
-        let checkout = scanner::resolve_host_path(&path);
-        let checkout_path = checkout.to_string_lossy().to_string();
-        let had_checkout = checkout.exists();
-        let removed = if !had_checkout {
-            Ok(())
-        } else {
-            worktree::remove_cancelled_task_worktree(&repo, &checkout_path, &orphan.branch)
-        };
-        match removed {
-            Ok(()) => {
-                // KT-1318 — an orphaned checkout removed just now takes its lane
-                // build dir with it, like at every other end of life (Done,
-                // Cancelled). A checkout that was already gone leaves its lane
-                // to the idle-aware sweep below.
-                if had_checkout {
-                    reclaim_lane_target(&state.db, &repo, &checkout_path).await;
-                }
-                let workspace_id = orphan.id.clone();
-                let branch = orphan.branch.clone();
-                let cleanup = state
-                    .db
-                    .with_conn(move |conn| {
-                        let tx = conn.unchecked_transaction()?;
-                        crate::db::orchestration::record_reconciliation_event(
-                            &tx,
-                            "workspace",
-                            &workspace_id,
-                            "orphan_removed",
-                            serde_json::json!({ "path": path, "branch": branch }),
-                        )?;
-                        crate::db::discussion_workspaces::delete_orphaned_managed(
-                            &tx,
-                            &workspace_id,
-                        )?;
-                        tx.commit()?;
-                        Ok(())
-                    })
-                    .await;
-                match cleanup {
-                    Ok(()) => report.orphan_workspaces_removed += 1,
-                    Err(error) => report.errors.push(format!(
-                        "workspace {} DB orphan cleanup: {error}",
-                        orphan.id
-                    )),
+        }
+        match release_orphaned_checkout(&state.db, &orphan).await {
+            Ok(copied) => {
+                report.orphan_workspaces_removed += 1;
+                if let Some(copied) = copied {
+                    report.lane_target_report.push(format!(
+                        "released orphaned checkout of workspace {}: branch kept{}",
+                        orphan.id,
+                        ignored_copied_note(Some(&copied))
+                    ));
                 }
             }
-            Err(error) => {
+            Err(OrphanKept::Preserved(error)) => {
                 report.orphan_workspaces_preserved += 1;
-                let workspace_id = orphan.id.clone();
-                let reason = error.clone();
-                let _ = state
-                    .db
-                    .with_conn(move |conn| {
-                        crate::db::orchestration::record_reconciliation_event(
-                            conn,
-                            "workspace",
-                            &workspace_id,
-                            "orphan_preserved",
-                            serde_json::json!({ "reason": reason }),
-                        )
-                    })
-                    .await;
-                report.errors.push(format!(
-                    "workspace {} was not safe to remove: {error}",
-                    orphan.id
-                ));
+                report.errors.push(error);
             }
+            Err(OrphanKept::Cleanup(error)) => report.errors.push(error),
         }
     }
 
@@ -5113,7 +5040,15 @@ pub async fn cleanup_integrated_execution(
 /// gives; a refusal (a build still holding the lock, a symlink) is logged and
 /// audited, and the orphan sweep picks the directory up later.
 async fn reclaim_lane_target(db: &Database, repo_path: &std::path::Path, child_path: &str) {
-    let Some((lane_target, outcome)) = remove_lane_target_outcome(repo_path, child_path) else {
+    // Filesystem work off the async runtime (KT-2084).
+    let (repo, child) = (repo_path.to_path_buf(), child_path.to_string());
+    let removal =
+        tokio::task::spawn_blocking(move || remove_lane_target_outcome(&repo, &child)).await;
+    let removal = removal.unwrap_or_else(|error| {
+        tracing::warn!(worktree = %child_path, "lane target reclaim stopped: {error}");
+        None
+    });
+    let Some((lane_target, outcome)) = removal else {
         return;
     };
     let canonical = child_path.to_string();
@@ -5154,7 +5089,10 @@ pub enum CleanCheckoutReclaim {
     /// release already holds it.
     NotApplicable,
     /// The clean checkout (or its leftover admin entry) is gone; the branch is kept.
-    Released,
+    /// `ignored_copied`: the folder its ignored files were copied to, if any (KT-2084).
+    Released {
+        ignored_copied: Option<std::path::PathBuf>,
+    },
     /// A finished execution's checkout Kronn must not remove (dirty, on another
     /// branch, unreadable). `name` is its directory name, never a path.
     Kept { name: String, reason: String },
@@ -5181,6 +5119,13 @@ pub struct ReleaseCandidate {
 /// What removing a claimed checkout did to its lane build dir: `None` when the
 /// worktree names no lane.
 type LaneRemoval = Option<(std::path::PathBuf, Result<(u64, bool), String>)>;
+
+/// What step 2 of a release did: the lane build dir's removal, and the folder the
+/// checkout's ignored files were copied into, when it held any (KT-2084).
+pub struct FinishedCheckoutRemoval {
+    lane: LaneRemoval,
+    ignored_copied: Option<std::path::PathBuf>,
+}
 
 /// Step 1, under the connection: pick the execution if it is finished and
 /// unused, and claim its checkout so no other release (and no reassign, resume
@@ -5232,19 +5177,28 @@ pub fn claim_finished_checkout(
     }))
 }
 
-/// Step 2, with no connection held: the Git checks (branch, `git status`) and
-/// the removal, then the lane build dir. `Err` is the reason the checkout was
-/// kept, with nothing removed.
-pub fn remove_finished_checkout(candidate: &ReleaseCandidate) -> Result<LaneRemoval, String> {
-    worktree::remove_cancelled_task_worktree(
+/// Step 2, with no connection held: the Git checks (branch, `git status`), the copy
+/// of its ignored files into the execution's evidence (KT-2084) and the removal,
+/// then the lane build dir. `Err` is the reason the checkout was kept, with
+/// nothing removed.
+pub fn remove_finished_checkout(
+    candidate: &ReleaseCandidate,
+) -> Result<FinishedCheckoutRemoval, String> {
+    let evidence = terminal_evidence_dir(&candidate.exec_id)?;
+    let released = worktree::remove_cancelled_task_worktree(
         &candidate.repo,
         &candidate.checkout,
         &candidate.branch,
+        &evidence,
     )?;
-    Ok(remove_lane_target_outcome(
-        &candidate.repo,
-        &candidate.checkout,
-    ))
+    let ignored_copied = match released {
+        worktree::TerminalWorktreeRelease::Removed { ignored_copied, .. } => ignored_copied,
+        worktree::TerminalWorktreeRelease::AlreadyGone => None,
+    };
+    Ok(FinishedCheckoutRemoval {
+        lane: remove_lane_target_outcome(&candidate.repo, &candidate.checkout),
+        ignored_copied,
+    })
 }
 
 /// Step 3, under the connection again: record what step 2 did. A removed
@@ -5253,12 +5207,12 @@ pub fn remove_finished_checkout(candidate: &ReleaseCandidate) -> Result<LaneRemo
 pub fn settle_finished_checkout(
     conn: &rusqlite::Connection,
     candidate: &ReleaseCandidate,
-    removal: Result<LaneRemoval, String>,
+    removal: Result<FinishedCheckoutRemoval, String>,
 ) -> Result<CleanCheckoutReclaim> {
     let exec_id = candidate.exec_id.as_str();
     match removal {
-        Ok(lane) => {
-            if let Some((lane_target, outcome)) = lane {
+        Ok(removal) => {
+            if let Some((lane_target, outcome)) = removal.lane {
                 let target = lane_target.to_string_lossy().to_string();
                 if let Err(error) = crate::db::orchestration::record_lane_target_reclaim(
                     conn,
@@ -5289,10 +5243,16 @@ pub fn settle_finished_checkout(
                     "path": candidate.db_path,
                     "branch": candidate.branch,
                     "clean_only": true,
+                    "ignored_files": removal
+                        .ignored_copied
+                        .as_ref()
+                        .map(|copied| copied.to_string_lossy().to_string()),
                 }),
             )?;
             tx.commit()?;
-            Ok(CleanCheckoutReclaim::Released)
+            Ok(CleanCheckoutReclaim::Released {
+                ignored_copied: removal.ignored_copied,
+            })
         }
         // Recording the reason is the caller's: the sweep leaves a dirty checkout
         // to its idle-aware pass, which journals its own reason, and the launch
@@ -5310,8 +5270,9 @@ pub fn settle_finished_checkout(
 /// is recorded once as a `worktree_release_kept` event. Unlike the idle-aware
 /// [`release_terminal_worktrees`] this needs no idle window: a clean tree holds
 /// nothing a removal can lose, and only a durably terminal execution with no
-/// live session or lease is touched. "Clean" is `git status` clean: ignored
-/// build output goes with the worktree.
+/// live session or lease is touched. "Clean" is `git status` clean: its ignored files
+/// a delete counts as work are copied into the execution's evidence before the release,
+/// as the idle-aware sweep does (KT-2084).
 ///
 /// The connection is held for the two short database steps only; the Git checks
 /// and the removal run on a blocking thread in between, so a slow disk never
@@ -5331,7 +5292,7 @@ pub async fn reclaim_clean_finished_checkout_with<R>(
     remove: R,
 ) -> Result<CleanCheckoutReclaim>
 where
-    R: FnOnce(&ReleaseCandidate) -> Result<LaneRemoval, String> + Send + 'static,
+    R: FnOnce(&ReleaseCandidate) -> Result<FinishedCheckoutRemoval, String> + Send + 'static,
 {
     let id = exec_id.to_string();
     let Some(candidate) = db
@@ -5479,7 +5440,7 @@ async fn reclaim_clean_checkouts(
     let mut report = FinishedWorktreeReclaim::default();
     for exec_id in candidates {
         match reclaim_clean_finished_checkout(db, &exec_id).await {
-            Ok(CleanCheckoutReclaim::Released) => report.released += 1,
+            Ok(CleanCheckoutReclaim::Released { .. }) => report.released += 1,
             Ok(CleanCheckoutReclaim::Kept { name, reason }) => {
                 tracing::info!(execution_id = %exec_id, "finished worktree kept: {reason}");
                 record_release_kept(db, &exec_id, &reason).await;
@@ -5648,9 +5609,17 @@ pub fn terminal_evidence_dir(exec_id: &str) -> Result<std::path::PathBuf, String
     Ok(root.join("task-evidence").join(exec_id))
 }
 
+/// What every release line appends when the checkout's ignored files were copied (KT-2084).
+fn ignored_copied_note(copied: Option<&std::path::Path>) -> String {
+    copied
+        .map(|copied| format!(", ignored files copied to {}", copied.display()))
+        .unwrap_or_default()
+}
+
 /// Release the checkout of an execution that is already terminal (KT-1397):
-/// uncommitted changes are saved as a patch under the execution's evidence
-/// directory, the checkout is removed with its branch kept, its lane build dir
+/// uncommitted changes are saved as a patch, and its ignored files copied
+/// (KT-2084), under the execution's evidence directory, the checkout is removed
+/// with its branch kept, its lane build dir
 /// goes with it, and the workspace row is retired with its lineage.
 ///
 /// The caller proves the execution is terminal (and, for a sweep, that no
@@ -5678,9 +5647,12 @@ async fn release_terminal_checkout(
     .map_err(|error| format!("worktree release failed: {error}"))??;
     // The DB's own path string: the lane audit looks the row up by that value.
     reclaim_lane_target(db, repo, checkout_path).await;
-    let patch = match &released {
-        worktree::TerminalWorktreeRelease::Removed { patch } => patch.clone(),
-        worktree::TerminalWorktreeRelease::AlreadyGone => None,
+    let (patch, ignored_copied) = match &released {
+        worktree::TerminalWorktreeRelease::Removed {
+            patch,
+            ignored_copied,
+        } => (patch.clone(), ignored_copied.clone()),
+        worktree::TerminalWorktreeRelease::AlreadyGone => (None, None),
     };
     let id = exec_id.to_string();
     let staged_patch =
@@ -5693,6 +5665,7 @@ async fn release_terminal_checkout(
         "already_gone": released == worktree::TerminalWorktreeRelease::AlreadyGone,
         "uncommitted_patch": patch.as_ref().map(|p| p.to_string_lossy().to_string()),
         "staged_patch": staged_patch,
+        "ignored_files": ignored_copied.as_ref().map(|p| p.to_string_lossy().to_string()),
     });
     db.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
@@ -5715,24 +5688,57 @@ async fn release_terminal_checkout(
     })
     .await
     .map_err(|error| format!("checkout removed but DB cleanup failed: {error}"))?;
+    let ignored = ignored_copied_note(ignored_copied.as_deref());
     Ok(match patch {
         Some(patch) => format!(
-            "checkout removed, branch kept, uncommitted changes saved to {}",
+            "checkout removed, branch kept, uncommitted changes saved to {}{ignored}",
             patch.display()
         ),
+        None if !ignored.is_empty() => format!("checkout removed, branch kept{ignored}"),
         None => "clean checkout removed, provenance preserved".to_string(),
     })
 }
 
-/// Release the managed checkout of one finished execution found by a sweep.
-/// Unlike a cancel that just signalled its worker, a sweep proves nothing
-/// still uses the checkout: a live session or lease keeps it. `Ok(None)` is
-/// an execution with nothing to release.
+/// What [`release_finished_execution_checkout`] did with one finished execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FinishedCheckoutRelease {
+    Released(String),
+    /// No managed checkout is recorded for it.
+    NothingToRelease,
+    /// Another release holds it: the caller skips or refuses, never races it.
+    Claimed,
+}
+
+/// Release the managed checkout of one finished execution, for the sweep, the
+/// boot pass and a discussion delete. Unlike a cancel that just signalled its
+/// worker, they prove nothing still uses the checkout: a live session or lease keeps it.
 async fn release_finished_execution_checkout(
     db: &Database,
     exec_id: &str,
     min_idle: std::time::Duration,
-) -> Result<Option<String>, String> {
+) -> Result<FinishedCheckoutRelease, String> {
+    // Held until the outcome is recorded, so no other release, reassign or
+    // resume takes the checkout meanwhile (see `checkout_release`).
+    let Some(claim) = crate::core::checkout_release::ReleaseClaim::take(exec_id) else {
+        return Ok(FinishedCheckoutRelease::Claimed);
+    };
+    release_claimed_finished_checkout(
+        db,
+        exec_id,
+        (min_idle, "server.disk_sweep_idle_hours"),
+        &claim,
+    )
+    .await
+}
+
+/// [`release_finished_execution_checkout`] under a claim the caller already
+/// holds. `idle` is the inactivity window and the name a refusal gives it.
+async fn release_claimed_finished_checkout(
+    db: &Database,
+    exec_id: &str,
+    idle: (std::time::Duration, &str),
+    _claim: &crate::core::checkout_release::ReleaseClaim,
+) -> Result<FinishedCheckoutRelease, String> {
     let id = exec_id.to_string();
     let snapshot = db
         .with_conn(move |conn| {
@@ -5755,7 +5761,7 @@ async fn release_finished_execution_checkout(
         .await
         .map_err(|error| format!("execution {exec_id} unreadable: {error}"))?;
     let Some((execution, workspace, path, liveness, project_path)) = snapshot else {
-        return Ok(None);
+        return Ok(FinishedCheckoutRelease::NothingToRelease);
     };
     if !execution.status.is_terminal() {
         return Err(format!("execution {exec_id} is not finished"));
@@ -5772,7 +5778,7 @@ async fn release_finished_execution_checkout(
     // nobody writes in the checkout any more (a human may be working in it).
     // The newest write in the tree restarts the inactivity window; an activity
     // that cannot be read is never idle.
-    if let Some(reason) = recent_checkout_activity(&path, min_idle).await {
+    if let Some(reason) = recent_checkout_activity(&path, idle.0, idle.1).await {
         record_release_kept(db, exec_id, &reason).await;
         return Err(reason);
     }
@@ -5786,7 +5792,7 @@ async fn release_finished_execution_checkout(
     )
     .await
     {
-        Ok(outcome) => Ok(Some(outcome)),
+        Ok(outcome) => Ok(FinishedCheckoutRelease::Released(outcome)),
         Err(reason) => {
             // A refusal that rests on the checkout itself (an evidence cap, a
             // diff that cannot be saved, a foreign branch) is the human's to
@@ -5797,12 +5803,455 @@ async fn release_finished_execution_checkout(
     }
 }
 
-/// Why a checkout is not idle yet: `Some(reason)` when something in it was
-/// written within `min_idle` or its age cannot be established. The reason is
-/// the same text on every sweep so the event log records it once.
+/// How long after it finished, and after its last write, a finished execution's
+/// checkout stays out of a discussion delete's reach (KT-2084): a cancelled worker
+/// or a human may still be writing in it.
+pub const DELETE_RELEASE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Why deleting `disc_id` must be refused (KT-2084); else its finished and clean orphaned
+/// checkouts are released, all judged before any goes, and `Ok` says what they kept (a
+/// branch). `live_tokens`: live cancel keys.
+pub async fn settle_discussion_executions_for_delete(
+    db: &Database,
+    disc_id: &str,
+    live_tokens: &std::collections::HashSet<String>,
+) -> Result<std::result::Result<Vec<String>, String>> {
+    let id = disc_id.to_string();
+    let (executions, orphans) = db
+        .with_conn(move |conn| {
+            Ok((
+                crate::db::orchestration::executions_of_discussion(conn, &id)?,
+                crate::db::discussion_workspaces::orphaned_checkouts_of_discussion(conn, &id)?,
+            ))
+        })
+        .await?;
+    let unfinished: Vec<String> = executions
+        .iter()
+        .filter(|execution| !execution.status.is_terminal())
+        .map(crate::db::orchestration::DiscussionExecution::label)
+        .collect();
+    if !unfinished.is_empty() {
+        return Ok(Err(format!(
+            "this discussion is the room or sub-discussion of unfinished task execution(s) {}: cancel them first",
+            unfinished.join(", ")
+        )));
+    }
+    let mut claimed = Vec::new();
+    for execution in executions.iter().filter(|e| e.checkout.is_some()) {
+        let reason = match finished_checkout_refusal(db, execution, live_tokens).await? {
+            Ok(claim) => {
+                claimed.push((execution, claim));
+                continue;
+            }
+            Err(reason) => reason,
+        };
+        return Ok(Err(format!(
+            "the checkout of finished task execution {} ({}) cannot be released yet: {reason}",
+            execution.execution_id, execution.task_reference
+        )));
+    }
+    let mut releasable = Vec::new();
+    for orphan in orphans {
+        match orphaned_checkout_refusal(db, &orphan).await {
+            Ok(OrphanVerdict::Releasable(note)) => releasable.push((orphan, note)),
+            Ok(OrphanVerdict::Gone) => {}
+            Err(reason) => return Ok(Err(reason)),
+        }
+    }
+    // Decided only at release, after earlier checkouts may be gone: the evidence cap, a
+    // patch that cannot be saved, a foreign branch, an orphan's removal. Nothing is lost.
+    let window_name = format!(
+        "the delete's {}-minute window",
+        DELETE_RELEASE_WINDOW.as_secs() / 60
+    );
+    for (execution, claim) in claimed {
+        let exec_id = &execution.execution_id;
+        let refused = |reason: &str| {
+            Err(format!(
+                "the checkout of finished task execution {exec_id} ({}) cannot be released yet: {reason}",
+                execution.task_reference
+            ))
+        };
+        let window = (DELETE_RELEASE_WINDOW, window_name.as_str());
+        match release_claimed_finished_checkout(db, exec_id, window, &claim).await {
+            Ok(FinishedCheckoutRelease::Released(outcome)) => {
+                tracing::info!(execution_id = %exec_id, "released before deleting discussion {disc_id}: {outcome}")
+            }
+            Ok(FinishedCheckoutRelease::NothingToRelease | FinishedCheckoutRelease::Claimed) => {}
+            Err(reason) => return Ok(refused(&reason)),
+        }
+    }
+    let mut notes = Vec::new();
+    for (orphan, note) in releasable {
+        let path = orphan.canonical_path.clone().unwrap_or_default();
+        match release_orphaned_checkout(db, &orphan).await {
+            Ok(copied) => {
+                tracing::info!(
+                    "released orphaned checkout {path} before deleting discussion {disc_id}"
+                );
+                let ignored = ignored_copied_note(copied.as_deref());
+                match note {
+                    Some(note) => notes.push(format!("{note}{ignored}")),
+                    None if copied.is_some() => notes.push(format!(
+                        "orphaned worker checkout {path} released, branch kept{ignored}"
+                    )),
+                    None => {}
+                }
+            }
+            Err(OrphanKept::Preserved(reason) | OrphanKept::Cleanup(reason)) => {
+                return Ok(Err(format!(
+                    "the orphaned worker checkout {path} cannot be released: {reason}"
+                )))
+            }
+        }
+    }
+    Ok(Ok(notes))
+}
+
+/// Why the delete may not release `execution`'s checkout yet, else the claim
+/// that keeps every other release off it until the delete releases it itself.
+async fn finished_checkout_refusal(
+    db: &Database,
+    execution: &crate::db::orchestration::DiscussionExecution,
+    live_tokens: &std::collections::HashSet<String>,
+) -> Result<std::result::Result<crate::core::checkout_release::ReleaseClaim, String>> {
+    let minutes = DELETE_RELEASE_WINDOW.as_secs() / 60;
+    let window = chrono::Duration::seconds(DELETE_RELEASE_WINDOW.as_secs() as i64);
+    // A legacy row without `finished_at` is old enough, as for the sweep; one
+    // that cannot be read is not.
+    match &execution.finished_at {
+        None => {}
+        Some(Err(stored)) => {
+            return Ok(Err(format!(
+                "its finish time {stored:?} cannot be read, so its {minutes}-minute window cannot be proved over; fix the row or retry once its worker is known stopped"
+            )))
+        }
+        Some(Ok(at)) => {
+            let ready = *at + window;
+            if chrono::Utc::now() < ready {
+                return Ok(Err(format!(
+                    "it finished less than {minutes} minutes ago; retry after {}",
+                    ready.to_rfc3339()
+                )));
+            }
+        }
+    }
+    let id = execution.execution_id.clone();
+    let checkout = execution.checkout.clone();
+    let (activity, keys, held, repo) = db
+        .with_conn(move |conn| {
+            // What the release would refuse on, known for every checkout before any goes.
+            let held = match &checkout {
+                Some(path) => {
+                    match crate::db::orchestration::worktree_cleanup_liveness(conn, path)? {
+                        worktree::ExecutionLiveness::Terminal => None,
+                        worktree::ExecutionLiveness::Active(reason)
+                        | worktree::ExecutionLiveness::Unknown(reason) => Some(reason),
+                    }
+                }
+                None => None,
+            };
+            let project = crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)?
+                .map(|workspace| workspace.project_id);
+            let repo = match &project {
+                Some(project_id) => {
+                    crate::db::projects::get_project(conn, project_id)?.map(|p| p.path)
+                }
+                None => None,
+            };
+            let held = match (held, project) {
+                (Some(reason), _) => Some(reason),
+                (None, Some(project_id)) if repo.is_none() => {
+                    Some(format!("project {project_id} is unavailable"))
+                }
+                (None, _) => None,
+            };
+            Ok((
+                crate::db::orchestration::finished_execution_activity(conn, &id)?,
+                crate::db::orchestration::execution_cancel_keys(conn, &id)?,
+                held,
+                repo,
+            ))
+        })
+        .await?;
+    if let Some(reason) = activity {
+        return Ok(Err(format!("{reason}; retry once it has stopped")));
+    }
+    // A cancel marks the dispatch over at once; its token stays until the run ends.
+    if let Some(key) = keys.iter().find(|key| live_tokens.contains(*key)) {
+        return Ok(Err(format!(
+            "its agent run {key} is still live; stop it and retry once it has ended"
+        )));
+    }
+    if let Some(reason) = held {
+        return Ok(Err(reason));
+    }
+    if let Some(checkout) = execution.checkout.as_deref() {
+        if let Some(reason) = delete_write_window_refusal(checkout).await {
+            return Ok(Err(reason));
+        }
+        if let Some(repo) = repo {
+            if let Some(reason) = finished_checkout_loss(&repo, checkout).await {
+                return Ok(Err(reason));
+            }
+        }
+    }
+    Ok(
+        crate::core::checkout_release::ReleaseClaim::take(&execution.execution_id)
+            .ok_or_else(|| "another release holds it; retry once it has settled".to_string()),
+    )
+}
+
+/// What releasing a finished checkout would lose that its patch and the copy of its ignored
+/// files do not save (KT-2084), judged before any checkout of the delete goes: a repository
+/// in Kronn's own directory, submodule work.
+async fn finished_checkout_loss(project_path: &str, checkout_path: &str) -> Option<String> {
+    let repo = scanner::resolve_host_path(project_path);
+    let path = scanner::resolve_host_path(checkout_path);
+    let shown = checkout_path.to_string();
+    tokio::task::spawn_blocking(move || {
+        if !path.exists() {
+            return None;
+        }
+        match worktree::forced_removal_loss(&repo, &path, &shown, worktree::Saved::Everything) {
+            Ok(loss) => loss,
+            Err(error) => Some(format!(
+                "its state cannot be read ({error}); check it, then retry"
+            )),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| Some(format!("its check failed: {error}; retry")))
+}
+
+/// Why a delete may not take a checkout written within its window: until when,
+/// from the newest write anywhere in it.
+async fn delete_write_window_refusal(checkout_path: &str) -> Option<String> {
+    let path = scanner::resolve_host_path(checkout_path);
+    let newest = tokio::task::spawn_blocking(move || {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(DELETE_RELEASE_WINDOW)
+            .unwrap_or(std::time::UNIX_EPOCH);
+        worktree::checkout_newest_write_since(&path, cutoff)
+    })
+    .await;
+    match newest {
+        Ok(Ok(None)) => None,
+        Ok(Ok(Some(written))) => {
+            let ready = chrono::DateTime::<chrono::Utc>::from(written + DELETE_RELEASE_WINDOW);
+            Some(format!(
+                "it was written less than {} minutes ago; retry after {}",
+                DELETE_RELEASE_WINDOW.as_secs() / 60,
+                ready.to_rfc3339()
+            ))
+        }
+        Ok(Err(error)) => Some(format!(
+            "its last write cannot be established ({error}); check it, then retry"
+        )),
+        Err(error) => Some(format!("its activity scan failed: {error}; retry")),
+    }
+}
+
+/// What a delete may do with an orphaned checkout (KT-2084).
+enum OrphanVerdict {
+    /// Gone from disk: only its row goes.
+    Gone,
+    /// Holds no work; the note says when its branch stays because of its commits.
+    Releasable(Option<String>),
+}
+
+/// Whether a delete may release an orphaned checkout (KT-2084), judged as its
+/// release judges it: its ignored files are copied first, anything else it would
+/// lose refuses; `Err` is the refusal.
+async fn orphaned_checkout_refusal(
+    db: &Database,
+    orphan: &crate::db::discussion_workspaces::DiscussionWorkspace,
+) -> std::result::Result<OrphanVerdict, String> {
+    let recorded = orphan.canonical_path.clone().unwrap_or_default();
+    let checkout = scanner::resolve_host_path(&recorded);
+    if !checkout.exists() {
+        return Ok(OrphanVerdict::Gone);
+    }
+    let held = {
+        let path = checkout.clone();
+        db.with_conn(move |conn| {
+            Ok(crate::db::discussion_workspaces::active_holder_of_checkout(
+                conn,
+                &path,
+                None,
+                &[],
+            ))
+        })
+        .await
+        .unwrap_or_else(|error| Some(format!("the registry could not be read: {error}")))
+    };
+    if let Some(holder) = held {
+        return Err(format!(
+            "an orphaned worker checkout is still in use at {recorded} ({holder}): stop it, then retry"
+        ));
+    }
+    let project_id = orphan.project_id.clone();
+    let repo = db
+        .with_conn(move |conn| {
+            Ok(crate::db::projects::get_project(conn, &project_id)?.map(|project| project.path))
+        })
+        .await
+        .ok()
+        .flatten()
+        .map(|path| scanner::resolve_host_path(&path));
+    let (branch, shown) = (orphan.branch.clone(), recorded.clone());
+    type Judged = std::result::Result<std::result::Result<Option<String>, String>, String>;
+    let judged = tokio::task::spawn_blocking(move || -> Judged {
+        let repo = repo.ok_or("its project is unavailable")?;
+        let saved = worktree::Saved::IgnoredFiles;
+        if let Some(work) = worktree::forced_removal_loss(&repo, &checkout, &shown, saved)? {
+            return Ok(Err(work));
+        }
+        Ok(Ok(worktree::commit_unique_to_branch(&repo, &branch)?.map(|commit| {
+            format!("orphaned worker checkout {shown} released, branch kept: {branch} (it holds commit {commit}, which no other branch, tag or remote reaches)")
+        })))
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("the check failed: {error}")));
+    match judged {
+        Ok(Ok(note)) => Ok(OrphanVerdict::Releasable(note)),
+        Ok(Err(work)) => Err(format!(
+            "an orphaned worker checkout still holds work: {work}"
+        )),
+        Err(error) => Err(format!(
+            "the orphaned worker checkout {recorded} cannot be read ({error}): check it, then retry"
+        )),
+    }
+}
+
+/// Why an orphaned managed checkout was not released, as the boot report words it.
+pub enum OrphanKept {
+    /// The checkout stays.
+    Preserved(String),
+    /// The checkout is gone, its row could not be cleaned.
+    Cleanup(String),
+}
+
+/// Where the evidence of the orphaned checkout of workspace `workspace_id` is
+/// kept: its ignored files, copied before its release (KT-2084).
+pub fn orphan_evidence_dir(workspace_id: &str) -> Result<std::path::PathBuf, String> {
+    terminal_evidence_dir(&format!("orphan-{workspace_id}"))
+}
+
+/// Remove an orphaned managed checkout once Git proves it is the task's and
+/// clean (KT-322), its ignored files copied into [`orphan_evidence_dir`] first
+/// (KT-2084), then its row: the boot collector's path and a delete's. `Ok` gives
+/// the folder its ignored files were copied to, if any.
+pub async fn release_orphaned_checkout(
+    db: &Database,
+    orphan: &crate::db::discussion_workspaces::DiscussionWorkspace,
+) -> std::result::Result<Option<std::path::PathBuf>, OrphanKept> {
+    let path = orphan.canonical_path.clone().unwrap_or_default();
+    let project_path = {
+        let project_id = orphan.project_id.clone();
+        db.with_conn(move |conn| {
+            Ok(crate::db::projects::get_project(conn, &project_id)?.map(|p| p.path))
+        })
+        .await
+    };
+    let Ok(Some(project_path)) = project_path else {
+        return Err(OrphanKept::Preserved(format!(
+            "workspace {} project is unavailable; preserved",
+            orphan.id
+        )));
+    };
+    let repo = scanner::resolve_host_path(&project_path);
+    let checkout = scanner::resolve_host_path(&path);
+    let checkout_path = checkout.to_string_lossy().to_string();
+    let had_checkout = checkout.exists();
+    let removed = if !had_checkout {
+        Ok(None)
+    } else {
+        let (repo, checkout_path, branch) =
+            (repo.clone(), checkout_path.clone(), orphan.branch.clone());
+        let evidence = orphan_evidence_dir(&orphan.id);
+        tokio::task::spawn_blocking(move || {
+            // Judged once, by the release: the ignored files are copied, anything else
+            // its removal would lose keeps it.
+            let released = worktree::remove_cancelled_task_worktree(
+                &repo,
+                &checkout_path,
+                &branch,
+                &evidence?,
+            )?;
+            Ok(match released {
+                worktree::TerminalWorktreeRelease::Removed { ignored_copied, .. } => ignored_copied,
+                worktree::TerminalWorktreeRelease::AlreadyGone => None,
+            })
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("the removal task failed: {error}")))
+    };
+    let copied = match removed {
+        Ok(copied) => copied,
+        Err(error) => {
+            tracing::warn!("orphaned worker checkout {path} kept: {error}");
+            let workspace_id = orphan.id.clone();
+            let reason = error.clone();
+            let _ = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::record_reconciliation_event(
+                        conn,
+                        "workspace",
+                        &workspace_id,
+                        "orphan_preserved",
+                        serde_json::json!({ "reason": reason }),
+                    )
+                })
+                .await;
+            return Err(OrphanKept::Preserved(format!(
+                "workspace {} was not safe to remove: {error}",
+                orphan.id
+            )));
+        }
+    };
+    // KT-1318 — an orphaned checkout removed just now takes its lane build dir
+    // with it; one already gone leaves its lane to the idle-aware sweep.
+    if had_checkout {
+        reclaim_lane_target(db, &repo, &checkout_path).await;
+    }
+    let workspace_id = orphan.id.clone();
+    let branch = orphan.branch.clone();
+    let ignored_copied = copied
+        .as_ref()
+        .map(|copied| copied.to_string_lossy().to_string());
+    db.with_conn(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        crate::db::orchestration::record_reconciliation_event(
+            &tx,
+            "workspace",
+            &workspace_id,
+            "orphan_removed",
+            serde_json::json!({ "path": path, "branch": branch, "ignored_files": ignored_copied }),
+        )?;
+        crate::db::discussion_workspaces::delete_orphaned_managed(&tx, &workspace_id)?;
+        tx.commit()?;
+        Ok(())
+    })
+    .await
+    .map(|()| copied)
+    .map_err(|error| {
+        OrphanKept::Cleanup(format!(
+            "workspace {} DB orphan cleanup: {error}",
+            orphan.id
+        ))
+    })
+}
+
+/// Why a checkout is not idle yet: written within `min_idle` (named `window`), or its
+/// age unknown. Same text on every sweep, so the event log records it once.
 async fn recent_checkout_activity(
     checkout_path: &str,
     min_idle: std::time::Duration,
+    window: &str,
 ) -> Option<String> {
     let path = scanner::resolve_host_path(checkout_path);
     let walked = tokio::task::spawn_blocking(move || {
@@ -5820,7 +6269,7 @@ async fn recent_checkout_activity(
         Ok(Ok(Some(newest))) => {
             tracing::debug!(newest = %newest.display(), "checkout written within the idle window");
             Some(format!(
-                "the checkout was written within the last {} s (server.disk_sweep_idle_hours) — keeping it",
+                "the checkout was written within the last {} s ({window}) — keeping it",
                 min_idle.as_secs()
             ))
         }
@@ -5891,10 +6340,11 @@ async fn release_closed_task_executions(db: &Database, report: &mut Orchestratio
     };
     for exec_id in candidates {
         match reclaim_clean_finished_checkout(db, &exec_id).await {
-            Ok(CleanCheckoutReclaim::Released) => {
+            Ok(CleanCheckoutReclaim::Released { ignored_copied }) => {
                 report.terminal_worktrees_released += 1;
+                let ignored = ignored_copied_note(ignored_copied.as_deref());
                 report.lane_target_report.push(format!(
-                    "released execution {exec_id} of a closed task: clean checkout removed, branch kept"
+                    "released execution {exec_id} of a closed task: clean checkout removed, branch kept{ignored}"
                 ));
             }
             Ok(CleanCheckoutReclaim::Kept { name, reason }) => {
@@ -5962,7 +6412,10 @@ pub async fn reconcile_missing_managed_checkouts(db: &Database) -> Result<usize>
         }
         gone += 1;
         tracing::info!(execution_id = %exec_id, "managed checkout is gone from disk");
-        if reclaim_clean_finished_checkout(db, &exec_id).await? == CleanCheckoutReclaim::Released {
+        if matches!(
+            reclaim_clean_finished_checkout(db, &exec_id).await?,
+            CleanCheckoutReclaim::Released { .. }
+        ) {
             continue;
         }
         let path = workspace.canonical_path.clone();
@@ -5985,13 +6438,15 @@ pub async fn reconcile_missing_managed_checkouts(db: &Database) -> Result<usize>
         })
         .await?;
         let repo = scanner::resolve_host_path(&project_path);
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::core::cmd::git_cmd()
-                .args(["worktree", "prune"])
-                .current_dir(repo)
-                .output()
+        // Kronn's own dead registrations only, each by its id (KT-2084): git's prune would also
+        // act on a registration a worker rewrote to name another worktree.
+        let pruned = tokio::task::spawn_blocking(move || {
+            crate::core::worktree::prune_kronn_worktrees(&repo)
         })
         .await;
+        if let Ok(Err(error)) = pruned {
+            tracing::warn!(execution_id = %exec_id, "no registration pruned: {error}");
+        }
     }
     Ok(gone)
 }
@@ -6034,10 +6489,11 @@ pub async fn release_terminal_worktrees(
         // KT-1646 — a clean checkout of a finished execution goes at once; the
         // idle window below only guards the dirty ones, whose diff is saved first.
         match reclaim_clean_finished_checkout(db, &exec_id).await {
-            Ok(CleanCheckoutReclaim::Released) => {
+            Ok(CleanCheckoutReclaim::Released { ignored_copied }) => {
                 report.terminal_worktrees_released += 1;
+                let ignored = ignored_copied_note(ignored_copied.as_deref());
                 report.lane_target_report.push(format!(
-                    "released finished execution {exec_id}: clean checkout removed, branch kept"
+                    "released finished execution {exec_id}: clean checkout removed, branch kept{ignored}"
                 ));
                 continue;
             }
@@ -6060,13 +6516,14 @@ pub async fn release_terminal_worktrees(
             continue;
         }
         match release_finished_execution_checkout(db, &exec_id, min_idle).await {
-            Ok(Some(outcome)) => {
+            Ok(FinishedCheckoutRelease::Released(outcome)) => {
                 report.terminal_worktrees_released += 1;
                 report
                     .lane_target_report
                     .push(format!("released finished execution {exec_id}: {outcome}"));
             }
-            Ok(None) => {}
+            // Another release is on it: the next sweep sees what it left.
+            Ok(FinishedCheckoutRelease::NothingToRelease | FinishedCheckoutRelease::Claimed) => {}
             Err(reason) => {
                 report.terminal_worktrees_kept += 1;
                 tracing::warn!(execution_id = %exec_id, "finished worktree kept: {reason}");
@@ -6237,11 +6694,17 @@ async fn reclaim_preserved_worktree_artifacts(
             return;
         }
     };
-    let outcome = match worktree::clean_worktree_build_artifacts(
-        repo_path,
-        std::path::Path::new(child_path),
-        liveness,
-    ) {
+    // Filesystem work off the async runtime (KT-2084).
+    let (repo, child) = (
+        repo_path.to_path_buf(),
+        std::path::PathBuf::from(child_path),
+    );
+    let cleaned = tokio::task::spawn_blocking(move || {
+        worktree::clean_worktree_build_artifacts(&repo, &child, liveness)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("the reclaim stopped: {error}")));
+    let outcome = match cleaned {
         Ok(report) => {
             if report.bytes_reclaimed > 0 {
                 tracing::info!(
@@ -15322,9 +15785,20 @@ pub async fn settle_cancelled_workspace(
         // the worker, which may still be writing. A dirty tree (and every
         // Preserve cancel) is left to the finished-execution sweep (KT-1397),
         // which proves the execution terminal and idle before it saves the diff.
-        match worktree::remove_cancelled_task_worktree(&repo, &checkout, &workspace.branch) {
-            Ok(()) => {
+        // Its ignored files are copied into the execution's evidence first (KT-2084).
+        let released = terminal_evidence_dir(exec_id).and_then(|evidence| {
+            worktree::remove_cancelled_task_worktree(&repo, &checkout, &workspace.branch, &evidence)
+        });
+        match released {
+            Ok(released) => {
                 survives = false;
+                if let worktree::TerminalWorktreeRelease::Removed {
+                    ignored_copied: Some(copied),
+                    ..
+                } = &released
+                {
+                    outcome.push_str(&format!("; ignored files copied to {}", copied.display()));
+                }
                 // KT-1256 — the checkout is gone, so is the lane it built in.
                 // The DB's own path string, because the audit looks the row up
                 // by that exact value.

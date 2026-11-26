@@ -249,6 +249,7 @@ import { discardImportantDraft } from '../../lib/importantMessageDraft';
 import type { ActiveAgentDispatch, ActiveWorkflowStep, AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun, WsMessage } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
 import type { ToastFn } from '../../hooks/useToast';
+import { ApiRequestError } from '../../lib/apiRequestError';
 
 const noop = () => {};
 const toastFn: ToastFn = vi.fn();
@@ -3590,6 +3591,216 @@ describe('DiscussionsPage', () => {
     expect(document.querySelector('.disc-reply-composer-preview'))
       .toHaveTextContent('#87654321');
     expect(loadReplyDraft('d1')?.messageId).toBe(sourceId);
+  });
+
+  // ── KT-2084 — the server cancels the room's agent before deleting it ──────
+  describe('a delete that closes the live stream', () => {
+    /** Deletes of the open discussion, each answered by hand in the order they started. */
+    const answerDeletesByHand = () => {
+      const answers: Array<{ resolve: (kept: string | null) => void; reject: (error: unknown) => void }> = [];
+      vi.mocked(discussionsApi.delete).mockReset();
+      vi.mocked(discussionsApi.delete).mockImplementation(() => new Promise((resolve, reject) => {
+        answers.push({ resolve: kept => resolve(kept as never), reject });
+      }));
+      vi.stubGlobal('confirm', vi.fn(() => true));
+      return {
+        deleted: (index: number, kept: string | null = null) => act(async () => { answers[index].resolve(kept); }),
+        refused: (index: number, error: unknown) => act(async () => { answers[index].reject(error); }),
+      };
+    };
+    /** Delete the open discussion from its side panel, the `count`-th delete asked. */
+    const clickDelete = async (count: number) => {
+      if (!screen.queryByTestId('side-panel-menu-btn')) {
+        fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
+      }
+      fireEvent.click(await screen.findByTestId('side-panel-menu-btn'));
+      await act(async () => {
+        fireEvent.click(document.querySelector('[role="menuitem"][data-action="delete"]') as HTMLElement);
+      });
+      await waitFor(() => expect(discussionsApi.delete).toHaveBeenCalledTimes(count));
+    };
+    /** A send left streaming, and a delete the test answers by hand. */
+    const streamThenDelete = async () => {
+      let closeStream: (error: string) => void = () => {};
+      vi.mocked(discussionsApi.sendMessageStream).mockReset();
+      vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+        (_discId: any, _payload: any, _onText: any, _onDone: any, onError: any) => new Promise<void>(resolve => {
+          closeStream = error => { onError(error); resolve(); };
+        }),
+      );
+      const deletes = answerDeletesByHand();
+      const discussion = makeListDiscussion('d-deleting', 0);
+      vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+      await wrap(
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[discussion]}
+          configLanguage="fr"
+          agentAccess={{ claude_code: { full_access: true } } as unknown as AgentsConfig}
+          refetchDiscussions={noop}
+          refetchProjects={noop}
+          onNavigate={noop}
+          toast={toastFn}
+          initialActiveDiscussionId="d-deleting"
+          {...liftedProps()}
+        />,
+      );
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+      fireEvent.change(textarea, { target: { value: 'Une question' } });
+      await act(async () => {
+        fireEvent.click(document.querySelector('button[aria-label="Send message"]') as HTMLButtonElement);
+      });
+      await waitFor(() => expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(1));
+
+      await clickDelete(1);
+      expect(discussionsApi.delete).toHaveBeenCalledWith('d-deleting');
+      vi.mocked(toastFn).mockClear();
+      return {
+        textarea,
+        closeStream: (error: string) => act(async () => { closeStream(error); }),
+        deleted: (kept: string | null) => deletes.deleted(0, kept),
+        refused: (error: unknown) => deletes.refused(0, error),
+        deleteAgain: async () => { await clickDelete(2); vi.mocked(toastFn).mockClear(); },
+        deletedAgain: (kept: string | null) => deletes.deleted(1, kept),
+        refusedAgain: (error: unknown) => deletes.refused(1, error),
+      };
+    };
+    const errorToasts = () => vi.mocked(toastFn).mock.calls.filter(([, kind]) => kind === 'error');
+    const refusal = () => new ApiRequestError('workflow run r-1 is still working in /wt: retry once it has finished', 'conflict');
+
+    afterEach(() => {
+      vi.mocked(discussionsApi.sendMessageStream).mockReset();
+      vi.mocked(discussionsApi.sendMessageStream).mockResolvedValue(undefined);
+      vi.mocked(discussionsApi.reviseMessageStream).mockReset();
+      vi.mocked(discussionsApi.reviseMessageStream).mockResolvedValue(undefined);
+      vi.mocked(discussionsApi.orchestrate).mockReset();
+      vi.mocked(discussionsApi.orchestrate).mockResolvedValue(undefined);
+      vi.mocked(discussionsApi.delete).mockReset();
+    });
+
+    it('holds a stream error while the delete is pending and handles it as before once refused', async () => {
+      const run = await streamThenDelete();
+
+      await run.closeStream('502 Bad Gateway');
+      expect(errorToasts()).toEqual([]);
+      await run.refused(refusal());
+
+      const messages = errorToasts().map(([message]) => message);
+      expect(messages).toHaveLength(2);
+      expect(messages).toEqual(expect.arrayContaining([
+        expect.stringContaining('workflow run r-1'),
+        expect.stringContaining('502'),
+      ]));
+      // Refused before any receipt: the message goes back to the composer.
+      await waitFor(() => expect(run.textarea.value).toContain('Une question'));
+    });
+
+    it('keeps the mark of a pending delete when an overlapping delete of it is refused', async () => {
+      const run = await streamThenDelete();
+      await run.deleteAgain();
+
+      await run.refusedAgain(refusal());
+      await run.closeStream('SSE stream closed before a terminal event; the operation closed before completion.');
+      await run.deleted(null);
+
+      expect(errorToasts().map(([message]) => message)).toEqual([
+        expect.stringContaining('workflow run r-1'),
+      ]);
+    });
+
+    it('shows no error for a retry stream the delete closed', async () => {
+      let closeStream: (error: string) => void = () => {};
+      vi.mocked(discussionsApi.reviseMessageStream).mockReset();
+      vi.mocked(discussionsApi.reviseMessageStream).mockImplementation(
+        (_discId: any, _request: any, _onText: any, _onDone: any, onError: any) => new Promise<void>(resolve => {
+          closeStream = error => { onError(error); resolve(); };
+        }),
+      );
+      const deletes = answerDeletesByHand();
+      const disc = longThread('d-deleting');
+      vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+      await renderThread(disc);
+      fireEvent.click(await screen.findByRole('button', { name: 'Relancer la réponse' }));
+      await waitFor(() => expect(discussionsApi.reviseMessageStream).toHaveBeenCalledTimes(1));
+      await clickDelete(1);
+      vi.mocked(toastFn).mockClear();
+
+      await act(async () => { closeStream('SSE stream closed before a terminal event'); });
+      await deletes.deleted(0);
+
+      expect(errorToasts()).toEqual([]);
+    });
+
+    it('shows no error for an orchestration the delete closed', async () => {
+      let closeStream: (error: string) => void = () => {};
+      vi.mocked(discussionsApi.orchestrate).mockReset();
+      vi.mocked(discussionsApi.orchestrate).mockImplementation(
+        (_discId: any, _request: any, callbacks: any) => new Promise<void>(resolve => {
+          closeStream = error => { callbacks.onError(error); resolve(); };
+        }),
+      );
+      const deletes = answerDeletesByHand();
+      const usable = (name: string, agent_type: AgentType): AgentDetection => ({
+        name, agent_type, installed: true, enabled: true, path: `/usr/bin/${name}`, version: '1.0.0',
+        latest_version: null, origin: 'host', install_command: null, host_managed: false,
+        host_label: null, runtime_available: false, rtk_available: false, rtk_hook_configured: false,
+      });
+      const discussion = makeListDiscussion('d-deleting', 0);
+      vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+      await wrap(
+        <DiscussionsPage
+          projects={[]}
+          agents={[usable('codex', 'Codex'), usable('claude', 'ClaudeCode')]}
+          allDiscussions={[discussion]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={noop}
+          refetchProjects={noop}
+          onNavigate={noop}
+          toast={toastFn}
+          initialActiveDiscussionId="d-deleting"
+          {...liftedProps()}
+        />,
+      );
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      fireEvent.click(document.querySelector('.disc-tool-btn[data-color="purple"]') as HTMLElement);
+      await act(async () => {
+        fireEvent.click(document.querySelector('.disc-debate-launch-btn') as HTMLElement);
+      });
+      await waitFor(() => expect(discussionsApi.orchestrate).toHaveBeenCalledTimes(1));
+      await clickDelete(1);
+      vi.mocked(toastFn).mockClear();
+
+      await act(async () => { closeStream('SSE stream closed before a terminal event'); });
+      await deletes.deleted(0);
+
+      expect(errorToasts()).toEqual([]);
+    });
+
+    it('shows no agent error for the stream the delete closed, and says where a worktree was kept', async () => {
+      const run = await streamThenDelete();
+
+      await run.closeStream('SSE stream closed before a terminal event; the operation closed before completion.');
+      await run.deleted('worktree kept at /repo/.kronn/worktrees/p--d: it is also the worktree of discussion(s) d-twin');
+
+      expect(errorToasts()).toEqual([]);
+      expect(toastFn).toHaveBeenCalledWith(
+        expect.stringContaining('worktree kept at /repo/.kronn/worktrees/p--d'),
+        'info',
+      );
+    });
+
+    it('lets a later stream error through once the server refused the delete', async () => {
+      const run = await streamThenDelete();
+
+      await run.refused(new ApiRequestError('workflow run r-1 is still working in /wt: retry once it has finished', 'conflict'));
+      expect(errorToasts()).toHaveLength(1);
+      await run.closeStream('502 Bad Gateway');
+
+      expect(errorToasts()).toHaveLength(2);
+    });
   });
 
   // ── KT-113 — a send refused while the previous run is still recovering ─────

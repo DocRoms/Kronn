@@ -8,6 +8,7 @@ import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { DiscussionWeightBadge } from './DiscussionWeightBadge';
 import { boundedWeightIds, useDiscussionWeights } from '../lib/useDiscussionWeights';
 import { unseenBasis } from '../lib/discussionUiUtils';
+import { describeDeleteRefusals, DiscussionsDeleteRefused } from '../lib/discussionDelete';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
 import { CollectionFavoritesHeader } from './CollectionFavoritesHeader';
 import { CollectionSidebarFooter } from './CollectionSidebarFooter';
@@ -1288,9 +1289,16 @@ export function DiscussionSidebar({
             if (!confirm(t('disc.bulk.confirmDelete', items.length))) throw new Error('cancelled');
             try {
               await onBulkDelete?.(items.map(disc => disc.id));
-            } catch {
-              toast(t('disc.bulk.error'), 'error');
-              throw new Error('delete failed');
+            } catch (error) {
+              if (error instanceof DiscussionsDeleteRefused) {
+                const titleOf = (id: string) => items.find(disc => disc.id === id)?.title;
+                toast(t('disc.bulk.deleteRefused', error.refused.length), 'error', {
+                  copyable: describeDeleteRefusals(error.refused, titleOf),
+                });
+              } else {
+                toast(t('disc.bulk.error'), 'error');
+              }
+              throw error;
             }
           },
         },

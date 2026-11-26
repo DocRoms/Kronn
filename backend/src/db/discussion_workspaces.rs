@@ -557,6 +557,24 @@ pub fn list_orphaned_managed(conn: &Connection) -> Result<Vec<DiscussionWorkspac
     Ok(rows)
 }
 
+/// The orphaned managed rows of `disc_id` that still name a checkout (KT-2084):
+/// deleting the discussion would cascade away the only row leading to them.
+pub fn orphaned_checkouts_of_discussion(
+    conn: &Connection,
+    disc_id: &str,
+) -> Result<Vec<DiscussionWorkspace>> {
+    let sql = format!(
+        "{SELECT_WORKSPACE} WHERE dw.disc_id = ?1 AND dw.ownership = 'managed' \
+         AND dw.task_execution_id IS NULL AND dw.canonical_path IS NOT NULL \
+         ORDER BY dw.created_at, dw.id"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map(params![disc_id], map_workspace)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Delete one exact orphan intent after its physical checkout was safely
 /// removed (or was already absent). The full predicate prevents a raced owner
 /// reattachment from being erased by a stale boot scan.

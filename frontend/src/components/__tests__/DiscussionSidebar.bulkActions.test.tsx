@@ -6,6 +6,7 @@ vi.mock('../../lib/api', () => buildApiMock());
 
 import { projects as projectsApi } from '../../lib/api';
 import { DiscussionSidebar } from '../DiscussionSidebar';
+import { DiscussionsDeleteRefused } from '../../lib/discussionDelete';
 import type { Discussion } from '../../types/generated';
 
 const makeDiscussion = (id: string): Discussion => ({
@@ -186,6 +187,30 @@ describe('DiscussionSidebar — bulk selection', () => {
     expect(confirmStub).toHaveBeenCalledWith('disc.bulk.confirmDelete:1');
     expect(props.onBulkDelete).not.toHaveBeenCalled();
     expect(screen.getByText('disc.bulk.selected:1')).toBeInTheDocument();
+  });
+
+  // KT-2084 — each discussion the server refused is named with its reason.
+  it('reports each refused discussion with its reason and keeps the selection', async () => {
+    const props = makeProps();
+    props.onBulkDelete.mockRejectedValue(new DiscussionsDeleteRefused([
+      { id: 'disc-b', reason: 'a task worker runs in it: cancel it first' },
+    ]));
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    render(<DiscussionSidebar {...props} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-b/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.delete' }));
+
+    await waitFor(() => expect(props.toast).toHaveBeenCalledWith(
+      'disc.bulk.deleteRefused:1',
+      'error',
+      { copyable: 'Discussion disc-b: a task worker runs in it: cancel it first' },
+    ));
+    expect(props.onBulkDelete).toHaveBeenCalledWith(['disc-a', 'disc-b']);
+    expect(screen.getByText('disc.bulk.selected:2')).toBeInTheDocument();
   });
 
   it('prunes a deleted discussion from the live bulk selection after a refresh', async () => {

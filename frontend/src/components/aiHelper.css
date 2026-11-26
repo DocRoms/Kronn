@@ -628,7 +628,8 @@
 }
 
 .ai-conv-empty,
-.ai-conv-error {
+.ai-conv-error,
+.ai-conv-note {
   font-size: var(--kr-fs-2xs);
   color: var(--kr-text-secondary);
 }

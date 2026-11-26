@@ -8,6 +8,8 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::core::cmd::async_cmd;
+use crate::core::lane_git::snapshot::Snapshot;
+use crate::core::worktree::{NotRemoved, RunCheckoutWork};
 use crate::models::WorkspaceHooks;
 
 /// TD-20260709 (A) — exclusivity of a project's MAIN checkout across
@@ -281,35 +283,55 @@ pub struct KeptCheckout {
     pub reason: String,
 }
 
+impl KeptCheckout {
+    /// Whether its removal stopped part way: what is left is to remove by hand.
+    pub fn partly_removed(&self) -> bool {
+        self.reason
+            .starts_with(crate::core::worktree::PARTLY_REMOVED)
+    }
+}
+
 /// Why a checkout, or a worktree registered inside it, must not be removed
-/// (uncommitted work, a detached HEAD or a state git cannot read), or `None`
-/// when the whole set is clean. Kronn's own `.kronn/` files are not work.
+/// (uncommitted work, a detached HEAD, anything else its removal would keep, or
+/// a state Kronn cannot judge), or `None` when the whole set is clean: the
+/// verdict [`remove_inspected_checkout`] gives. Kronn's own `.kronn/` files and
+/// ignored files are not work. Judged from Kronn's copy of each git state: no
+/// git runs in them or their submodules (KT-2084).
 pub async fn work_to_keep(repo_path: &Path, worktree: &Path) -> Option<String> {
-    // After the agents ran: git's agent-writable pointers are not followed.
-    if let Err(error) = crate::core::worktree::ensure_local_git_exclude_pinned(repo_path, ".kronn/")
-    {
+    // After the agents ran: git's agent-writable pointers are not followed. Off the runtime:
+    // it runs git (KT-2084).
+    let repo = repo_path.to_path_buf();
+    let excluded = tokio::task::spawn_blocking(move || {
+        crate::core::worktree::ensure_local_git_exclude_pinned(&repo, ".kronn/")
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("the exclude task stopped: {error}")));
+    if let Err(error) = excluded {
         tracing::warn!(path = %repo_path.display(), "cannot exclude .kronn/: {error}");
     }
-    let mut checkouts = nested_worktrees(repo_path, worktree).await;
+    let mut checkouts = match nested_worktrees(repo_path, worktree).await {
+        Ok(checkouts) => checkouts,
+        Err(error) => return Some(format!("worktrees Kronn cannot list ({error})")),
+    };
     checkouts.push(worktree.to_path_buf());
     for checkout in checkouts {
         // A nested worktree whose directory is gone holds nothing.
         if checkout != worktree && !checkout.exists() {
             continue;
         }
-        let inspected = if checkout == worktree {
-            inspect_run_checkout(repo_path, &checkout).await
-        } else {
-            inspect_interrupted_checkout(&checkout).await
-        };
-        let found = match inspected {
-            Ok(InterruptedCheckout::Removable { .. } | InterruptedCheckout::DetachedReachable) => {
-                continue
-            }
-            Ok(InterruptedCheckout::Dirty { entries }) => {
+        let (repo, looked_at) = (repo_path.to_path_buf(), checkout.clone());
+        let work = tokio::task::spawn_blocking(move || {
+            crate::core::worktree::run_checkout_work(&repo, &looked_at)
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("the inspection stopped: {error}")));
+        let found = match work {
+            Ok(None) => continue,
+            Ok(Some(RunCheckoutWork::Uncommitted(entries))) => {
                 format!("{entries} uncommitted change(s)")
             }
-            Ok(InterruptedCheckout::Detached) => "a detached HEAD".into(),
+            Ok(Some(RunCheckoutWork::Detached)) => "a detached HEAD".into(),
+            Ok(Some(RunCheckoutWork::Kept(reason))) => reason,
             Err(error) => format!("a state git cannot read ({error})"),
         };
         return Some(if checkout == worktree {
@@ -321,31 +343,28 @@ pub async fn work_to_keep(repo_path: &Path, worktree: &Path) -> Option<String> {
     None
 }
 
-/// The agent configs Kronn copied into `worktree` that are still as copied,
-/// with nothing in the index on their path beyond the committed version.
-async fn copied_agent_configs(repo_path: &Path, worktree: &Path) -> Vec<PathBuf> {
-    let (repo, tree) = (repo_path.to_path_buf(), worktree.to_path_buf());
-    let unchanged = tokio::task::spawn_blocking(move || {
-        crate::core::worktree::unchanged_agent_configs(&repo, &tree)
-    })
-    .await
-    .unwrap_or_default();
+/// The agent configs Kronn copied into the checkout `judged` is a copy of that are still
+/// as copied, with nothing in the index on their path beyond the committed version.
+fn copied_agent_configs(repo_path: &Path, judged: &Snapshot) -> Vec<PathBuf> {
+    let Some(worktree) = judged.work_tree() else {
+        return Vec::new();
+    };
     let mut copies = Vec::new();
-    for relative in unchanged {
+    for relative in crate::core::worktree::unchanged_agent_configs(repo_path, worktree) {
         let name = relative.to_string_lossy();
         // Untracked, ignored, or modified in the work tree only. Anything
         // the index says (staged, added, unmerged), or an error: the run's.
         // Not trimmed: the first column of a porcelain line is the index.
-        let status = match crate::core::lane_git::async_git(worktree) {
-            Ok(mut git) => git
-                .args(["status", "--porcelain", "--untracked-files=normal", "--"])
-                .arg(format!(":(top,literal){name}"))
-                .output()
-                .await
-                .ok(),
-            Err(_) => None,
-        };
-        let index_untouched = status.is_some_and(|output| {
+        let pathspec = format!(":(top,literal){name}");
+        let status = judged.output(&[
+            "status",
+            "--porcelain",
+            "--ignore-submodules=dirty",
+            "--untracked-files=normal",
+            "--",
+            &pathspec,
+        ]);
+        let index_untouched = status.is_ok_and(|output| {
             output.status.success()
                 && String::from_utf8_lossy(&output.stdout)
                     .lines()
@@ -358,321 +377,55 @@ async fn copied_agent_configs(repo_path: &Path, worktree: &Path) -> Vec<PathBuf>
     copies
 }
 
-/// Takes those copies back, once the removal is decided: the tracked ones
-/// restored, the others removed. Git would refuse the removal over them.
-/// Returns the ones taken.
-async fn drop_copied_agent_configs(repo_path: &Path, worktree: &Path) -> Vec<PathBuf> {
-    let unchanged = copied_agent_configs(repo_path, worktree).await;
-    for relative in &unchanged {
-        let name = relative.to_string_lossy();
-        let tracked = git_text_output(worktree, &["ls-files", "--error-unmatch", "--", &name])
-            .await
-            .is_some();
-        if tracked {
-            let _ = git_text_output(worktree, &["checkout", "--", &name]).await;
-        } else {
-            let _ = std::fs::remove_file(worktree.join(relative));
-        }
-    }
-    unchanged
-}
-
-/// Puts back the copies `drop_copied_agent_configs` took, and only those:
-/// any other config is as the run left it.
-fn restore_copied_agent_configs(repo_path: &Path, worktree: &Path, taken: &[PathBuf]) {
-    let Ok(root) = worktree.canonicalize() else {
-        return;
-    };
-    for relative in taken {
-        let target = worktree.join(relative);
-        // Never through a link, in the file or above it: the copy taken was
-        // a plain file at its own path.
-        let own_place = target
-            .parent()
-            .and_then(|parent| parent.canonicalize().ok())
-            .zip(relative.parent())
-            .is_some_and(|(found, parent)| found == root.join(parent));
-        let linked =
-            std::fs::symlink_metadata(&target).is_ok_and(|found| !found.file_type().is_file());
-        if !own_place || linked {
-            tracing::warn!(
-                path = %target.display(),
-                "agent config not put back in the kept worktree: its place changed"
-            );
-            continue;
-        }
-        if let Err(error) = std::fs::copy(repo_path.join(relative), &target) {
-            tracing::warn!(
-                path = %target.display(),
-                "agent config not put back in the kept worktree: {error}"
-            );
-        }
-    }
-}
-
-async fn nested_worktrees(repo_path: &Path, parent: &Path) -> Vec<PathBuf> {
+/// `Err` when the registrations cannot be read: no nested worktree is then known absent.
+async fn nested_worktrees(
+    repo_path: &Path,
+    parent: &Path,
+) -> std::result::Result<Vec<PathBuf>, String> {
     let (repo, parent) = (repo_path.to_path_buf(), parent.to_path_buf());
     tokio::task::spawn_blocking(move || crate::core::worktree::nested_worktrees(&repo, &parent))
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|error| Err(format!("the listing stopped: {error}")))
 }
 
-#[cfg(any(test, feature = "test-support"))]
-tokio::task_local! {
-    /// Runs where a refused removal used to be forced: lets a test write work
-    /// after the last inspection.
-    pub static AFTER_REFUSAL: std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
-}
-
-/// Removes a checkout found clean, nested worktrees first, never with
-/// `--force`: no re-read can exclude a write landing just before a forced
-/// removal, so a refusal (late work, a lock) keeps the set and says why
-/// (`Ok(Some(reason))`). The one forced removal is a checkout with initialised
-/// submodules, which git never removes otherwise, re-inspected first (KT-1809).
+/// Removes a checkout found clean, nested worktrees first, each once Kronn's
+/// own judgement of it, made right before, finds nothing to lose (KT-2084):
+/// late work, a lock, a submodule holding a commit no remote has keep the set
+/// and say why (`Ok(Some(reason))`). Kronn removes the checkout and its one
+/// registration itself, never through a link nor by a path git reads from
+/// the agent-writable registration; no git runs in it after the judgement.
+/// A removal that stopped part way is reported the same way, as what it left.
 pub async fn remove_inspected_checkout(
     repo_path: &Path,
     worktree: &Path,
 ) -> Result<Option<String>> {
-    let mut targets = nested_worktrees(repo_path, worktree).await;
+    let mut targets = match nested_worktrees(repo_path, worktree).await {
+        Ok(targets) => targets,
+        Err(error) => return Ok(Some(format!("worktrees Kronn cannot list ({error}); kept"))),
+    };
     targets.push(worktree.to_path_buf());
-    let mut dropped: Vec<PathBuf> = Vec::new();
     for target in targets {
         if !target.exists() {
             continue;
         }
-        if target == worktree {
-            dropped = drop_copied_agent_configs(repo_path, worktree).await;
-        }
-        let Err(refusal) = remove_clean_checkout(repo_path, &target).await else {
-            continue;
-        };
-        #[cfg(any(test, feature = "test-support"))]
-        let _ = AFTER_REFUSAL.try_with(|hook| hook(&target));
-        let Err(held) = remove_checkout_with_submodules(repo_path, &target).await else {
-            continue;
-        };
-        let found = held.unwrap_or_else(|| refusal.to_string());
+        let (repo, removed) = (repo_path.to_path_buf(), target.clone());
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::core::worktree::remove_judged_run_checkout(&repo, &removed)
+        })
+        .await
+        .context("the worktree removal task failed")?;
         let which = if target == worktree {
             String::new()
         } else {
             format!(" (nested worktree `{}`)", target.display())
         };
-        // Kept after all, and maybe resumed: it gets those configs back.
-        restore_copied_agent_configs(repo_path, worktree, &dropped);
-        return Ok(Some(format!("{found}{which}; kept")));
-    }
-    Ok(None)
-}
-
-/// An initialised submodule, as `git submodule foreach` reports it.
-struct SubmoduleState {
-    path: String,
-    git_dir: PathBuf,
-    changes: usize,
-}
-
-/// Every initialised submodule of `checkout`, nested ones included.
-/// `None`: git could not say.
-async fn submodule_states(checkout: &Path) -> Option<Vec<SubmoduleState>> {
-    let report = git_text_output(
-        checkout,
-        &[
-            "submodule",
-            "foreach",
-            "--quiet",
-            "--recursive",
-            "printf '@%s\\n' \"$displaypath\" \
-             && printf '>%s\\n' \"$(git rev-parse --absolute-git-dir)\" \
-             && git status --porcelain --untracked-files=normal",
-        ],
-    )
-    .await?;
-    let mut states: Vec<SubmoduleState> = Vec::new();
-    for line in report.lines() {
-        if let Some(path) = line.strip_prefix('@') {
-            states.push(SubmoduleState {
-                path: path.to_string(),
-                git_dir: PathBuf::new(),
-                changes: 0,
-            });
-            continue;
-        }
-        let state = states.last_mut()?;
-        match line.strip_prefix('>') {
-            Some(dir) if state.git_dir.as_os_str().is_empty() => state.git_dir = dir.into(),
-            _ => state.changes += 1,
-        }
-    }
-    Some(states)
-}
-
-/// Every submodule clone the worktree owns, deinitialised ones included:
-/// they live under its git directory and go with a forced removal.
-fn submodule_clones(modules: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let entries = match std::fs::read_dir(modules) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if path.join("HEAD").is_file() && path.join("objects").is_dir() {
-            submodule_clones(&path.join("modules"), found)?;
-            found.push(path);
-        } else {
-            submodule_clones(&path, found)?;
-        }
-    }
-    Ok(())
-}
-
-/// The first repository kept inside `dir` itself (a `.git` directory, where
-/// a worktree or an absorbed submodule has a file): a forced removal takes it.
-fn embedded_repository(dir: &Path, top: bool) -> std::io::Result<Option<PathBuf>> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        if entry.file_name() == ".git" {
-            if top {
-                continue;
-            }
-            return Ok(Some(dir.to_path_buf()));
-        }
-        if let Some(found) = embedded_repository(&entry.path(), false)? {
-            return Ok(Some(found));
+        match outcome {
+            Ok(()) => {}
+            Err(NotRemoved::Kept(found)) => return Ok(Some(format!("{found}{which}; kept"))),
+            Err(NotRemoved::Failed(error)) => return Ok(Some(format!("{error}{which}"))),
         }
     }
     Ok(None)
-}
-
-/// What the disk says of the submodules of `checkout`: the canonical
-/// `modules` directory, its clones, and a repository embedded in the tree.
-type SubmoduleDisk = (PathBuf, Vec<PathBuf>, Option<PathBuf>);
-
-fn submodule_disk(checkout: &Path, git_dir: &Path) -> std::io::Result<SubmoduleDisk> {
-    let modules = git_dir.canonicalize()?.join("modules");
-    let mut clones = Vec::new();
-    submodule_clones(&modules, &mut clones)?;
-    let embedded = embedded_repository(checkout, true)?;
-    Ok((modules, clones, embedded))
-}
-
-/// Whether `checkout` has submodules a forced removal would take, all clean
-/// (`Ok(false)`: it has none). `Err` says what the removal would lose: a
-/// change, a repository kept inside the worktree, or a commit no remote branch
-/// of its submodule holds. Anything git or the disk cannot say counts as work.
-async fn submodules_hold_nothing(checkout: &Path) -> std::result::Result<bool, String> {
-    let unreadable = || "submodules git cannot read".to_string();
-    let git_dir = git_text_output(checkout, &["rev-parse", "--absolute-git-dir"])
-        .await
-        .ok_or_else(unreadable)?;
-    let states = submodule_states(checkout).await.ok_or_else(unreadable)?;
-    let (root, git_dir) = (checkout.to_path_buf(), PathBuf::from(git_dir));
-    let (modules, clones, embedded) =
-        tokio::task::spawn_blocking(move || submodule_disk(&root, &git_dir))
-            .await
-            .map_err(|_| unreadable())?
-            .map_err(|error| format!("submodules the disk cannot read ({error})"))?;
-    if let Some(embedded) = embedded {
-        let at = embedded.strip_prefix(checkout).unwrap_or(&embedded);
-        return Err(format!(
-            "a repository kept inside the worktree, at `{}`",
-            at.display()
-        ));
-    }
-    for state in &states {
-        if state.changes > 0 {
-            return Err(format!(
-                "{} uncommitted change(s) in its submodule `{}`",
-                state.changes, state.path
-            ));
-        }
-        let owned = state
-            .git_dir
-            .canonicalize()
-            .is_ok_and(|dir| dir.starts_with(&modules));
-        if !owned {
-            return Err(format!(
-                "the repository of its submodule `{}`, kept outside its git directory",
-                state.path
-            ));
-        }
-    }
-    for clone in &clones {
-        let name = clone.strip_prefix(&modules).unwrap_or(clone).display();
-        // A worktree of the submodule's own repository lives in its clone.
-        let linked = std::fs::read_dir(clone.join("worktrees"))
-            .is_ok_and(|mut entries| entries.next().is_some());
-        if linked {
-            return Err(format!(
-                "its submodule `{name}`, which has worktrees of its own"
-            ));
-        }
-        // Its recorded work tree may be gone (deinitialised, removed).
-        let unpushed = crate::core::cmd::async_git_cmd() // lane-git-allow: a submodule clone of a workflow run's worktree, never a worker lane
-            .arg("--git-dir")
-            .arg(clone)
-            .arg("--work-tree")
-            .arg(clone)
-            .args(["rev-list", "-n1", "HEAD", "--all", "--not", "--remotes"])
-            .output()
-            .await;
-        match unpushed {
-            Ok(output) if output.status.success() && output.stdout.is_empty() => {}
-            Ok(output) if output.status.success() => {
-                let commit = String::from_utf8_lossy(&output.stdout);
-                return Err(format!(
-                    "commit {} in its submodule `{name}`, which no remote branch of that \
-                     submodule holds",
-                    commit.trim().get(..12).unwrap_or(commit.trim())
-                ));
-            }
-            _ => return Err(format!("its submodule `{name}`, which git cannot read")),
-        }
-    }
-    Ok(!states.is_empty() || !clones.is_empty())
-}
-
-/// KT-1809 — git never removes, without force, a worktree with an initialised
-/// submodule. Forced only once a fresh inspection, made after git's refusal,
-/// finds the checkout clean and `submodules_hold_nothing`. `Err(Some(_))` says
-/// what a submodule holds; `Err(None)`: the refusal was not about submodules.
-pub async fn remove_checkout_with_submodules(
-    repo_path: &Path,
-    checkout: &Path,
-) -> std::result::Result<(), Option<String>> {
-    let late = match inspect_interrupted_checkout(checkout).await {
-        Ok(InterruptedCheckout::Removable { .. } | InterruptedCheckout::DetachedReachable) => None,
-        Ok(InterruptedCheckout::Dirty { entries }) => Some(format!(
-            "{entries} uncommitted change(s) written since the inspection"
-        )),
-        Ok(InterruptedCheckout::Detached) => Some("a HEAD detached since the inspection".into()),
-        Err(error) => Some(format!(
-            "a state git cannot read since the inspection ({error})"
-        )),
-    };
-    if late.is_some() {
-        return Err(late);
-    }
-    if !submodules_hold_nothing(checkout).await.map_err(Some)? {
-        return Err(None);
-    }
-    let removed = crate::core::cmd::async_git_cmd() // lane-git-allow: the worktree of a workflow run, removed from the registered checkout
-        .args(["worktree", "remove", "--force"])
-        .arg(checkout)
-        .current_dir(repo_path)
-        .output()
-        .await;
-    if removed.is_ok_and(|output| output.status.success()) {
-        Ok(())
-    } else {
-        Err(None)
-    }
 }
 
 /// Sanitize a workflow name for use in branch names and directory paths.
@@ -701,40 +454,66 @@ pub fn sanitize_name(name: &str) -> String {
 /// of preservation — losing real work is much worse than leaving a stale
 /// empty branch behind.
 async fn check_branch_for_preservation(checkout: &Path, branch: &str) -> Option<PreservedBranch> {
+    let unreadable = || {
+        Some(PreservedBranch {
+            branch_name: branch.to_string(),
+            head_sha: String::new(),
+            ahead: 0,
+            pushed_upstream: false,
+        })
+    };
+    // A name git would not take as a branch never reaches it: the branch is kept (KT-2084).
+    if let Err(error) = crate::core::lane_git::check_branch_name(branch) {
+        tracing::warn!("{error}: the branch is kept");
+        return unreadable();
+    }
     let tip = format!("refs/heads/{branch}");
     // The branch tip is the anchor we want to be able to recover.
     let head_sha = match branch_tip(checkout, &tip).await {
         BranchTip::At(sha) => sha,
         BranchTip::Absent => return None,
-        BranchTip::Unreadable => {
-            return Some(PreservedBranch {
-                branch_name: branch.to_string(),
-                head_sha: String::new(),
-                ahead: 0,
-                pushed_upstream: false,
-            })
-        }
+        BranchTip::Unreadable => return unreadable(),
     };
 
     // Was an upstream set on the branch ? Tells us whether the agent tried
-    // to push at all. `@{u}` resolves only when set.
-    let upstream = format!("{branch}@{{u}}");
-    let pushed_upstream = git_text_output(checkout, &["rev-parse", "--abbrev-ref", &upstream])
-        .await
-        .is_some();
+    // to push at all. `@{upstream}` resolves only when set; its full name is a base.
+    let upstream = git_text_output(
+        checkout,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--symbolic-full-name",
+            "--end-of-options",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    )
+    .await
+    .filter(|name| name.starts_with("refs/"));
+    let pushed_upstream = upstream.is_some();
 
-    // Walk through plausible bases in order of relevance. The first one
+    // Walk through plausible bases in order of relevance, as full ref names. The first one
     // that resolves wins — count commits ahead.
     let mut bases: Vec<&str> = Vec::with_capacity(5);
-    if pushed_upstream {
-        bases.push(&upstream);
+    if let Some(upstream) = upstream.as_deref() {
+        bases.push(upstream);
     }
-    bases.extend(["origin/main", "origin/master", "main", "master"]);
+    bases.extend([
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/master",
+        "refs/heads/main",
+        "refs/heads/master",
+    ]);
 
     for base in bases {
         let count_str = git_text_output(
             checkout,
-            &["rev-list", "--count", &format!("{base}..{tip}")],
+            &[
+                "rev-list",
+                "--count",
+                "--end-of-options",
+                &format!("{base}..{tip}"),
+            ],
         )
         .await;
         if let Some(count_str) = count_str {
@@ -772,13 +551,11 @@ enum BranchTip {
 }
 
 async fn branch_tip(checkout: &Path, tip: &str) -> BranchTip {
-    let Ok(mut git) = crate::core::lane_git::async_git(checkout) else {
-        return BranchTip::Unreadable;
-    };
-    match git
-        .args(["rev-parse", "--verify", "--quiet", tip])
-        .output()
-        .await
+    match bounded_git(
+        checkout,
+        &["rev-parse", "--verify", "--quiet", "--end-of-options", tip],
+    )
+    .await
     {
         Ok(out) if out.status.success() => {
             BranchTip::At(String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -791,16 +568,30 @@ async fn branch_tip(checkout: &Path, tip: &str) -> BranchTip {
 
 /// Run `git <args>` in `cwd`, return trimmed stdout if exit was 0.
 async fn git_text_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = crate::core::lane_git::async_git(cwd)
-        .ok()?
-        .args(args)
-        .output()
-        .await
-        .ok()?;
+    let out = bounded_git(cwd, args).await.ok()?;
     if !out.status.success() {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `git <args>` in `cwd` (pinned in a managed worktree), off the async runtime and within
+/// the judgement time bound, its process group killed past it (KT-2084). `Err`: it could not
+/// run, or timed out.
+async fn bounded_git(
+    cwd: &Path,
+    args: &[&str],
+) -> std::result::Result<std::process::Output, String> {
+    let cwd = cwd.to_path_buf();
+    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    tokio::task::spawn_blocking(move || {
+        let mut command = crate::core::lane_git::git(&cwd)?;
+        command.args(&args);
+        let what = args.first().map(String::as_str).unwrap_or_default();
+        crate::core::lane_git::snapshot::bounded_output(command, what)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("git stopped: {error}")))
 }
 
 /// Upper bound on the fetch that refreshes a run's `base_ref`: an unreachable
@@ -984,47 +775,67 @@ pub enum InterruptedCheckout {
     },
 }
 
-pub async fn inspect_interrupted_checkout(
-    worktree: &Path,
-) -> std::result::Result<InterruptedCheckout, String> {
-    inspect_checkout(worktree, &[]).await
-}
-
-/// `inspect_interrupted_checkout` for a run's own worktree: the agent configs
-/// Kronn copied into it, still as copied, are not changes. Reads only.
+/// What boot finds in the checkout of an `Interrupted` run: the agent configs
+/// Kronn copied into it, still as copied, are not changes. Reads only, judged
+/// from Kronn's copy of its git state (KT-2084): no git reads its registration,
+/// a submodule or a configuration the agent can write, and every command is
+/// bounded in time. A submodule's own files are left to [`work_to_keep`].
 pub async fn inspect_run_checkout(
     repo_path: &Path,
     worktree: &Path,
 ) -> std::result::Result<InterruptedCheckout, String> {
-    let copies = copied_agent_configs(repo_path, worktree).await;
-    inspect_checkout(worktree, &copies).await
+    let (repo, tree) = (repo_path.to_path_buf(), worktree.to_path_buf());
+    let looked = tokio::task::spawn_blocking(move || inspect_checkout(&repo, &tree))
+        .await
+        .unwrap_or_else(|error| Err(format!("the inspection stopped: {error}")))?;
+    Ok(match looked {
+        Looked::Dirty(entries) => InterruptedCheckout::Dirty { entries },
+        Looked::Detached => InterruptedCheckout::Detached,
+        Looked::DetachedReachable => InterruptedCheckout::DetachedReachable,
+        Looked::OnBranch { branch, head_sha } => {
+            // Read from the repository: branches are shared.
+            let preserve = check_branch_for_preservation(repo_path, &branch).await;
+            InterruptedCheckout::Removable {
+                branch,
+                head_sha,
+                preserve,
+            }
+        }
+    })
 }
 
-async fn inspect_checkout(
-    worktree: &Path,
-    not_changes: &[PathBuf],
-) -> std::result::Result<InterruptedCheckout, String> {
-    let mut paths: Vec<String> = Vec::new();
+/// What [`inspect_checkout`] saw.
+enum Looked {
+    Dirty(usize),
+    Detached,
+    DetachedReachable,
+    OnBranch { branch: String, head_sha: String },
+}
+
+/// The checkout `worktree` of `repo_path`, judged from Kronn's copy of its git state.
+fn inspect_checkout(repo_path: &Path, worktree: &Path) -> std::result::Result<Looked, String> {
+    let judged = Snapshot::of_registered_worktree(repo_path, worktree)?;
+    let not_changes = copied_agent_configs(repo_path, &judged);
+    // On the command line: a config hiding untracked files hides work. Never a `git status`
+    // inside a submodule, with its own configuration.
+    let mut args: Vec<String> = [
+        "status",
+        "--porcelain",
+        "--ignore-submodules=dirty",
+        "--untracked-files=normal",
+    ]
+    .map(String::from)
+    .to_vec();
     if !not_changes.is_empty() {
-        paths.extend(["--".to_string(), ":(top)".to_string()]);
-        paths.extend(
+        args.extend(["--".to_string(), ":(top)".to_string()]);
+        args.extend(
             not_changes
                 .iter()
                 .map(|path| format!(":(top,exclude,literal){}", path.to_string_lossy())),
         );
     }
-    let status = crate::core::lane_git::async_git(worktree)?
-        // On the command line: a config hiding untracked files hides work.
-        .args([
-            "status",
-            "--porcelain",
-            "--ignore-submodules=none",
-            "--untracked-files=normal",
-        ])
-        .args(&paths)
-        .output()
-        .await
-        .map_err(|error| format!("cannot run git status: {error}"))?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let status = judged.output(&args)?;
     if !status.status.success() {
         return Err(format!(
             "git status failed: {}",
@@ -1036,91 +847,80 @@ async fn inspect_checkout(
         .filter(|line| !line.trim().is_empty())
         .count();
     if entries > 0 {
-        return Ok(InterruptedCheckout::Dirty { entries });
+        return Ok(Looked::Dirty(entries));
     }
-    let Some(branch) =
-        git_text_output(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await
-    else {
-        let holder = git_text_output(
-            worktree,
-            &[
-                "for-each-ref",
-                "--contains",
-                "HEAD",
-                "--count=1",
-                "--format=%(refname)",
-                // Not `refs/worktree`, `refs/bisect`: they go with the worktree.
-                "refs/heads",
-                "refs/tags",
-                "refs/remotes",
-            ],
-        )
-        .await;
+    let text = |args: &[&str]| {
+        judged
+            .output(args)
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    // The branch the copy's `HEAD`, read under a cap and never from a FIFO, names: its full
+    // name, a branch name git would take as one, or the checkout is kept (KT-2084).
+    let Some(head_ref) = text(&["symbolic-ref", "--quiet", "HEAD"]) else {
+        let holder = text(&[
+            "for-each-ref",
+            "--contains",
+            "HEAD",
+            "--count=1",
+            "--format=%(refname)",
+            // Not `refs/worktree`, `refs/bisect`: they go with the worktree.
+            "refs/heads",
+            "refs/tags",
+            "refs/remotes",
+        ]);
         // No output, or an error: nothing proves a ref holds it.
         return Ok(match holder {
-            Some(holder) if !holder.is_empty() => InterruptedCheckout::DetachedReachable,
-            _ => InterruptedCheckout::Detached,
+            Some(holder) if !holder.is_empty() => Looked::DetachedReachable,
+            _ => Looked::Detached,
         });
     };
-    let head_sha = git_text_output(worktree, &["rev-parse", "HEAD"])
-        .await
+    let branch = head_ref
+        .strip_prefix("refs/heads/")
+        .ok_or_else(|| format!("HEAD names `{}`, not a branch", head_ref.escape_debug()))?;
+    crate::core::lane_git::check_branch_name(branch)?;
+    let head_sha = text(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+        .filter(|sha| !sha.is_empty())
         .ok_or_else(|| "cannot read HEAD".to_string())?;
-    let preserve = check_branch_for_preservation(worktree, &branch).await;
-    Ok(InterruptedCheckout::Removable {
-        branch,
+    Ok(Looked::OnBranch {
+        branch: branch.to_string(),
         head_sha,
-        preserve,
     })
-}
-
-/// Remove a checkout already found clean. No `--force`: git refuses if it
-/// became dirty or was locked since the inspection.
-pub async fn remove_clean_checkout(repo_path: &Path, worktree: &Path) -> Result<()> {
-    let output = crate::core::cmd::async_git_cmd()
-        .args(["worktree", "remove"])
-        .arg(worktree)
-        .current_dir(repo_path)
-        .output()
-        .await
-        .context("Failed to run git worktree remove")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git worktree remove refused: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
 }
 
 /// Delete `branch` only while it still points at `expected_sha`.
 pub async fn delete_branch_at(repo_path: &Path, branch: &str, expected_sha: &str) -> Result<()> {
-    // `update-ref` would leave a checkout that is on it without a branch.
-    let listed = crate::core::cmd::async_git_cmd()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_path)
-        .output()
-        .await
-        .context("Failed to run git worktree list")?;
-    if !listed.status.success() {
-        anyhow::bail!("branch `{branch}` not deleted: the worktrees cannot be listed");
-    }
-    let checked_out = String::from_utf8_lossy(&listed.stdout)
-        .lines()
-        .any(|line| line.strip_prefix("branch refs/heads/") == Some(branch));
-    if checked_out {
+    crate::core::lane_git::check_branch_name(branch)
+        .map_err(|error| anyhow::anyhow!("branch not deleted: {error}"))?;
+    // `update-ref` would leave a checkout that is on it without a branch. Read from the
+    // registrations' files, no git run (KT-2084).
+    let repo = repo_path.to_path_buf();
+    let listed =
+        tokio::task::spawn_blocking(move || crate::core::lane_git::registered_worktrees(&repo))
+            .await
+            .context("the worktree listing task failed")?;
+    let listed = listed.map_err(|error| {
+        anyhow::anyhow!("branch `{branch}` not deleted: the worktrees cannot be listed ({error})")
+    })?;
+    if listed
+        .iter()
+        .any(|entry| entry.branch.as_deref() == Some(branch))
+    {
         anyhow::bail!("branch `{branch}` not deleted: a checkout is on it");
     }
-    let output = crate::core::cmd::async_git_cmd()
-        .args([
+    let output = bounded_git(
+        repo_path,
+        &[
             "update-ref",
             "-d",
+            "--end-of-options",
             &format!("refs/heads/{branch}"),
             expected_sha,
-        ])
-        .current_dir(repo_path)
-        .output()
-        .await
-        .context("Failed to run git update-ref")?;
+        ],
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("branch `{branch}` not deleted: {error}"))?;
     if !output.status.success() {
         anyhow::bail!(
             "branch `{branch}` not deleted: {}",
@@ -1130,20 +930,28 @@ pub async fn delete_branch_at(repo_path: &Path, branch: &str, expected_sha: &str
     Ok(())
 }
 
-async fn remove_nested_worktrees(repo_path: &Path, parent: &Path) -> usize {
+/// `Err` when the registrations cannot be read: the checkout holding them then stays.
+async fn remove_nested_worktrees(repo_path: &Path, parent: &Path) -> Result<usize> {
     let (repo, parent) = (repo_path.to_path_buf(), parent.to_path_buf());
     tokio::task::spawn_blocking(move || {
         crate::core::worktree::remove_nested_worktrees(&repo, &parent)
     })
     .await
-    .unwrap_or(0)
+    .context("the nested worktree removal task failed")?
+    .map_err(|error| anyhow::anyhow!("nested worktrees cannot be listed: {error}"))
 }
 
+/// Nothing is pruned when a registration cannot be read; the reason is logged.
 async fn prune_kronn_worktrees(repo_path: &Path) -> usize {
     let repo = repo_path.to_path_buf();
-    tokio::task::spawn_blocking(move || crate::core::worktree::prune_kronn_worktrees(&repo))
-        .await
-        .unwrap_or(0)
+    let pruned =
+        tokio::task::spawn_blocking(move || crate::core::worktree::prune_kronn_worktrees(&repo))
+            .await
+            .unwrap_or_else(|error| Err(format!("the prune stopped: {error}")));
+    pruned.unwrap_or_else(|error| {
+        tracing::warn!(repo = %repo_path.display(), "worktree registrations not pruned: {error}");
+        0
+    })
 }
 
 /// Boot pass: drops the admin entries of Kronn worktrees whose checkout is
@@ -1252,6 +1060,21 @@ impl Workspace {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("git worktree add failed: {}", stderr);
+        }
+
+        // The registration carries the checkout's folder name, or the run is refused (KT-2084).
+        {
+            let (repo, path, branch) = (
+                repo_path.to_path_buf(),
+                worktree_path.clone(),
+                branch.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                crate::core::worktree::confirm_registration_id(&repo, &path, Some(&branch))
+            })
+            .await
+            .context("the new worktree's registration could not be checked")?
+            .map_err(anyhow::Error::msg)?;
         }
 
         tracing::info!(
@@ -1411,25 +1234,18 @@ impl Workspace {
         Ok(outcome)
     }
 
+    /// Kronn removes the run's checkout and its registration itself, never through a link
+    /// nor by a path git reads from the agent-writable `gitdir` file (KT-2084).
     async fn force_remove(&self) -> Result<()> {
-        remove_nested_worktrees(&self.repo_path, &self.path).await;
-        let output = crate::core::cmd::async_git_cmd()
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.path)
-            .current_dir(&self.repo_path)
-            .output()
-            .await
-            .context("Failed to execute git worktree remove")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                "git worktree remove failed (will try manual cleanup): {}",
-                stderr
-            );
-            // Fallback: remove directory manually
-            if self.path.exists() {
-                let _ = std::fs::remove_dir_all(&self.path);
-            }
+        remove_nested_worktrees(&self.repo_path, &self.path).await?;
+        let (repo, path) = (self.repo_path.clone(), self.path.clone());
+        let removed = tokio::task::spawn_blocking(move || {
+            crate::core::worktree::remove_owned_worktree(&repo, &path)
+        })
+        .await
+        .context("the worktree removal task failed")?;
+        if let Err(error) = removed {
+            tracing::warn!(path = %self.path.display(), "worktree not removed: {error}");
         }
         Ok(())
     }
@@ -2636,8 +2452,8 @@ mod tests {
         (ws, source)
     }
 
-    /// The window a forced fallback left open: work written after the last
-    /// inspection, where `--force` used to run after a submodule refusal.
+    /// Work written after the first inspection of a checkout with a submodule,
+    /// where `--force` used to run: the judgement the removal makes sees it.
     #[tokio::test]
     async fn a_refused_removal_is_never_forced_over_late_work() {
         let (_dir, repo) = make_test_repo().await;
@@ -2650,19 +2466,13 @@ mod tests {
             "clean before removal"
         );
         let late = path.join("late-user-work.txt");
-        let hook_late = late.clone();
-        let kept = AFTER_REFUSAL
-            .scope(
-                std::sync::Arc::new(move |_: &std::path::Path| {
-                    std::fs::write(&hook_late, "late\n").unwrap();
-                }),
-                remove_inspected_checkout(&repo, &path),
-            )
+        std::fs::write(&late, "late\n").unwrap();
+        let kept = remove_inspected_checkout(&repo, &path)
             .await
             .expect("removal");
         let reason = kept.expect("kept");
         assert!(
-            reason.contains("since the inspection") && reason.contains("kept"),
+            reason.contains("late-user-work.txt") && reason.contains("kept"),
             "{reason}"
         );
         assert!(late.exists(), "the late work survives");
@@ -2762,8 +2572,8 @@ mod tests {
         );
     }
 
-    /// Looking at a worktree changes nothing in it, and one git refuses to
-    /// remove gets its agent configs back: it may be resumed.
+    /// Looking at a worktree changes nothing in it, and a kept one keeps its
+    /// agent configs: it may be resumed.
     #[tokio::test]
     async fn a_kept_worktree_keeps_its_agent_configs() {
         let (_dir, repo) = make_test_repo().await;
@@ -2786,8 +2596,8 @@ mod tests {
         assert!(path.join(".mcp.json").exists());
     }
 
-    /// Only the copies taken are put back: a config the run edited, ignored
-    /// by git, is the run's and stays as the run left it.
+    /// A config the run edited, ignored by git, is the run's: a kept worktree
+    /// keeps it as the run left it.
     #[tokio::test]
     async fn a_kept_worktree_keeps_the_configs_the_run_edited() {
         let (_dir, repo) = make_test_repo().await;
@@ -2830,32 +2640,6 @@ mod tests {
         git(&ws.path, &["add", ".mcp.json"]);
         std::fs::write(ws.path.join(".mcp.json"), "{}\n").unwrap();
         assert!(work_to_keep(&repo, &ws.path).await.is_some());
-    }
-
-    /// A directory replaced by a link after the copies were taken: nothing
-    /// is written through it.
-    #[cfg(unix)] // creates symlinks through std::os::unix
-    #[test]
-    fn a_config_is_never_put_back_through_a_linked_directory() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (repo, tree, outside) = (
-            dir.path().join("repo"),
-            dir.path().join("tree"),
-            dir.path().join("outside"),
-        );
-        for made in [&repo.join(".gemini"), &tree, &outside] {
-            std::fs::create_dir_all(made).unwrap();
-        }
-        std::fs::write(repo.join(".gemini/settings.json"), "project\n").unwrap();
-        std::fs::write(outside.join("settings.json"), "theirs\n").unwrap();
-        std::os::unix::fs::symlink(&outside, tree.join(".gemini")).unwrap();
-
-        restore_copied_agent_configs(&repo, &tree, &[PathBuf::from(".gemini/settings.json")]);
-
-        assert_eq!(
-            std::fs::read_to_string(outside.join("settings.json")).unwrap(),
-            "theirs\n"
-        );
     }
 
     /// `git add -N` leaves nothing staged for `diff --cached`, yet the path
@@ -2981,10 +2765,13 @@ mod tests {
         );
         git(&path, &["add", "deps/lib"]);
         git(&path, &["commit", "-q", "-m", "bump the submodule"]);
-        assert_eq!(
-            work_to_keep(&repo, &path).await,
-            None,
-            "the checkout itself is clean"
+        // The first look gives the removal's verdict.
+        let first = work_to_keep(&repo, &path).await;
+        assert!(
+            first
+                .as_ref()
+                .is_some_and(|reason| reason.contains("deps/lib")),
+            "{first:?}"
         );
 
         let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
@@ -3023,10 +2810,12 @@ mod tests {
         );
         git(&path, &["add", "vendor/lib"]);
         git(&path, &["commit", "-q", "-m", "embedded submodule"]);
-        assert_eq!(
-            work_to_keep(&repo, &path).await,
-            None,
-            "the checkout itself is clean"
+        let first = work_to_keep(&repo, &path).await;
+        assert!(
+            first
+                .as_ref()
+                .is_some_and(|reason| reason.contains("vendor/lib")),
+            "{first:?}"
         );
 
         let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
@@ -3088,10 +2877,12 @@ mod tests {
         git(&path, &["add", "deps/lib"]);
         git(&path, &["commit", "-q", "-m", "bump"]);
         git(&path, &["submodule", "deinit", "-q", "-f", "deps/lib"]);
-        assert_eq!(
-            work_to_keep(&repo, &path).await,
-            None,
-            "the checkout itself is clean"
+        let first = work_to_keep(&repo, &path).await;
+        assert!(
+            first
+                .as_ref()
+                .is_some_and(|reason| reason.contains("commit")),
+            "{first:?}"
         );
 
         let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
@@ -3100,6 +2891,484 @@ mod tests {
             .expect("the deinitialised clone holds a commit");
         assert!(kept.reason.contains("commit"), "{}", kept.reason);
         assert!(path.exists());
+    }
+
+    // ── KT-2084 — Kronn judges a run's worktree and removes it itself ──────
+
+    /// The git directory the `.git` file of the checkout `path` names, canonical.
+    fn git_dir_named_by(path: &Path) -> PathBuf {
+        let text = std::fs::read_to_string(path.join(".git")).unwrap();
+        let named = PathBuf::from(text.trim().strip_prefix("gitdir:").unwrap().trim());
+        let named = if named.is_absolute() {
+            named
+        } else {
+            path.join(named)
+        };
+        named.canonicalize().unwrap()
+    }
+
+    /// A clean filter in the submodule `sub`'s own configuration, assigned to every file, and
+    /// `lib.txt` left for git to read again: `ran` appears if the filter runs.
+    fn plant_submodule_filter(sub: &Path, ran: &Path) {
+        let module = git_dir_named_by(sub);
+        let filter = format!("touch '{}'; cat", ran.display());
+        git(sub, &["config", "filter.x.clean", &filter]);
+        std::fs::create_dir_all(module.join("info")).unwrap();
+        std::fs::write(module.join("info/attributes"), "* filter=x\n").unwrap();
+        std::fs::File::options()
+            .append(true)
+            .open(sub.join("lib.txt"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(3600))
+            .unwrap();
+    }
+
+    /// A registration naming the run's worktree through `s/..` is not one Kronn wrote: the
+    /// removal keeps the worktree and its registration, and says why.
+    #[cfg(unix)] // writes a POSIX absolute path into a registration's gitdir
+    #[tokio::test]
+    async fn a_run_worktree_registered_through_a_parent_is_kept_with_the_reason() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "through-parent", "a1b2c3d4-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.canonicalize().unwrap();
+        drop(ws);
+        std::fs::create_dir(path.join("s")).unwrap();
+        let admin = git_dir_named_by(&path);
+        let gitdir = format!("{}/s/../.git\n", path.display());
+        std::fs::write(admin.join("gitdir"), gitdir).unwrap();
+
+        let kept = remove_inspected_checkout(&repo, &path)
+            .await
+            .expect("removal");
+
+        let reason = kept.expect("kept: its registration is not one Kronn wrote");
+        assert!(
+            reason.contains("registered through") && reason.contains("kept"),
+            "{reason}"
+        );
+        assert!(path.join("README.md").exists() && path.join(".git").exists());
+        assert!(admin.join("HEAD").exists(), "its registration was removed");
+    }
+
+    /// A registration naming the run's worktree through a link: nothing the link reaches is
+    /// removed, the link stays, and the worktree is kept with the reason.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[tokio::test]
+    async fn a_run_worktree_registered_through_a_link_is_kept_with_the_reason() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "through-link", "b2c3d4e5-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.canonicalize().unwrap();
+        drop(ws);
+        let link = path.parent().unwrap().join("ln");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let admin = git_dir_named_by(&path);
+        std::fs::write(admin.join("gitdir"), format!("{}/.git\n", link.display())).unwrap();
+
+        let kept = remove_inspected_checkout(&repo, &path).await;
+
+        assert!(
+            path.join("README.md").exists() && path.join(".git").exists(),
+            "what the link reaches was removed: {kept:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "the link was removed"
+        );
+        assert!(admin.join("HEAD").exists(), "its registration was removed");
+        let reason = kept.expect("removal").expect("kept");
+        assert!(
+            reason.contains("registered through") && reason.contains("kept"),
+            "{reason}"
+        );
+    }
+
+    /// A filter the submodule's own configuration declares never runs while Kronn judges the
+    /// run's worktree and removes it.
+    #[cfg(unix)] // the planted clean filter is a POSIX shell command line
+    #[tokio::test]
+    async fn a_submodule_filter_never_runs_while_a_run_worktree_is_judged() {
+        let (_dir, repo) = make_test_repo().await;
+        let (ws, _source) = worktree_with_submodule(&repo, "c3d4e5f6-run").await;
+        let path = ws.path.clone();
+        drop(ws);
+        let marks = tempfile::TempDir::new().unwrap();
+        let ran = marks.path().join("ran");
+        plant_submodule_filter(&path.join("deps/lib"), &ran);
+
+        let purged = Workspace::purge_terminal_checkout(&repo, &path).await;
+
+        assert!(
+            !ran.exists(),
+            "a program of the submodule's configuration ran: {purged:?}"
+        );
+    }
+
+    /// Once Kronn judged the run's worktree, nothing runs in it: a filter its submodule's
+    /// configuration declares as the removal starts never runs.
+    #[cfg(unix)] // the swap probe (unix-only) plants a POSIX shell filter mid-removal
+    #[tokio::test]
+    async fn a_submodule_filter_planted_as_a_run_worktree_is_removed_never_runs() {
+        use crate::core::fs_guard::swap_probe;
+        let (_dir, repo) = make_test_repo().await;
+        let (ws, _source) = worktree_with_submodule(&repo, "d4e5f6a7-run").await;
+        let path = ws.path.canonicalize().unwrap();
+        drop(ws);
+        let marks = tempfile::TempDir::new().unwrap();
+        let ran = marks.path().join("ran");
+        let (sub, planted) = (path.join("deps/lib"), ran.clone());
+        swap_probe::arm_hook(path.parent().unwrap(), 0, move |_| {
+            plant_submodule_filter(&sub, &planted)
+        });
+
+        let kept = remove_inspected_checkout(&repo, &path).await;
+
+        let fired = swap_probe::fired();
+        assert!(
+            !ran.exists(),
+            "a program of the submodule's configuration ran"
+        );
+        assert!(
+            fired,
+            "the filter must appear as Kronn removes the worktree: {kept:?}"
+        );
+        assert!(matches!(kept, Ok(None)), "{kept:?}");
+        assert!(!path.exists());
+    }
+
+    /// A clean run worktree goes with its registration: git no longer lists it.
+    #[tokio::test]
+    async fn a_clean_run_worktree_goes_with_its_registration() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "clean-gone", "e5f6a7b8-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        drop(ws);
+        let admin = git_dir_named_by(&path);
+
+        let kept = remove_inspected_checkout(&repo, &path)
+            .await
+            .expect("removal");
+
+        assert!(kept.is_none(), "{kept:?}");
+        assert!(!path.exists() && !admin.exists());
+        let listed = porcelain(&repo).await;
+        assert!(!listed.contains("e5f6a7b8"), "{listed}");
+    }
+
+    /// `.gitignore` committed to `repo` with `patterns`.
+    fn commit_ignore(repo: &Path, patterns: &str) {
+        std::fs::write(repo.join(".gitignore"), patterns).unwrap();
+        git(repo, &["add", ".gitignore"]);
+        git(repo, &["commit", "-q", "-m", "ignore"]);
+    }
+
+    /// Git's own removal never kept a run's worktree for its ignored files: one holding a
+    /// `.env` and generated bindings goes with its registration.
+    #[tokio::test]
+    async fn a_run_worktree_holding_ignored_files_goes_with_its_registration() {
+        let (_dir, repo) = make_test_repo().await;
+        commit_ignore(&repo, ".env\nbackend/bindings/\nnode_modules/\n");
+        let ws = Workspace::create(&repo, "ignored", "f6a7b8c9-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        let admin = git_dir_named_by(&path);
+        std::fs::create_dir_all(path.join("node_modules/x")).unwrap();
+        std::fs::write(path.join("node_modules/x/index.js"), "x\n").unwrap();
+        std::fs::write(path.join(".env"), "TOKEN=mine\n").unwrap();
+        std::fs::create_dir_all(path.join("backend/bindings")).unwrap();
+        std::fs::write(path.join("backend/bindings/Task.ts"), "export {};\n").unwrap();
+
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+
+        assert!(
+            outcome.kept.is_none(),
+            "{:?}",
+            outcome.kept.map(|kept| kept.reason)
+        );
+        assert!(!path.exists() && !admin.exists());
+        let listed = porcelain(&repo).await;
+        assert!(!listed.contains("f6a7b8c9"), "{listed}");
+    }
+
+    /// The first look and the removal give one verdict: a repository in Kronn's own folder
+    /// keeps the run's worktree before its `before_remove` hook runs.
+    #[cfg(unix)] // the before_remove hook is a POSIX shell command line
+    #[tokio::test]
+    async fn a_repository_in_kronns_folder_keeps_a_run_worktree_before_its_hook_runs() {
+        let (_dir, repo) = make_test_repo().await;
+        let marks = tempfile::TempDir::new().unwrap();
+        let ran = marks.path().join("before-remove-ran");
+        let hooks = WorkspaceHooks {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: Some(format!("touch '{}'", ran.display())),
+        };
+        let ws = Workspace::create(&repo, "nested-repo", "c7c7c7c7-run", Some(hooks), None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        git(&path, &["init", "-q", ".kronn/clone"]);
+
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+
+        let kept = outcome.kept.expect("kept: a repository is inside it");
+        assert!(kept.reason.contains(".kronn"), "{}", kept.reason);
+        assert!(
+            !ran.exists(),
+            "the before_remove hook ran for a checkout the removal kept"
+        );
+        assert!(path.join(".kronn/clone/.git").is_dir());
+    }
+
+    /// A repository inside an ignored folder (a package manager's editable install) is not
+    /// the run's work: the worktree goes.
+    #[tokio::test]
+    async fn a_repository_inside_an_ignored_folder_never_keeps_a_run_worktree() {
+        let (_dir, repo) = make_test_repo().await;
+        commit_ignore(&repo, ".venv/\n");
+        let ws = Workspace::create(&repo, "venv-repo", "d8d8d8d8-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        git(&path, &["init", "-q", ".venv/src/pkg"]);
+
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+
+        assert!(
+            outcome.kept.is_none(),
+            "{:?}",
+            outcome.kept.map(|kept| kept.reason)
+        );
+        assert!(!path.exists());
+    }
+
+    /// The look for a repository kept inside a run's worktree is bounded: past its depth the
+    /// worktree is kept, and the reason names the bound.
+    #[tokio::test]
+    async fn a_walk_past_its_depth_bound_keeps_a_run_worktree_with_the_reason() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "deep", "e9e9e9e9-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        // Deeper than the look goes, within what the removal could take.
+        let deep: PathBuf = std::iter::repeat_n("d", 56).collect();
+        std::fs::create_dir_all(path.join(deep)).unwrap();
+
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+
+        let kept = outcome.kept.expect("kept: the look stopped at its bound");
+        assert!(
+            kept.reason.contains("levels") && !kept.reason.starts_with("partly"),
+            "{}",
+            kept.reason
+        );
+        assert!(path.join("README.md").exists());
+    }
+
+    /// An ignored folder deeper than the removal goes: the first look keeps the run's worktree
+    /// with the reason, before its `before_remove` hook runs, instead of a removal stopped
+    /// part way.
+    #[cfg(unix)] // the hook is a POSIX shell command; Windows has no removal depth bound
+    #[tokio::test]
+    async fn an_ignored_folder_deeper_than_the_removal_goes_keeps_a_run_worktree_first() {
+        let (_dir, repo) = make_test_repo().await;
+        commit_ignore(&repo, "node_modules/\n");
+        let marks = tempfile::TempDir::new().unwrap();
+        let ran = marks.path().join("before-remove-ran");
+        let hooks = WorkspaceHooks {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: Some(format!("touch '{}'", ran.display())),
+        };
+        let ws = Workspace::create(&repo, "deep-ignored", "b3b3b3b3-run", Some(hooks), None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        let deep: PathBuf = std::iter::once("node_modules")
+            .chain(std::iter::repeat_n("d", 69))
+            .collect();
+        std::fs::create_dir_all(path.join(deep)).unwrap();
+
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+
+        let kept = outcome.kept.expect("kept: the removal would stop part way");
+        assert!(
+            kept.reason.contains("node_modules")
+                && kept.reason.contains("levels")
+                && !kept.reason.starts_with("partly"),
+            "{}",
+            kept.reason
+        );
+        assert!(
+            !ran.exists(),
+            "the before_remove hook ran for a checkout the removal kept"
+        );
+        assert!(path.join("README.md").exists());
+    }
+
+    /// A stray file among git's worktree records (a `.DS_Store`) is no registration: a run's
+    /// cleanup still lists the worktrees and removes its own.
+    #[tokio::test]
+    async fn a_stray_file_among_the_worktree_records_never_blocks_a_run_cleanup() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "stray", "c4c4c4c4-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        std::fs::write(repo.join(".git/worktrees/.DS_Store"), "junk").unwrap();
+
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+
+        assert!(
+            outcome.kept.is_none(),
+            "{:?}",
+            outcome.kept.map(|kept| kept.reason)
+        );
+        assert!(!path.exists());
+    }
+
+    /// The main checkout of a repository whose git directory lives elsewhere
+    /// (`--separate-git-dir`) is listed too: the branch it is on is never deleted.
+    #[tokio::test]
+    async fn the_branch_of_a_main_checkout_with_a_separate_git_dir_is_never_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("proj");
+        let git_dir = dir.path().join("proj.git");
+        git(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                &git_dir.to_string_lossy(),
+                &repo.to_string_lossy(),
+            ],
+        );
+        std::fs::write(repo.join("README.md"), "test\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
+        git(&repo, &["checkout", "-q", "-b", "kronn/run-d5d5d5d5"]);
+        let sha = git_text(&repo, &["rev-parse", "HEAD"]);
+
+        let deleted = delete_branch_at(&repo, "kronn/run-d5d5d5d5", &sha).await;
+
+        assert!(
+            deleted
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("a checkout is on it")),
+            "{deleted:?}"
+        );
+        assert_eq!(
+            git_text(&repo, &["rev-parse", "refs/heads/kronn/run-d5d5d5d5"]),
+            sha
+        );
+    }
+
+    /// The trimmed output of `git <args>` in `dir`.
+    fn git_text(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A stash in a submodule lives only in the worktree's copy of its repository: the run's
+    /// worktree is kept.
+    #[tokio::test]
+    async fn a_stash_in_a_submodule_keeps_a_run_worktree() {
+        let (_dir, repo) = make_test_repo().await;
+        let (ws, _source) = worktree_with_submodule(&repo, "f1f1f1f1-run").await;
+        let path = ws.path.clone();
+        let lib = path.join("deps/lib");
+        std::fs::write(lib.join("lib.txt"), "stashed\n").unwrap();
+        git(
+            &lib,
+            &["-c", "user.name=t", "-c", "user.email=t@t", "stash", "-q"],
+        );
+
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+
+        let kept = outcome.kept.expect("kept: the stash is only there");
+        assert!(kept.reason.contains("deps/lib"), "{}", kept.reason);
+        assert!(lib.join("lib.txt").exists());
+    }
+
+    /// KT-1809's rule for a run's submodules: a local tag on a commit no remote branch
+    /// reaches keeps the worktree.
+    #[tokio::test]
+    async fn a_local_tag_on_a_local_submodule_commit_keeps_a_run_worktree() {
+        let (_dir, repo) = make_test_repo().await;
+        let (ws, _source) = worktree_with_submodule(&repo, "a2a2a2a2-run").await;
+        let path = ws.path.clone();
+        let lib = path.join("deps/lib");
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        git(
+            &lib,
+            &[
+                &identity[..],
+                &["commit", "-q", "--allow-empty", "-m", "local"],
+            ]
+            .concat(),
+        );
+        git(&lib, &["tag", "mine"]);
+        git(&lib, &["checkout", "-q", "--detach", "HEAD~1"]);
+
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+
+        let kept = outcome.kept.expect("kept: only the tag reaches the commit");
+        assert!(kept.reason.contains("deps/lib"), "{}", kept.reason);
+        assert!(lib.join("lib.txt").exists());
+    }
+
+    /// A removal that stopped part way reads as one to finish by hand, with no advice to
+    /// commit what is left.
+    #[test]
+    fn a_partly_removed_run_worktree_reads_as_a_removal_to_finish_by_hand() {
+        let path = PathBuf::from("/repo/.kronn/worktrees/run-1");
+        let kept = KeptCheckout {
+            path: path.clone(),
+            reason: format!(
+                "{}: {} could not be removed completely (busy)",
+                crate::core::worktree::PARTLY_REMOVED,
+                path.display()
+            ),
+        };
+
+        let note = crate::workflows::runner::kept_checkout_note(&kept);
+
+        assert!(
+            note.contains("partly removed") && note.contains("by hand"),
+            "{note}"
+        );
+        assert!(
+            !note.contains("Commit") && !note.contains("kept with its branch"),
+            "{note}"
+        );
     }
 
     /// A ref of the worktree itself goes with it: it holds nothing.
@@ -3513,5 +3782,117 @@ mod tests {
             .expect_err("unknown ref")
             .to_string();
         assert!(error.contains("names no commit"), "{error}");
+    }
+
+    // ── KT-2084: a registration Kronn cannot read keeps everything, at once ──
+
+    async fn admin_of(worktree: &std::path::Path) -> PathBuf {
+        let out = crate::core::cmd::async_git_cmd()
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(worktree)
+            .output()
+            .await
+            .unwrap();
+        PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
+    }
+
+    #[cfg(unix)]
+    fn fifo(path: &std::path::Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
+
+    /// Releases the FIFO once dropped: held open read-write it lets every pending open
+    /// through, removed no later open waits on it, and closed every reader reads an end of
+    /// file. A git a regression left blocked on it stops.
+    #[cfg(unix)]
+    struct Unblock(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for Unblock {
+        fn drop(&mut self) {
+            use std::os::unix::fs::OpenOptionsExt;
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&self.0);
+            let _ = std::fs::remove_file(&self.0);
+            std::thread::sleep(Duration::from_millis(50));
+            drop(held);
+        }
+    }
+
+    /// A FIFO at another worktree's `locked`: a run's cleanup answers at once and keeps its
+    /// checkout with the reason.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fifo_in_another_registration_keeps_a_run_cleanup_bounded() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "fifo", "aa11bb22-run", None, None)
+            .await
+            .unwrap();
+        let other = Workspace::create(&repo, "fifo", "cc33dd44-run", None, None)
+            .await
+            .unwrap();
+        let pipe = admin_of(&other.path).await.join("locked");
+        fifo(&pipe);
+        let _unblock = Unblock(pipe.clone());
+        let path = ws.path.clone();
+
+        let cleanup = tokio::spawn(ws.cleanup_keeping_work());
+        let outcome = tokio::time::timeout(Duration::from_secs(20), cleanup).await;
+
+        let outcome = outcome
+            .expect("the cleanup did not return")
+            .unwrap()
+            .expect("cleanup");
+        assert!(outcome.kept.is_some(), "{outcome:?}");
+        assert!(path.exists(), "nothing is removed");
+    }
+
+    /// The same FIFO: the boot prune answers at once and prunes nothing.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fifo_in_a_registration_keeps_the_boot_prune_bounded() {
+        let (_dir, repo) = make_test_repo().await;
+        let gone = Workspace::create(&repo, "fifo", "dd55ee66-run", None, None)
+            .await
+            .unwrap();
+        let other = Workspace::create(&repo, "fifo", "ff77aa88-run", None, None)
+            .await
+            .unwrap();
+        let gone_admin = admin_of(&gone.path).await;
+        std::fs::remove_dir_all(&gone.path).unwrap();
+        let pipe = admin_of(&other.path).await.join("locked");
+        fifo(&pipe);
+        let _unblock = Unblock(pipe.clone());
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let now = chrono::Utc::now();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id": "proj-fifo", "name": "Fifo",
+            "path": repo.to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(),
+        }))
+        .unwrap();
+        db.with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+
+        let pass = tokio::spawn({
+            let db = db.clone();
+            async move { prune_orphan_worktrees(&db).await }
+        });
+        let pruned = tokio::time::timeout(Duration::from_secs(20), pass).await;
+
+        assert_eq!(pruned.expect("the boot prune did not return").unwrap(), 0);
+        assert!(
+            gone_admin.join("HEAD").exists(),
+            "a registration was pruned"
+        );
     }
 }

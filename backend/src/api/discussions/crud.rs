@@ -805,7 +805,7 @@ pub async fn create(
                 if let Err(cleanup) = crate::core::worktree::remove_discussion_worktree(
                     std::path::Path::new(&workspace.repo_path),
                     &workspace.path,
-                    false,
+                    None,
                 ) {
                     tracing::warn!(
                         "Failed to remove the review worktree of discussion {}: {}",
@@ -1055,11 +1055,115 @@ pub async fn update(
     }
 }
 
-/// DELETE /api/discussions/:id
+/// DELETE /api/discussions/:id. The data names the worktree kept on disk, when
+/// the discussion is gone but its worktree could not go with it.
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<ApiResponse<()>> {
+) -> Json<ApiResponse<Option<String>>> {
+    // KT-2084 — judged before anything is cancelled or removed: a running task
+    // worker's room or checkout, or uncommitted work, is never deleted from under it.
+    let own = match state
+        .db
+        .with_conn({
+            let did = id.clone();
+            move |conn| {
+                let own = own_worktree_of(conn, &did)?;
+                let run = match &own {
+                    Some(own) => active_run_refusal(conn, own)?,
+                    None => None,
+                };
+                Ok((unshared(conn, &did, own)?, run))
+            }
+        })
+        .await
+    {
+        Ok((_, Some(refusal))) => {
+            return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, refusal))
+        }
+        Ok((own, None)) => own,
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("the worktree of this discussion cannot be read: {error}"),
+            ))
+        }
+    };
+    if let Some(refusal) = unsaved_work_off_the_lock(own).await {
+        return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, refusal));
+    }
+    let live_tokens: std::collections::HashSet<String> = state
+        .cancel_registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keys()
+        .cloned()
+        .collect();
+    let notes = match crate::api::orchestration::settle_discussion_executions_for_delete(
+        &state.db,
+        &id,
+        &live_tokens,
+    )
+    .await
+    {
+        Ok(Ok(notes)) => notes,
+        Ok(Err(refusal)) => return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, refusal)),
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("the task executions of this discussion cannot be read: {error}"),
+            ))
+        }
+    };
+    cancel_and_delete(&state, &id, notes).await
+}
+
+/// [`cancel_and_delete`], for the tests that race a launch against the handler.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn cancel_and_delete_for_tests(
+    state: &AppState,
+    id: &str,
+) -> Json<ApiResponse<Option<String>>> {
+    cancel_and_delete(state, id, Vec::new()).await
+}
+
+/// The handler once its checks and releases are done: judge everything once
+/// more, cancel the discussion's agents, then delete it. `notes` say what the
+/// releases kept (a branch), for the response.
+async fn cancel_and_delete(
+    state: &AppState,
+    id: &str,
+    mut notes: Vec<String>,
+) -> Json<ApiResponse<Option<String>>> {
+    let id = id.to_string();
+    // Every refusal knowable now comes before any cancel. A later launch or write is caught by
+    // the deleting transaction or by git; a refusal there leaves the cancels below in place.
+    let recheck = state
+        .db
+        .with_conn({
+            let did = id.clone();
+            move |conn| {
+                if let Some(reason) = delete_blocker(conn, &did)? {
+                    return Ok(Err(reason));
+                }
+                let own = own_worktree_of(conn, &did)?;
+                Ok(Ok(unshared(conn, &did, own)?))
+            }
+        })
+        .await;
+    let own = match recheck {
+        Ok(Ok(own)) => own,
+        Ok(Err(refusal)) => return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, refusal)),
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("this discussion cannot be checked before its delete: {error}"),
+            ))
+        }
+    };
+    if let Some(refusal) = unsaved_work_off_the_lock(own).await {
+        return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, refusal));
+    }
     let resume_job_ids = state
         .db
         .with_conn({
@@ -1121,52 +1225,367 @@ pub async fn delete(
         );
     }
 
-    // Fetch discussion to check for worktree before deleting
-    let disc = state
-        .db
-        .with_conn({
-            let did = id.clone();
-            move |conn| crate::db::discussions::get_discussion(conn, &did)
-        })
-        .await
-        .ok()
-        .flatten();
+    match delete_discussion_and_worktree(&state.db, &id).await {
+        Ok(DiscussionDelete::Deleted { kept_worktree }) => {
+            notes.extend(kept_worktree);
+            Json(ApiResponse::ok(
+                (!notes.is_empty()).then(|| notes.join("; ")),
+            ))
+        }
+        Ok(DiscussionDelete::NotFound) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Discussion not found",
+        )),
+        Ok(DiscussionDelete::Refused(reason)) => {
+            Json(ApiResponse::err_coded(ApiErrorCode::Conflict, reason))
+        }
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
 
-    // Clean up worktree if present
-    if let Some(ref d) = disc {
-        if let Some(ref wp) = d.workspace_path {
-            if let Some(ref pid) = d.project_id {
-                let pid = pid.clone();
-                let project_path = state
-                    .db
-                    .with_conn(move |conn| {
-                        let p = crate::db::projects::get_project(conn, &pid)?;
-                        Ok(p.map(|p| p.path).unwrap_or_default())
-                    })
-                    .await
-                    .unwrap_or_default();
+/// What [`delete_discussion_and_worktree`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscussionDelete {
+    /// The row is gone; `kept_worktree` says where and why its worktree stays.
+    Deleted {
+        kept_worktree: Option<String>,
+    },
+    NotFound,
+    /// An execution of it appeared or kept its checkout since the handler's check.
+    Refused(String),
+}
 
-                if !project_path.is_empty() {
-                    let resolved = crate::core::scanner::resolve_host_path(&project_path);
-                    let repo_path = std::path::Path::new(&resolved);
-                    if let Err(e) =
-                        crate::core::worktree::remove_discussion_worktree(repo_path, wp, true)
-                    {
-                        tracing::warn!("Failed to remove worktree for discussion {}: {}", id, e);
-                    }
-                }
-            }
+/// [`delete_discussion_and_worktree`], for the tests that race an execution launch against it.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn delete_discussion_and_worktree_for_tests(
+    db: &crate::db::Database,
+    id: &str,
+) -> anyhow::Result<DiscussionDelete> {
+    delete_discussion_and_worktree(db, id).await
+}
+
+/// Why `id` cannot be deleted, from the database and the disk alone (KT-2084): an
+/// execution, an orphaned checkout only its row leads to, a workflow run in its worktree.
+fn delete_blocker(conn: &rusqlite::Connection, id: &str) -> anyhow::Result<Option<String>> {
+    if let Some(reason) = crate::db::orchestration::discussion_delete_blocker(conn, id)? {
+        return Ok(Some(reason));
+    }
+    for orphan in crate::db::discussion_workspaces::orphaned_checkouts_of_discussion(conn, id)? {
+        let path = orphan.canonical_path.unwrap_or_default();
+        if crate::core::scanner::resolve_host_path(&path).exists() {
+            return Ok(Some(format!(
+                "an orphaned worker checkout still holds work at {path}: retry once it is saved or released"
+            )));
         }
     }
+    match own_worktree_of(conn, id)? {
+        Some(own) => active_run_refusal(conn, &own),
+        None => Ok(None),
+    }
+}
 
-    match state
-        .db
-        .with_conn(move |conn| crate::db::discussions::delete_discussion(conn, &id))
+/// Delete a discussion's row, then its own worktree (KT-2084), unless another
+/// discussion also names it (same-slug discussions share one, KT-1811).
+async fn delete_discussion_and_worktree(
+    db: &crate::db::Database,
+    id: &str,
+) -> anyhow::Result<DiscussionDelete> {
+    let did = id.to_string();
+    let (outcome, own) = db
+        .with_conn(move |conn| {
+            if crate::db::discussions::get_discussion(conn, &did)?.is_none() {
+                return Ok((DiscussionDelete::NotFound, None));
+            }
+            // On the deleting connection: nothing launched since the handler's
+            // check is cascaded away.
+            if let Some(reason) = delete_blocker(conn, &did)? {
+                return Ok((DiscussionDelete::Refused(reason), None));
+            }
+            let own = own_worktree_of(conn, &did)?;
+            let sharers = match &own {
+                Some(own) => sharers_of(conn, &did, own)?,
+                None => Vec::new(),
+            };
+            let branch_users = branches_named_elsewhere(conn, &did)?;
+            if !crate::db::discussions::delete_discussion(conn, &did)? {
+                return Ok((DiscussionDelete::NotFound, None));
+            }
+            let kept_worktree = own.as_ref().filter(|_| !sharers.is_empty()).map(|own| {
+                format!(
+                    "worktree kept at {}: it is also the worktree of discussion(s) {}",
+                    own.path,
+                    sharers.join(", ")
+                )
+            });
+            let own = own
+                .filter(|_| sharers.is_empty())
+                .map(|own| (own, branch_users));
+            Ok((DiscussionDelete::Deleted { kept_worktree }, own))
+        })
+        .await?;
+    if let Some((own, branch_users)) = own {
+        if let Some(kept) = remove_own_worktree(id, own, branch_users).await {
+            return Ok(DiscussionDelete::Deleted {
+                kept_worktree: Some(kept),
+            });
+        }
+    }
+    Ok(outcome)
+}
+
+/// A discussion's own worktree, as its delete handles it.
+#[derive(Debug, Clone)]
+struct OwnWorktree {
+    path: String,
+    repo: std::path::PathBuf,
+    /// A review's detached checkout is disposable (KT-1645).
+    review: bool,
+    /// The discussion's own branch: the only one its delete may remove.
+    branch: Option<String>,
+}
+
+/// The worktree of `id`, unless it has none or it is a task execution's checkout.
+fn own_worktree_of(conn: &rusqlite::Connection, id: &str) -> anyhow::Result<Option<OwnWorktree>> {
+    let Some(disc) = crate::db::discussions::get_discussion(conn, id)? else {
+        return Ok(None);
+    };
+    let (Some(path), Some(project_id)) = (disc.workspace_path, disc.project_id) else {
+        return Ok(None);
+    };
+    if crate::db::orchestration::is_task_checkout(conn, id, &path)? {
+        return Ok(None);
+    }
+    let project_path = crate::db::projects::get_project(conn, &project_id)?
+        .map(|project| project.path)
+        .unwrap_or_default();
+    if project_path.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(OwnWorktree {
+        path,
+        repo: crate::core::scanner::resolve_host_path(&project_path),
+        review: disc.workspace_mode == crate::db::discussions::REVIEW_WORKSPACE_MODE,
+        branch: disc.worktree_branch.filter(|branch| !branch.is_empty()),
+    }))
+}
+
+/// Whether `a` and `b` name one directory: same spelling, or same canonical path.
+/// Only paths ending in the same name are canonicalised (a filesystem look each).
+fn same_worktree(a: &str, b: &str) -> bool {
+    let (a, b) = (std::path::Path::new(a), std::path::Path::new(b));
+    a == b
+        || (a.file_name().is_some()
+            && a.file_name() == b.file_name()
+            && crate::core::worktree::same_path(
+                &crate::core::scanner::resolve_host_path(&a.to_string_lossy()),
+                &crate::core::scanner::resolve_host_path(&b.to_string_lossy()),
+            ))
+}
+
+/// The other discussions whose worktree is `own`, however they spell it: a same-slug
+/// reuse (KT-1811) stores git's canonical path, the first discussion Kronn's.
+fn sharers_of(
+    conn: &rusqlite::Connection,
+    id: &str,
+    own: &OwnWorktree,
+) -> anyhow::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id, workspace_path FROM discussions
+          WHERE workspace_path IS NOT NULL AND workspace_path != '' AND id != ?1 ORDER BY id",
+    )?;
+    let rows = statement
+        .query_map([id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, path)| same_worktree(path, &own.path))
+        .map(|(other, _)| other)
+        .collect())
+}
+
+/// `own`, unless another discussion shares it: that worktree is kept whatever it
+/// holds, so its files are no reason to refuse.
+fn unshared(
+    conn: &rusqlite::Connection,
+    id: &str,
+    own: Option<OwnWorktree>,
+) -> anyhow::Result<Option<OwnWorktree>> {
+    match own {
+        Some(own) if sharers_of(conn, id, &own)?.is_empty() => Ok(Some(own)),
+        _ => Ok(None),
+    }
+}
+
+/// A workflow run still working in `own`, which the delete would take from it.
+fn active_run_refusal(
+    conn: &rusqlite::Connection,
+    own: &OwnWorktree,
+) -> anyhow::Result<Option<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id, workspace_path FROM workflow_runs WHERE workspace_path IS NOT NULL
+            AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
+          ORDER BY id",
+    )?;
+    let runs = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(runs
+        .into_iter()
+        .find(|(_, path)| same_worktree(path, &own.path))
+        .map(|(run, _)| {
+            format!(
+                "workflow run {run} is still working in {}: retry once it has finished",
+                own.path
+            )
+        }))
+}
+
+/// The branches another discussion's worktree row or an active orchestration run names,
+/// with who names each (KT-2084): never deleted, whether or not their paths still exist.
+fn branches_named_elsewhere(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let rows =
+        |query: &str, params: &[&dyn rusqlite::ToSql]| -> rusqlite::Result<Vec<(String, String)>> {
+            conn.prepare(query)?
+                .query_map(params, |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+        };
+    let named_by = [
+        (
+            rows(
+                "SELECT id, worktree_branch FROM discussions
+                  WHERE id != ?1 AND worktree_branch IS NOT NULL AND worktree_branch != ''",
+                &[&id],
+            )?,
+            "the worktree of discussion",
+        ),
+        (
+            rows(
+                "SELECT disc_id, branch FROM discussion_workspaces
+                  WHERE disc_id != ?1 AND branch != ''",
+                &[&id],
+            )?,
+            "a worktree row of discussion",
+        ),
+        (
+            rows(
+                "SELECT id, target_branch FROM orchestration_runs
+                  WHERE status = 'active' AND target_branch IS NOT NULL AND target_branch != ''",
+                &[],
+            )?,
+            "active orchestration run",
+        ),
+    ];
+    let mut named = std::collections::BTreeMap::new();
+    for (found, who) in named_by {
+        for (owner, branch) in found {
+            named
+                .entry(branch)
+                .or_insert_with(|| format!("{who} {owner} names it"));
+        }
+    }
+    Ok(named)
+}
+
+/// [`unsaved_work_refusal`] on a blocking thread, outside the database lock (KT-1646).
+async fn unsaved_work_off_the_lock(own: Option<OwnWorktree>) -> Option<String> {
+    let own = own?;
+    tokio::task::spawn_blocking(move || unsaved_work_refusal(&own))
         .await
-    {
-        Ok(true) => Json(ApiResponse::ok(())),
-        Ok(false) => Json(ApiResponse::err("Discussion not found")),
-        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+        .unwrap_or_else(|error| Some(format!("the worktree check failed: {error}")))
+}
+
+/// Why `own` cannot go: uncommitted or ignored work in it or in its submodules,
+/// commits on its detached HEAD, or a state that cannot be read. Runs git: blocking.
+fn unsaved_work_refusal(own: &OwnWorktree) -> Option<String> {
+    if own.review {
+        return None;
+    }
+    let checkout = crate::core::scanner::resolve_host_path(&own.path);
+    if !checkout.exists() {
+        return None;
+    }
+    // A worktree Kronn does not manage, or one git no longer lists, stays on disk whatever it
+    // holds: nothing to judge.
+    if crate::core::worktree::is_unregistered_managed_worktree(&own.repo, &checkout) {
+        return None;
+    }
+    if matches!(
+        crate::core::worktree::is_managed_discussion_worktree(&own.repo, &checkout),
+        Ok(false)
+    ) {
+        return None;
+    }
+    let path = &own.path;
+    crate::core::worktree::unsaved_work(&own.repo, &checkout, path).unwrap_or_else(|error| {
+        // A reftable repository: retrying changes nothing, the reason says what to do.
+        if error.contains(crate::core::lane_git::snapshot::REFTABLE_FORMAT) {
+            return Some(error);
+        }
+        Some(format!(
+            "the state of the worktree {path} cannot be read ({error}): check it, then retry"
+        ))
+    })
+}
+
+/// Remove `own` once its discussion is deleted; `Some` says where and why it, or its
+/// branch, stays.
+async fn remove_own_worktree(
+    disc_id: &str,
+    own: OwnWorktree,
+    branch_users: std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let path = own.path.clone();
+    let removed = tokio::task::spawn_blocking(move || {
+        // Written to since the handler's check: the row is gone, the work stays.
+        if let Some(reason) = unsaved_work_refusal(&own) {
+            return Err(reason);
+        }
+        let checkout = crate::core::scanner::resolve_host_path(&own.path);
+        if checkout.exists()
+            && crate::core::worktree::is_unregistered_managed_worktree(&own.repo, &checkout)
+        {
+            return Err(crate::core::worktree::UNREGISTERED_WORKTREE.to_string());
+        }
+        if checkout.exists()
+            && !crate::core::worktree::is_managed_discussion_worktree(&own.repo, &checkout)?
+        {
+            return Err(crate::core::worktree::UNMANAGED_WORKTREE.to_string());
+        }
+        if own.review {
+            return crate::core::worktree::remove_discussion_worktree(&own.repo, &own.path, None)
+                .map(|()| crate::core::worktree::DeletedDiscussionBranch::NoBranch);
+        }
+        crate::core::worktree::remove_deleted_discussion_worktree(
+            &own.repo,
+            &own.path,
+            own.branch.as_deref(),
+            &branch_users,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("the removal task failed: {error}")));
+    match removed {
+        Ok(crate::core::worktree::DeletedDiscussionBranch::Kept { branch, reason }) => {
+            tracing::warn!("discussion {disc_id} deleted, its branch {branch} kept: {reason}");
+            Some(format!("branch kept: {branch} ({reason})"))
+        }
+        Ok(_) => None,
+        // Stopped midway: the reason says what of the worktree is left.
+        Err(reason) if reason.starts_with(crate::core::worktree::PARTLY_REMOVED) => {
+            tracing::warn!("discussion {disc_id} deleted, its worktree {path} {reason}");
+            Some(format!("worktree {path} {reason}"))
+        }
+        Err(reason) => {
+            tracing::warn!("discussion {disc_id} deleted, its worktree {path} kept: {reason}");
+            Some(format!("worktree kept at {path}: {reason}"))
+        }
     }
 }
 

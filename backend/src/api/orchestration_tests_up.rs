@@ -25047,7 +25047,13 @@ async fn a_clean_finished_worktree_is_reclaimed_and_its_branch_kept() {
             .await
             .unwrap();
 
-        assert_eq!(outcome, CleanCheckoutReclaim::Released, "{status}");
+        assert_eq!(
+            outcome,
+            CleanCheckoutReclaim::Released {
+                ignored_copied: None
+            },
+            "{status}"
+        );
         assert!(!std::path::Path::new(&path).exists(), "{status}");
         assert!(!lane_target.exists(), "{status}: lane purged");
         assert_eq!(
@@ -25139,7 +25145,12 @@ async fn the_removal_holds_no_database_connection_and_keeps_the_claim() {
     .await
     .unwrap();
 
-    assert_eq!(outcome, CleanCheckoutReclaim::Released);
+    assert_eq!(
+        outcome,
+        CleanCheckoutReclaim::Released {
+            ignored_copied: None
+        }
+    );
     assert_eq!(
         *observed.lock().unwrap(),
         Some((true, true)),
@@ -25230,7 +25241,12 @@ async fn a_reassign_racing_a_release_is_refused_and_nothing_is_revived() {
         })
         .await
         .unwrap();
-    assert_eq!(outcome, CleanCheckoutReclaim::Released);
+    assert_eq!(
+        outcome,
+        CleanCheckoutReclaim::Released {
+            ignored_copied: None
+        }
+    );
 
     // Settled: the claim is gone, the execution is still finished, and the
     // retired workspace claims no path that could be handed out again.
@@ -25543,6 +25559,74 @@ async fn a_preserved_worktree_is_released_when_its_task_closes() {
     assert_eq!(workspace_of(&db, &exec_id).await.state, "detached");
 }
 
+/// A worker's checkout holding an ignored `.env` (through the repository's own exclude
+/// file), and the execution's evidence folder, emptied.
+async fn checkout_holding_an_ignored_file(
+    db: &Database,
+    repo: &Path,
+    exec_id: &str,
+) -> (String, std::path::PathBuf) {
+    use std::io::Write;
+    let path = managed_worktree_path(db, exec_id).await;
+    std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+    let mut exclude = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(repo.join(".git/info/exclude"))
+        .unwrap();
+    writeln!(exclude, ".env").unwrap();
+    std::fs::write(Path::new(&path).join(".env"), "TOKEN=1").unwrap();
+    let evidence = terminal_evidence_dir(exec_id).unwrap();
+    let _ = std::fs::remove_dir_all(&evidence);
+    (path, evidence)
+}
+
+/// KT-2084 — closing a task releases its checkout holding an ignored file too: the file is
+/// copied into the execution's evidence first.
+#[tokio::test]
+async fn closing_a_task_releases_a_checkout_holding_an_ignored_file_with_a_copy() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let (path, evidence) = checkout_holding_an_ignored_file(&db, repo.path(), &exec_id).await;
+    worker_session_left(&db).await;
+
+    let task_id = set_task_status_of(&db, &exec_id, "done").await;
+    let report = release_closed_task_checkouts(&db, &task_id).await;
+
+    assert_eq!(report.released, 1, "{:?}", report.kept);
+    assert!(!Path::new(&path).exists());
+    assert_eq!(
+        std::fs::read(evidence.join("ignored/.env")).unwrap(),
+        b"TOKEN=1"
+    );
+}
+
+/// KT-2084 — a `RemoveIfClean` cancel takes a checkout whose only extra is an ignored file,
+/// copied into the execution's evidence first.
+#[tokio::test]
+async fn a_remove_if_clean_cancel_copies_an_ignored_file_before_the_release() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let (path, evidence) = checkout_holding_an_ignored_file(&db, repo.path(), &exec_id).await;
+
+    let outcome = cancelled_with_policy(
+        &db,
+        repo.path(),
+        &exec_id,
+        crate::models::CancellationCleanupPolicy::RemoveIfClean,
+    )
+    .await;
+
+    assert!(outcome.contains("removed"), "{outcome}");
+    assert!(!Path::new(&path).exists());
+    assert_eq!(
+        std::fs::read(evidence.join("ignored/.env")).unwrap(),
+        b"TOKEN=1"
+    );
+}
+
 /// KT-1676 — the periodic and boot sweeps take the worktrees of tasks that
 /// were closed while no hook ran (a restart, an update from a workflow).
 #[tokio::test]
@@ -25563,6 +25647,33 @@ async fn the_sweep_releases_the_worktree_of_a_task_closed_by_hand() {
 
     assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
     assert!(!std::path::Path::new(&path).exists());
+}
+
+/// KT-2084 — the sweep's line for a closed task's checkout says where its ignored files were
+/// copied.
+#[tokio::test]
+async fn the_sweep_line_of_a_closed_task_names_where_its_ignored_files_went() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let (path, evidence) = checkout_holding_an_ignored_file(&db, repo.path(), &exec_id).await;
+    worker_session_left(&db).await;
+    set_task_status_of(&db, &exec_id, "done").await;
+    let mut report = OrchestrationBootReport::default();
+
+    release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+
+    assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
+    assert!(!Path::new(&path).exists());
+    let copied = evidence.join("ignored");
+    assert!(
+        report
+            .lane_target_report
+            .iter()
+            .any(|line| line.contains(&format!("ignored files copied to {}", copied.display()))),
+        "{:?}",
+        report.lane_target_report
+    );
 }
 
 /// KT-1676 — a managed worktree removed outside Kronn is no longer recorded
@@ -25622,6 +25733,37 @@ async fn a_worktree_removed_outside_kronn_is_marked_gone() {
 
     // Already settled: a second pass finds nothing to do.
     assert_eq!(reconcile_missing_managed_checkouts(&db).await.unwrap(), 0);
+}
+
+/// KT-2084 — a worker rewrote its registration's `gitdir` to name another lane's `.git`: the
+/// reconciliation that runs when a managed checkout went missing removes only Kronn's own dead
+/// registrations, never the other lane's.
+#[tokio::test]
+async fn a_registration_naming_another_lane_costs_it_nothing_when_a_checkout_goes_missing() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, _child, first) = attached_cli_worker(&db, repo.path()).await;
+    let project = project_of_execution(&db, &first).await;
+    let (second, _) = another_attached_worker(&db, &project.id, 2).await;
+    let (gone, _) = another_attached_worker(&db, &project.id, 3).await;
+    let mut lanes = [
+        dir_name(&managed_worktree_path(&db, &first).await),
+        dir_name(&managed_worktree_path(&db, &second).await),
+    ];
+    lanes.sort();
+    let registrations = repo.path().join(".git/worktrees");
+    let (a, b) = (registrations.join(&lanes[0]), registrations.join(&lanes[1]));
+    std::fs::write(a.join("gitdir"), std::fs::read(b.join("gitdir")).unwrap()).unwrap();
+    std::fs::remove_dir_all(managed_worktree_path(&db, &gone).await).unwrap();
+
+    let _ = reconcile_missing_managed_checkouts(&db).await;
+
+    assert!(
+        b.join("index").is_file(),
+        "the registration {} lost its index",
+        b.display()
+    );
+    assert!(b.join("HEAD").is_file());
 }
 
 /// KT-1676 — the reported case: 65 worktrees, one over the cap, eight of
@@ -26071,7 +26213,7 @@ async fn a_marked_lane_of_a_finished_execution_with_a_kept_dirty_worktree_surviv
 async fn a_marked_lane_of_a_finished_execution_with_a_removed_worktree_is_removed() {
     let fx = lane_fixture().await;
     fx.cancel().await;
-    worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, true).unwrap();
+    worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, None).unwrap();
     assert!(!std::path::Path::new(&fx.path).exists());
 
     let dry = fx.sweep(worktree::LaneSweepScope::ReportOnly).await;
@@ -26177,7 +26319,7 @@ async fn an_unmarked_lane_whose_worktree_is_gone_is_removed_by_lineage() {
     std::fs::create_dir_all(stranger.join("debug")).unwrap();
     std::fs::write(stranger.join("debug/kronn"), b"nobody's").unwrap();
     fx.cancel().await;
-    worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, true).unwrap();
+    worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, None).unwrap();
     fx.retire_workspace().await;
 
     let sweep = fx.sweep(worktree::LaneSweepScope::WorktreeGone).await;
@@ -26220,7 +26362,7 @@ async fn an_unmarked_lane_with_a_live_worktree_survives_by_lineage() {
 async fn an_unmarked_lane_of_a_live_execution_survives_by_lineage() {
     let fx = lane_fixture().await;
     fx.strip_marker();
-    worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, true).unwrap();
+    worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, None).unwrap();
     assert!(!exec_of(&fx.db, &fx.exec_id).await.status.is_terminal());
 
     let sweep = fx.sweep(worktree::LaneSweepScope::WorktreeGone).await;
@@ -26236,7 +26378,7 @@ async fn an_unmanaged_workspace_attributes_no_lane() {
     let fx = lane_fixture().await;
     fx.strip_marker();
     fx.cancel().await;
-    worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, true).unwrap();
+    worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, None).unwrap();
     fx.db
         .with_conn(|conn| {
             conn.execute(
@@ -32336,6 +32478,9 @@ async fn a_worker_bridge_token_cannot_extend_its_own_review_rounds() {
 mod agent_fallback_return;
 #[path = "orchestration/tests/agent_fallback_runs.rs"]
 mod agent_fallback_runs;
+// KT-2084 — deleting a discussion spares a worker's checkout and unmerged branches.
+#[path = "orchestration/tests/discussion_delete.rs"]
+mod discussion_delete;
 
 /// A parent room `d-parent` whose Codex turn `job-1` is running and launched
 /// `t-1`'s execution (returned), plus every room-agent identity that must NOT

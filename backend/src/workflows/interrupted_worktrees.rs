@@ -148,7 +148,7 @@ pub async fn reclaim_stale_interrupted_worktrees(
             }
         }
 
-        // Nested worktrees first, a submodule checkout re-inspected (KT-1809).
+        // Nested worktrees first, each judged again by Kronn (KT-1809, KT-2084).
         let refusal = match workspace::remove_inspected_checkout(&repo, &path).await {
             Ok(None) => None,
             Ok(Some(reason)) => Some(reason),
@@ -555,5 +555,81 @@ mod tests {
 
         assert_eq!(reclaim(&fixture, TTL_DAYS).await, ReclaimReport::default());
         assert!(parent.path.exists(), "the parent can still be resumed");
+    }
+
+    /// KT-2084 — a FIFO in place of the run worktree's `HEAD` in its registration: the boot
+    /// pass answers at once and keeps the worktree.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fifo_at_the_registration_head_keeps_the_worktree_and_the_pass_returns() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        let fixture = std::sync::Arc::new(fixture().await);
+        let ws = interrupted(&fixture, "abab1212-fifo", 10).await;
+        let head =
+            PathBuf::from(git(&ws.path, &["rev-parse", "--absolute-git-dir"]).await).join("HEAD");
+        std::fs::remove_file(&head).unwrap();
+        let c = std::ffi::CString::new(head.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+        let pass = tokio::spawn({
+            let fixture = fixture.clone();
+            async move { reclaim(&fixture, TTL_DAYS).await }
+        });
+        let report = tokio::time::timeout(std::time::Duration::from_secs(30), pass).await;
+
+        // Held read-write the FIFO lets every pending open through, removed no later open
+        // waits on it, closed every reader reads an end of file: a blocked git stops.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&head);
+        let _ = std::fs::remove_file(&head);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(held);
+        let report = report.expect("the boot pass did not return").unwrap();
+        assert_eq!(report.reclaimed, 0, "{report:?}");
+        assert!(ws.path.exists());
+    }
+
+    /// KT-2084 — a run checkout on a branch named like an option (`--output=<file>`): the boot
+    /// pass keeps it and never hands git the name as an option, so nothing is written through
+    /// it.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[tokio::test]
+    async fn a_branch_named_like_an_option_keeps_the_checkout_and_writes_nothing() {
+        let fixture = fixture().await;
+        let ws = interrupted(&fixture, "ffff6666-option", 30).await;
+        let scratch = tempfile::Builder::new()
+            .prefix("kronn-option-branch")
+            .tempdir()
+            .unwrap();
+        let victim = scratch.path().join("victim");
+        std::fs::write(&victim, "precious\n").unwrap();
+        let branch = format!("--output={}", scratch.path().join("v").display());
+        // What `rev-list --output=<branch>@{u}..refs/heads/<branch>` would open: a link there.
+        let opened = PathBuf::from(format!(
+            "{}@{{u}}..refs/heads/{branch}",
+            scratch.path().join("v").display()
+        ));
+        std::fs::create_dir_all(opened.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, &opened).unwrap();
+        let full = format!("refs/heads/{branch}");
+        git(&ws.path, &["update-ref", &full, "HEAD"]).await;
+        git(&ws.path, &["symbolic-ref", "HEAD", &full]).await;
+
+        let report = reclaim(&fixture, TTL_DAYS).await;
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+        assert_eq!(
+            report,
+            ReclaimReport {
+                kept_other: 1,
+                ..Default::default()
+            }
+        );
+        assert!(ws.path.exists(), "the checkout is kept");
     }
 }

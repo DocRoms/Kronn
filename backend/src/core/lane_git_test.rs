@@ -287,6 +287,48 @@ fn a_worktree_git_registers_nothing_for_is_refused() {
     assert!(error.contains("not a worktree registered"), "{error}");
 }
 
+/// KT-2084 — a registration names its worktree only as Kronn or git writes it.
+#[cfg(unix)] // symlink made through std::os::unix
+#[test]
+fn a_registration_naming_the_worktree_through_a_link_or_a_parent_is_refused() {
+    let world = World::new();
+    let gitdir = world.root().join(".git/worktrees/task-kt-1745-poc/gitdir");
+    let elsewhere = tempfile::Builder::new()
+        .prefix("kronn-lane-alias")
+        .tempdir()
+        .unwrap();
+    let alias = elsewhere.path().join("alias");
+    std::os::unix::fs::symlink(world.worktree.parent().unwrap(), &alias).unwrap();
+    fs::create_dir(world.worktree.join("sub")).unwrap();
+    for spelling in [
+        format!("{}/task-kt-1745-poc/.git\n", alias.display()),
+        format!("{}/sub/../.git\n", world.worktree.display()),
+    ] {
+        fs::write(&gitdir, &spelling).unwrap();
+        let error = LaneGit::resolve(&world.worktree).unwrap_err();
+        assert!(error.contains("registered"), "{spelling}: {error}");
+    }
+}
+
+#[cfg(unix)] // writes a POSIX absolute path into a registration's gitdir
+#[test]
+fn a_worktree_two_registrations_name_is_refused() {
+    let world = World::new();
+    let other = world.root().join(".kronn/worktrees/other");
+    git(
+        world.main.path(),
+        &["worktree", "add", "-b", "other", other.to_str().unwrap()],
+    );
+    fs::write(
+        world.root().join(".git/worktrees/other/gitdir"),
+        format!("{}/.git\n", world.worktree.display()),
+    )
+    .unwrap();
+    let error = LaneGit::resolve(&world.worktree).unwrap_err();
+    assert!(error.contains("registrations"), "{error}");
+    assert!(is_registered(&world.worktree).is_err());
+}
+
 #[test]
 fn the_pointer_is_checked_every_time_and_a_restored_pointer_is_trusted_again() {
     let world = World::new();
@@ -1551,6 +1593,9 @@ mod unix {
         every_kronn_path_leaves_the_worker_nothing_to_run(&world);
     }
 
+    /// The vetting accepts the key. The fixture is no real reftable repository: git cannot
+    /// list its gitlinks, and a submodule git cannot list is refused (KT-2084), so the vetting
+    /// itself is what is asserted.
     #[test]
     fn a_reftable_clone_is_not_refused() {
         assert!(nested_key_is_plain("extensions.refstorage"));
@@ -1559,6 +1604,294 @@ mod unix {
             &world.worktree.join("lib/.git/config"),
             b"[extensions]\n\trefStorage = reftable\n",
         );
+        let admin = world.root().join(".git/worktrees/task-kt-1745-poc");
+        assert_eq!(
+            vet_nested_dot_git(&world.worktree.join("lib"), &admin),
+            Ok(())
+        );
+    }
+
+    // ── KT-2084 fourth round: what git reads besides the vetted configuration ──
+
+    #[test]
+    fn a_submodule_repository_naming_its_own_work_tree_is_refused() {
+        let world = world_with_submodule();
+        append_bytes(
+            &world.worktree.join("lib/.git/config"),
+            format!("[core]\n\tworktree = {}\n", world.markers.path().display()).as_bytes(),
+        );
+        let error = LaneGit::resolve(&world.worktree).expect_err("not trusted");
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        assert!(error.contains("core.worktree"), "{error}");
+    }
+
+    #[test]
+    fn a_submodule_repository_with_attributes_of_its_own_is_refused() {
+        let world = world_with_submodule();
+        let info = world.worktree.join("lib/.git/info");
+        fs::create_dir_all(&info).unwrap();
+        fs::write(info.join("attributes"), "* filter=lfs\n").unwrap();
+        let error = LaneGit::resolve(&world.worktree).expect_err("not trusted");
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        assert!(error.contains("info/attributes"), "{error}");
+
+        // An empty one changes nothing git does.
+        fs::write(info.join("attributes"), "").unwrap();
         assert!(LaneGit::resolve(&world.worktree).is_ok());
+    }
+
+    /// A filter in `config` that leaves `marker` when it runs, named for every file, and a
+    /// tracked file git must hash again.
+    fn filter_for_every_file(world: &World, config: &Path, marker: &str) {
+        append_bytes(
+            config,
+            format!(
+                "[filter \"kt\"]\n\tclean = {}; cat\n\trequired = false\n",
+                world.touch(marker)
+            )
+            .as_bytes(),
+        );
+        fs::write(world.worktree.join(".gitattributes"), "* filter=kt\n").unwrap();
+        let readme = fs::File::options()
+            .append(true)
+            .open(world.worktree.join("README.md"))
+            .unwrap();
+        readme
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_pinned_command_reads_the_registered_common_directory_only() {
+        let world = World::new();
+        let elsewhere = world.markers.path().join("common");
+        let copied = std::process::Command::new("cp")
+            .args(["-R"])
+            .arg(world.root().join(".git"))
+            .arg(&elsewhere)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+        filter_for_every_file(&world, &elsewhere.join("config"), "COMMON_DIR_FILTER");
+        let admin = world.root().join(".git/worktrees/task-kt-1745-poc");
+        fs::write(
+            admin.join("commondir"),
+            format!("{}\n", elsewhere.display()),
+        )
+        .unwrap();
+
+        let _ = crate::core::lane_git::git(&world.worktree)
+            .map(|mut command| command.args(["status", "--porcelain"]).output());
+        let _ = crate::core::worktree::worktree_dirty_files(&world.worktree);
+
+        assert!(
+            !world.marker("COMMON_DIR_FILTER").exists(),
+            "a configuration outside the registration was read"
+        );
+    }
+
+    #[test]
+    fn a_worktree_configuration_is_vetted_like_a_nested_one() {
+        let world = World::new();
+        git(
+            world.main.path(),
+            &["config", "core.repositoryformatversion", "1"],
+        );
+        git(
+            world.main.path(),
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        let admin = world.root().join(".git/worktrees/task-kt-1745-poc");
+        fs::write(admin.join("config.worktree"), "").unwrap();
+        assert!(
+            LaneGit::resolve(&world.worktree).is_ok(),
+            "an empty one is fine"
+        );
+        filter_for_every_file(&world, &admin.join("config.worktree"), "WORKTREE_FILTER");
+
+        let refused = LaneGit::resolve(&world.worktree);
+        let _ = crate::core::lane_git::git(&world.worktree)
+            .map(|mut command| command.args(["status", "--porcelain"]).output());
+
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.contains("config.worktree")),
+            "{refused:?}"
+        );
+        assert!(!world.marker("WORKTREE_FILTER").exists(), "the filter ran");
+    }
+
+    #[test]
+    fn a_hook_declared_in_configuration_never_runs() {
+        let world = World::new();
+        for (name, event) in [
+            ("kt-ref", "reference-transaction"),
+            ("kt-index", "post-index-change"),
+        ] {
+            git(
+                world.main.path(),
+                &["config", &format!("hook.{name}.event"), event],
+            );
+            git(
+                world.main.path(),
+                &[
+                    "config",
+                    &format!("hook.{name}.command"),
+                    &world.touch(name),
+                ],
+            );
+        }
+        git(world.main.path(), &["branch", "kt-spare"]);
+        let _ = fs::remove_file(world.marker("kt-ref"));
+        let _ = fs::remove_file(world.marker("kt-index"));
+        fs::File::options()
+            .append(true)
+            .open(world.worktree.join("README.md"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+
+        let status = crate::core::lane_git::git(&world.worktree)
+            .unwrap()
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let deleted = crate::core::lane_git::git(world.main.path())
+            .unwrap()
+            .args(["branch", "-D", "kt-spare"])
+            .output()
+            .unwrap();
+        assert!(deleted.status.success());
+
+        world.assert_no_marker();
+    }
+
+    /// An index git reads (version 2, no extension, a zero checksum) holding `entries`
+    /// `(mode, path)`, each naming the same object.
+    fn crafted_index(entries: &[(u32, &str)]) -> Vec<u8> {
+        let mut sorted: Vec<&(u32, &str)> = entries.iter().collect();
+        sorted.sort_by(|a, b| a.1.as_bytes().cmp(b.1.as_bytes()));
+        let mut out = b"DIRC".to_vec();
+        out.extend(2u32.to_be_bytes());
+        out.extend((sorted.len() as u32).to_be_bytes());
+        for (mode, path) in sorted {
+            let start = out.len();
+            for field in [0u32, 0, 0, 0, 0, 0, *mode, 0, 0, 0] {
+                out.extend(field.to_be_bytes());
+            }
+            out.extend([0x11u8; 20]);
+            out.extend((path.len() as u16).to_be_bytes());
+            out.extend(path.as_bytes());
+            let padded = (out.len() - start + 8) / 8 * 8;
+            out.resize(start + padded, 0);
+        }
+        out.extend([0u8; 20]);
+        out
+    }
+
+    /// KT-2084 — a submodule's `.git` file names `<the worktree's registration>/modules/<path>`,
+    /// where git puts it: the common directory itself, another registration, a folder of the
+    /// registration outside `modules`, or the main checkout's modules are refused, for git and
+    /// for a delete's judgement alike.
+    #[test]
+    fn a_submodule_gitfile_outside_its_registration_modules_is_refused() {
+        let world = world_with_submodule();
+        let common = world.root().join(".git");
+        let admin = common.join("worktrees/task-kt-1745-poc");
+        let other = world.root().join(".kronn/worktrees/task-kt-2084-other");
+        git(
+            world.main.path(),
+            &["worktree", "add", "-q", "--detach", other.to_str().unwrap()],
+        );
+        let module = admin.join("modules/lib");
+        fs::create_dir_all(admin.join("modules")).unwrap();
+        fs::rename(world.worktree.join("lib/.git"), &module).unwrap();
+        let gitfile = world.worktree.join("lib/.git");
+        for target in [
+            common.clone(),
+            common.join("worktrees/task-kt-2084-other"),
+            admin.join("lib"),
+            common.join("modules/lib"),
+        ] {
+            fs::write(&gitfile, format!("gitdir: {}\n", target.display())).unwrap();
+            let error = crate::core::lane_git::git(&world.worktree).unwrap_err();
+            assert!(
+                error.starts_with(NESTED_PREFIX),
+                "{}: {error}",
+                target.display()
+            );
+            let judged =
+                crate::core::worktree::unsaved_work(world.main.path(), &world.worktree, "wt");
+            assert!(judged.is_err(), "{}: {judged:?}", target.display());
+        }
+        fs::write(&gitfile, format!("gitdir: {}\n", module.display())).unwrap();
+        assert!(crate::core::lane_git::git(&world.worktree).is_ok());
+        world.assert_no_marker();
+    }
+
+    /// KT-2084 — a directory named inside a managed worktree that a link leads out of: no
+    /// git runs there, pinned or not.
+    #[test]
+    fn a_path_inside_a_worktree_that_a_link_leads_out_of_is_refused() {
+        let world = World::new();
+        let outside = tempfile::tempdir().unwrap();
+        git(outside.path(), &["init", "-q", "-b", "main"]);
+        std::os::unix::fs::symlink(outside.path(), world.worktree.join("away")).unwrap();
+
+        let error = LaneGit::resolve(&world.worktree.join("away")).unwrap_err();
+
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        assert!(crate::core::lane_git::git(&world.worktree.join("away")).is_err());
+    }
+
+    /// KT-2084 — a gitlink path git never writes (`..`, absolute) refuses the worktree.
+    #[test]
+    fn a_gitlink_path_that_is_not_plain_refuses_the_worktree() {
+        for odd in ["../outside", "/abs/x"] {
+            let world = World::new();
+            let index = world.root().join(".git/worktrees/task-kt-1745-poc/index");
+            fs::write(
+                &index,
+                crafted_index(&[(0o100644, "README.md"), (0o160000, odd)]),
+            )
+            .unwrap();
+
+            let refused = crate::core::lane_git::git(&world.worktree);
+
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|error| error.starts_with(NESTED_PREFIX)),
+                "{odd}: {:?}",
+                refused.map(|_| ())
+            );
+        }
+    }
+
+    /// KT-2084 — a Kronn stopped mid-judgement leaves its copy behind: the boot step removes
+    /// every entry of the folder of copies, and a link planted there goes as a link.
+    #[test]
+    fn leftover_snapshots_are_removed_at_boot_and_a_link_there_is_never_followed() {
+        let data = tempfile::TempDir::new().unwrap();
+        let holder = data.path().join(snapshot::SNAPSHOTS_DIR);
+        fs::create_dir_all(holder.join("s-leftover/objects")).unwrap();
+        fs::write(holder.join("s-leftover/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(outside.path().join("precious.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), holder.join("s-link")).unwrap();
+
+        snapshot::sweep_leftovers_in(data.path());
+
+        let left: Vec<_> = fs::read_dir(&holder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        assert!(
+            outside.path().join("precious.txt").exists(),
+            "the link was followed"
+        );
     }
 }

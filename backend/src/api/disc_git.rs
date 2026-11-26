@@ -299,21 +299,36 @@ async fn status_for_selected_workspace(
     if attached {
         git_allowed_in(&repo)?;
     }
-    let live_head = attached
-        .then(|| crate::core::worktree::resolve_commit(&repo, "HEAD").ok())
-        .flatten();
-    let head = delivery
-        .as_ref()
-        .map(|item| item.head_sha.clone())
-        .or(live_head)
-        .or_else(|| workspace.head_sha.clone());
-    let has_durable_range = workspace.base_sha.is_some() && head.is_some();
     let github_env = crate::core::github_connection::env_for_launch(Some(&project.id)).await;
-    let mut status = if has_durable_range {
-        super::git_ops::run_git_status_without_commit_evidence(&repo, &github_env)?
-    } else {
-        super::git_ops::run_git_status_page(&repo, commit_offset, commit_limit, &github_env)?
-    };
+    // Every git off the runtime, each within its time bound (KT-2084).
+    let delivered_head = delivery.as_ref().map(|item| item.head_sha.clone());
+    let (recorded_head, base_sha) = (workspace.head_sha.clone(), workspace.base_sha.clone());
+    let looked_at = repo.clone();
+    let (mut status, head, range) = tokio::task::spawn_blocking(move || {
+        let repo = looked_at;
+        let live_head = attached
+            .then(|| crate::core::worktree::resolve_commit(&repo, "HEAD").ok())
+            .flatten();
+        let head = delivered_head.or(live_head).or(recorded_head);
+        let status = if base_sha.is_some() && head.is_some() {
+            super::git_ops::run_git_status_without_commit_evidence(&repo, &github_env)?
+        } else {
+            super::git_ops::run_git_status_page(&repo, commit_offset, commit_limit, &github_env)?
+        };
+        let range = match (base_sha.as_deref(), head.as_deref()) {
+            (Some(base), Some(head)) => Some(super::git_ops::run_git_range_page(
+                &repo,
+                base,
+                head,
+                commit_offset,
+                commit_limit,
+            )?),
+            _ => None,
+        };
+        Ok::<_, String>((status, head, range))
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("Task failed: {error}")))?;
     status.workspace = Some(workspace_provenance(
         &workspace,
         execution.as_ref(),
@@ -325,9 +340,7 @@ async fn status_for_selected_workspace(
     status.branch = workspace.branch.clone();
     status.is_default_branch = status.branch == status.default_branch;
 
-    if let (Some(base), Some(head)) = (workspace.base_sha.as_deref(), head.as_deref()) {
-        let (files, commits, total, truncated) =
-            super::git_ops::run_git_range_page(&repo, base, head, commit_offset, commit_limit)?;
+    if let Some((files, commits, total, truncated)) = range {
         status.committed_files = files;
         status.commits = commits;
         status.commits_total = total;
@@ -453,20 +466,27 @@ pub async fn disc_git_status(
         return Json(ApiResponse::err(reason));
     }
     let display_path = work_dir.to_string_lossy().to_string();
-    let status_dir = work_dir.clone();
+    let status_dir = work_dir;
     let commit_offset = query.commit_offset;
     let commit_limit = query.commit_limit;
     let github_env = discussion_github_env(&state, &id).await;
 
     let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_git_status_page(&status_dir, commit_offset, commit_limit, &github_env)
+        let status = super::git_ops::run_git_status_page(
+            &status_dir,
+            commit_offset,
+            commit_limit,
+            &github_env,
+        )?;
+        // Off the runtime too (KT-2084).
+        let head = crate::core::worktree::resolve_commit(&status_dir, "HEAD").ok();
+        Ok((status, head))
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
-        Ok(mut status) => {
-            let head = crate::core::worktree::resolve_commit(&work_dir, "HEAD").ok();
+        Ok((mut status, head)) => {
             status.workspace = Some(GitWorkspaceProvenance {
                 workspace_id: None,
                 ownership: "direct".to_string(),
@@ -489,6 +509,16 @@ pub async fn disc_git_status(
         }
         Err(e) => Json(ApiResponse::err(e)),
     }
+}
+
+/// `work`, which runs git or reads the checkout, on a blocking thread (KT-2084): a git that
+/// waits holds that thread until its time bound, never a thread of the async runtime.
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
 }
 
 /// GET /api/discussions/:id/git-diff?path=...
@@ -514,7 +544,12 @@ pub async fn disc_git_diff(
                 .or(workspace.head_sha.as_deref());
             if let (Some(base), Some(head)) = (workspace.base_sha.as_deref(), head) {
                 let repo = crate::core::scanner::resolve_host_path(&project.path);
-                return match super::git_ops::run_git_diff_range(&repo, base, head, &query.path) {
+                let (base, head, path) = (base.to_string(), head.to_string(), query.path.clone());
+                let diff = off_runtime(move || {
+                    super::git_ops::run_git_diff_range(&repo, &base, &head, &path)
+                })
+                .await;
+                return match diff {
                     Ok(diff) => Json(ApiResponse::ok(diff)),
                     Err(error) => Json(ApiResponse::err(error)),
                 };
@@ -663,11 +698,14 @@ pub async fn worktree_unlock(
         return Json(ApiResponse::err("Project not found"));
     }
 
-    let resolved = crate::core::scanner::resolve_host_path(&project_path);
-    let repo_path = std::path::Path::new(&resolved);
+    let repo_path = crate::core::scanner::resolve_host_path(&project_path);
 
     // Remove worktree but keep the branch
-    if let Err(e) = crate::core::worktree::remove_discussion_worktree(repo_path, &wp, false) {
+    let removed = off_runtime(move || {
+        crate::core::worktree::remove_discussion_worktree(&repo_path, &wp, None)
+    })
+    .await;
+    if let Err(e) = removed {
         return Json(ApiResponse::err(format!("Failed to unlock: {}", e)));
     }
 
@@ -743,10 +781,14 @@ pub async fn worktree_lock(
         _ => return Json(ApiResponse::err("Project not found")),
     };
 
-    let resolved = crate::core::scanner::resolve_host_path(&project.path);
-    let repo_path = std::path::Path::new(&resolved);
+    let repo_path = crate::core::scanner::resolve_host_path(&project.path);
 
-    match crate::core::worktree::reattach_worktree(repo_path, &project.name, &disc.title, &branch) {
+    let reattached = off_runtime({
+        let (name, title) = (project.name.clone(), disc.title.clone());
+        move || crate::core::worktree::reattach_worktree(&repo_path, &name, &title, &branch)
+    })
+    .await;
+    match reattached {
         Ok(info) => {
             let did = disc.id.clone();
             let wp = info.path.clone();
@@ -916,7 +958,9 @@ pub async fn test_mode_enter(
     // ── Preflight #1: worktree must be clean ────────────────────────────
     if let Some(ref wp) = disc.workspace_path {
         let wt_resolved = crate::core::scanner::resolve_host_path(wp);
-        match crate::core::worktree::worktree_dirty_files(&wt_resolved) {
+        let dirty =
+            off_runtime(move || crate::core::worktree::worktree_dirty_files(&wt_resolved)).await;
+        match dirty {
             Ok(files) if !files.is_empty() => {
                 let count = files.len();
                 return blocked(
@@ -934,7 +978,12 @@ pub async fn test_mode_enter(
     }
 
     // ── Preflight #2 + #3: main repo state ──────────────────────────────
-    let state_before = match crate::core::worktree::main_repo_state(&repo_path) {
+    let state_before = off_runtime({
+        let repo = repo_path.clone();
+        move || crate::core::worktree::main_repo_state(&repo)
+    })
+    .await;
+    let state_before = match state_before {
         Ok(s) => s,
         Err(e) => {
             return Json(ApiResponse::err(format!(
@@ -969,7 +1018,12 @@ pub async fn test_mode_enter(
                 })),
             );
         }
-        match crate::core::worktree::stash_push(&repo_path, &stash_message) {
+        let pushed = off_runtime({
+            let (repo, message) = (repo_path.clone(), stash_message.clone());
+            move || crate::core::worktree::stash_push(&repo, &message)
+        })
+        .await;
+        match pushed {
             Ok(true) => {
                 stashed = true;
             }
@@ -986,10 +1040,18 @@ pub async fn test_mode_enter(
     // ── Unlock worktree (must happen BEFORE checkout, so the branch is
     //    free to be checked out in the main repo) ───────────────────────
     if let Some(ref wp) = disc.workspace_path {
-        if let Err(e) = crate::core::worktree::remove_discussion_worktree(&repo_path, wp, false) {
-            if stashed {
-                let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
+        let removed = off_runtime({
+            let (repo, wp, message) = (repo_path.clone(), wp.clone(), stash_message.clone());
+            move || {
+                let removed = crate::core::worktree::remove_discussion_worktree(&repo, &wp, None);
+                if removed.is_err() && stashed {
+                    let _ = crate::core::worktree::stash_pop_by_message(&repo, &message);
+                }
+                removed
             }
+        })
+        .await;
+        if let Err(e) = removed {
             return Json(ApiResponse::err(format!(
                 "Failed to unlock worktree: {}",
                 e
@@ -1014,17 +1076,23 @@ pub async fn test_mode_enter(
     }
 
     // ── Checkout the discussion branch in the main repo ─────────────────
-    if let Err(e) = crate::core::worktree::checkout_branch(&repo_path, &branch) {
-        // Full rollback: re-create worktree + pop stash.
-        let _ = crate::core::worktree::reattach_worktree(
-            &repo_path,
-            &project.name,
-            &disc.title,
-            &branch,
-        );
-        if stashed {
-            let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
+    let checked_out = off_runtime({
+        let (repo, branch, message) = (repo_path.clone(), branch.clone(), stash_message.clone());
+        let (name, title) = (project.name.clone(), disc.title.clone());
+        move || {
+            let checked_out = crate::core::worktree::checkout_branch(&repo, &branch);
+            if checked_out.is_err() {
+                // Full rollback: re-create worktree + pop stash.
+                let _ = crate::core::worktree::reattach_worktree(&repo, &name, &title, &branch);
+                if stashed {
+                    let _ = crate::core::worktree::stash_pop_by_message(&repo, &message);
+                }
+            }
+            checked_out
         }
+    })
+    .await;
+    if let Err(e) = checked_out {
         return Json(ApiResponse::err(format!(
             "Checkout failed, rolled back: {}",
             e
@@ -1057,16 +1125,24 @@ pub async fn test_mode_enter(
         })
         .await
     {
-        let _ = crate::core::worktree::checkout_branch(&repo_path, &previous_branch);
-        let _ = crate::core::worktree::reattach_worktree(
-            &repo_path,
-            &project.name,
-            &disc.title,
-            &branch,
-        );
-        if stashed {
-            let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
-        }
+        let _ = off_runtime({
+            let (repo, previous, branch) =
+                (repo_path.clone(), previous_branch.clone(), branch.clone());
+            let (name, title, message) = (
+                project.name.clone(),
+                disc.title.clone(),
+                stash_message.clone(),
+            );
+            move || {
+                let _ = crate::core::worktree::checkout_branch(&repo, &previous);
+                let _ = crate::core::worktree::reattach_worktree(&repo, &name, &title, &branch);
+                if stashed {
+                    let _ = crate::core::worktree::stash_pop_by_message(&repo, &message);
+                }
+                Ok(())
+            }
+        })
+        .await;
         return Json(ApiResponse::err(format!(
             "Could not persist test-mode restore state ({e}) — checkout rolled back to `{previous_branch}`"
         )));
@@ -1129,7 +1205,12 @@ pub async fn test_mode_exit(
     // Checkout the user's previous branch. If this fails we stop here —
     // the user needs to resolve whatever conflict is blocking it manually
     // (probably they committed to the branch during the test).
-    if let Err(e) = crate::core::worktree::checkout_branch(&repo_path, &restore_branch) {
+    let checked_out = off_runtime({
+        let (repo, restore) = (repo_path.clone(), restore_branch.clone());
+        move || crate::core::worktree::checkout_branch(&repo, &restore)
+    })
+    .await;
+    if let Err(e) = checked_out {
         return Json(ApiResponse::err(format!(
             "Failed to checkout back to `{}`: {}. Resolve manually, then call /test-mode/exit again.",
             restore_branch, e
@@ -1141,7 +1222,12 @@ pub async fn test_mode_exit(
     let mut unstashed = false;
     let mut stash_warn: Option<String> = None;
     if let Some(ref msg) = stash_ref {
-        match crate::core::worktree::stash_pop_by_message(&repo_path, msg) {
+        let popped = off_runtime({
+            let (repo, message) = (repo_path.clone(), msg.clone());
+            move || crate::core::worktree::stash_pop_by_message(&repo, &message)
+        })
+        .await;
+        match popped {
             Ok(()) => {
                 unstashed = true;
             }
@@ -1155,12 +1241,12 @@ pub async fn test_mode_exit(
     let worktree_branch = disc.worktree_branch.clone().unwrap_or_default();
     let mut worktree_restored = false;
     if !worktree_branch.is_empty() {
-        match crate::core::worktree::reattach_worktree(
-            &repo_path,
-            &project.name,
-            &disc.title,
-            &worktree_branch,
-        ) {
+        let reattached = off_runtime({
+            let (repo, name, title) = (repo_path.clone(), project.name.clone(), disc.title.clone());
+            move || crate::core::worktree::reattach_worktree(&repo, &name, &title, &worktree_branch)
+        })
+        .await;
+        match reattached {
             Ok(info) => {
                 worktree_restored = true;
                 let did = disc.id.clone();
@@ -1294,6 +1380,18 @@ pub async fn disc_create_pr(
     }
 }
 
+/// The PR template of the checkout `work_dir` and where it comes from: the project's own
+/// file, or Kronn's default naming the current branch.
+fn pr_template_of(work_dir: &std::path::Path) -> (String, &'static str) {
+    if let Some(template) = super::git_ops::read_pr_template(work_dir) {
+        return (template, "project");
+    }
+    (
+        super::git_ops::default_pr_template(&super::git_ops::current_branch_name(work_dir)),
+        "kronn",
+    )
+}
+
 /// GET /api/discussions/:id/pr-template
 pub async fn disc_pr_template(
     State(state): State<AppState>,
@@ -1306,20 +1404,10 @@ pub async fn disc_pr_template(
             Err(e) => return Json(ApiResponse::err(e)),
         };
 
-    let branch = crate::core::lane_git::git_or_refuse(&work_dir)
-        .args(["branch", "--show-current"])
-        .current_dir(&work_dir)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-
-    let template = super::git_ops::read_pr_template(&work_dir)
-        .unwrap_or_else(|| super::git_ops::default_pr_template(&branch));
-
-    let source = if super::git_ops::read_pr_template(&work_dir).is_some() {
-        "project"
-    } else {
-        "kronn"
+    // The git and the read off the runtime, the git within its time bound (KT-2084).
+    let (template, source) = match off_runtime(move || Ok(pr_template_of(&work_dir))).await {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(e)),
     };
 
     Json(ApiResponse::ok(serde_json::json!({
@@ -1600,5 +1688,58 @@ mod tests {
         .0;
         assert!(diff.success, "historical diff must succeed");
         assert!(diff.data.unwrap().diff.contains("durable evidence"));
+    }
+
+    /// KT-2084 — no route of this file runs git or reads a checkout on a thread of the async
+    /// runtime: each such call sits inside `off_runtime` or `spawn_blocking`.
+    #[test]
+    fn every_git_of_these_routes_runs_off_the_runtime() {
+        let path = std::path::Path::new(crate::BACKEND_DIR).join("src/api/disc_git.rs");
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = text
+            .lines()
+            .take_while(|line| !line.starts_with("mod tests"))
+            .collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let leaves = |line: &str| line.contains("off_runtime(") || line.contains("spawn_blocking(");
+        // Neither runs git nor reads a file.
+        let pure = ["validate_exec_command", "default_pr_template"];
+        let mut on_runtime = Vec::new();
+        for (at, line) in lines.iter().enumerate() {
+            let called = ["crate::core::worktree::", "super::git_ops::"]
+                .iter()
+                .find_map(|module| line.split_once(module).map(|(_, rest)| rest));
+            let Some(called) = called else { continue };
+            let name: String = called
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            let is_call = called[name.len()..].starts_with('(');
+            if !is_call || line.trim_start().starts_with("//") || pure.contains(&name.as_str()) {
+                continue;
+            }
+            // What the call is nested in, read from rustfmt's indentation, up to its function.
+            let (mut depth, mut off, mut function) = (indent(line), leaves(line), "");
+            for outer in lines[..at].iter().rev() {
+                if outer.trim().is_empty() {
+                    continue;
+                }
+                if indent(outer) < depth {
+                    depth = indent(outer);
+                    off |= leaves(outer);
+                }
+                if depth == 0 && !outer.starts_with("//") && outer.contains("fn ") {
+                    function = outer;
+                    break;
+                }
+            }
+            if !off && function.contains("async fn ") {
+                on_runtime.push(format!("{}: {}", at + 1, line.trim()));
+            }
+        }
+        assert!(
+            on_runtime.is_empty(),
+            "on the async runtime: {on_runtime:#?}"
+        );
     }
 }

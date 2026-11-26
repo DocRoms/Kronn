@@ -189,7 +189,10 @@ changed by the release.
 
 **"Clean" means `git status` clean.** Ignored files do not count: a Rust `target/` or `node_modules/` inside a
 checkout that `.gitignore` covers goes with the worktree, and the lane build dir (`target/wt-<lane>`) is purged
-with it. A checkout with any modified or untracked (non-ignored) file is kept.
+with it. A checkout with any modified or untracked (non-ignored) file is kept. Every task-checkout release (the
+terminal one, a closed task's, a clean finished one's, a `RemoveIfClean` cancel, an orphaned one's) first copies
+the ignored files a delete counts as work, its submodules' included (under `ignored/<submodule>/`), into the
+execution's evidence folder (`orphan-<workspace id>` for an orphan), then removes the checkout (KT-2084).
 
 The release runs in three steps so that a slow removal never freezes the API: under the database connection the
 execution is picked (finished, no live session, no worker lease) and its checkout **claimed**; with no connection
@@ -242,7 +245,7 @@ a live execution is ever offered.
 | Entry | When it is purgeable | What a purge removes |
 |---|---|---|
 | **`foreign`** build dir (`target/wt-*` with no `.kronn-lane.json` marker and no workspace lineage) | not written for `server.disk_sweep_idle_hours` (a build may be running in a fresh one), and no live execution claims its lane name | the directory. Kronn did not create it, so the panel warns to be sure it is not yours |
-| **ownerless** worktree (`.kronn/worktrees/<name>` that **no** workspace row names, by checkout path, remembered path or directory name) and its `target/` | not written for the same idle window | the `target/` alone (regenerable), or the whole checkout through `git worktree remove` **without** `--force`: uncommitted or untracked work is refused, the branch stays |
+| **ownerless** worktree (`.kronn/worktrees/<name>` that **no** workspace row names, by checkout path, remembered path or directory name) and its `target/` | not written for the same idle window | the `target/` alone (regenerable), or the whole checkout with its registration, removed by Kronn once its judgement finds nothing git's own removal without `--force` kept: uncommitted or untracked work, a populated submodule, a repository kept inside it or a lock is refused; ignored files go with it, the branch stays (KT-2084) |
 | **`stalled`** build dir (an execution `Blocked` or `Interrupted`) | idle for `server.disk_stalled_build_days` (default **3**, minimum 1) *and* durable state shows nothing working for the execution: no pending or running dispatch, no unsettled commit lease, no attached session, no held worker lease | the build dir only. The worktree and branch stay, and the next resume rebuilds the lane (a seed clone plus its first build) |
 
 A checkout a row names stays the business of the flow that owns it (integration, cancel, terminal release):

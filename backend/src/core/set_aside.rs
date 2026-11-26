@@ -371,6 +371,7 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
             _ => return None,
         },
         ["server", "frontend_origins", "[]"] => Url,
+        ["server", "regenerable_outputs", "[]"] => Text,
         ["server", "agent_handoff_blocked_agents", "[]"] => Text,
         ["server", "ollama_context_overrides", _] => Number,
         ["server", "discussion_weight", "enabled"] => Flag,
@@ -1239,6 +1240,7 @@ mod tests {
         cfg.server.global_context = some("a context");
         cfg.server.timezone = some("Europe/Paris");
         cfg.server.frontend_origins = vec!["http://kronn.lan:5173".into()];
+        cfg.server.regenerable_outputs = vec!["generated".into()];
         cfg.server
             .ollama_context_overrides
             .insert("qwen3.8:27b-mlx".into(), 32768);

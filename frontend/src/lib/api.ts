@@ -2197,7 +2197,8 @@ export const discussions = {
     `/discussions/${id}/poll${revision ? `?revision=${encodeURIComponent(revision)}` : ''}`,
   ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
-  delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
+  /** Where the server kept the worktree it could not remove, if it did (KT-2084). */
+  delete: (id: string) => api<string | null>('DELETE', `/discussions/${id}`),
   update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; connection_id?: string | null; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; attach_agents?: AgentType[]; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
   nativeAgentMode: (id: string) =>
     api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),

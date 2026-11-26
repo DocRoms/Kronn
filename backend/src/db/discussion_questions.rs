@@ -546,6 +546,10 @@ fn new_round_refusal(
     // A Kronn card is never sent to a new key: nothing would read that answer.
     Ok(match owner {
         Some(owner) if state == "pending" => Some(format!("{waiting}; it {owner}")),
+        Some(BRIEFING_OWNED) if state == "answered" => Some(format!(
+            "key `{key}` was answered in message {source}; a briefing card is not asked again; \
+             do not repost it under any key"
+        )),
         // A declined card cannot be answered: the form or a new launch is the way on.
         Some(BRIEFING_OWNED) if matches!(state, "declined" | "cancelled") => Some(format!(
             "key `{key}` was {state} in message {source}, and a {state} briefing card is not \

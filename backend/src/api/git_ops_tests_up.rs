@@ -1336,3 +1336,370 @@ fn github_remotes_map_to_a_credential_free_https_url() {
     assert_eq!(github_https_url("git@gitlab.com:acme/app.git"), None);
     assert_eq!(github_https_url("/srv/git/app.git"), None);
 }
+
+/// KT-2084 — a FIFO named `.gitignore` in a checkout: the git panel's status answers within
+/// the git time bound, with an error that names it, instead of holding a thread forever.
+#[cfg(unix)] // FIFO made with libc::mkfifo
+#[test]
+fn a_fifo_gitignore_keeps_the_panel_status_within_its_bound() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let repo = tempfile::tempdir().unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &[
+            "-c",
+            "user.email=tests@kronn.local",
+            "-c",
+            "user.name=Kronn Tests",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    ] {
+        assert!(crate::core::cmd::git_cmd()
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    let pipe = repo.path().join(".gitignore");
+    let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let dir = repo.path().to_path_buf();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        crate::core::lane_git::snapshot::set_timeout_for_tests(Some(
+            std::time::Duration::from_secs(2),
+        ));
+        let _ = sent.send(run_git_status_page_without_pr_lookup(&dir, 0, 20));
+    });
+
+    let outcome = received.recv_timeout(std::time::Duration::from_secs(30));
+
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&pipe);
+    let _ = std::fs::remove_file(&pipe);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    drop(held);
+    let outcome = outcome.expect("the status did not return within its bound");
+    assert!(
+        outcome
+            .as_ref()
+            .is_err_and(|error| error.contains("timeout")),
+        "{:?}",
+        outcome.map(|status| status.files.len())
+    );
+}
+
+// ── KT-2084 round 8: full refs on a push, the terminal's git, bounded forge and template ──
+
+/// The commit `name` resolves to in `repo`, empty when it names none.
+fn resolved(repo: &Path, name: &str) -> String {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "-q", "--verify", name])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// A project with `origin`, a bare repository holding its `main`.
+fn repo_with_origin(name: &str) -> (tempfile::TempDir, tempfile::TempDir, std::path::PathBuf) {
+    let base = tempfile::tempdir().unwrap();
+    let remote = base.path().join("remote.git");
+    let repo = make_test_repo(name);
+    repo_git(
+        base.path(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            remote.to_str().unwrap(),
+        ],
+    );
+    repo_git(
+        repo.path(),
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    repo_git(repo.path(), &["push", "-q", "-u", "origin", "main"]);
+    (base, repo, remote)
+}
+
+/// KT-2084 — a push names its branch in full on both sides: a branch whose name git reads as
+/// a forced refspec, or resolves to another ref, moves no other branch of the remote.
+#[test]
+fn a_push_names_its_branch_in_full_and_moves_no_other_branch() {
+    // A branch named like a forced refspec, the local `main` behind the remote's.
+    let (_base, repo, remote) = repo_with_origin("push-forced-name");
+    commit_file(repo.path(), "second.txt");
+    repo_git(repo.path(), &["push", "-q", "origin", "main"]);
+    let published = resolved(&remote, "refs/heads/main");
+    repo_git(repo.path(), &["checkout", "-q", "-b", "+main"]);
+    repo_git(repo.path(), &["branch", "-f", "main", "HEAD~1"]);
+
+    let pushed = run_git_push(repo.path(), &[]).unwrap();
+
+    assert!(pushed.success, "{}", pushed.message);
+    assert_eq!(
+        resolved(&remote, "refs/heads/main"),
+        published,
+        "the remote's main was moved"
+    );
+    assert_eq!(resolved(&remote, "refs/heads/+main"), published);
+
+    // An unborn branch whose name resolves to the local `main`, ahead of the remote's.
+    let (_base, repo, remote) = repo_with_origin("push-unborn-name");
+    let published = resolved(&remote, "refs/heads/main");
+    commit_file(repo.path(), "unpublished.txt");
+    repo_git(repo.path(), &["checkout", "-q", "--orphan", "heads/main"]);
+
+    let pushed = run_git_push(repo.path(), &[]).unwrap();
+
+    assert!(!pushed.success, "{}", pushed.message);
+    assert_eq!(
+        resolved(&remote, "refs/heads/main"),
+        published,
+        "the remote's main received the local main"
+    );
+
+    let command =
+        authenticated_push_command(repo.path(), "https://github.com/acme/app.git", "topic", "t")
+            .unwrap();
+    assert_eq!(
+        command.get_args().last().and_then(|arg| arg.to_str()),
+        Some("refs/heads/topic:refs/heads/topic")
+    );
+}
+
+/// KT-2084 — `git` typed in the panel's terminal for a managed worktree is Kronn's pinned git:
+/// a repository put in place of the worktree's `.git` is not the one git reads, and the
+/// program it names never runs.
+#[cfg(unix)] // runs a #!/bin/sh fixture made executable through unix mode bits
+#[test]
+fn the_terminal_git_of_a_managed_worktree_runs_nothing_its_own_git_names() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = make_test_repo("exec-pinned");
+    let out = tempfile::tempdir().unwrap();
+    let marker = out.path().join("ran.marker");
+    let lane =
+        crate::core::worktree::create_discussion_worktree(repo.path(), "proj", "lane", "main")
+            .unwrap();
+    let lane = Path::new(&lane.path).canonicalize().unwrap();
+    let shown = run_exec(&lane, "git log --oneline -1", &[]).unwrap();
+    assert_eq!(shown.exit_code, 0, "{}", shown.stderr);
+    assert!(shown.stdout.contains("init"), "{}", shown.stdout);
+
+    let program = lane.join("prog.sh");
+    std::fs::write(
+        &program,
+        format!("#!/bin/sh\necho ran >> '{}'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_file(lane.join(".git")).unwrap();
+    repo_git(&lane, &["init", "-q"]);
+    repo_git(&lane, &["add", "prog.sh"]);
+    repo_git(
+        &lane,
+        &["config", "core.fsmonitor", program.to_str().unwrap()],
+    );
+    assert!(!marker.exists(), "the fixture itself ran the program");
+
+    let ran = run_exec(&lane, "git status", &[]);
+
+    assert!(
+        !marker.exists(),
+        "the worktree's own program ran: {:?}",
+        ran.as_ref().map(|shown| &shown.stderr)
+    );
+    assert!(ran.is_err(), "{:?}", ran.map(|shown| shown.stdout));
+}
+
+/// KT-2084 — a PR template that is a FIFO, or a link out of the checkout, is never read: the
+/// lookup goes on at once to the next candidate.
+#[cfg(unix)] // FIFO made with libc::mkfifo, symlink made through std::os::unix
+#[test]
+fn a_pr_template_that_is_not_a_plain_file_of_the_checkout_is_not_read() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("notes.md"), "outside the checkout").unwrap();
+    std::fs::create_dir_all(repo.path().join(".gitlab/merge_request_templates")).unwrap();
+    std::fs::write(
+        repo.path()
+            .join(".gitlab/merge_request_templates/Default.md"),
+        "## The project's own",
+    )
+    .unwrap();
+    let pipe = repo.path().join("PULL_REQUEST_TEMPLATE.md");
+    let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let dir = repo.path().to_path_buf();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(read_pr_template(&dir));
+    });
+
+    let read = received.recv_timeout(std::time::Duration::from_secs(10));
+
+    // Held read-write the FIFO lets a pending open through; closed, its reader reads an end.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&pipe);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    drop(held);
+    assert_eq!(
+        read.expect("the template lookup waited on the FIFO")
+            .as_deref(),
+        Some("## The project's own")
+    );
+
+    std::fs::remove_file(&pipe).unwrap();
+    std::fs::create_dir_all(repo.path().join(".github")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("notes.md"),
+        repo.path().join(".github/pull_request_template.md"),
+    )
+    .unwrap();
+    assert_eq!(
+        read_pr_template(repo.path()).as_deref(),
+        Some("## The project's own")
+    );
+}
+
+/// KT-2084 — a forge CLI that never answers is stopped at Kronn's bound, with its process
+/// group: the pull request creation answers with that reason instead of holding a thread.
+#[cfg(unix)] // stands in a #!/bin/sh script for the gh CLI, made executable through unix mode bits
+#[test]
+fn a_forge_cli_that_never_answers_is_stopped_at_kronns_bound() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::tempdir().unwrap();
+    let gh = bin.path().join("gh");
+    std::fs::write(&gh, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (_base, repo, _remote) = repo_with_origin("forge-bound");
+    let path = format!(
+        "{}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        bin.path().display()
+    );
+    let dir = repo.path().to_path_buf();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        set_push_timeout_for_tests(Some(std::time::Duration::from_secs(1)));
+        let home = dir.to_string_lossy().into_owned();
+        let created = crate::core::child_env::with_parent_env(
+            &[("PATH", path.as_str()), ("HOME", home.as_str())],
+            || run_create_pr(&dir, "title", "body", "main", &[]),
+        );
+        let _ = sent.send(created);
+    });
+
+    let created = received.recv_timeout(std::time::Duration::from_secs(30));
+
+    let created = created.expect("the forge CLI was not given up");
+    assert!(
+        created
+            .as_ref()
+            .is_err_and(|error| error.contains("gh was stopped") && error.contains("Kronn's own")),
+        "{created:?}"
+    );
+    // A base that is no branch name never reaches the forge CLI.
+    let refused = run_create_pr(repo.path(), "title", "body", "--repo=other/one", &[]);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.contains("not a branch name")),
+        "{refused:?}"
+    );
+}
+
+/// KT-2084 — a push has an hour (a `pre-push` hook, an LFS upload), and one stopped at that
+/// bound says the bound is Kronn's own and where a longer push runs.
+#[cfg(unix)] // the pre-push hook is a #!/bin/sh script, executable through unix mode bits
+#[test]
+fn a_push_stopped_at_its_bound_says_the_bound_is_kronns() {
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(push_timeout(), std::time::Duration::from_secs(60 * 60));
+    let (_base, repo, remote) = repo_with_origin("push-bound");
+    commit_file(repo.path(), "late.txt");
+    let published = resolved(&remote, "refs/heads/main");
+    let hook = repo.path().join(".git/hooks/pre-push");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = repo.path().to_path_buf();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        set_push_timeout_for_tests(Some(std::time::Duration::from_secs(1)));
+        let _ = sent.send(run_git_push(&dir, &[]));
+    });
+
+    let pushed = received.recv_timeout(std::time::Duration::from_secs(30));
+
+    let pushed = pushed.expect("the push was not given up");
+    assert!(
+        pushed
+            .as_ref()
+            .is_err_and(|error| error.contains("Kronn's own")
+                && error.contains("timeout")
+                && error.contains("from a terminal")),
+        "{pushed:?}"
+    );
+    assert_eq!(resolved(&remote, "refs/heads/main"), published);
+}
+
+/// KT-2084 — a FIFO read by a command of the panel's terminal: the command is stopped at
+/// Kronn's bound and says so, instead of holding the request and its permit for ever.
+#[cfg(unix)] // FIFO made with libc::mkfifo
+#[test]
+fn a_fifo_read_by_a_terminal_command_is_stopped_at_kronns_bound() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let repo = make_test_repo("exec-fifo");
+    let pipe = repo.path().join("notes.txt");
+    let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let dir = repo.path().to_path_buf();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        crate::core::lane_git::snapshot::set_timeout_for_tests(Some(
+            std::time::Duration::from_secs(2),
+        ));
+        let _ = sent.send(run_exec(&dir, "cat notes.txt", &[]));
+    });
+
+    let outcome = received.recv_timeout(std::time::Duration::from_secs(30));
+
+    // Held read-write the FIFO lets a pending open through; closed, its reader reads an end.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&pipe);
+    let _ = std::fs::remove_file(&pipe);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    drop(held);
+    let outcome = outcome.expect("the terminal command was not given up");
+    assert!(
+        outcome
+            .as_ref()
+            .is_err_and(|error| error.contains("was stopped") && error.contains("Kronn's own")),
+        "{:?}",
+        outcome.map(|shown| shown.stderr)
+    );
+}

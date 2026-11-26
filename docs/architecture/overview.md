@@ -472,10 +472,11 @@ pass (a frequent schedule adds no fire during the repeated hour).
   is kept, a detached HEAD is kept (even on a commit a ref holds), a path shared with a run that is live,
   paused or interrupted more recently is kept, and a branch holding commits no
   known base has is kept and recorded in the run's `produced_branches` before
-  the checkout goes. Git-ignored files (build output) go with the checkout.
+  the checkout goes. Ignored files go with the checkout, as git's own removal
+  without `--force` let them (KT-2084).
   Worktrees registered inside it and its submodules follow the rules of the
   next entry: work in a nested worktree keeps the set, and a checkout with
-  submodules is forced away only under the KT-1809 conditions.
+  submodules goes only under the KT-1809 conditions.
 - **No run destroys uncommitted work (KT-1096, KT-1806).** At the end of
   every run (Success, Partial, Failed, Cancelled, StoppedByGuard, an engine
   error, a Gate rejection), and in the boot purge of
@@ -483,25 +484,29 @@ pass (a frequent schedule adds no fire during the repeated hour).
   a detached HEAD on a commit no ref holds or a state git cannot read, in
   itself or in a worktree registered inside it (`<run>/.kronn/pr-N`; a PR
   checkout of a commit a ref holds strands nothing), is kept with its branch and its
-  nested worktrees (clean nested ones may already be gone when git refuses
-  the parent at removal) (`Workspace::cleanup_keeping_work`,
+  nested worktrees (clean nested ones may already be gone when the removal
+  keeps the parent) (`Workspace::cleanup_keeping_work`,
   `workspace::work_to_keep`, which the Interrupted reclaim runs too).
-  `before_remove` does not run for work found by that inspection; it has
-  run when the work is found only at removal (late files, a lock, a
-  submodule). The run keeps its `workspace_path`; its
+  That inspection gives the removal's own verdict (a lock, a repository kept
+  inside the tree, a submodule's work included), so `before_remove` never
+  runs for a checkout the removal then keeps; it has run only when work is
+  written after the inspection. The run keeps its `workspace_path`; its
   last step says where the work is (the log does, after an engine error, a
   Gate rejection or at boot), and a later boot removes the checkout
-  once it is clean. A clean set is removed without `--force`, nested
-  worktrees first. Whenever git refuses (work written after the inspection,
-  a lock) the set is kept and the run says why; the one forced removal is the
-  submodule case below.
+  once it is clean. A clean set is removed by Kronn itself, nested worktrees
+  first (KT-2084): each is judged again right before, from Kronn's private
+  copy of its git state (no git runs in the worktree or its submodules), then
+  its checkout is removed through no link, with the one registration naming
+  it exactly. Whenever that judgement finds something (work written after the
+  inspection, a lock) the set is kept and the run says why. A removal that
+  stops part way is left to finish by hand: the run says what is left and that
+  `git worktree prune` clears the registration.
   Kronn's own `.kronn/` files are not work: `.kronn/` is added to the
   repository's local `info/exclude`. Nor are the agent configs Kronn copied
   into the worktree (`.mcp.json` and the like) while they still equal the
   main checkout's, are plain files at their own path and have nothing
   staged: the inspection, read-only, leaves them out; the removal takes them
-  back first (tracked ones restored, the others removed) and puts those same
-  files back if git then refuses, so a kept worktree can still be resumed. Untracked files are read whatever `status.showUntrackedFiles`
+  with the checkout, and a kept worktree keeps them, so it can still be resumed. Untracked files are read whatever `status.showUntrackedFiles`
   says, and a nested worktree whose directory is gone holds nothing. A Success run follows the same rule: a
   step's output can be files that no later step committed, so a successful
   end is no reason to delete them. A kept set still records its branch in
@@ -509,18 +514,18 @@ pass (a frequent schedule adds no fire during the repeated hour).
   judged on its own commits, read from the repository: a HEAD an agent left
   detached on a known commit, or a worktree directory already gone, never
   deletes a branch that is ahead, and a synced branch checked out in another
-  checkout is left alone. Git refuses to remove, without force, a
-  worktree with a populated submodule or a submodule clone left under its git
-  directory: after that refusal the checkout and
-  its submodules are inspected again, and the removal is forced only when all
-  are clean, every submodule repository lives under the worktree's git
-  directory, no `.git` directory sits anywhere inside the tree, and no
-  submodule clone, deinitialised or removed ones included, has a worktree of
-  its own or holds a commit (HEAD, branch, tag, stash) that
-  no remote branch of it has (KT-1809). Otherwise the set is kept and the
-  reason names what holds it, the submodule when git could read it. A commit
-  only a remote tag holds, or whose remote branch was deleted, counts as
-  held work: such a checkout is kept until removed by hand. A detached commit counts as held only by
+  checkout is left alone. A worktree with a populated submodule or a
+  submodule clone left under its git directory is removed only when the
+  judgement finds all clean (a submodule's ignored files go with it), every
+  submodule repository under the worktree's git directory, no `.git`
+  directory inside the tree outside its ignored folders (Kronn's `.kronn/` is
+  always looked into; a tree deeper than 48 folders or holding more than
+  100,000 is kept, the reason naming the bound), and no submodule clone,
+  deinitialised or removed ones included, with a worktree of its own or a
+  commit on its HEAD, a branch or its stash that no remote branch of it
+  reaches (KT-1809, KT-2084). Otherwise the set is kept and the reason names
+  what holds it. A commit whose remote branch was deleted counts as held work: such a
+  checkout is kept until removed by hand. A detached commit counts as held only by
   a branch, a tag or a remote ref, never by a ref that goes with the worktree.
 - **A provider quota pauses the run, it does not fail it (KT-811, KT-1562,
   KT-1563).** When an
@@ -632,7 +637,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
   [src: file: backend/src/core/worktree.rs:2320-2328#remove_nested_worktrees]
   [src: file: backend/src/core/worktree.rs:2341-2351#prune_kronn_worktrees]
   [src: file: backend/src/workflows/workspace.rs:1148-1166#prune_orphan_worktrees]
-  Removal uses `git worktree remove` without `--force`; the run's own
+  Kronn removes the checkout and its registration itself, as above; the run's own
   `kronn/…` branch is deleted only when fully integrated, by compare-and-swap
   on the commit that was checked. No workspace hook runs. The run keeps its
   `workspace_path`, so a later resume is refused ("worktree no longer exists")
@@ -641,7 +646,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
   live, paused or Interrupted run (a finished sub-workflow child shares its
   parent's).
   [src: file: backend/src/workflows/interrupted_worktrees.rs:24-169#reclaim_stale_interrupted_worktrees]
-  [src: file: backend/src/workflows/workspace.rs:1075-1130#remove_clean_checkout]
+  [src: file: backend/src/workflows/workspace.rs:1075-1130#remove_inspected_checkout]
   [src: file: backend/src/db/workflows.rs:1350-1391#terminal_workspace_cleanup_candidates]
 - **The hooks belong to the project (KT-687).** `Project.workspace.hooks` is
   inherited by every workflow of the project that asks for isolation, and a
@@ -968,7 +973,7 @@ WorkflowRunner (per run)
     → evaluate on_result conditions (stop/skip/goto)
     → record StepResult (output, tokens, duration)
   → run workspace hooks: after_run
-  → cleanup workspace (git worktree remove)
+  → cleanup workspace (Kronn's judged removal)
   → run workspace hooks: before_remove
   → emit SSE events throughout for real-time UI updates
   → on Success (top-level linear run): classify the outcome (no_op | changed)

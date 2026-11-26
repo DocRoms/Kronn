@@ -536,11 +536,7 @@ fn run_worktrees(
     ctx: &TemplateContext,
     checkouts: &[&Path],
 ) -> Vec<PathBuf> {
-    let registered: Vec<PathBuf> = checkouts
-        .iter()
-        .flat_map(|checkout| registered_worktrees(checkout))
-        .collect();
-    let mut found: Vec<PathBuf> = Vec::new();
+    let mut named_by_steps: Vec<PathBuf> = Vec::new();
     for step in steps {
         if !matches!(step.step_type, crate::models::StepType::Exec) {
             continue;
@@ -557,6 +553,14 @@ fn run_worktrees(
         let Ok(real) = Path::new(printed).canonicalize() else {
             continue;
         };
+        named_by_steps.push(real);
+    }
+    let registered: Vec<PathBuf> = checkouts
+        .iter()
+        .flat_map(|checkout| registered_worktrees(checkout, &named_by_steps))
+        .collect();
+    let mut found: Vec<PathBuf> = Vec::new();
+    for real in named_by_steps {
         if registered.contains(&real) && !found.contains(&real) {
             found.push(real);
         }
@@ -570,15 +574,26 @@ fn run_worktrees(
 /// The linked worktrees `checkout` registers, by their real path. A record
 /// counts when the worktree still points back at it: a stale entry whose
 /// folder was removed and made again as an ordinary directory names nothing.
-fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
+/// A path a record names outside the checkout counts only as written, when it
+/// is one of the run's `printed` paths (real paths): Kronn looks at nothing
+/// else a record names there (KT-2084).
+fn registered_worktrees(checkout: &Path, printed: &[PathBuf]) -> Vec<PathBuf> {
     /// A small regular file of `dir` read as text; a link is not followed.
     fn pointer(dir: &Path, name: &str) -> Option<String> {
         let bytes = crate::core::rooted_io::read_capped(dir, Path::new(name), 4096).ok()?;
         String::from_utf8(bytes).ok()
     }
-    let registry = checkout.join(".git").join("worktrees");
+    let Ok(owner) = checkout.canonicalize() else {
+        return Vec::new();
+    };
+    let owner = crate::core::lane_git::without_verbatim_prefix(owner);
+    let registry = owner.join(".git").join("worktrees");
     let Ok(entries) = std::fs::read_dir(&registry) else {
         return Vec::new();
+    };
+    let inside = |path: &Path| match crate::core::lane_git::resolve_inside(&owner, path) {
+        Some((real, true)) => Some(real),
+        _ => None,
     };
     entries
         .flatten()
@@ -592,7 +607,22 @@ fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
                 recorded
             };
             (recorded.file_name()? == ".git").then_some(())?;
-            let worktree = recorded.parent()?.canonicalize().ok()?;
+            // `.` and `..` resolved as written, without a look at the disk.
+            let mut named = PathBuf::new();
+            for part in recorded.parent()?.components() {
+                match part {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        named.pop();
+                    }
+                    other => named.push(other),
+                }
+            }
+            let worktree = if named.starts_with(&owner) {
+                inside(&named)?
+            } else {
+                printed.iter().find(|path| **path == named)?.clone()
+            };
             let back = pointer(&worktree, ".git")?;
             let back = PathBuf::from(back.trim().strip_prefix("gitdir:")?.trim());
             let back = if back.is_relative() {
@@ -600,7 +630,7 @@ fn registered_worktrees(checkout: &Path) -> Vec<PathBuf> {
             } else {
                 back
             };
-            (back.canonicalize().ok()? == entry.canonicalize().ok()?).then_some(worktree)
+            (inside(&back)? == inside(&entry)?).then_some(worktree)
         })
         .collect()
 }

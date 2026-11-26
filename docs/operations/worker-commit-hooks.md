@@ -167,8 +167,13 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
   [src: file: backend/src/core/lane_git.rs:525#vet_nested_dot_git]): a nested
   `.git/config` with any key outside `core.*` plumbing, `extensions.objectformat` /
   `extensions.refstorage` (a reftable clone), `remote.*.url|fetch`,
-  `branch.*.remote|merge`, `user.*` (so no `filter.*`, `core.fsmonitor`,
-  `include.*`, `gpg.*`). The keys are listed BY GIT, not by a parser of Kronn's
+  `branch.*.remote|merge`, `user.*`, and what `git submodule init` writes for the
+  submodule's own submodules: `submodule.<name>.url|active`, and `.update` only as
+  `checkout`, `rebase`, `merge` or `none` (so no `filter.*`, `core.fsmonitor`,
+  `include.*`, `gpg.*`, `submodule.*.ignore`, `update = !command`). A partial clone
+  (`remote.*.promisor`, `extensions.partialclone`) or a submodule sharing another
+  repository's objects (`objects/info/alternates`) is not judged: the worktree is
+  deleted by hand. The keys are listed BY GIT, not by a parser of Kronn's
   (`git --git-dir=/dev/null config --file <config> --no-includes --null --name-only --list`,
   no system or global configuration, no repository discovery)
   ([src: file: backend/src/core/lane_git.rs:395-404#nested_config_keys]): git accepts

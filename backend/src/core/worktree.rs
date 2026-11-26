@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::lane_git::plainly_spelled;
 use crate::core::task_worker_env::LANE_TARGET_PREFIX;
 use crate::models::WorkerCommitHooks;
 
@@ -366,12 +367,18 @@ pub fn clean_worktree_build_artifacts(
 
     let measured = measure_real_within_budget(&target_path);
     let (bytes_reclaimed, bytes_are_partial) = (measured.bytes, measured.partial);
-    std::fs::remove_dir_all(&target_path).map_err(|error| {
-        format!(
-            "failed to clean {}: {error}. Nothing further was attempted; the target is \
-             left as it stands.",
-            target_path.display()
-        )
+    // Rooted at the worktree, never through a link, bounded in depth (KT-2084): what the
+    // removal stopped at stays.
+    crate::core::fs_guard::guarded_remove_tree(worktree_path, &target_path).map_err(|error| {
+        if crate::core::fs_guard::is_link_refusal(&error) {
+            format!("refusing to clean {}: {error}", target_path.display())
+        } else {
+            format!(
+                "failed to clean {} ({PARTLY_REMOVED} at most): {error}. The rest is left as \
+                 it stands.",
+                target_path.display()
+            )
+        }
     })?;
 
     tracing::info!(
@@ -505,9 +512,10 @@ pub fn remove_lane_target(repo_path: &Path, lane_target: &Path) -> Result<Cleanu
 // the owner, who confirms each one; these two functions are what a confirmed
 // delete runs. The caller has proven no row names the path.
 
-/// Delete the whole checkout of an ownerless worktree, as `git worktree remove`
-/// does without `--force`: Git refuses a checkout with uncommitted or untracked
-/// work, and the branch stays. Refuses a running build.
+/// Delete the whole checkout of an ownerless worktree and its registration (KT-2084):
+/// Kronn's judgement ([`kept_by_git`]) keeps what git's removal without `--force` kept
+/// (uncommitted or untracked files, a populated submodule, a repository kept inside it, a
+/// lock); its ignored files go with it, and the branch stays. Refuses a running build.
 pub fn remove_ownerless_worktree(
     repo_path: &Path,
     worktree_path: &Path,
@@ -525,42 +533,25 @@ pub fn remove_ownerless_worktree(
             worktree_path.display()
         ));
     }
-    if !worktree_path.join(".git").exists() {
+    // Its own entry, never followed (KT-2084).
+    if std::fs::symlink_metadata(worktree_path.join(".git")).is_err() {
         return Err(format!(
             "{} is not a git worktree: remove it by hand once you know it is yours",
             worktree_path.display()
         ));
     }
-    // Git refuses to remove a checkout holding an untracked file that is not
-    // ignored: a stale one's `.DS_Store` must not be that file.
-    if let Err(error) = ensure_os_junk_excluded(repo_path) {
-        tracing::warn!(path = %repo_path.display(), "cannot exclude OS junk files: {error}");
-    }
-    let dirty = worktree_dirty_files(worktree_path)?;
-    if !dirty.is_empty() {
-        return Err(format!(
-            "{} has {} uncommitted or untracked file(s): commit or discard them first",
-            worktree_path.display(),
-            dirty.len()
-        ));
-    }
+    // A link named `target` is the checkout's own entry, never followed (KT-2084).
     let target = worktree_path.join("target");
-    if target.is_dir() {
+    if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
         assert_no_build_in_progress(&target)?;
     }
     let measured = measure_real_within_budget(worktree_path);
-    let output = crate::core::cmd::git_cmd()
-        .args(["worktree", "remove"])
-        .arg(worktree_path)
-        .current_dir(repo_path)
-        .output()
-        .map_err(|error| format!("git worktree remove failed to run: {error}"))?;
-    if !output.status.success() || worktree_path.exists() {
-        return Err(format!(
-            "git refused to remove {}: {}",
-            worktree_path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    // Kronn's judgement, not git's refusal: OS junk is not work, no exclude needed.
+    let (root, checkout) = owned_checkout(repo_path, worktree_path, true)?;
+    let judged = Judgement::of(&checkout)?;
+    match remove_judged_checkout(repo_path, &root, &checkout, judged, Removal::Ownerless) {
+        Ok(()) => {}
+        Err(NotRemoved::Kept(reason) | NotRemoved::Failed(reason)) => return Err(reason),
     }
     tracing::info!(
         "Removed ownerless worktree {} ({} bytes{})",
@@ -724,13 +715,17 @@ pub fn mark_lane_target_for_worktree(
 
 /// The marker of a lane target, when it is a plain, well-formed file whose
 /// lane agrees with the directory name. Anything else is "not marked".
+/// Read without following a link and never from a FIFO (KT-2084).
 fn read_lane_owner(lane_target: &Path) -> Option<LaneOwner> {
     let marker = lane_target.join(LANE_OWNER_MARKER);
-    let meta = std::fs::symlink_metadata(&marker).ok()?;
-    if !meta.is_file() || meta.len() > LANE_OWNER_MAX_BYTES {
+    // Rooted at its parent: a lane target that is a link is never followed (KT-2084).
+    let parent = lane_target.parent()?;
+    let bytes = crate::core::fs_guard::guarded_read_head(parent, &marker, LANE_OWNER_MAX_BYTES + 1)
+        .ok()??;
+    if bytes.len() as u64 > LANE_OWNER_MAX_BYTES {
         return None;
     }
-    let owner: LaneOwner = serde_json::from_slice(&std::fs::read(&marker).ok()?).ok()?;
+    let owner: LaneOwner = serde_json::from_slice(&bytes).ok()?;
     let directory_lane = lane_target
         .file_name()?
         .to_string_lossy()
@@ -948,7 +943,7 @@ fn classify_lane_worktree(repo_path: &Path, lane: &str, worktree: &Path) -> Resu
                     worktree.display()
                 ));
             }
-            if worktree_dirty_files(worktree)?.is_empty() {
+            if judged_dirty_files(&Snapshot::of_worktree(worktree)?)?.is_empty() {
                 Ok(true)
             } else {
                 Err(format!(
@@ -982,42 +977,31 @@ pub fn process_lane_target(
 /// every build, so a build that ran a minute ago moves this forward.
 ///
 /// `None` when nothing could be read: callers must then treat the lane as
-/// written just now, never as idle (KT-1318).
+/// written just now, never as idle (KT-1318). Rooted at the lane's parent folder
+/// (KT-2084): the lane, or a folder of it, swapped for a link is never followed, and an
+/// unreadable one is `None`.
 pub fn lane_target_last_write(lane_target: &Path) -> Option<std::time::SystemTime> {
+    use crate::core::fs_guard::{guarded_walk, Visit, WalkBounds};
     const ENTRY_BUDGET: usize = 4_000;
-    let modified = |path: &Path| std::fs::symlink_metadata(path).ok()?.modified().ok();
-    let mut newest = modified(lane_target)?;
-    let mut visited = 0usize;
-    let Ok(children) = std::fs::read_dir(lane_target) else {
-        return Some(newest);
-    };
-    for child in children.flatten() {
-        visited += 1;
-        if let Some(time) = child.metadata().ok().and_then(|meta| meta.modified().ok()) {
-            newest = newest.max(time);
-        }
-        let is_dir = child.file_type().is_ok_and(|kind| kind.is_dir());
-        if !is_dir {
-            continue;
-        }
-        let Ok(grandchildren) = std::fs::read_dir(child.path()) else {
-            continue;
-        };
-        for grandchild in grandchildren.flatten() {
-            visited += 1;
-            if visited > ENTRY_BUDGET {
-                return Some(newest);
+    const TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+    let parent = lane_target.parent()?;
+    let mut newest: Option<std::time::SystemTime> = None;
+    // Past the budget the newest write seen so far stands, as before.
+    guarded_walk(
+        parent,
+        lane_target,
+        WalkBounds::within(ENTRY_BUDGET, TIME_BUDGET),
+        &mut |entry| {
+            newest = Some(newest.map_or(entry.modified, |known| known.max(entry.modified)));
+            if entry.depth < 2 {
+                Visit::Enter
+            } else {
+                Visit::Skip
             }
-            if let Some(time) = grandchild
-                .metadata()
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-            {
-                newest = newest.max(time);
-            }
-        }
-    }
-    Some(newest)
+        },
+    )
+    .ok()?;
+    newest
 }
 
 /// How long a lane target has gone without a write, or `None` when unknown.
@@ -1174,7 +1158,7 @@ fn assert_no_build_in_progress(target_path: &Path) -> Result<(), String> {
     use fs2::FileExt;
     for lock_name in [".cargo-lock", "debug/.cargo-lock", "release/.cargo-lock"] {
         let lock_path = target_path.join(lock_name);
-        let Ok(file) = std::fs::File::open(&lock_path) else {
+        let Some(file) = open_build_lock(target_path, &lock_path)? else {
             continue;
         };
         match file.try_lock_exclusive() {
@@ -1193,6 +1177,49 @@ fn assert_no_build_in_progress(target_path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The Cargo lock `lock_path` of `target_path`, opened from the target's parent folder without
+/// following a link and without waiting on a FIFO (KT-2084): `None` when there is none. A lock
+/// name, or a folder on its way, that is not what Cargo makes refuses the clean.
+#[cfg(unix)]
+fn open_build_lock(target_path: &Path, lock_path: &Path) -> Result<Option<std::fs::File>, String> {
+    let refuse = |why: String| {
+        format!(
+            "refusing to clean {}: its build lock {} {why}",
+            target_path.display(),
+            lock_path.display()
+        )
+    };
+    let (Some(base), Some(target_name), Ok(below)) = (
+        target_path.parent(),
+        target_path.file_name(),
+        lock_path.strip_prefix(target_path),
+    ) else {
+        return Err(refuse("is not below a named target folder".to_string()));
+    };
+    let lock_name = below
+        .file_name()
+        .ok_or_else(|| refuse("has no name".to_string()))?;
+    let folder = Path::new(target_name).join(below.parent().unwrap_or(Path::new("")));
+    let dir = match crate::core::rooted_fd::Dir::open_path(base, &folder, false) {
+        Ok(Some(dir)) => dir,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            return Err(refuse(format!(
+                "cannot be reached as a plain folder ({error})"
+            )))
+        }
+    };
+    dir.open_regular(lock_name)
+        .map_err(|error| refuse(format!("is not a regular file ({error})")))
+}
+
+/// The Cargo lock `lock_path`, opened by path: Windows has no rooted primitive here (the
+/// residual risk of `core::fs_guard`). `None` when it cannot be opened.
+#[cfg(not(unix))]
+fn open_build_lock(_: &Path, lock_path: &Path) -> Result<Option<std::fs::File>, String> {
+    Ok(std::fs::File::open(lock_path).ok())
 }
 
 /// The thresholds the running server was configured with.
@@ -1420,32 +1447,28 @@ pub struct WorktreeInfo {
 /// took the reuse path and handed the MAIN CHECKOUT back as a "worktree"
 /// (is_main_repo: false) — the agent then edited the user's live tree
 /// believing it was isolated.
-fn same_path(a: &Path, b: &Path) -> bool {
+pub fn same_path(a: &Path, b: &Path) -> bool {
     let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
     let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
     ca == cb
 }
 
-fn branch_checked_out_at(repo_path: &Path, branch: &str) -> Option<PathBuf> {
-    let output = crate::core::cmd::git_cmd()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut current_path: Option<String> = None;
-    for line in text.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            current_path = Some(path.to_string());
-        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
-            if b == branch {
-                return current_path.map(PathBuf::from);
-            }
-        } else if line.is_empty() {
-            current_path = None;
-        }
-    }
-    None
+/// The registered worktree `branch` is checked out in, read from the registrations' files
+/// (KT-2084). `Err` when one cannot be read: the branch is then not known to be free.
+fn branch_checked_out_at(repo_path: &Path, branch: &str) -> Result<Option<WorktreeEntry>, String> {
+    Ok(worktree_entries(repo_path)?
+        .into_iter()
+        .find(|entry| entry.branch.as_deref() == Some(branch)))
+}
+
+/// Whether `entry` is the user's own checkout `repo_path`: the main worktree, or the entry
+/// naming `repo_path` itself. A path is resolved inside the checkout only, and never through
+/// a link that leaves it (KT-2084).
+fn is_main_checkout(entry: &WorktreeEntry, repo_path: &Path) -> bool {
+    entry.admin.is_none()
+        || (entry.inside_checkout
+            && crate::core::lane_git::resolve_in_checkout(repo_path, &entry.path)
+                .is_some_and(|(real, _)| real == repo_path))
 }
 
 /// Base directory for worktrees: `.kronn/worktrees/` inside the repo.
@@ -1541,15 +1564,16 @@ pub fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), S
 /// then nothing is written. In a managed worktree git is pinned to its
 /// registration (KT-1745).
 fn already_ignored(repo_path: &Path, pattern: &str) -> bool {
-    crate::core::lane_git::git_or_refuse(repo_path)
-        .args([
-            "check-ignore",
-            "-q",
-            "--no-index",
-            pattern.trim_start_matches('/'),
-        ])
-        .status()
-        .is_ok_and(|status| status.success())
+    let mut command = crate::core::lane_git::git_or_refuse(repo_path);
+    command.args([
+        "check-ignore",
+        "-q",
+        "--no-index",
+        "--",
+        pattern.trim_start_matches('/'),
+    ]);
+    // Within a time bound (KT-2084): a FIFO `.gitignore` never holds the caller.
+    bounded(command, "check-ignore").is_ok_and(|output| output.status.success())
 }
 
 /// [`ensure_local_git_exclude`] for code that runs AFTER an agent (every audit
@@ -1695,20 +1719,29 @@ fn anchored_under_prefix(prefix: &str, pattern: &str) -> String {
 /// The directory is found from the main repository's own record — the `gitdir`
 /// file of each `worktrees/<id>` entry names the worktree's `.git` file — and
 /// NOT from the worktree's `.git` pointer or from `git rev-parse`, both of
-/// which an agent can rewrite (`gitdir: /other/repo/.git`). Git's answer is
-/// still asked for, and a mismatch is refused: a worktree whose pointer was
-/// moved is never written for. Every read goes through the rooted primitive
-/// from `main_checkout`, so a link at `.git`, `worktrees` or an entry is
-/// refused. The returned path is under `main_checkout`: pass `main_checkout` as
-/// the root of the `guarded_*` calls that use it.
+/// which an agent can rewrite (`gitdir: /other/repo/.git`). No git runs
+/// (KT-2084): the pointer is read as a file and must name that directory as
+/// written, or it is refused: a worktree whose pointer was moved is never
+/// written for. Every read goes through the rooted primitive from
+/// `main_checkout`, so a link at `.git`, `worktrees` or an entry is refused,
+/// and a recorded path outside `main_checkout` is never looked at. The
+/// returned path is under `main_checkout`: pass `main_checkout` as the root of
+/// the `guarded_*` calls that use it.
 pub fn registered_worktree_git_dir(
     main_checkout: &Path,
     worktree: &Path,
 ) -> Result<PathBuf, String> {
-    use crate::core::fs_guard::{guarded_list, guarded_read};
-    let wanted = worktree
-        .canonicalize()
-        .map_err(|error| format!("cannot resolve {}: {error}", worktree.display()))?;
+    use crate::core::fs_guard::guarded_list;
+    let wanted = crate::core::lane_git::without_verbatim_prefix(
+        worktree
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve {}: {error}", worktree.display()))?,
+    );
+    let owner = crate::core::lane_git::without_verbatim_prefix(
+        main_checkout
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve {}: {error}", main_checkout.display()))?,
+    );
     let registry = main_checkout.join(".git").join("worktrees");
     let entries = guarded_list(main_checkout, &registry)
         .map_err(|error| format!("cannot read the worktree registry of the checkout: {error}"))?
@@ -1716,21 +1749,30 @@ pub fn registered_worktree_git_dir(
     let mut found: Vec<PathBuf> = Vec::new();
     for name in entries {
         let entry = registry.join(&name);
-        let Ok(Some(raw)) = guarded_read(main_checkout, &entry.join("gitdir")) else {
+        // Under the registration cap and as written, one final newline apart (KT-2084): a
+        // record another lane padded or grew is not this lane's.
+        let Some(recorded) = crate::core::lane_git::registration_gitdir(main_checkout, &entry)
+        else {
             continue;
         };
-        let recorded = PathBuf::from(String::from_utf8_lossy(&raw).trim().to_string());
-        // `worktree.useRelativePaths` records it relative to the entry itself.
+        let recorded = PathBuf::from(recorded);
+        // `worktree.useRelativePaths` records it relative to the entry itself, taken from the
+        // checkout's own spelling.
         let recorded = if recorded.is_relative() {
-            entry.join(recorded)
+            owner
+                .join(".git")
+                .join("worktrees")
+                .join(&name)
+                .join(recorded)
         } else {
             recorded
         };
+        // Resolved inside the checkout only (KT-2084).
         let is_ours = recorded.file_name().is_some_and(|n| n == ".git")
             && recorded
                 .parent()
-                .and_then(|parent| parent.canonicalize().ok())
-                .is_some_and(|parent| parent == wanted);
+                .and_then(|parent| crate::core::lane_git::resolve_inside(&owner, parent))
+                .is_some_and(|(parent, _)| parent == wanted);
         if is_ours {
             found.push(entry);
         }
@@ -1742,27 +1784,15 @@ pub fn registered_worktree_git_dir(
             "the checkout registers this lane more than once".to_string()
         });
     };
-    // lane-git-allow: asks through the worktree's own pointer on purpose, to refuse a moved one.
-    let answer = crate::core::cmd::git_cmd()
-        .args(["rev-parse", "--absolute-git-dir"])
-        .current_dir(worktree)
-        .output()
-        .map_err(|error| format!("cannot ask git for the worktree's git directory: {error}"))?;
-    if !answer.status.success() {
+    let admin = crate::core::lane_git::without_verbatim_prefix(
+        registered
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve {}: {error}", registered.display()))?,
+    );
+    if let Some(why) = crate::core::lane_git::pointer_problem(&wanted, &admin) {
         return Err(format!(
-            "git rev-parse failed: {}",
-            String::from_utf8_lossy(&answer.stderr).trim()
-        ));
-    }
-    let answered = PathBuf::from(String::from_utf8_lossy(&answer.stdout).trim().to_string());
-    let same = match (answered.canonicalize(), registered.canonicalize()) {
-        (Ok(answered), Ok(registered)) => answered == registered,
-        _ => false,
-    };
-    if !same {
-        return Err(format!(
-            "git names {} for this worktree but the checkout registered {}: its `.git` pointer was moved, so nothing is written for it",
-            answered.display(),
+            "the `.git` of this worktree {why} but the checkout registered {}: its `.git` \
+             pointer was moved, so nothing is written for it",
             registered.display()
         ));
     }
@@ -1861,14 +1891,22 @@ fn is_os_junk(path: &str, patterns: &[String]) -> bool {
 }
 
 fn glob_matches(pattern: &str, name: &str) -> bool {
-    match pattern.split_once('*') {
-        None => pattern == name,
-        Some((head, tail)) => {
-            name.len() >= head.len() + tail.len()
-                && name.starts_with(head)
-                && name[head.len()..].ends_with(tail)
+    let mut parts = pattern.split('*');
+    let head = parts.next().unwrap_or_default();
+    let Some(mut rest) = name.strip_prefix(head) else {
+        return false;
+    };
+    let mut parts: Vec<&str> = parts.collect();
+    let Some(tail) = parts.pop() else {
+        return rest.is_empty();
+    };
+    for middle in parts {
+        match rest.find(middle) {
+            Some(at) => rest = &rest[at + middle.len()..],
+            None => return false,
         }
     }
+    rest.len() >= tail.len() && rest.ends_with(tail)
 }
 
 /// Keep OS junk out of `git status` for the repository and every worktree of it
@@ -1878,6 +1916,126 @@ pub fn ensure_os_junk_excluded(repo_path: &Path) -> Result<(), String> {
         ensure_local_git_exclude(repo_path, &pattern)?;
     }
     Ok(())
+}
+
+/// What a build, an install or a tool makes again (KT-2084): names or globs matched
+/// against the name of an ignored entry, so a discussion delete never counts it as work.
+/// `server.regenerable_outputs` adds more, by name or by path. `.cc-writes` is an agent
+/// CLI's write log; `vendor`, `Pods`, `.terraform`, `_build` and `.build` are installed
+/// dependencies and build folders (Composer or Go, CocoaPods, Terraform, Mix, SwiftPM).
+/// `bin`, `deps` and `obj` are not: generic names that may hold hand-written scripts or
+/// hand-placed SDKs (C and C++ projects). A project names them in
+/// `server.regenerable_outputs`.
+pub const REGENERABLE_OUTPUTS: [&str; 34] = [
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    "coverage",
+    ".gradle",
+    ".tox",
+    "*.tsbuildinfo",
+    ".eslintcache",
+    ".stylelintcache",
+    "*.pyc",
+    "test-results",
+    "playwright-report",
+    ".parcel-cache",
+    ".svelte-kit",
+    ".angular",
+    ".dart_tool",
+    ".cc-writes",
+    "vendor",
+    "Pods",
+    ".terraform",
+    "_build",
+    ".build",
+];
+
+/// The entries `server.regenerable_outputs` adds, published by `config::save` and at boot.
+static REGENERABLE_OUTPUT_EXTRA: std::sync::RwLock<Vec<String>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// Publish `server.regenerable_outputs` to this process.
+pub fn set_regenerable_outputs(extra: &[String]) {
+    *REGENERABLE_OUTPUT_EXTRA
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = extra.to_vec();
+}
+
+/// [`REGENERABLE_OUTPUTS`] and the configured entries.
+pub fn regenerable_outputs() -> Vec<String> {
+    let extra = REGENERABLE_OUTPUT_EXTRA
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    regenerable_outputs_with(&extra)
+}
+
+/// [`REGENERABLE_OUTPUTS`] and `extra`, each trimmed of blanks and slashes.
+pub fn regenerable_outputs_with(extra: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = REGENERABLE_OUTPUTS
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    names.extend(
+        extra
+            .iter()
+            .map(|name| name.trim().trim_matches('/').to_string())
+            .filter(|name| !name.is_empty()),
+    );
+    names
+}
+
+/// Whether the ignored `path` is one of `regenerable`. An entry without `/` names the
+/// entry itself, never a folder above it (a `.env` in a tracked `build/` is work); one
+/// with `/` names a path from the worktree root (`backend/bindings`) and what is below it.
+fn is_regenerable(path: &str, regenerable: &[String]) -> bool {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let Some(name) = parts.last() else {
+        return false;
+    };
+    regenerable.iter().any(|pattern| {
+        if !pattern.contains('/') {
+            return glob_matches(pattern, name);
+        }
+        let wanted: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
+        !wanted.is_empty()
+            && wanted.len() <= parts.len()
+            && wanted
+                .iter()
+                .zip(&parts)
+                .all(|(want, part)| glob_matches(want, part))
+    })
+}
+
+/// `regenerable` for the submodule at `prefix`: names as they are, path entries below it
+/// from the submodule's root.
+fn regenerable_below(regenerable: &[String], prefix: &str) -> Vec<String> {
+    regenerable
+        .iter()
+        .filter_map(|pattern| {
+            if !pattern.contains('/') {
+                return Some(pattern.clone());
+            }
+            pattern
+                .strip_prefix(prefix)?
+                .strip_prefix('/')
+                .filter(|rest| !rest.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// What every Kronn checkout needs ignored: its own `.kronn/` directory (an
@@ -1981,13 +2139,45 @@ pub fn create_discussion_worktree(
     // If the branch is already checked out in the main repo, block — user must switch
     // branches before the agent can work. This avoids the agent modifying files under
     // a running dev environment.
-    if let Some(existing_path) = branch_checked_out_at(repo_path, &branch) {
-        if same_path(&existing_path, repo_path) {
+    if let Some(existing) = branch_checked_out_at(repo_path, &branch)? {
+        if is_main_checkout(&existing, repo_path) {
             return Err(format!(
                 "Branch {} is currently checked out in the main repo. Please switch to another branch before continuing.",
                 branch
             ));
         }
+        // Outside the checkout: not Kronn's, never used as a discussion's worktree (KT-2084).
+        if !existing.inside_checkout {
+            return Err(format!(
+                "Branch {branch} is checked out at {}, outside the project checkout: Kronn \
+                 does not use that worktree",
+                existing.path.display()
+            ));
+        }
+        // Reused only when it is the checkout Kronn gives this discussion (KT-2084): that
+        // folder of `.kronn/worktrees`, through no link, its `.git` naming this registration.
+        // Any other folder of the checkout is the user's tree, or another lane's.
+        let own = plain_path(&existing)
+            .and_then(|path| owned_checkout(repo_path, &path, true).ok())
+            .is_some_and(|(_, checkout)| {
+                checkout
+                    .file_name()
+                    .is_some_and(|name| name == dir_name.as_str())
+                    && std::fs::symlink_metadata(&checkout).is_ok_and(|meta| meta.is_dir())
+                    && existing.admin.as_deref().is_some_and(|admin| {
+                        crate::core::lane_git::pointer_problem(&checkout, admin).is_none()
+                    })
+            });
+        if !own {
+            return Err(format!(
+                "Branch {branch} is checked out at {}, which is not the worktree Kronn gives this \
+                 discussion ({}): Kronn does not use it. Switch that worktree to another branch, \
+                 or remove it with `git worktree remove`, then retry.",
+                existing.path.display(),
+                worktree_path.display()
+            ));
+        }
+        let existing_path = existing.path;
         // Already in a worktree (e.g. .kronn/worktrees/) — reuse it
         tracing::info!(
             "Branch {} already checked out at {}, reusing",
@@ -2031,6 +2221,8 @@ pub fn create_discussion_worktree(
         worktree_path.display(),
         branch
     );
+
+    confirm_registration_id(repo_path, &worktree_path, Some(&branch))?;
 
     // Fix gitdir paths so the worktree works from the host too (not just inside Docker)
     fix_worktree_paths(repo_path, &worktree_path);
@@ -2115,6 +2307,7 @@ pub fn create_review_worktree(
         ));
     }
 
+    confirm_registration_id(repo_path, &worktree_path, None)?;
     fix_worktree_paths(repo_path, &worktree_path);
     copy_agent_configs(repo_path, &worktree_path);
     tracing::info!(
@@ -2180,16 +2373,16 @@ pub fn release_review_worktree(
         }
     }
 
-    remove_discussion_worktree(repo_path, worktree_path, false)?;
+    remove_discussion_worktree(repo_path, worktree_path, None)?;
     Ok(ReviewRelease::Removed)
 }
 
 /// Why removing the review checkout at `path` would lose something, if it would.
 fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String> {
-    let on_branch = crate::core::lane_git::git(path)?
-        .args(["symbolic-ref", "-q", "HEAD"])
-        .output()
-        .map_err(|e| format!("git symbolic-ref failed: {e}"))?
+    // Judged from Kronn's copy of its git state (KT-2084).
+    let judged = Snapshot::of_worktree(path)?;
+    let on_branch = judged
+        .output(&["symbolic-ref", "-q", "HEAD"])?
         .status
         .success();
     if on_branch {
@@ -2198,10 +2391,7 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
 
     // `--glob=refs/*`, not `--all`: `--all` also counts this worktree's own
     // HEAD, which would make every commit it holds look reachable.
-    let unreachable = crate::core::lane_git::git(path)?
-        .args(["rev-list", "-n", "1", "HEAD", "--not", "--glob=refs/*"])
-        .output()
-        .map_err(|e| format!("git rev-list failed: {e}"))?;
+    let unreachable = judged.output(&["rev-list", "-n", "1", "HEAD", "--not", "--glob=refs/*"])?;
     if !unreachable.status.success() {
         return Ok(Some(format!(
             "its history cannot be read: {}",
@@ -2217,15 +2407,13 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
         ));
     }
 
-    let status = crate::core::lane_git::git(path)?
-        .args([
-            "status",
-            "--ignore-submodules=dirty",
-            "--porcelain=v1",
-            "--untracked-files=all",
-        ])
-        .output()
-        .map_err(|e| format!("git status failed: {e}"))?;
+    let status = judged.output(&[
+        "status",
+        "--ignore-submodules=dirty",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ])?;
     if !status.status.success() {
         return Ok(Some(format!(
             "its state cannot be read: {}",
@@ -2236,7 +2424,7 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
         .iter()
         .map(|parts| parts.join("/"))
         .collect();
-    let dirty: Vec<DirtyFile> = parse_porcelain(&String::from_utf8_lossy(&status.stdout))
+    let dirty: Vec<DirtyFile> = parse_porcelain_z(&status.stdout)
         .into_iter()
         .filter(|file| !(file.status == "??" && copied.contains(&file.path)))
         .collect();
@@ -2253,99 +2441,324 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
 /// `repo_path` (itself first), whatever directory they live in. Asked of the
 /// registered checkout, never of a lane, so a lane's own `.git` pointer cannot
 /// make it claim another project.
-pub fn registered_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
-    worktree_entries(repo_path)
+pub fn registered_worktree_paths(repo_path: &Path) -> Result<Vec<PathBuf>, String> {
+    Ok(worktree_entries(repo_path)?
         .into_iter()
         .map(|entry| entry.path)
-        .collect()
+        .collect())
 }
 
-/// One `git worktree list --porcelain` entry.
-struct WorktreeEntry {
-    path: PathBuf,
-    prunable: bool,
+type WorktreeEntry = crate::core::lane_git::RegisteredWorktree;
+
+/// The path of `entry`, when Kronn may act on it as spelled: see [`plainly_spelled`], and
+/// inside the owner's checkout (KT-2084).
+fn plain_path(entry: &WorktreeEntry) -> Option<PathBuf> {
+    (entry.readable && entry.inside_checkout && plainly_spelled(&entry.path))
+        .then(|| entry.path.clone())
 }
 
-fn worktree_entries(repo_path: &Path) -> Vec<WorktreeEntry> {
-    let Ok(output) = crate::core::cmd::git_cmd()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_path)
-        .output()
-    else {
-        return Vec::new();
+/// The worktrees registered for `repo_path`, read from the registrations' files (KT-2084): no
+/// git runs, nothing is read through a link or from a FIFO, and a registration Kronn cannot
+/// read that way is an error, never "nothing registered".
+fn worktree_entries(repo_path: &Path) -> Result<Vec<WorktreeEntry>, String> {
+    crate::core::lane_git::registered_worktrees(repo_path)
+}
+
+/// `<repo>/.kronn/worktrees`, canonical, with no link below the repository: the only folder
+/// Kronn removes a checkout from.
+fn managed_root(repo_path: &Path) -> Result<PathBuf, String> {
+    let repo = repo_path
+        .canonicalize()
+        .map_err(|error| format!("{} cannot be resolved: {error}", repo_path.display()))?;
+    let repo = crate::core::lane_git::without_verbatim_prefix(repo);
+    let root = repo.join(".kronn").join("worktrees");
+    crate::core::fs_guard::assert_contained_no_symlink(&repo, &root)?;
+    assert_no_reparse_component(&repo, &root)?;
+    Ok(root)
+}
+
+/// The checkout `path` of `repo_path`, as Kronn or git spells it, as Kronn removes it
+/// (KT-2084): plainly spelled, below `<repo>/.kronn/worktrees` (`direct`: a directory of
+/// its own there) and with no link from the repository down. Returns the canonical managed
+/// root and the canonical checkout.
+fn owned_checkout(
+    repo_path: &Path,
+    path: &Path,
+    direct: bool,
+) -> Result<(PathBuf, PathBuf), String> {
+    let refuse = |why: &str| {
+        Err(format!(
+            "{} is not a worktree Kronn removes: {why}",
+            path.display()
+        ))
     };
-    let mut entries: Vec<WorktreeEntry> = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            entries.push(WorktreeEntry {
-                path: PathBuf::from(path),
-                prunable: false,
-            });
-        } else if line == "prunable" || line.starts_with("prunable ") {
-            if let Some(last) = entries.last_mut() {
-                last.prunable = true;
-            }
+    if !plainly_spelled(path) {
+        return refuse("its path has an empty, `.` or `..` part, or a control character");
+    }
+    let root = managed_root(repo_path)?;
+    let Ok(relative) = path
+        .strip_prefix(worktree_base_dir(repo_path))
+        .or_else(|_| path.strip_prefix(&root))
+    else {
+        return refuse("it is not under .kronn/worktrees");
+    };
+    let depth = relative.components().count();
+    if depth == 0 || (direct && depth != 1) {
+        return refuse("it is not a checkout directory of .kronn/worktrees");
+    }
+    let checkout = root.join(relative);
+    crate::core::fs_guard::assert_contained_no_symlink(&root, &checkout)?;
+    assert_no_reparse_component(&root, &checkout)?;
+    Ok((root, checkout))
+}
+
+/// Start of the reason a removal gives when it stopped with part of the worktree removed.
+pub const PARTLY_REMOVED: &str = "partly removed";
+
+/// Remove the one registration (`<common>/worktrees/<id>`) naming Kronn's checkout
+/// `checkout` exactly, without following a link (KT-2084); when none names it, the one Kronn
+/// gave it ([`registration_by_id`]). `Ok(false)`: neither. `checkout` comes from Kronn's own
+/// records (a discussion's, a task's), never from a path a registration names.
+fn remove_registration(repo_path: &Path, checkout: &Path) -> Result<bool, String> {
+    let admin = match crate::core::lane_git::registration_of(repo_path, checkout)? {
+        Some(admin) => Some(admin),
+        None => registration_by_id(repo_path, checkout)?,
+    };
+    match admin {
+        Some(admin) => remove_admin_dir(&admin).map(|()| true),
+        None => Ok(false),
+    }
+}
+
+/// When no registration names Kronn's checkout `checkout` (canonical, a folder of
+/// `<repo>/.kronn/worktrees`), the one Kronn gave it at creation: its id is the checkout's
+/// folder name, which [`confirm_registration_id`] checked when the checkout was made, and a
+/// worker may have rewritten its `gitdir` to name another path (KT-2084). Removing the
+/// checkout never leaves it behind. Kept only when it is another checkout's own: its `gitdir`
+/// names another folder of the managed root whose `.git` names this registration. Only for a
+/// `checkout` Kronn's own records give: the id is never taken from what a `gitdir` says.
+fn registration_by_id(repo_path: &Path, checkout: &Path) -> Result<Option<PathBuf>, String> {
+    let root = managed_root(repo_path)?;
+    let (Some(id), true) = (
+        checkout.file_name(),
+        checkout.parent() == Some(root.as_path()),
+    ) else {
+        return Ok(None);
+    };
+    let Some((admin, named)) = crate::core::lane_git::registration_by_id(repo_path, id)? else {
+        return Ok(None);
+    };
+    if let Some(other) = named.as_deref().filter(|other| *other != checkout) {
+        let another_checkout = other.parent() == Some(root.as_path())
+            && std::fs::symlink_metadata(other).is_ok_and(|meta| meta.is_dir());
+        if another_checkout && crate::core::lane_git::pointer_problem(other, &admin).is_none() {
+            tracing::warn!(
+                checkout = %checkout.display(),
+                registration = %admin.display(),
+                "the registration with this checkout's name is {}'s: kept",
+                other.display()
+            );
+            return Ok(None);
         }
     }
-    entries
+    tracing::warn!(
+        checkout = %checkout.display(),
+        registration = %admin.display(),
+        "the registration Kronn gave this checkout names {}: removed with it",
+        named.as_deref().map_or_else(
+            || "no readable path".to_string(),
+            |other| other.display().to_string()
+        )
+    );
+    Ok(Some(admin))
 }
 
-/// Strictly below `root`, whether git recorded the path as spelled or as
-/// canonicalized (`/var` vs `/private/var` on macOS).
-fn is_strictly_inside(path: &Path, root: &Path) -> bool {
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    [root, canonical_root.as_path()].iter().any(|root| {
-        [path, canonical_path.as_path()]
-            .iter()
-            .any(|path| path.starts_with(root) && path != root)
+/// The registration git gave the checkout `worktree_path` Kronn just created carries its
+/// folder's name (KT-2084): git gives another id (`<name>1`) when that name is taken, and
+/// Kronn later finds the registration it made by that name. Otherwise the creation is undone
+/// (the checkout, its registration, and `created_branch`) and refused, naming the holder.
+pub fn confirm_registration_id(
+    repo_path: &Path,
+    worktree_path: &Path,
+    created_branch: Option<&str>,
+) -> Result<(), String> {
+    // A path Kronn would not remove by its registration's name either: nothing to confirm.
+    let Ok((root, checkout)) = owned_checkout(repo_path, worktree_path, true) else {
+        return Ok(());
+    };
+    let Some(id) = checkout.file_name() else {
+        return Ok(());
+    };
+    // Read from the `.git` git just wrote, before any agent runs in the checkout.
+    let Some(given) = crate::core::lane_git::pointer_registration_id(&checkout) else {
+        return Ok(());
+    };
+    if id == given.as_str() {
+        return Ok(());
+    }
+    let holder = match crate::core::lane_git::registration_by_id(repo_path, id) {
+        Ok(Some((taken, Some(path)))) => {
+            format!("{} (the worktree {})", taken.display(), path.display())
+        }
+        Ok(Some((taken, None))) => taken.display().to_string(),
+        _ => "another registration".to_string(),
+    };
+    let mut left = String::new();
+    if let Err(error) = remove_owned_checkout(repo_path, &root, &checkout, false) {
+        left = format!(" The new checkout could not be undone: {error}.");
+    } else if let Some(branch) = created_branch {
+        let deleted = delete_git(repo_path).and_then(|mut command| {
+            command.args(["branch", "-D", "--end-of-options", branch]);
+            bounded(command, "branch -D")
+        });
+        if !deleted.is_ok_and(|output| output.status.success()) {
+            left = format!(" The new branch {branch} is left: delete it before retrying.");
+        }
+    }
+    Err(format!(
+        "git registered {} as `{given}`, not under its folder's name, because {holder} already \
+         holds that name: Kronn creates no worktree whose registration it could take for that \
+         one. Remove that worktree (`git worktree remove`) or rename it, then retry.{left}",
+        checkout.display()
+    ))
+}
+
+/// Remove the registration `admin`, below its own `<common>/worktrees`.
+fn remove_admin_dir(admin: &Path) -> Result<(), String> {
+    let registrations = admin
+        .parent()
+        .ok_or_else(|| format!("{} has no parent folder", admin.display()))?;
+    crate::core::fs_guard::guarded_remove_tree(registrations, admin).map_err(|error| {
+        format!(
+            "its git registration {} could not be removed ({error})",
+            admin.display()
+        )
     })
 }
 
-fn force_remove_worktree(repo_path: &Path, path: &Path) -> bool {
-    let removed = crate::core::cmd::git_cmd()
-        .args(["worktree", "remove", "--force"])
-        .arg(path)
-        .current_dir(repo_path)
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !removed && path.exists() {
-        let _ = std::fs::remove_dir_all(path);
+/// Remove Kronn's checkout `checkout` (canonical, below the canonical managed `root`), then
+/// the one registration naming it exactly, each without following a link (KT-2084). Neither
+/// is found from the worktree's `.git` or from a path git lists. A checkout no registration
+/// names goes when `unregistered` allows it, with the registration Kronn gave it if one is
+/// left ([`registration_by_id`]); several registrations, or one naming it through a link,
+/// keep it.
+fn remove_owned_checkout(
+    repo_path: &Path,
+    root: &Path,
+    checkout: &Path,
+    unregistered: bool,
+) -> Result<(), String> {
+    let admin = crate::core::lane_git::registration_of(repo_path, checkout)?;
+    let present = std::fs::symlink_metadata(checkout).is_ok();
+    if present && admin.is_none() && !unregistered {
+        return Err(UNREGISTERED_WORKTREE.to_string());
     }
-    removed || !path.exists()
+    // Read before the checkout goes: the registration of another checkout is told from its
+    // `.git`.
+    let admin = match admin {
+        Some(admin) => Some(admin),
+        None => registration_by_id(repo_path, checkout)?,
+    };
+    if present {
+        crate::core::fs_guard::guarded_remove_tree(root, checkout).map_err(|error| {
+            if crate::core::fs_guard::is_link_refusal(&error) {
+                format!("{} cannot be removed: {error}", checkout.display())
+            } else {
+                format!(
+                    "{PARTLY_REMOVED}: {} could not be removed completely ({error})",
+                    checkout.display()
+                )
+            }
+        })?;
+    }
+    // The registration found before: what its `gitdir` says now does not matter.
+    if let Some(admin) = admin {
+        remove_admin_dir(&admin)
+            .map_err(|error| format!("{PARTLY_REMOVED}: its directory is removed, but {error}"))?;
+    }
+    Ok(())
 }
 
-/// Removes the worktrees registered inside `parent`, deepest first. A workflow
-/// step may add one under its run's worktree (`<run>/.kronn/pr-N`); deleting
-/// the run's directory alone would leave its admin entry behind as prunable.
-pub fn remove_nested_worktrees(repo_path: &Path, parent: &Path) -> usize {
-    nested_worktrees(repo_path, parent)
+/// Remove Kronn's checkout `worktree_path` of `repo_path` and its registration, as
+/// [`remove_discussion_worktree`] does, keeping every branch: a workflow run's forced cleanup.
+pub fn remove_owned_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), String> {
+    let (root, checkout) = owned_checkout(repo_path, worktree_path, true)?;
+    remove_owned_checkout(repo_path, &root, &checkout, true)
+}
+
+/// The registration of Kronn's checkout `worktree_path`, gone from disk, removed by its own
+/// id (KT-2084): a blanket `git worktree prune` would also drop a user's own worktree sitting
+/// on an unmounted drive.
+fn remove_registration_of_gone(repo_path: &Path, worktree_path: &Path) {
+    let removed = owned_checkout(repo_path, worktree_path, true)
+        .and_then(|(_, checkout)| remove_registration(repo_path, &checkout));
+    if let Err(error) = removed {
+        tracing::warn!(path = %worktree_path.display(), "registration kept: {error}");
+    }
+}
+
+/// Removes the worktrees registered inside `parent`, deepest first, as Kronn removes its own
+/// (KT-2084). A workflow step may add one under its run's worktree (`<run>/.kronn/pr-N`);
+/// deleting the run's directory alone would leave its registration behind.
+pub fn remove_nested_worktrees(repo_path: &Path, parent: &Path) -> Result<usize, String> {
+    let Ok(root) = managed_root(repo_path) else {
+        return Ok(0);
+    };
+    Ok(nested_worktrees(repo_path, parent)?
         .iter()
-        .filter(|path| force_remove_worktree(repo_path, path))
-        .count()
+        .filter(
+            |path| match remove_owned_checkout(repo_path, &root, path, false) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), "nested worktree kept: {error}");
+                    false
+                }
+            },
+        )
+        .count())
 }
 
-/// The worktrees registered inside `parent`, deepest first.
-pub fn nested_worktrees(repo_path: &Path, parent: &Path) -> Vec<PathBuf> {
-    let mut nested: Vec<PathBuf> = worktree_entries(repo_path)
-        .into_iter()
-        .map(|entry| entry.path)
-        .filter(|path| is_strictly_inside(path, parent))
+/// The worktrees registered strictly inside `parent`, a checkout of `<repo>/.kronn/worktrees`,
+/// deepest first and canonical. A path a registration names with a `..`, `.` or empty part, a
+/// control character or a link below the repository is none of them (KT-2084). `Err` when the
+/// registrations cannot be read: none can then be said absent.
+pub fn nested_worktrees(repo_path: &Path, parent: &Path) -> Result<Vec<PathBuf>, String> {
+    let Ok((_, parent)) = owned_checkout(repo_path, parent, false) else {
+        return Ok(Vec::new());
+    };
+    let mut nested: Vec<PathBuf> = worktree_entries(repo_path)?
+        .iter()
+        .filter_map(plain_path)
+        .filter_map(|path| owned_checkout(repo_path, &path, false).ok())
+        .map(|(_, checkout)| checkout)
+        .filter(|path| path.starts_with(&parent) && path != &parent)
         .collect();
     nested.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    nested
+    nested.dedup();
+    Ok(nested)
 }
 
-/// Drops the admin entries of Kronn's worktrees whose checkout is gone. Scoped
-/// to `<repo>/.kronn/`: a blanket `git worktree prune` would also drop a user's
-/// own worktree sitting on an unmounted drive.
-pub fn prune_kronn_worktrees(repo_path: &Path) -> usize {
-    let kronn_root = repo_path.join(".kronn");
-    worktree_entries(repo_path)
-        .into_iter()
-        .filter(|entry| entry.prunable && is_strictly_inside(&entry.path, &kronn_root))
-        .filter(|entry| force_remove_worktree(repo_path, &entry.path))
-        .count()
+/// Drops the registrations of Kronn's worktrees whose checkout is gone (prunable); the
+/// directory, if any, stays (KT-2084). Only a registration whose own `gitdir` names, exactly
+/// as Kronn or git writes it, a gone checkout of `<repo>/.kronn/worktrees`, plainly spelled and
+/// reached through no link: the registration removed is that entry itself, never one looked
+/// up by a name its `gitdir` gives. A user's own worktree, on an unmounted drive or anywhere
+/// else, is never touched. `Err`, and nothing dropped, when a registration cannot be read.
+pub fn prune_kronn_worktrees(repo_path: &Path) -> Result<usize, String> {
+    Ok(worktree_entries(repo_path)?
+        .iter()
+        .filter(|entry| entry.prunable)
+        .filter_map(|entry| Some((entry.admin.as_deref()?, plain_path(entry)?)))
+        .filter_map(|(admin, path)| {
+            let (_, checkout) = owned_checkout(repo_path, &path, false).ok()?;
+            Some((admin, checkout))
+        })
+        .filter(|(admin, checkout)| {
+            crate::core::lane_git::registration_of(repo_path, checkout)
+                .is_ok_and(|named| named.as_deref() == Some(*admin))
+                && remove_admin_dir(admin).is_ok()
+        })
+        .count())
 }
 
 /// The agent configs [`copy_agent_configs`] puts into a new worktree.
@@ -2377,25 +2790,97 @@ pub fn copy_agent_configs(repo_path: &Path, worktree_path: &Path) {
     }
 }
 
+/// Largest agent config compared with the main checkout's: a bigger one is not Kronn's copy.
+const AGENT_CONFIG_READ_CAP: u64 = 1024 * 1024;
+
 /// The copies [`copy_agent_configs`] made that still equal the main
 /// checkout's file: Kronn's own, not the work of what ran in the worktree.
 pub fn unchanged_agent_configs(repo_path: &Path, worktree_path: &Path) -> Vec<PathBuf> {
     let Ok(root) = worktree_path.canonicalize() else {
         return Vec::new();
     };
+    // A regular file under the cap, never through a link, never from a FIFO.
+    let read = |root: &Path, relative: &Path| {
+        crate::core::fs_guard::guarded_read_head(
+            root,
+            &root.join(relative),
+            AGENT_CONFIG_READ_CAP + 1,
+        )
+        .ok()
+        .flatten()
+        .filter(|bytes| bytes.len() as u64 <= AGENT_CONFIG_READ_CAP)
+    };
     AGENT_CONFIG_FILES
         .iter()
         .filter_map(|parts| {
             let relative: PathBuf = parts.iter().collect();
-            let copy = worktree_path.join(&relative);
-            // A link, or a file reached through one, is not Kronn's copy.
-            let plain = std::fs::symlink_metadata(&copy).ok()?.file_type().is_file()
-                && copy.canonicalize().ok()? == root.join(&relative);
-            let same = plain
-                && std::fs::read(&copy).ok()? == std::fs::read(repo_path.join(&relative)).ok()?;
+            let same = read(&root, &relative)? == read(repo_path, &relative)?;
             same.then_some(relative)
         })
         .collect()
+}
+
+/// What to do about the registration that holds the path or the branch of a reattach git
+/// refused (KT-2084): read from the registrations' files, so it depends on neither git's
+/// wording nor its version, and names that one registration. Empty when none holds them.
+fn reattach_holder_advice(repo_path: &Path, worktree_path: &Path, branch: &str) -> String {
+    let entries = match worktree_entries(repo_path) {
+        Ok(entries) => entries,
+        Err(error) => return format!(" {error}"),
+    };
+    let wanted = owned_checkout(repo_path, worktree_path, true)
+        .ok()
+        .map(|(_, checkout)| checkout);
+    let holder = entries.iter().find_map(|entry| {
+        let admin = entry.admin.as_deref()?;
+        if entry.branch.as_deref() == Some(branch) {
+            Some((admin, entry, format!("the branch {branch}")))
+        } else if wanted.as_deref() == Some(entry.path.as_path()) {
+            Some((admin, entry, "this path".to_string()))
+        } else {
+            None
+        }
+    });
+    let Some((admin, entry, held)) = holder else {
+        return String::new();
+    };
+    use crate::core::lane_git::{path_as_data, quoted_for_command};
+    // A lane writes the path its registration names: in a command only when no shell reads it.
+    let quoted = quoted_for_command(repo_path).zip(quoted_for_command(&entry.path));
+    let removal = match quoted {
+        Some((repo, path)) if entry.readable => format!(
+            "run `git -C {repo} worktree remove {path}` (with `--force` when it holds changes \
+             you do not need)"
+        ),
+        _ => "remove it with git's own worktree removal, from the project's folder, giving it \
+              that path exactly as written above"
+            .to_string(),
+    };
+    format!(
+        " The registration {} holds {held}, and Kronn removes no registration whose worktree \
+         may be in use. Its worktree is:{}If that worktree is no longer needed, {removal}, then \
+         retry.",
+        admin.display(),
+        path_as_data(&entry.path)
+    )
+}
+
+/// `command`, one that changes the owner's checkout (a checkout, a stash, a `worktree add`),
+/// run to its end within five times the judgement's bound, its process group killed past it
+/// (KT-2084): git reads every registration there, and a FIFO in one makes it wait forever.
+fn bounded_change(
+    mut command: std::process::Command,
+    what: &str,
+) -> Result<std::process::Output, String> {
+    let timeout = crate::core::lane_git::snapshot::judge_timeout() * 5;
+    match crate::core::cmd::run_bounded_output(&mut command, &[], timeout) {
+        Ok(crate::core::cmd::BoundedOutput::Exited(output)) => Ok(output),
+        Ok(crate::core::cmd::BoundedOutput::TimedOut) => Err(format!(
+            "git {what} did not finish within Kronn's own {} s timeout, so Kronn stopped it",
+            timeout.as_secs()
+        )),
+        Err(error) => Err(format!("git {what} could not be started: {error}")),
+    }
 }
 
 /// Re-attach an existing branch to a new worktree path.
@@ -2412,8 +2897,9 @@ pub fn reattach_worktree(
     let worktree_path = worktree_base_dir(repo_path).join(&dir_name);
 
     // Block if branch is checked out in the main repo (user is testing)
-    if let Some(existing_path) = branch_checked_out_at(repo_path, existing_branch) {
-        if same_path(&existing_path, repo_path) {
+    crate::core::lane_git::check_branch_name(existing_branch)?;
+    if let Some(existing) = branch_checked_out_at(repo_path, existing_branch)? {
+        if is_main_checkout(&existing, repo_path) {
             return Err(format!(
                 "Branch {} is currently checked out in the main repo. Please switch to another branch first.",
                 existing_branch
@@ -2438,25 +2924,30 @@ pub fn reattach_worktree(
     crate::core::git_global_config::ensure_safe_directory(repo_path);
     crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
-    // Prune stale worktree entries first (old /data/workspaces/ refs)
-    let _ = crate::core::cmd::git_cmd()
-        .args(["worktree", "prune"])
-        .current_dir(repo_path)
-        .output();
+    // A registration left by a checkout of Kronn's that is gone holds the path and the branch:
+    // only those go, each by its own id (KT-2084). Git's own prune would also act on a
+    // registration a worker rewrote, or on a user's worktree on an unmounted drive.
+    if let Err(error) = prune_kronn_worktrees(repo_path) {
+        tracing::warn!(repo = %repo_path.display(), "no registration pruned: {error}");
+    }
 
     // Attach existing branch to new worktree path (no -b, branch already exists)
-    let output = crate::core::cmd::project_git_cmd()
-        .args(["worktree", "add"])
+    let mut add = crate::core::cmd::project_git_cmd();
+    add.args(["worktree", "add"])
         .arg(&worktree_path)
         .arg(existing_branch)
-        .current_dir(repo_path)
-        .output()
+        .current_dir(repo_path);
+    let output = bounded_change(add, "worktree add")
         .map_err(|e| format!("Failed to execute git worktree add: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git worktree reattach failed: {}", stderr));
+        // Kronn prunes only its own registrations (KT-2084): one it did not make may hold the
+        // path or the branch.
+        let advice = reattach_holder_advice(repo_path, &worktree_path, existing_branch);
+        return Err(format!("git worktree reattach failed: {stderr}{advice}"));
     }
+    confirm_registration_id(repo_path, &worktree_path, None)?;
 
     tracing::info!(
         "Re-attached worktree at {} (branch: {})",
@@ -2473,120 +2964,1503 @@ pub fn reattach_worktree(
     })
 }
 
-/// Find the branch associated with a worktree path (before removal).
+/// Largest `HEAD` file read from a worktree's registration.
+const HEAD_READ_CAP: u64 = 4096;
+
+/// The branch the managed worktree `worktree_path` of `repo_path` is on, read from its own
+/// registration (`<admin>/HEAD`, never through a link, a regular file under a size cap), so the
+/// form `git worktree list` gives its path in does not matter. Only `ref: refs/heads/<name>`
+/// names one; `None`: detached, or not a worktree Kronn manages. No git runs: the registration
+/// is found from the owner's checkout, its `HEAD` read as a file.
 fn find_branch_for_worktree(repo_path: &Path, worktree_path: &str) -> Option<String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    // Extract the dir name for matching (git may list relative or absolute paths)
-    let wt_dir_name = Path::new(worktree_path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut found = false;
-    for line in text.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            found = path == worktree_path || path.ends_with(&wt_dir_name);
-        } else if found && line.starts_with("branch refs/heads/") {
-            return Some(line.trim_start_matches("branch refs/heads/").to_string());
-        } else if found && line.is_empty() {
-            found = false;
-        }
+    let checkout = Path::new(worktree_path);
+    let pinned = crate::core::lane_git::managed_registration(checkout).ok()?;
+    if !same_path(&pinned.repo, repo_path) {
+        return None;
     }
-    None
+    let head = crate::core::fs_guard::guarded_read_head(
+        &pinned.git_dir,
+        &pinned.git_dir.join("HEAD"),
+        HEAD_READ_CAP,
+    )
+    .ok()??;
+    if head.len() as u64 >= HEAD_READ_CAP {
+        return None;
+    }
+    let target = std::str::from_utf8(&head)
+        .ok()?
+        .strip_prefix("ref: ")?
+        .trim_end_matches('\n');
+    // A reftable repository keeps HEAD in its tables, which Kronn does not read: this file is
+    // then a stub, and no branch is found (kept, never guessed).
+    let name = target
+        .strip_prefix("refs/heads/")
+        .filter(|name| *name != ".invalid")?;
+    // A name git would take as a branch, never as an option (KT-2084).
+    crate::core::lane_git::check_branch_name(name)
+        .is_ok()
+        .then(|| name.to_string())
 }
 
-/// Remove a worktree and optionally delete the branch.
+/// Remove Kronn's worktree `worktree_path` of `repo_path` (a directory of
+/// `<repo>/.kronn/worktrees`), and its branch when that is `delete_branch`.
 ///
-/// `--force` is required, not a preference: a managed task worktree materializes
-/// its submodules (KT-478), and Git refuses to remove a worktree that declares
-/// submodules without it — `working trees containing submodules cannot be moved
-/// or removed`. `--force` covers that on current Git; the manual directory
-/// removal covers the rest.
+/// Kronn removes the checkout itself (KT-2084): the directory Kronn named, never through a
+/// link, then the one registration naming it exactly, neither found from the worktree's
+/// `.git` or the `gitdir` file the agent may rewrite. A checkout no registration names goes
+/// alone; several registrations keep it. Its submodules go with it: nothing in them is
+/// judged here, the callers judge first.
+///
+/// The branch, read from the registration's `HEAD` before, goes only when it is
+/// `delete_branch` and both removals succeeded.
 ///
 /// The one thing this must never do is report success while the checkout is
 /// still on disk. A worktree that silently survives its own reclamation is
 /// exactly how the `.git/worktrees/*` count climbed unbounded until the sandbox
 /// guard blocked every worker (KT-514). So the outcome is verified against the
 /// filesystem before returning, and a residual checkout is a traced error rather
-/// than a phantom success — with the branch left intact, since its worktree is
-/// still live.
+/// than a phantom success, with the branch left intact.
 pub fn remove_discussion_worktree(
     repo_path: &Path,
     worktree_path: &str,
-    delete_branch: bool,
+    delete_branch: Option<&str>,
 ) -> Result<(), String> {
-    // Determine the branch name BEFORE removing the worktree (it won't be listed after)
-    let branch_to_delete = if delete_branch {
-        find_branch_for_worktree(repo_path, worktree_path)
-    } else {
-        None
-    };
-
-    // Remove the worktree via git (try absolute path, then relative)
-    let wt_abs = Path::new(worktree_path);
-    let wt_relative = wt_abs
-        .strip_prefix(repo_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    let output = crate::core::cmd::git_cmd()
-        .args(["worktree", "remove", "--force", worktree_path])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute git worktree remove: {}", e))?;
-
-    if !output.status.success() && !wt_relative.is_empty() {
-        // Git may know the worktree by relative path (due to relative gitdir refs)
-        let _ = crate::core::cmd::git_cmd()
-            .args(["worktree", "remove", "--force", &wt_relative])
-            .current_dir(repo_path)
-            .output();
-    }
-
-    // Final fallback: remove the checkout directory by hand. Traced, never
-    // silently discarded — an ignored failure here is precisely how the worktree
-    // count rises unseen.
-    let mut manual_error: Option<String> = None;
-    if wt_abs.exists() {
-        if let Err(e) = std::fs::remove_dir_all(wt_abs) {
-            manual_error = Some(e.to_string());
-        }
-    }
-
-    // Prune the admin entry (`.git/worktrees/<name>`) so a removed checkout stops
-    // counting, whichever path above removed the directory.
-    let _ = crate::core::cmd::git_cmd()
-        .args(["worktree", "prune"])
-        .current_dir(repo_path)
-        .output();
-
-    // Reclamation only counts if the count actually goes down. If the checkout
-    // outlived every attempt, say so instead of reporting a phantom success, and
-    // leave the branch alone.
-    if wt_abs.exists() {
+    let (root, checkout) = owned_checkout(repo_path, Path::new(worktree_path), true)?;
+    // Before the removal: the branch is read from the registration's `HEAD`.
+    let branch_to_delete = delete_branch.filter(|expected| {
+        find_branch_for_worktree(repo_path, worktree_path).as_deref() == Some(*expected)
+    });
+    remove_owned_checkout(repo_path, &root, &checkout, true)?;
+    if std::fs::symlink_metadata(&checkout).is_ok() {
         return Err(format!(
-            "worktree {} could not be removed{} — leaving it rather than reporting a phantom reclaim",
-            worktree_path,
-            manual_error
-                .map(|e| format!(" ({e})"))
-                .unwrap_or_default()
+            "worktree {worktree_path} could not be removed — leaving it rather than reporting a phantom reclaim"
         ));
     }
-
     if let Some(branch) = branch_to_delete {
-        let _ = crate::core::cmd::git_cmd()
-            .args(["branch", "-D", &branch])
-            .current_dir(repo_path)
-            .output();
-        tracing::info!("Deleted branch: {}", branch);
+        let mut command = delete_git(repo_path)?;
+        command.args(["branch", "-D", "--end-of-options", branch]);
+        let deleted = bounded(command, "branch -D").is_ok_and(|output| output.status.success());
+        if deleted {
+            tracing::info!("Deleted branch: {}", branch);
+        } else {
+            tracing::warn!("Branch {} of the removed worktree was not deleted", branch);
+        }
     }
-
     tracing::info!("Removed worktree: {}", worktree_path);
     Ok(())
+}
+
+/// Git for a delete (KT-2084): lane_git's switches and pinning, since an agent may have
+/// written a config in `dir`, and C messages, which Kronn parses.
+fn delete_git(dir: &Path) -> Result<std::process::Command, String> {
+    let mut command = crate::core::lane_git::git(dir)?;
+    command.env("LC_ALL", "C");
+    Ok(command)
+}
+
+/// `command` run to its end within the judgement's time bound (KT-2084): a timeout keeps
+/// what it was judging, and says so.
+fn bounded(command: std::process::Command, what: &str) -> Result<std::process::Output, String> {
+    crate::core::lane_git::snapshot::bounded_output(command, what)
+}
+
+/// What removing a deleted discussion's worktree did with its branch (KT-2084).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeletedDiscussionBranch {
+    /// The checkout was on no branch (detached, or none found).
+    NoBranch,
+    /// Every commit on the branch is reachable from another ref: deleted.
+    Deleted(String),
+    /// A commit no other ref reaches, or no proof either way: kept.
+    Kept { branch: String, reason: String },
+}
+
+/// Remove a deleted discussion's worktree (KT-2084). Its branch goes only when it is the
+/// discussion's own (`expected_branch`, a `kronn/` branch), no commit is lost and
+/// `branch_users` (branch → who names it) names none. Err keeps the worktree (or says what
+/// of it is left) and its branch, with the reason.
+pub fn remove_deleted_discussion_worktree(
+    repo_path: &Path,
+    worktree_path: &str,
+    expected_branch: Option<&str>,
+    branch_users: &std::collections::BTreeMap<String, String>,
+) -> Result<DeletedDiscussionBranch, String> {
+    let branch = find_branch_for_worktree(repo_path, worktree_path);
+    remove_clean_discussion_worktree(repo_path, worktree_path).map_err(|reason| match &branch {
+        Some(branch) if reason.starts_with(PARTLY_REMOVED) => {
+            format!("{reason}; its branch {branch} is kept")
+        }
+        _ => reason,
+    })?;
+    let Some(branch) = branch else {
+        return Ok(DeletedDiscussionBranch::NoBranch);
+    };
+    let own = expected_branch.filter(|expected| expected.starts_with("kronn/"));
+    if own != Some(branch.as_str()) {
+        let reason = match expected_branch {
+            Some(expected) => format!(
+                "the worktree was on it, not on the discussion's branch {expected}: neither is deleted"
+            ),
+            None => "the discussion names no branch of its own".to_string(),
+        };
+        return Ok(DeletedDiscussionBranch::Kept { branch, reason });
+    }
+    if let Some(user) = branch_users.get(&branch) {
+        let reason = user.clone();
+        return Ok(DeletedDiscussionBranch::Kept { branch, reason });
+    }
+    let reason = match commit_only_on_branch(repo_path, &branch) {
+        Ok(None) => {
+            let mut command = delete_git(repo_path)?;
+            command.args(["branch", "-D", "--end-of-options", &branch]);
+            let output = bounded(command, "branch -D")?;
+            if output.status.success() {
+                return Ok(DeletedDiscussionBranch::Deleted(branch));
+            }
+            format!(
+                "git branch -D failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        }
+        Ok(Some(commit)) => format!("commit {commit} is reachable from no other ref"),
+        Err(reason) => reason,
+    };
+    Ok(DeletedDiscussionBranch::Kept { branch, reason })
+}
+
+/// Whether `checkout` is a worktree Kronn manages for `repo_path` (KT-2084): a registered
+/// `<repo>/.kronn/worktrees/<name>` itself, pinned to that repository. Err: its registration
+/// or its pointer cannot be trusted. No git runs in the worktree or its registration.
+pub fn is_managed_discussion_worktree(repo_path: &Path, checkout: &Path) -> Result<bool, String> {
+    let named = crate::core::lane_git::managed_worktree_repo(checkout);
+    if !named.is_some_and(|repo| same_path(&repo, repo_path)) {
+        return Ok(false);
+    }
+    let pinned = crate::core::lane_git::managed_registration(checkout)?;
+    Ok(same_path(&pinned.repo, repo_path))
+}
+
+/// Kronn's own copy of the git state of a managed worktree and of each of its populated
+/// submodules (KT-2084): every read-only git command of a judgement runs against it, never
+/// against a configuration, `HEAD` or index the agent can write.
+struct Judgement {
+    worktree: Snapshot,
+    /// `(path from the worktree, its copy)`, nested ones included, parents first.
+    submodules: Vec<(String, Snapshot)>,
+}
+
+impl Judgement {
+    fn of(checkout: &Path) -> Result<Self, String> {
+        Self::with_submodules(Snapshot::of_worktree(checkout)?)
+    }
+
+    /// [`Judgement::of`] a worktree `repo_path` registers anywhere below its managed root.
+    fn of_registered(repo_path: &Path, checkout: &Path) -> Result<Self, String> {
+        Self::with_submodules(Snapshot::of_registered_worktree(repo_path, checkout)?)
+    }
+
+    fn with_submodules(worktree: Snapshot) -> Result<Self, String> {
+        let submodules = populated_submodules(&worktree)?;
+        Ok(Self {
+            worktree,
+            submodules,
+        })
+    }
+}
+
+/// Kronn's judgement is the verdict (KT-2084): a fresh look at the worktree, its submodules
+/// and every submodule repository finds nothing to lose, then Kronn removes the checkout and
+/// its registration itself. No git runs in the worktree or its submodules after that look.
+fn remove_clean_discussion_worktree(repo_path: &Path, worktree_path: &str) -> Result<(), String> {
+    let given = Path::new(worktree_path);
+    let (root, checkout) = match owned_checkout(repo_path, given, true) {
+        Ok(owned) => owned,
+        Err(_) if std::fs::symlink_metadata(given).is_err() => return Ok(()),
+        Err(_) => return Err(UNMANAGED_WORKTREE.to_string()),
+    };
+    if std::fs::symlink_metadata(&checkout).is_err() {
+        return remove_registration(repo_path, &checkout).map(|_| ());
+    }
+    // Git follows the worktree's pointer to look at it: refused when it was moved.
+    if !is_managed_discussion_worktree(repo_path, &checkout)? {
+        return Err(UNMANAGED_WORKTREE.to_string());
+    }
+    let judged = Judgement::of(&checkout)?;
+    let (loss, found) = forced_removal_check(repo_path, &judged, worktree_path, Saved::Nothing)?;
+    drop(judged);
+    if !found.files.nested.is_empty() {
+        return Err(format!(
+            "{} hold(s) a repository Kronn never removes by hand: move it out first",
+            name_files(&found.files.nested)
+        ));
+    }
+    if let Some(loss) = loss {
+        return Err(loss);
+    }
+    remove_owned_checkout(repo_path, &root, &checkout, false)
+}
+
+/// What a stopped workflow run's checkout, or a worktree registered inside it, holds
+/// (KT-2084), judged from Kronn's copy of its git state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunCheckoutWork {
+    /// Modified and untracked files, its submodules' included.
+    Uncommitted(usize),
+    /// Commits on a detached HEAD that no branch, tag or remote reaches.
+    Detached,
+    /// Anything else its removal keeps, worded: a lock, a repository kept inside it, a
+    /// submodule's commits.
+    Kept(String),
+}
+
+/// The first look at a run's `checkout` before its teardown (KT-2084): the verdict its removal
+/// ([`remove_judged_run_checkout`]) gives, the worktrees registered inside it left to their
+/// own look. No git runs in it or in its submodules.
+pub fn run_checkout_work(
+    repo_path: &Path,
+    checkout: &Path,
+) -> Result<Option<RunCheckoutWork>, String> {
+    let (_, checkout) = owned_checkout(repo_path, checkout, false)?;
+    let removed_first = nested_worktrees(repo_path, &checkout)?;
+    let judged = Judgement::of_registered(repo_path, &checkout)?;
+    let kept = kept_by_git(repo_path, &checkout, &judged, Removal::Run, &removed_first)?;
+    Ok(if !kept.uncommitted.is_empty() {
+        Some(RunCheckoutWork::Uncommitted(kept.uncommitted.len()))
+    } else if kept.detached.is_some() {
+        Some(RunCheckoutWork::Detached)
+    } else {
+        joined(kept.other).map(RunCheckoutWork::Kept)
+    })
+}
+
+/// Which removal git's own check once guarded (KT-2084).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// A stopped workflow run's checkout, or a worktree registered inside it.
+    Run,
+    /// A worktree of Kronn's layout that nothing owns.
+    Ownerless,
+}
+
+/// What keeps a checkout from a run's or an ownerless removal (KT-2084).
+#[derive(Debug, Default)]
+struct KeptByGit {
+    /// Modified and untracked files, a run's submodules' included, by path from the checkout.
+    uncommitted: Vec<String>,
+    /// The newest commit on a detached HEAD that no branch, tag or remote reaches.
+    detached: Option<String>,
+    /// Anything else, worded.
+    other: Vec<String>,
+}
+
+impl KeptByGit {
+    /// Why the checkout `shown` is kept, `None` when nothing keeps it.
+    fn describe(self, shown: &str) -> Option<String> {
+        let mut lines = WorktreeFiles {
+            uncommitted: self.uncommitted,
+            ..WorktreeFiles::default()
+        }
+        .describe(shown);
+        if let Some(commit) = self.detached {
+            lines.push(format!(
+                "{shown} has commits on a detached HEAD (newest {commit}) that no branch, tag or remote reaches: create a branch or discard them first"
+            ));
+        }
+        lines.extend(self.other);
+        joined(lines)
+    }
+}
+
+/// Kronn's verdict on a run's or an ownerless `checkout` (canonical), judged from the copy
+/// `judged` (KT-2084): what git's own removal without `--force` kept. Modified and untracked
+/// files (links, OS junk and Kronn's own entries excepted), a detached HEAD's commits, a
+/// repository kept inside it, a lock, submodule repositories with worktrees of their own or
+/// commits no remote branch reaches; a run's submodules' files; any populated submodule of an
+/// ownerless worktree. Ignored files go with it. `removed_first`: worktrees registered inside
+/// it, removed before it and judged on their own.
+fn kept_by_git(
+    repo_path: &Path,
+    checkout: &Path,
+    judged: &Judgement,
+    removal: Removal,
+    removed_first: &[PathBuf],
+) -> Result<KeptByGit, String> {
+    let shown = checkout.display().to_string();
+    let regenerable = regenerable_outputs();
+    let files = worktree_files(Some(repo_path), &judged.worktree, &regenerable)?;
+    let mut kept = KeptByGit {
+        uncommitted: files.uncommitted,
+        ..KeptByGit::default()
+    };
+    let mut skipped = files.ignored_dirs;
+    match removal {
+        Removal::Ownerless if !judged.submodules.is_empty() => {
+            let paths: Vec<String> = judged.submodules.iter().map(|(p, _)| p.clone()).collect();
+            kept.other.push(format!(
+                "{shown} has populated submodules ({}): Kronn does not remove it; remove it by \
+                 hand once nothing in it is needed",
+                name_files(&paths)
+            ));
+        }
+        Removal::Ownerless => {}
+        Removal::Run => {
+            for (relative, submodule) in &judged.submodules {
+                let below = regenerable_below(&regenerable, relative);
+                let found = worktree_files(None, submodule, &below)?;
+                let below = |path: &String| format!("{relative}/{path}");
+                kept.uncommitted.extend(found.uncommitted.iter().map(below));
+                skipped.extend(found.ignored_dirs.iter().map(below));
+            }
+        }
+    }
+    kept.detached = commit_on_detached_head(&judged.worktree)?;
+    let nested: Vec<String> = files
+        .nested
+        .into_iter()
+        .filter(|entry| {
+            let dir = checkout.join(entry.trim_end_matches('/'));
+            holds_a_repository_besides(checkout, &dir, removed_first)
+        })
+        .collect();
+    if !nested.is_empty() {
+        kept.other.push(format!(
+            "{} in {shown} hold(s) a repository: move it out first",
+            name_files(&nested)
+        ));
+    }
+    let admin = judged.worktree.source();
+    if std::fs::symlink_metadata(admin.join("locked")).is_ok() {
+        kept.other.push(format!(
+            "{shown} is locked (`git worktree unlock` releases it)"
+        ));
+    }
+    kept.other.extend(module_worktrees(admin)?);
+    kept.other.extend(
+        submodule_commits_off_remotes(repo_path, judged, SubmoduleCommits::OffRemotes)?
+            .into_iter()
+            .map(|line| format!("{line}: push it or discard it first")),
+    );
+    if let Some(reason) = embedded_repository(checkout, &skipped, removed_first) {
+        kept.other.push(reason);
+    }
+    Ok(kept)
+}
+
+/// Why Kronn did not remove a checkout it judged (KT-2084).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotRemoved {
+    /// Its judgement keeps it, or could not be made: nothing was removed.
+    Kept(String),
+    /// The removal stopped part way ([`PARTLY_REMOVED`]).
+    Failed(String),
+}
+
+/// Removes a stopped run's checkout `checkout`, or a worktree registered inside it, with its
+/// registration, once Kronn's judgement finds nothing in it to lose (KT-2084). The branch
+/// stays. No git runs in the worktree or its submodules after the judgement.
+pub fn remove_judged_run_checkout(repo_path: &Path, checkout: &Path) -> Result<(), NotRemoved> {
+    let (root, checkout) = owned_checkout(repo_path, checkout, false).map_err(NotRemoved::Kept)?;
+    if std::fs::symlink_metadata(&checkout).is_err() {
+        return Ok(());
+    }
+    let judged = Judgement::of_registered(repo_path, &checkout).map_err(not_judged)?;
+    remove_judged_checkout(repo_path, &root, &checkout, judged, Removal::Run)
+}
+
+fn not_judged(error: String) -> NotRemoved {
+    NotRemoved::Kept(format!("a state git cannot read ({error})"))
+}
+
+/// Kronn's verdict on removing the judged `checkout` (canonical, below the canonical managed
+/// `root`) with everything in it ([`kept_by_git`]), then its removal with the one
+/// registration naming it. Worktrees registered inside it are gone already.
+fn remove_judged_checkout(
+    repo_path: &Path,
+    root: &Path,
+    checkout: &Path,
+    judged: Judgement,
+    removal: Removal,
+) -> Result<(), NotRemoved> {
+    let kept = kept_by_git(repo_path, checkout, &judged, removal, &[]).map_err(not_judged)?;
+    drop(judged);
+    if let Some(reason) = kept.describe(&checkout.display().to_string()) {
+        return Err(NotRemoved::Kept(reason));
+    }
+    remove_owned_checkout(repo_path, root, checkout, false).map_err(|error| {
+        if error.starts_with(PARTLY_REMOVED) {
+            NotRemoved::Failed(error)
+        } else {
+            NotRemoved::Kept(error)
+        }
+    })
+}
+
+/// The submodule repositories of the registration `admin` that have worktrees of their own:
+/// removing the registration would take what those worktrees need.
+fn module_worktrees(admin: &Path) -> Result<Vec<String>, String> {
+    let modules = admin.join("modules");
+    let mut found = Vec::new();
+    for git_dir in module_git_dirs(admin)? {
+        let name = git_dir
+            .strip_prefix(&modules)
+            .unwrap_or(&git_dir)
+            .display()
+            .to_string();
+        match crate::core::fs_guard::guarded_list(&git_dir, &git_dir.join("worktrees")) {
+            Ok(None) => {}
+            Ok(Some(entries)) if entries.is_empty() => {}
+            Ok(Some(_)) => found.push(format!(
+                "its submodule `{name}`, which has worktrees of its own"
+            )),
+            Err(error) => found.push(format!(
+                "its submodule `{name}`, whose worktrees cannot be listed ({error})"
+            )),
+        }
+    }
+    Ok(found)
+}
+
+/// How deep [`embedded_repository`] looks, under the depth Kronn's removal walks
+/// ([`crate::core::rooted_fd::MAX_DEPTH`]), and how many folders: past either it keeps.
+const MAX_EMBEDDED_DEPTH: usize = 48;
+const MAX_EMBEDDED_DIRS: usize = 100_000;
+
+/// The deepest folder Kronn's removal takes, counted from the removed checkout
+/// ([`crate::core::rooted_fd::MAX_DEPTH`] levels, the checkout itself included).
+const REMOVAL_DEPTH: usize = crate::core::rooted_fd::MAX_DEPTH - 1;
+/// How many entries, and how long, the look at the depth of an ignored folder spends: past
+/// either it stops without keeping the checkout (no content of it is judged).
+const IGNORED_DEPTH_ENTRIES: usize = 2_000_000;
+const IGNORED_DEPTH_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Why Kronn's removal of `checkout` would stop in its ignored folder `dir`, `depth` levels
+/// below it: a folder deeper than [`REMOVAL_DEPTH`], or one that cannot be listed. Only the
+/// folders are looked at, never what they hold.
+fn ignored_folder_unremovable(checkout: &Path, dir: &Path, depth: usize) -> Option<String> {
+    use crate::core::fs_guard::{guarded_walk, Visit, WalkBounds};
+    let shown = |path: &Path| {
+        path.strip_prefix(checkout)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let bounds = WalkBounds {
+        max_entries: IGNORED_DEPTH_ENTRIES,
+        deadline: std::time::Instant::now() + IGNORED_DEPTH_TIME,
+        max_depth: crate::core::rooted_fd::MAX_DEPTH,
+    };
+    let mut too_deep = None;
+    let walked = guarded_walk(checkout, dir, bounds, &mut |entry| {
+        if entry.depth == 0 {
+            return Visit::Enter;
+        }
+        if !entry.is_dir || entry.is_symlink {
+            return Visit::Skip;
+        }
+        if depth + entry.depth > REMOVAL_DEPTH {
+            too_deep = Some(entry.path.to_path_buf());
+            return Visit::Stop;
+        }
+        Visit::Enter
+    });
+    if let Some(deep) = too_deep {
+        return Some(format!(
+            "its ignored folder `{}` goes more than {REMOVAL_DEPTH} levels deep (`{}`): Kronn's \
+             removal stops there; remove it by hand",
+            shown(dir),
+            shown(&deep)
+        ));
+    }
+    match walked {
+        Ok(end) => {
+            if let Some(why) = end.bound() {
+                tracing::warn!(
+                    "the depth of the ignored folder {} was not looked through ({why})",
+                    dir.display()
+                );
+            }
+            None
+        }
+        Err(error) => Some(format!(
+            "its ignored folder `{}` cannot be listed ({error}): Kronn's removal would stop \
+             there; remove it by hand",
+            shown(dir)
+        )),
+    }
+}
+
+/// Why a repository kept inside `checkout` itself keeps it: a `.git` directory below its top
+/// (a clone, a submodule never absorbed), found through no link, outside its ignored folders
+/// `skipped` (by path from it; Kronn's `.kronn/` is never one) and the worktrees `besides`,
+/// judged on their own. A folder that cannot be listed keeps it too, and so does a walk past
+/// its bounds. An ignored folder is not searched, but one the removal would stop in keeps it
+/// ([`ignored_folder_unremovable`]).
+fn embedded_repository(checkout: &Path, skipped: &[String], besides: &[PathBuf]) -> Option<String> {
+    let shown = |dir: &Path| {
+        dir.strip_prefix(checkout)
+            .unwrap_or(dir)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let skipped: std::collections::HashSet<PathBuf> = skipped
+        .iter()
+        .map(|dir| checkout.join(dir.trim_end_matches('/')))
+        .collect();
+    let mut pending = vec![(checkout.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = pending.pop() {
+        visited += 1;
+        if visited > MAX_EMBEDDED_DIRS {
+            return Some(format!(
+                "it holds more than {MAX_EMBEDDED_DIRS} folders outside its ignored ones: \
+                 Kronn does not look further for a repository kept inside it"
+            ));
+        }
+        let Some(entries) = listed(checkout, &dir) else {
+            return Some(format!(
+                "`{}` cannot be listed: Kronn cannot tell whether it holds a repository",
+                shown(&dir)
+            ));
+        };
+        for (name, kind) in entries {
+            if !kind.is_dir() {
+                continue;
+            }
+            if name == ".git" {
+                if dir != checkout {
+                    return Some(format!(
+                        "a repository kept inside the worktree, at `{}`: move it out first",
+                        shown(&dir)
+                    ));
+                }
+                continue;
+            }
+            let child = dir.join(name);
+            if besides.contains(&child) {
+                continue;
+            }
+            if skipped.contains(&child) {
+                if let Some(reason) = ignored_folder_unremovable(checkout, &child, depth + 1) {
+                    return Some(reason);
+                }
+                continue;
+            }
+            if depth + 1 > MAX_EMBEDDED_DEPTH {
+                return Some(format!(
+                    "its folders go more than {MAX_EMBEDDED_DEPTH} levels deep (`{}`): Kronn \
+                     does not look further for a repository kept inside it",
+                    shown(&child)
+                ));
+            }
+            pending.push((child, depth + 1));
+        }
+    }
+    None
+}
+
+/// Why a delete leaves a directory of the worktree layout that git no longer lists on disk.
+pub const UNREGISTERED_WORKTREE: &str =
+    "git no longer lists it as a worktree (its registration was removed): it stays on disk; \
+     remove it by hand once nothing in it is needed";
+
+/// Whether `checkout` is a directory of `repo_path`'s worktree layout that git no longer lists
+/// (its registration pruned, the directory left): Kronn neither judges nor removes it (KT-2084).
+pub fn is_unregistered_managed_worktree(repo_path: &Path, checkout: &Path) -> bool {
+    checkout
+        .parent()
+        .is_some_and(|parent| same_path(parent, &worktree_base_dir(repo_path)))
+        && matches!(crate::core::lane_git::is_registered(checkout), Ok(false))
+}
+
+/// Why a delete leaves a worktree Kronn does not manage on disk (KT-2084).
+pub const UNMANAGED_WORKTREE: &str =
+    "Kronn does not manage this worktree (it is not one of the project's registered \
+     .kronn/worktrees): it stays on disk";
+
+use crate::core::lane_git::plain_relative;
+use crate::core::lane_git::snapshot::Snapshot;
+
+/// How deep [`populated_submodules`] looks before refusing to judge.
+const MAX_SUBMODULE_DEPTH: usize = 6;
+
+/// The populated submodules of the copy `parent`, nested ones included: `(path from its work
+/// tree, the submodule's own copy)`, parents first, from the gitlinks of each copied index.
+/// A submodule Kronn cannot judge from a copy (a link, a path outside the tree, a `.git` that
+/// names another repository) refuses the whole judgement: git never runs in it.
+fn populated_submodules(parent: &Snapshot) -> Result<Vec<(String, Snapshot)>, String> {
+    let mut found = Vec::new();
+    collect_submodules(parent, "", 0, &mut found)?;
+    Ok(found)
+}
+
+fn collect_submodules(
+    parent: &Snapshot,
+    prefix: &str,
+    depth: usize,
+    found: &mut Vec<(String, Snapshot)>,
+) -> Result<(), String> {
+    for path in parent.gitlinks()? {
+        let Some(submodule) = parent.of_submodule(&path)? else {
+            continue;
+        };
+        if depth + 1 > MAX_SUBMODULE_DEPTH {
+            return Err(format!(
+                "submodules nested more than {MAX_SUBMODULE_DEPTH} levels deep"
+            ));
+        }
+        let relative = if prefix.is_empty() {
+            path
+        } else {
+            format!("{prefix}/{path}")
+        };
+        let mut nested = Vec::new();
+        collect_submodules(&submodule, &relative, depth + 1, &mut nested)?;
+        found.push((relative, submodule));
+        found.extend(nested);
+    }
+    Ok(())
+}
+
+/// Most directories [`module_git_dirs`] visits, and how deep: past either it refuses.
+const MAX_MODULE_DIRS: usize = 1024;
+const MAX_MODULE_DEPTH: usize = 16;
+
+/// The submodule repositories `--force` would delete with the worktree: every git
+/// directory under its `modules` directory, a de-initialised one included. A link at
+/// `<admin>/modules` or below refuses, and so does a walk past its bounds.
+fn module_git_dirs(admin: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    let modules = admin.join("modules");
+    let is_dir = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+    match std::fs::symlink_metadata(&modules) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => return Err(format!("{} cannot be read: {error}", modules.display())),
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(format!(
+                "{} is a link or a file: Kronn does not judge its submodule repositories",
+                modules.display()
+            ))
+        }
+    }
+    let mut pending = vec![(modules, 0usize)];
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = pending.pop() {
+        visited += 1;
+        if visited > MAX_MODULE_DIRS {
+            return Err(format!(
+                "{} holds more than {MAX_MODULE_DIRS} directories: Kronn does not judge its \
+                 submodule repositories",
+                admin.join("modules").display()
+            ));
+        }
+        let names = crate::core::fs_guard::guarded_list(admin, &dir)
+            .map_err(|error| format!("{} cannot be read: {error}", dir.display()))?
+            .unwrap_or_default();
+        for name in names {
+            let path = dir.join(&name);
+            let meta = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("{} cannot be read: {error}", path.display()))?;
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "{} is a link: Kronn does not judge its submodule repositories",
+                    path.display()
+                ));
+            }
+            if !meta.is_dir() {
+                continue;
+            }
+            if depth + 1 > MAX_MODULE_DEPTH {
+                return Err(format!(
+                    "{} is nested more than {MAX_MODULE_DEPTH} levels deep: Kronn does not \
+                     judge its submodule repositories",
+                    path.display()
+                ));
+            }
+            let is_repository = std::fs::symlink_metadata(path.join("HEAD"))
+                .is_ok_and(|meta| meta.is_file())
+                && is_dir(&path.join("objects"));
+            if is_repository {
+                let nested = path.join("modules");
+                match std::fs::symlink_metadata(&nested) {
+                    Ok(meta) if meta.is_dir() => pending.push((nested, depth + 1)),
+                    Ok(_) => {
+                        return Err(format!(
+                            "{} is a link or a file: Kronn does not judge its submodule \
+                             repositories",
+                            nested.display()
+                        ))
+                    }
+                    Err(_) => {}
+                }
+                found.push(path);
+            } else {
+                pending.push((path, depth + 1));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// A commit of `snapshot`'s repository that `rule` counts and no `saved` commit reaches: what
+/// deleting that repository may lose. Read from the copy's refs, `refs/stash` included.
+fn commit_off_remotes(
+    snapshot: &Snapshot,
+    saved: &[String],
+    rule: SubmoduleCommits,
+) -> Result<Option<String>, String> {
+    let mut command = snapshot.command();
+    command.args(["rev-list", "-n", "1", "HEAD"]);
+    match rule {
+        // `--glob` matches `refs/stash` itself only through a pattern, and none is no error.
+        SubmoduleCommits::OffRemotesAndTags => command.args([
+            "--branches",
+            "--glob=refs/stas[h]",
+            "--not",
+            "--remotes",
+            "--tags",
+        ]),
+        SubmoduleCommits::OffRemotes => command.args(["--all", "--not", "--remotes"]),
+    };
+    command.args(saved);
+    let output = bounded(command, "rev-list")?;
+    if !output.status.success() {
+        return Err(format!(
+            "its commits cannot be read: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!commit.is_empty()).then_some(commit))
+}
+
+/// Most tips of a submodule repository checked against its source; the rest count as unsaved.
+const MAX_SOURCE_TIPS: usize = 64;
+
+/// The tips of the submodule repository `submodule` (its HEAD and each local branch, read from
+/// Kronn's copy) that the project checkout's own repository at the same path `relative`
+/// already holds (KT-2084): a task's submodule is cloned from there, so a pin the project
+/// holds is saved even when none of its branches reaches it. Only a source the owner itself
+/// declares counts ([`owner_source_module`]), never one below `.kronn/`, where Kronn's
+/// checkouts and the workers' lane targets live: otherwise empty, every tip unsaved, with
+/// the reason the project's copy was not read (`Err` of the inner result).
+fn tips_held_by_source(
+    submodule: &Snapshot,
+    repo_path: &Path,
+    relative: &str,
+) -> Result<Result<Vec<String>, String>, String> {
+    let first = relative.split('/').next().unwrap_or_default();
+    if first.eq_ignore_ascii_case(".kronn") {
+        return Ok(Err(
+            "it lies under .kronn, where Kronn reads no source".to_string()
+        ));
+    }
+    let owner = crate::core::lane_git::without_verbatim_prefix(
+        repo_path
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve {}: {e}", repo_path.display()))?,
+    );
+    let source = match owner_source_module(&owner, relative)? {
+        Ok(source) => source,
+        Err(unread) => return Ok(Err(unread)),
+    };
+    let read = |args: &[&str]| -> Result<String, String> {
+        let output = submodule.output(args)?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    };
+    let listed = [
+        read(&["rev-parse", "-q", "--verify", "HEAD"])?,
+        read(&["for-each-ref", "--format=%(objectname)", "refs/heads"])?,
+    ]
+    .concat();
+    // HEAD first; an object id only, so nothing else reaches the source's git.
+    let mut tips: Vec<&str> = Vec::new();
+    for tip in listed.lines().map(str::trim) {
+        let object_id =
+            matches!(tip.len(), 40 | 64) && tip.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if object_id && !tips.contains(&tip) && tips.len() < MAX_SOURCE_TIPS {
+            tips.push(tip);
+        }
+    }
+    if tips.is_empty() {
+        return Ok(Ok(Vec::new()));
+    }
+    // Kronn's copy of the source: one git, bounded, answers a line per tip, in order.
+    let asked: String = tips
+        .iter()
+        .map(|tip| format!("{tip}^{{commit}}\n"))
+        .collect();
+    let mut command = source.command();
+    command.args(["cat-file", "--batch-check=%(objecttype)"]);
+    let output = crate::core::lane_git::snapshot::bounded_output_with_input(
+        command,
+        asked.as_bytes(),
+        "cat-file",
+    )?;
+    // Nothing proven held: every tip stays counted.
+    if !output.status.success() {
+        return Ok(Err("git could not read its objects".to_string()));
+    }
+    let answers = String::from_utf8_lossy(&output.stdout);
+    Ok(Ok(tips
+        .iter()
+        .zip(answers.lines())
+        .filter(|(_, answer)| *answer == "commit")
+        .map(|(tip, _)| tip.to_string())
+        .collect()))
+}
+
+/// Kronn's copy of the submodule `relative` of the owner's checkout `owner` (canonical), when
+/// the owner declares it (KT-2084): a gitlink of the owner's own index, populated with a
+/// `.git` file naming the owner's `<common>/modules/<path>`, vetted, no part a link. The inner
+/// `Err` otherwise, saying which of these it is not, for the reason a checkout is kept: no git
+/// runs in a repository found below the checkout by discovery.
+fn owner_source_module(owner: &Path, relative: &str) -> Result<Result<Snapshot, String>, String> {
+    let mut listed = delete_git(owner)?;
+    listed.args([
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+        &format!(":(literal){relative}"),
+    ]);
+    let output = bounded(listed, "ls-files")?;
+    if !output.status.success()
+        || !crate::core::lane_git::snapshot::gitlinks_of(&output.stdout)?
+            .iter()
+            .any(|path| path == relative)
+    {
+        return Ok(Err(
+            "the project does not list it as a submodule of its own (a submodule of a \
+             submodule is one of that submodule)"
+                .to_string(),
+        ));
+    }
+    let Ok(source) = crate::core::lane_git::submodule_dir(owner, relative) else {
+        return Ok(Err(
+            "its folder is reached through a link or is not a folder".to_string(),
+        ));
+    };
+    match std::fs::symlink_metadata(source.join(".git")) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(meta) if meta.is_dir() => {
+            let fix = match crate::core::lane_git::quoted_for_command(owner) {
+                Some(owner) => format!("`git -C {owner} submodule absorbgitdirs`"),
+                None => "git's `submodule absorbgitdirs`, run in the project's folder,".to_string(),
+            };
+            return Ok(Err(format!(
+                "it keeps its repository in its own .git directory, which Kronn does not read: \
+                 {fix} moves it under the project's .git"
+            )));
+        }
+        Ok(_) => return Ok(Err("its .git is neither a file nor a directory".to_string())),
+        Err(_) => return Ok(Err("it is not initialised there (no .git)".to_string())),
+    }
+    let common = crate::core::lane_git::common_dir_of(owner)?;
+    let modules = common.join("modules");
+    let outside = || {
+        format!(
+            "its .git names no repository under {} that Kronn reads",
+            modules.display()
+        )
+    };
+    let Ok(Some(git_dir)) = crate::core::lane_git::vetted_nested_git_dir(&source, &common) else {
+        return Ok(Err(outside()));
+    };
+    if !git_dir.starts_with(&modules) {
+        return Ok(Err(outside()));
+    }
+    Ok(Snapshot::of_module(&git_dir, &modules, None)
+        .map_err(|error| format!("Kronn could not copy its git state ({error})")))
+}
+
+/// Up to five of `files`, for a message naming them.
+pub fn name_files(files: &[String]) -> String {
+    let named = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if files.len() > 5 {
+        format!("{named}, …")
+    } else {
+        named
+    }
+}
+
+/// A detached-HEAD commit no branch, tag or remote reaches (KT-2084): removing the
+/// worktree deletes the only reflog that remembers it. Read from Kronn's copy.
+fn commit_on_detached_head(worktree: &Snapshot) -> Result<Option<String>, String> {
+    let output = worktree.output(&[
+        "rev-list",
+        "-n",
+        "1",
+        "HEAD",
+        "--not",
+        "--branches",
+        "--tags",
+        "--remotes",
+    ])?;
+    if !output.status.success() {
+        return Err(format!(
+            "the commits of its HEAD cannot be read: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!commit.is_empty()).then_some(commit))
+}
+
+/// A worktree's files as a delete judges them (KT-2084).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorktreeFiles {
+    /// Modified tracked files, untracked files, dirty submodules: work to commit.
+    pub uncommitted: Vec<String>,
+    /// Ignored files (a `.env`, notes) and wholly ignored folders (a trailing `/`): work
+    /// git never shows, to move away.
+    pub ignored: Vec<String>,
+    /// Untracked OS junk, links and Kronn's own entries, which git would still refuse.
+    pub disposable: Vec<String>,
+    /// Kronn's unchanged untracked agent-config copies, which git would refuse too.
+    pub copies: Vec<String>,
+    /// Kronn's copies of a TRACKED agent config, modified: git would refuse them.
+    pub modified_copies: Vec<String>,
+    /// Untracked or ignored directories of Kronn's own that hold a repository: never
+    /// removed by hand.
+    pub nested: Vec<String>,
+    /// Every wholly ignored directory but Kronn's own `.kronn/` and a link (a trailing `/`),
+    /// work or not: a repository inside one is no repository of the worktree's own.
+    pub ignored_dirs: Vec<String>,
+}
+
+impl WorktreeFiles {
+    /// What the work in it is and what to do with it, for a refusal naming `shown`.
+    fn describe(&self, shown: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        if !self.uncommitted.is_empty() {
+            found.push(format!(
+                "{} uncommitted file(s) in {shown} ({}): commit or discard them first",
+                self.uncommitted.len(),
+                name_files(&self.uncommitted)
+            ));
+        }
+        if !self.ignored.is_empty() {
+            let folders = self
+                .ignored
+                .iter()
+                .filter(|path| path.ends_with('/'))
+                .count();
+            let files = self.ignored.len() - folders;
+            let counted = match (files, folders) {
+                (files, 0) => format!("{files} ignored file(s)"),
+                (0, folders) => format!("{folders} ignored folder(s)"),
+                (files, folders) => {
+                    format!("{files} ignored file(s) and {folders} ignored folder(s)")
+                }
+            };
+            found.push(format!(
+                "{counted} in {shown} ({}): move or delete them first; if it is generated \
+                 output, name it in `server.regenerable_outputs`",
+                name_files(&self.ignored)
+            ));
+        }
+        found
+    }
+}
+
+/// What a delete never counts as work in an ignored path (KT-2084).
+struct NotWork<'a> {
+    checkout: &'a Path,
+    regenerable: &'a [String],
+    junk: &'a [String],
+    /// Kronn's agent configs and copies, by path from the checkout.
+    kronn_files: &'a [String],
+    seeds: &'a [String],
+}
+
+impl NotWork<'_> {
+    fn seeded(&self, path: &str) -> bool {
+        self.seeds
+            .iter()
+            .any(|seed| path == seed || path.starts_with(&format!("{seed}/")))
+    }
+
+    /// Whether the ignored `path` (no trailing slash) is Kronn's or made again.
+    fn ignored(&self, path: &str, is_dir: bool) -> bool {
+        is_regenerable(path, self.regenerable)
+            || self.seeded(path)
+            || self.kronn_files.iter().any(|file| file == path)
+            || (is_dir && self.holds_none(path))
+    }
+
+    /// A wholly ignored directory holds only links, Kronn's files, seeds, OS junk and what
+    /// tools make again, at any depth. A name that is not UTF-8 is work.
+    fn holds_none(&self, dir: &str) -> bool {
+        let mut pending = vec![dir.to_string()];
+        while let Some(relative) = pending.pop() {
+            let Some(entries) = listed(self.checkout, &self.checkout.join(&relative)) else {
+                return false;
+            };
+            for (name, kind) in entries {
+                let Some(name) = name.to_str().map(str::to_string) else {
+                    return false;
+                };
+                let path = format!("{relative}/{name}");
+                if kind.is_symlink() || is_os_junk(&name, self.junk) || self.ignored(&path, false) {
+                    continue;
+                }
+                if !kind.is_dir() {
+                    return false;
+                }
+                pending.push(path);
+            }
+        }
+        true
+    }
+}
+
+/// The entries of `dir` below `root` and their types, listed through no link (KT-2084).
+/// `None`: it cannot be listed.
+fn listed(root: &Path, dir: &Path) -> Option<Vec<(std::ffi::OsString, std::fs::FileType)>> {
+    let names = crate::core::fs_guard::guarded_list(root, dir).ok()??;
+    names
+        .into_iter()
+        .map(|name| {
+            let kind = std::fs::symlink_metadata(dir.join(&name)).ok()?.file_type();
+            Some((name, kind))
+        })
+        .collect()
+}
+
+/// Whether `dir` (below `root`) holds a `.git` entry at any depth (a repository, a linked
+/// worktree); one that cannot be read counts as holding one.
+fn holds_a_repository(root: &Path, dir: &Path) -> bool {
+    holds_a_repository_besides(root, dir, &[])
+}
+
+/// [`holds_a_repository`], the worktrees `besides` (judged on their own) left out.
+fn holds_a_repository_besides(root: &Path, dir: &Path, besides: &[PathBuf]) -> bool {
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if besides.contains(&dir) {
+            continue;
+        }
+        let Some(entries) = listed(root, &dir) else {
+            return true;
+        };
+        for (name, kind) in entries {
+            if name == ".git" {
+                return true;
+            }
+            if kind.is_dir() {
+                pending.push(dir.join(name));
+            }
+        }
+    }
+    false
+}
+
+/// Kronn's own entries in `checkout`, by path from it: its unchanged agent-config copies,
+/// every agent-config path with those copies, and its seeds (none in a submodule:
+/// `repo_path` None).
+fn kronn_entries(
+    repo_path: Option<&Path>,
+    checkout: &Path,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (copies, mut kronn_files): (Vec<String>, Vec<String>) = match repo_path {
+        Some(repo) => (
+            unchanged_agent_configs(repo, checkout)
+                .iter()
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                .collect(),
+            AGENT_CONFIG_FILES
+                .iter()
+                .map(|parts| parts.join("/"))
+                .collect(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    let seeds: Vec<String> = repo_path
+        .map(|repo| seeded_paths(repo, checkout))
+        .unwrap_or_default();
+    kronn_files.extend(copies.iter().cloned());
+    (copies, kronn_files, seeds)
+}
+
+/// Not work for a delete: OS junk, `.kronn/`, Kronn's agent-config copies and seeds, a link,
+/// what tools make again (`regenerable`) when ignored (`repo_path` None: a submodule). Judged
+/// from Kronn's copy `judged` of the git state.
+fn worktree_files(
+    repo_path: Option<&Path>,
+    judged: &Snapshot,
+    regenerable: &[String],
+) -> Result<WorktreeFiles, String> {
+    let checkout = judged
+        .work_tree()
+        .ok_or_else(|| format!("{} has no work tree", judged.source().display()))?;
+    // A submodule's own files are judged from its own copy, never by git descending into a
+    // repository whose configuration it would then read.
+    let output = judged.output(&[
+        "status",
+        "--ignore-submodules=dirty",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignored=matching",
+    ])?;
+    if !output.status.success() {
+        return Err(format!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if std::str::from_utf8(&output.stdout).is_err() {
+        return Err("git names a path that is not UTF-8: Kronn does not judge it".to_string());
+    }
+    let junk = os_junk_patterns();
+    let (copies, kronn_files, seeds) = kronn_entries(repo_path, checkout);
+    let not_work = NotWork {
+        checkout,
+        regenerable,
+        junk: &junk,
+        kronn_files: &kronn_files,
+        seeds: &seeds,
+    };
+    let mut files = WorktreeFiles::default();
+    for file in parse_porcelain_z(&output.stdout) {
+        let path = file.path;
+        if !plain_relative(&path) {
+            return Err(format!(
+                "git names {path:?}, which is not a plain path of the worktree: Kronn does not judge it"
+            ));
+        }
+        let trimmed = path.trim_end_matches('/');
+        let is_dir = path.ends_with('/');
+        let kronn_own =
+            trimmed == ".kronn" || path.starts_with(".kronn/") || is_os_junk(&path, &junk);
+        // Removing a link loses nothing; what it points at stays.
+        let link = std::fs::symlink_metadata(checkout.join(trimmed))
+            .is_ok_and(|meta| meta.file_type().is_symlink());
+        match file.status.as_str() {
+            // `.kronn/` is ignored in every worktree; a PR checkout under it is a repository.
+            "!!" if kronn_own && is_dir && !link => {
+                if holds_a_repository(checkout, &checkout.join(trimmed)) {
+                    files.nested.push(path);
+                }
+            }
+            "!!" => {
+                if is_dir && !link && !kronn_own {
+                    files.ignored_dirs.push(path.clone());
+                }
+                if !(link || kronn_own || not_work.ignored(trimmed, is_dir)) {
+                    files.ignored.push(path);
+                }
+            }
+            "??" if copies.contains(&path) => files.copies.push(path),
+            "??" if link => files.disposable.push(path),
+            "??" if kronn_own
+                || (is_dir && holds_only_kronn_files(checkout, &path, &copies, &junk)) =>
+            {
+                if is_dir && holds_a_repository(checkout, &checkout.join(trimmed)) {
+                    files.nested.push(path);
+                } else {
+                    files.disposable.push(path);
+                }
+            }
+            " M" if copies.contains(&path) => files.modified_copies.push(path),
+            // A repository of its own (git lists it as one folder): no patch holds it.
+            "??" if is_dir && !link && holds_a_repository(checkout, &checkout.join(trimmed)) => {
+                files.nested.push(path.clone());
+                files.uncommitted.push(path);
+            }
+            _ => files.uncommitted.push(path),
+        }
+    }
+    Ok(files)
+}
+
+/// The file, in a managed worktree's registered git directory, naming the paths Kronn
+/// seeded into it (KT-1438).
+pub const LANE_SEEDS_MARKER_FILE: &str = "kronn-lane-seeds.json";
+
+/// What [`LANE_SEEDS_MARKER_FILE`] holds: the source fingerprint of each seeded path.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct LaneSeedsMarker {
+    #[serde(default)]
+    pub seeds: std::collections::BTreeMap<String, String>,
+}
+
+/// The paths Kronn seeded into the worktree `checkout` of `repo_path` (KT-1438): its
+/// copies of the main checkout's generated assets. Empty when it has none.
+fn seeded_paths(repo_path: &Path, checkout: &Path) -> Vec<String> {
+    // Found from the owner's registrations, never by asking git through the worktree.
+    let Some(git_dir) = checkout
+        .canonicalize()
+        .ok()
+        .and_then(|checkout| crate::core::lane_git::registration_of(repo_path, &checkout).ok())
+        .flatten()
+    else {
+        return Vec::new();
+    };
+    crate::core::fs_guard::guarded_read_head(
+        &git_dir,
+        &git_dir.join(LANE_SEEDS_MARKER_FILE),
+        SEEDS_MARKER_READ_CAP + 1,
+    )
+    .ok()
+    .flatten()
+    .filter(|bytes| bytes.len() as u64 <= SEEDS_MARKER_READ_CAP)
+    .and_then(|bytes| serde_json::from_slice::<LaneSeedsMarker>(&bytes).ok())
+    .map(|marker| marker.seeds.into_keys().collect())
+    .unwrap_or_default()
+}
+
+/// Largest seeds marker read: a list of paths and fingerprints.
+const SEEDS_MARKER_READ_CAP: u64 = 4 * 1024 * 1024;
+
+/// What deleting `checkout` would lose (KT-2084): files, detached commits and a submodule's
+/// files, each named after `shown`. A submodule commit no remote reaches never refuses a
+/// delete: see [`submodule_commits_off_remotes`].
+pub fn unsaved_work(
+    repo_path: &Path,
+    checkout: &Path,
+    shown: &str,
+) -> Result<Option<String>, String> {
+    unsaved_work_with(repo_path, checkout, shown, &regenerable_outputs())
+}
+
+/// [`unsaved_work`] with the regenerable outputs given.
+fn unsaved_work_with(
+    repo_path: &Path,
+    checkout: &Path,
+    shown: &str,
+    regenerable: &[String],
+) -> Result<Option<String>, String> {
+    let judged = Judgement::of(checkout)?;
+    let found = work_found(repo_path, &judged, shown, regenerable, Saved::Nothing)?;
+    Ok(joined(found.lines))
+}
+
+fn joined(found: Vec<String>) -> Option<String> {
+    (!found.is_empty()).then(|| found.join("; "))
+}
+
+/// What a release saves before it removes a task checkout (KT-2084).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Saved {
+    /// Nothing: every file counts (a discussion delete).
+    Nothing,
+    /// Its ignored files, its submodules' included, copied into the evidence.
+    IgnoredFiles,
+    /// Those, and its own modified and untracked files as a patch.
+    Everything,
+}
+
+/// What a judgement of a checkout found: the work lines, its files and its submodules'.
+struct WorkFound {
+    lines: Vec<String>,
+    files: WorktreeFiles,
+    /// `(path from the checkout, its files)` of each populated submodule.
+    submodules: Vec<(String, WorktreeFiles)>,
+}
+
+/// The work lines of `checkout`, and its files. What `saved` saves is not counted; a
+/// submodule's modified and untracked files always are.
+fn work_found(
+    repo_path: &Path,
+    judged: &Judgement,
+    shown: &str,
+    regenerable: &[String],
+    saved: Saved,
+) -> Result<WorkFound, String> {
+    let files = worktree_files(Some(repo_path), &judged.worktree, regenerable)?;
+    let mut lines = WorktreeFiles {
+        uncommitted: match saved {
+            Saved::Everything => Vec::new(),
+            _ => files.uncommitted.clone(),
+        },
+        ignored: match saved {
+            Saved::Nothing => files.ignored.clone(),
+            _ => Vec::new(),
+        },
+        ..WorktreeFiles::default()
+    }
+    .describe(shown);
+    if let Some(commit) = commit_on_detached_head(&judged.worktree)? {
+        lines.push(format!(
+            "{shown} has commits on a detached HEAD (newest {commit}) that no branch, tag or remote reaches: create a branch or discard them first"
+        ));
+    }
+    let mut submodules = Vec::new();
+    for (relative, submodule) in &judged.submodules {
+        let shown = format!("the submodule {relative} of {shown}");
+        let below = regenerable_below(regenerable, relative);
+        let found = worktree_files(None, submodule, &below)?;
+        lines.extend(
+            WorktreeFiles {
+                uncommitted: found.uncommitted.clone(),
+                ignored: match saved {
+                    Saved::Nothing => found.ignored.clone(),
+                    _ => Vec::new(),
+                },
+                ..WorktreeFiles::default()
+            }
+            .describe(&shown),
+        );
+        submodules.push((relative.clone(), found));
+    }
+    Ok(WorkFound {
+        lines,
+        files,
+        submodules,
+    })
+}
+
+/// Which commits of a submodule repository its removal may lose (KT-2084).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmoduleCommits {
+    /// HEAD, its branches and its stash, minus what remote branches and tags reach: a
+    /// discussion's and a task's.
+    OffRemotesAndTags,
+    /// HEAD and every ref but a remote branch, minus what remote branches reach: a run's
+    /// (KT-1809), whose stash and local tags count.
+    OffRemotes,
+}
+
+/// The commits of the worktree's submodule repositories, de-initialised ones included,
+/// that `rule` counts and the project checkout's own submodule does not hold (KT-2084):
+/// removing them deletes those commits, and nothing proves them saved or lost without the
+/// network.
+fn submodule_commits_off_remotes(
+    repo_path: &Path,
+    judged: &Judgement,
+    rule: SubmoduleCommits,
+) -> Result<Vec<String>, String> {
+    let reaches = match rule {
+        SubmoduleCommits::OffRemotesAndTags => "no remote branch or tag reaches",
+        SubmoduleCommits::OffRemotes => "no remote branch reaches",
+    };
+    let mut found: Vec<String> = Vec::new();
+    for (relative, submodule) in &judged.submodules {
+        // The reason says whether the project's own copy was read, and why not (KT-2084).
+        let (saved, source) = match tips_held_by_source(submodule, repo_path, relative)? {
+            Ok(saved) => (
+                saved,
+                "the project's own copy of that submodule does not hold it either".to_string(),
+            ),
+            Err(unread) => (
+                Vec::new(),
+                format!("the project's own copy of that submodule was not checked: {unread}"),
+            ),
+        };
+        if let Some(commit) = commit_off_remotes(submodule, &saved, rule)? {
+            found.push(format!(
+                "the submodule {relative} holds commit {commit} that {reaches} ({source})"
+            ));
+        }
+    }
+    let admin = judged.worktree.source();
+    let modules = admin.join("modules");
+    for git_dir in module_git_dirs(admin)? {
+        let module = Snapshot::of_module(&git_dir, &modules, None)?;
+        if let Some(commit) = commit_off_remotes(&module, &[], rule)? {
+            if !found.iter().any(|line| line.contains(&commit)) {
+                found.push(format!(
+                    "the submodule repository {} holds commit {commit} that {reaches}",
+                    git_dir.display()
+                ));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// What removing the task checkout `checkout` with everything in it would lose (KT-2084):
+/// its work as [`unsaved_work`] judges it, a repository in Kronn's own directory, and
+/// submodule commits no remote reaches, but what `saved` saves first (see
+/// [`release_terminal_task_worktree`] and [`remove_cancelled_task_worktree`]).
+pub fn forced_removal_loss(
+    repo_path: &Path,
+    checkout: &Path,
+    shown: &str,
+    saved: Saved,
+) -> Result<Option<String>, String> {
+    let judged = Judgement::of(checkout)?;
+    forced_removal_check(repo_path, &judged, shown, saved).map(|(loss, _)| loss)
+}
+
+/// [`forced_removal_loss`] of the copy `judged`, and what it found.
+fn forced_removal_check(
+    repo_path: &Path,
+    judged: &Judgement,
+    shown: &str,
+    saved: Saved,
+) -> Result<(Option<String>, WorkFound), String> {
+    let regenerable = regenerable_outputs();
+    let mut found = work_found(repo_path, judged, shown, &regenerable, saved)?;
+    if !found.files.nested.is_empty() {
+        let line = format!(
+            "{} in {shown} hold(s) a repository: move it out first",
+            name_files(&found.files.nested)
+        );
+        found.lines.push(line);
+    }
+    found.lines.extend(
+        submodule_commits_off_remotes(repo_path, judged, SubmoduleCommits::OffRemotesAndTags)?
+            .into_iter()
+            .map(|line| format!("{line}: push it or discard it first")),
+    );
+    let loss = joined(std::mem::take(&mut found.lines));
+    Ok((loss, found))
+}
+
+/// An untracked or ignored directory of a worktree holds nothing but Kronn's
+/// agent-config copies and OS junk, at any depth.
+fn holds_only_kronn_files(worktree: &Path, dir: &str, copies: &[String], junk: &[String]) -> bool {
+    let mut pending = vec![dir.trim_end_matches('/').to_string()];
+    while let Some(relative) = pending.pop() {
+        let Some(entries) = listed(worktree, &worktree.join(&relative)) else {
+            return false;
+        };
+        for (name, kind) in entries {
+            let path = format!("{relative}/{}", name.to_string_lossy());
+            if kind.is_dir() {
+                pending.push(path);
+            } else if !(copies.contains(&path) || is_os_junk(&path, junk)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A commit of `branch` that no other branch, tag or remote branch reaches, if
+/// any (KT-2084): what deleting the branch, or forgetting it, would lose.
+pub fn commit_unique_to_branch(repo_path: &Path, branch: &str) -> Result<Option<String>, String> {
+    commit_only_on_branch(repo_path, branch)
+}
+
+/// A commit of `branch` that no other branch, tag or remote branch reaches, if any.
+/// A stash, a detached HEAD or a backup ref goes away at will: none keeps a commit.
+fn commit_only_on_branch(repo_path: &Path, branch: &str) -> Result<Option<String>, String> {
+    reject_option_like_rev(branch)?;
+    // `--exclude` before `--branches` takes the name without `refs/heads/`.
+    let mut command = delete_git(repo_path)?;
+    command
+        .args([
+            "rev-list",
+            "-n",
+            "1",
+            &format!("refs/heads/{branch}"),
+            "--not",
+        ])
+        .arg(format!("--exclude={branch}"))
+        .args(["--branches", "--tags", "--remotes"]);
+    let output = bounded(command, "rev-list")?;
+    if !output.status.success() {
+        return Err(format!(
+            "the commits of {branch} cannot be read: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!commit.is_empty()).then_some(commit))
 }
 
 // ── Task-execution worktree provisioning (KT-318) ─────────────────────────────
@@ -2614,16 +4488,17 @@ fn git_head(dir: &Path) -> Result<String, String> {
 
 /// Resolve a local branch to its commit SHA, or `None` when it does not exist.
 fn branch_commit(repo_path: &Path, branch: &str) -> Option<String> {
-    let out = crate::core::cmd::git_cmd()
+    let mut command = crate::core::cmd::git_cmd();
+    command
         .args([
             "rev-parse",
             "--verify",
             "--quiet",
+            "--end-of-options",
             &format!("refs/heads/{branch}"),
         ])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
+        .current_dir(repo_path);
+    let out = bounded(command, "rev-parse").ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2662,10 +4537,15 @@ pub fn resolve_commit(repo_path: &Path, rev: &str) -> Result<String, String> {
     // A worker's worktree is pinned and its pointer checked (KT-1745): git never
     // discovers the repository, and so never fetches lazily or runs a program,
     // from what the worker wrote. The owner's checkout keeps plain git.
-    let out = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?
-        .args(["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
-        .output()
-        .map_err(|e| format!("git rev-parse failed: {e}"))?;
+    // Within a time bound (KT-2084), the revision never an option.
+    let mut command = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?;
+    command.args([
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        &format!("{rev}^{{commit}}"),
+    ]);
+    let out = bounded(command, "rev-parse").map_err(|e| format!("git rev-parse failed: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "cannot resolve '{rev}' to a commit: {}",
@@ -2707,10 +4587,11 @@ pub fn target_branch_checkouts(
 ) -> Result<(String, Vec<PathBuf>), String> {
     let branch = resolve_local_branch(repo_path, target)?;
     let branch_field = format!("branch refs/heads/{branch}");
-    let output = crate::core::cmd::git_cmd()
-        .args(["worktree", "list", "--porcelain", "-z"])
-        .current_dir(repo_path)
-        .output()
+    // Within a time bound: it reads every registration (KT-2084).
+    let mut list = crate::core::cmd::git_cmd();
+    list.args(["worktree", "list", "--porcelain", "-z"])
+        .current_dir(repo_path);
+    let output = bounded(list, "worktree list")
         .map_err(|error| format!("cannot list target worktrees: {error}"))?;
     if !output.status.success() {
         return Err("cannot list target worktrees".into());
@@ -3446,6 +5327,8 @@ fn apply_config(config: &crate::models::AppConfig) {
     );
     // KT-1750 — Settings > Workers: the OS junk files that never count as work.
     set_os_junk_patterns(&config.workers.os_junk_patterns);
+    // KT-2084 — what a discussion delete never counts as work.
+    set_regenerable_outputs(&config.server.regenerable_outputs);
     // KT-1748 — Settings > Workers: the extra roots of Kronn-managed worktrees.
     set_global_managed_worktree_roots(&config.workers);
     // KT-1718 — Settings > Workers: the shell limits of a Claude task worker.
@@ -3992,10 +5875,10 @@ pub fn create_task_worktree(
     ensure_disk_headroom(repo_path, warning_gib, critical_gib)?;
 
     // Fail closed on any collision — never reuse a foreign or stale checkout.
-    if let Some(existing) = branch_checked_out_at(repo_path, &branch) {
+    if let Some(existing) = branch_checked_out_at(repo_path, &branch)? {
         return Err(format!(
             "task branch {branch} is already checked out at {} — refusing to reuse it",
-            existing.display()
+            existing.path.display()
         ));
     }
     if branch_commit(repo_path, &branch).is_some() {
@@ -4038,16 +5921,19 @@ pub fn create_task_worktree(
     // gitdir at the correct depth resolves from both views — the Git-side prerequisite
     // for handing a task worktree to a CLI worker (KT-328). Applied before the HEAD
     // check below so verification exercises the same gitdir the worker will use.
+    confirm_registration_id(repo_path, &worktree_path, Some(&branch))?;
     fix_worktree_paths(repo_path, &worktree_path);
 
     // Defense-in-depth: confirm HEAD landed on the pinned base. On mismatch,
     // undo our own just-created (unique-branch) resource so no orphan remains.
     if let Err(e) = verify_worktree_head(&worktree_path, base_sha) {
-        let _ = remove_discussion_worktree(repo_path, &worktree_path.to_string_lossy(), true);
+        let _ =
+            remove_discussion_worktree(repo_path, &worktree_path.to_string_lossy(), Some(&branch));
         return Err(e);
     }
     if let Err(e) = materialize_task_submodules(repo_path, &worktree_path) {
-        let _ = remove_discussion_worktree(repo_path, &worktree_path.to_string_lossy(), true);
+        let _ =
+            remove_discussion_worktree(repo_path, &worktree_path.to_string_lossy(), Some(&branch));
         return Err(e);
     }
 
@@ -4087,21 +5973,16 @@ pub fn remove_task_worktree(
         // if it is still exactly at the pinned base — never delete landed work.
         return match branch_commit(repo_path, expected_branch) {
             None => {
-                let _ = crate::core::cmd::git_cmd()
-                    .args(["worktree", "prune"])
-                    .current_dir(repo_path)
-                    .output();
+                remove_registration_of_gone(repo_path, wt);
                 Ok(())
             }
             Some(sha) if sha == expected_base_sha => {
-                let _ = crate::core::cmd::git_cmd()
-                    .args(["worktree", "prune"])
-                    .current_dir(repo_path)
-                    .output();
-                let _ = crate::core::cmd::git_cmd()
-                    .args(["branch", "-D", expected_branch])
-                    .current_dir(repo_path)
-                    .output();
+                remove_registration_of_gone(repo_path, wt);
+                let mut command = crate::core::cmd::git_cmd();
+                command
+                    .args(["branch", "-D", "--end-of-options", expected_branch])
+                    .current_dir(repo_path);
+                let _ = bounded(command, "branch -D");
                 Ok(())
             }
             Some(sha) => Err(format!(
@@ -4112,62 +5993,88 @@ pub fn remove_task_worktree(
 
     // Prove ownership before touching anything.
     let actual_branch = find_branch_for_worktree(repo_path, worktree_path).ok_or_else(|| {
-        format!("cannot determine branch for worktree {worktree_path} — refusing blind removal")
+        branch_unknown(
+            worktree_path,
+            format!(
+                "cannot determine branch for worktree {worktree_path} — refusing blind removal"
+            ),
+        )
     })?;
     if actual_branch != expected_branch {
         return Err(format!(
             "worktree {worktree_path} is on branch {actual_branch}, expected {expected_branch} — refusing to remove a checkout we do not own"
         ));
     }
-    let head = git_head(wt)?;
+    let judged = Snapshot::of_worktree(wt)?;
+    let head = judged_head(&judged)?;
     if head != expected_base_sha {
         return Err(format!(
             "worktree {worktree_path} HEAD advanced to {head} (pinned {expected_base_sha}) — refusing to remove a checkout with work"
         ));
     }
-    if !worktree_dirty_files(wt)?.is_empty() {
+    if !judged_dirty_files(&judged)?.is_empty() {
         return Err(format!(
             "worktree {worktree_path} has uncommitted changes — refusing to remove; leave the execution resumable"
         ));
     }
+    drop(judged);
 
     // Ownership proven and tree clean → safe to remove worktree + its branch.
-    remove_discussion_worktree(repo_path, worktree_path, true)
+    remove_discussion_worktree(repo_path, worktree_path, Some(expected_branch))
 }
 
-/// Remove the checkout of a cancelled/failed task while preserving its branch
-/// for inspection. Ownership is proved by the exact branch and the tree must be
-/// clean; unlike provisioning compensation, the branch may legitimately have
-/// advanced beyond its base commit.
+/// Remove the clean checkout of a task while preserving its branch for inspection: a
+/// cancelled, failed or finished execution's, a closed task's, an orphaned one. Ownership is
+/// proved by the exact branch and a modified or untracked file keeps it; unlike provisioning
+/// compensation, the branch may legitimately have advanced beyond its base commit. Its
+/// ignored files are copied into `evidence_dir` first, as [`release_terminal_task_worktree`]
+/// does (KT-2084).
 pub fn remove_cancelled_task_worktree(
     repo_path: &Path,
     worktree_path: &str,
     expected_branch: &str,
-) -> Result<(), String> {
-    reject_option_like_rev(expected_branch)?;
-    let wt = Path::new(worktree_path);
-    assert_managed_task_worktree_path(repo_path, wt)?;
-    if !wt.exists() {
-        let _ = crate::core::cmd::git_cmd()
-            .args(["worktree", "prune"])
-            .current_dir(repo_path)
-            .output();
-        return Ok(());
+    evidence_dir: &Path,
+) -> Result<TerminalWorktreeRelease, String> {
+    release_task_checkout(
+        repo_path,
+        worktree_path,
+        expected_branch,
+        evidence_dir,
+        RELEASED_WORKTREE_PATCH_CAP_BYTES,
+        TaskRelease::Clean,
+    )
+}
+
+/// How a task checkout is released (KT-2084).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskRelease {
+    /// Only once clean: a modified or untracked file keeps it.
+    Clean,
+    /// A terminal execution's: its modified and untracked files are saved as a patch.
+    Terminal,
+}
+
+/// Why Kronn does not know the branch of the managed worktree `worktree_path`: a reftable
+/// repository keeps it in tables Kronn does not read yet (KT-2101).
+fn branch_unknown(worktree_path: &str, unknown: String) -> String {
+    let checkout = Path::new(worktree_path);
+    let reftable = crate::core::lane_git::managed_registration(checkout)
+        .ok()
+        .and_then(|pinned| {
+            crate::core::fs_guard::guarded_read_head(
+                &pinned.git_dir,
+                &pinned.git_dir.join("HEAD"),
+                HEAD_READ_CAP,
+            )
+            .ok()
+            .flatten()
+        })
+        .is_some_and(|head| head == crate::core::lane_git::snapshot::REFTABLE_STUB);
+    if reftable {
+        crate::core::lane_git::snapshot::reftable_refusal(checkout)
+    } else {
+        unknown
     }
-    let actual_branch = find_branch_for_worktree(repo_path, worktree_path).ok_or_else(|| {
-        format!("cannot determine branch for cancelled worktree {worktree_path} — preserving it")
-    })?;
-    if actual_branch != expected_branch {
-        return Err(format!(
-            "cancelled worktree {worktree_path} is on branch {actual_branch}, expected {expected_branch} — preserving it"
-        ));
-    }
-    if !worktree_dirty_files(wt)?.is_empty() {
-        return Err(format!(
-            "cancelled worktree {worktree_path} has uncommitted changes — preserving it"
-        ));
-    }
-    remove_discussion_worktree(repo_path, worktree_path, false)
 }
 
 /// What [`release_terminal_task_worktree`] did with the checkout.
@@ -4177,9 +6084,20 @@ pub enum TerminalWorktreeRelease {
     AlreadyGone,
     /// The checkout was removed. `patch` is the saved uncommitted diff, when
     /// there was one: the working-tree patch, or the staged one when that is
-    /// all there was (both sit in the evidence directory).
-    Removed { patch: Option<PathBuf> },
+    /// all there was (both sit in the evidence directory). `ignored_copied` is the
+    /// folder its ignored files were copied to, when it held any (KT-2084).
+    Removed {
+        patch: Option<PathBuf>,
+        ignored_copied: Option<PathBuf>,
+    },
 }
+
+/// The folder of the evidence directory that holds a released checkout's ignored files, at
+/// their path from the checkout (KT-2084).
+pub const RELEASED_WORKTREE_IGNORED_DIR: &str = "ignored";
+
+/// Most ignored files a release copies; above this the checkout is kept.
+const MAX_RELEASED_IGNORED_FILES: usize = 20_000;
 
 /// Name of the working-tree patch (index -> files on disk, untracked files
 /// included) kept as evidence of a released worktree. With nothing staged it is
@@ -4196,12 +6114,25 @@ pub const RELEASED_WORKTREE_STAGED_PATCH: &str = "staged-changes.patch";
 /// this the checkout is kept and the reason recorded (KT-1397).
 pub const RELEASED_WORKTREE_PATCH_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
-fn run_git_in_index(wt: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = crate::core::lane_git::git(wt)?
-        .args(args)
-        .env("GIT_INDEX_FILE", index)
-        .output()
-        .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
+/// `git <args>` against Kronn's copy `judged`, reading and writing the scratch `index`.
+fn git_in_scratch_index(judged: &Snapshot, index: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    git_in_scratch_index_fed(judged, index, args, &[])
+}
+
+/// [`git_in_scratch_index`] with `input` on the command's standard input.
+fn git_in_scratch_index_fed(
+    judged: &Snapshot,
+    index: &Path,
+    args: &[&str],
+    input: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut command = judged.command();
+    command.args(args).env("GIT_INDEX_FILE", index);
+    let output = crate::core::lane_git::snapshot::bounded_output_with_input(
+        command,
+        input,
+        args.first().copied().unwrap_or_default(),
+    )?;
     if !output.status.success() {
         return Err(format!(
             "git {} failed: {}",
@@ -4213,19 +6144,20 @@ fn run_git_in_index(wt: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>, S
 }
 
 /// `Some(bytes)` once the content of the modified and untracked (not ignored)
-/// files of `wt` is known to exceed `cap`. Measured from file sizes before
-/// anything is staged, so an oversized tree is refused without copying a byte.
-fn uncommitted_content_over(wt: &Path, cap: u64) -> Result<Option<u64>, String> {
-    let output = crate::core::lane_git::git(wt)?
-        .args([
-            "ls-files",
-            "-z",
-            "--modified",
-            "--others",
-            "--exclude-standard",
-        ])
-        .output()
-        .map_err(|e| format!("git ls-files failed: {e}"))?;
+/// files of the worktree `judged` is a copy of is known to exceed `cap`. Measured
+/// from file sizes before anything is staged, so an oversized tree is refused
+/// without copying a byte.
+fn uncommitted_content_over(judged: &Snapshot, cap: u64) -> Result<Option<u64>, String> {
+    let wt = judged
+        .work_tree()
+        .ok_or_else(|| format!("{} has no work tree", judged.source().display()))?;
+    let output = judged.output(&[
+        "ls-files",
+        "-z",
+        "--modified",
+        "--others",
+        "--exclude-standard",
+    ])?;
     if !output.status.success() {
         return Err(format!(
             "git ls-files failed: {}",
@@ -4258,26 +6190,38 @@ fn uncommitted_content_over(wt: &Path, cap: u64) -> Result<Option<u64>, String> 
 /// nothing is left behind and the result is an error. `Ok(Some(n))` is the size
 /// written.
 fn write_capped_git_patch(
-    wt: &Path,
+    judged: &Snapshot,
     args: &[&str],
     out: &Path,
     cap: u64,
 ) -> Result<Option<u64>, String> {
     use std::io::Read;
-    let mut child = crate::core::lane_git::git(wt)?
+    let mut command = judged.command();
+    command
         .args(args)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::core::cmd::own_process_group(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
+    let timeout = crate::core::lane_git::snapshot::judge_timeout();
+    let deadline = crate::core::cmd::Deadline::arm(&child, timeout);
     let mut stdout = child.stdout.take().ok_or("git diff has no output")?;
     let staging = out.with_extension("patch.tmp");
     let copied = std::fs::File::create(&staging)
         .and_then(|mut file| std::io::copy(&mut stdout.by_ref().take(cap + 1), &mut file));
     let abandon = |child: &mut std::process::Child| {
-        let _ = child.kill();
-        let _ = child.wait();
+        crate::core::cmd::kill_process_group(child);
         let _ = std::fs::remove_file(&staging);
+    };
+    let timed_out = || {
+        format!(
+            "git {} did not finish within its {} s timeout",
+            args.first().copied().unwrap_or_default(),
+            timeout.as_secs_f32()
+        )
     };
     let copied = match copied {
         Ok(copied) => copied,
@@ -4294,6 +6238,11 @@ fn write_capped_git_patch(
         return Err(format!("the patch exceeds the {cap}-byte evidence cap"));
     }
     let status = child.wait().map_err(|e| format!("git diff failed: {e}"))?;
+    if deadline.fired() {
+        let _ = std::fs::remove_file(&staging);
+        return Err(timed_out());
+    }
+    drop(deadline);
     if !status.success() {
         let _ = std::fs::remove_file(&staging);
         return Err(format!("git {} failed", args.join(" ")));
@@ -4309,26 +6258,6 @@ fn write_capped_git_patch(
     Ok(Some(copied))
 }
 
-/// The real index of `wt`, as a path.
-fn worktree_index_path(wt: &Path) -> Result<PathBuf, String> {
-    let output = crate::core::lane_git::git(wt)?
-        .args(["rev-parse", "--git-path", "index"])
-        .output()
-        .map_err(|e| format!("git rev-parse failed: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git rev-parse --git-path index failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    Ok(if path.is_relative() {
-        wt.join(path)
-    } else {
-        path
-    })
-}
-
 /// Which patches a release saved. `staged` is `HEAD` -> the worktree's own index;
 /// `working` is that index -> the files on disk (tracked edits and untracked,
 /// not ignored, files). Reapplied in that order (`git apply --index` the first,
@@ -4340,28 +6269,65 @@ struct SavedPatches {
     working: bool,
 }
 
-/// Save the whole uncommitted state of `wt` as the two patches described on
-/// [`SavedPatches`], within one `cap`. The worktree's own index is only copied
-/// (never opened for writing), so the checkout is exactly as it was when this
-/// returns. An index that cannot be written as a tree (unmerged paths) is an
-/// error: the checkout is kept rather than lose what one patch cannot hold.
+/// Save the whole uncommitted state of the worktree `judged` is a copy of as the two
+/// patches described on [`SavedPatches`], within one `cap`. Kronn's copy of its index is
+/// copied again as a scratch index in the copy's own folder: the worktree's index is never
+/// read by git nor opened for writing, so the checkout is exactly as it was when this
+/// returns. An index that cannot be written as a tree (unmerged paths) is an error: the
+/// checkout is kept rather than lose what one patch cannot hold.
+///
+/// No git starts in a submodule (KT-2084): `add -A` would run `git status` in each populated
+/// one, with that repository's configuration. Each submodule is recorded at the commit
+/// Kronn's copy of its repository has checked out (`update-index`), and `add` is told to
+/// leave every submodule path out.
 fn write_uncommitted_patches(
-    wt: &Path,
-    scratch_index: &Path,
+    judgement: &Judgement,
     evidence_dir: &Path,
     cap: u64,
 ) -> Result<SavedPatches, String> {
-    std::fs::copy(worktree_index_path(wt)?, scratch_index)
-        .map_err(|e| format!("cannot copy the index of {}: {e}", wt.display()))?;
-    let staged_tree =
-        String::from_utf8_lossy(&run_git_in_index(wt, scratch_index, &["write-tree"])?)
-            .trim()
-            .to_string();
-    run_git_in_index(wt, scratch_index, &["add", "-A"])?;
-    let working_tree =
-        String::from_utf8_lossy(&run_git_in_index(wt, scratch_index, &["write-tree"])?)
-            .trim()
-            .to_string();
+    let judged = &judgement.worktree;
+    let scratch_index = judged.dir().join("patch-index");
+    std::fs::copy(judged.dir().join("index"), &scratch_index).map_err(|e| {
+        format!(
+            "cannot copy Kronn's copy of the index of {}: {e}",
+            judged.source().display()
+        )
+    })?;
+    let scratch_index = scratch_index.as_path();
+    let staged_tree = String::from_utf8_lossy(&git_in_scratch_index(
+        judged,
+        scratch_index,
+        &["write-tree"],
+    )?)
+    .trim()
+    .to_string();
+    let (index_info, left_out) = submodule_index_lines(judgement, scratch_index)?;
+    if !index_info.is_empty() {
+        git_in_scratch_index_fed(
+            judged,
+            scratch_index,
+            &["update-index", "-z", "--index-info"],
+            &index_info,
+        )?;
+    }
+    let mut pathspecs = b":(top)\0".to_vec();
+    for path in &left_out {
+        pathspecs.extend_from_slice(format!(":(top,exclude,literal){path}").as_bytes());
+        pathspecs.push(0);
+    }
+    git_in_scratch_index_fed(
+        judged,
+        scratch_index,
+        &["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        &pathspecs,
+    )?;
+    let working_tree = String::from_utf8_lossy(&git_in_scratch_index(
+        judged,
+        scratch_index,
+        &["write-tree"],
+    )?)
+    .trim()
+    .to_string();
     let staged_out = evidence_dir.join(RELEASED_WORKTREE_STAGED_PATCH);
     let working_out = evidence_dir.join(RELEASED_WORKTREE_PATCH);
     let diff = |from: &str, to: &str| {
@@ -4371,6 +6337,7 @@ fn write_uncommitted_patches(
             "--binary".to_string(),
             "--no-ext-diff".to_string(),
             "--no-textconv".to_string(),
+            "--end-of-options".to_string(),
             from.to_string(),
             to.to_string(),
         ]
@@ -4378,11 +6345,11 @@ fn write_uncommitted_patches(
     let saved = (|| {
         let args = diff("HEAD", &staged_tree);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let staged = write_capped_git_patch(wt, &args, &staged_out, cap)?;
+        let staged = write_capped_git_patch(judged, &args, &staged_out, cap)?;
         let args = diff(&staged_tree, &working_tree);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let working = write_capped_git_patch(
-            wt,
+            judged,
             &args,
             &working_out,
             cap.saturating_sub(staged.unwrap_or(0)),
@@ -4400,6 +6367,80 @@ fn write_uncommitted_patches(
     saved
 }
 
+/// What [`write_uncommitted_patches`] records for each submodule of the scratch `index`
+/// (KT-2084): `update-index -z --index-info` input and the submodule paths `add` leaves out.
+/// A populated submodule is set to the commit Kronn's copy of its repository has checked out,
+/// an unpopulated one stays as it is, and one whose folder is gone or is no longer a folder is
+/// dropped (what stands there instead is then added like any file).
+fn submodule_index_lines(
+    judgement: &Judgement,
+    index: &Path,
+) -> Result<(Vec<u8>, Vec<String>), String> {
+    let judged = &judgement.worktree;
+    let checkout = judged
+        .work_tree()
+        .ok_or_else(|| format!("{} has no work tree", judged.source().display()))?;
+    let listed = git_in_scratch_index(judged, index, &["ls-files", "--stage", "-z"])?;
+    let mut lines = Vec::new();
+    let mut left_out = Vec::new();
+    for entry in listed.split(|byte| *byte == 0) {
+        let Some(rest) = entry.strip_prefix(b"160000 ") else {
+            continue;
+        };
+        let Some(tab) = rest.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        let (meta, path) = (&rest[..tab], &rest[tab + 1..]);
+        let (Ok(meta), Ok(path)) = (std::str::from_utf8(meta), std::str::from_utf8(path)) else {
+            return Err(format!(
+                "a submodule entry is not UTF-8 ({}): Kronn does not save it",
+                String::from_utf8_lossy(entry)
+            ));
+        };
+        let oid = meta.split(' ').next().unwrap_or_default();
+        if !plain_relative(path) || oid.is_empty() {
+            return Err(format!(
+                "the submodule entry {path:?} is not a plain path of the worktree"
+            ));
+        }
+        let line = match std::fs::symlink_metadata(checkout.join(path)) {
+            Ok(meta) if meta.is_dir() => {
+                left_out.push(path.to_string());
+                let populated = judgement
+                    .submodules
+                    .iter()
+                    .find(|(relative, _)| relative == path);
+                match populated {
+                    Some((_, submodule)) => {
+                        format!("160000 {}\t{path}", checked_out_commit(submodule, path)?)
+                    }
+                    None => continue,
+                }
+            }
+            Ok(_) => format!("0 {oid}\t{path}"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                format!("0 {oid}\t{path}")
+            }
+            Err(error) => return Err(format!("the submodule {path} cannot be read: {error}")),
+        };
+        lines.extend_from_slice(line.as_bytes());
+        lines.push(0);
+    }
+    Ok((lines, left_out))
+}
+
+/// The commit Kronn's copy `submodule` of the submodule at `path` has checked out.
+fn checked_out_commit(submodule: &Snapshot, path: &str) -> Result<String, String> {
+    let output = submodule.output(&["rev-parse", "--verify", "-q", "HEAD^{commit}"])?;
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || commit.is_empty() {
+        return Err(format!(
+            "the commit the submodule {path} has checked out cannot be read"
+        ));
+    }
+    Ok(commit)
+}
+
 /// Whether anything in the checkout `wt` was written after `cutoff`: the newest
 /// mtime of any file or directory in it, except the Git admin entry and without
 /// following symlinks (the lane build dir lives outside the checkout). Stops at
@@ -4409,52 +6450,73 @@ pub fn checkout_written_since(
     wt: &Path,
     cutoff: std::time::SystemTime,
 ) -> Result<Option<PathBuf>, String> {
-    let mut pending = vec![wt.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
-        };
-        let dir_meta = match std::fs::symlink_metadata(&dir) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("cannot stat {}: {e}", dir.display())),
-        };
-        let written = dir_meta
-            .modified()
-            .map_err(|e| format!("no mtime for {}: {e}", dir.display()))?;
+    let mut found = None;
+    walk_checkout_writes(wt, |path, written| {
         if written > cutoff {
-            return Ok(Some(dir));
+            found = Some(path.to_path_buf());
         }
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("cannot list {}: {e}", dir.display()))?;
-            if dir == wt && entry.file_name() == ".git" {
-                continue;
-            }
-            let path = entry.path();
-            let meta = match std::fs::symlink_metadata(&path) {
-                Ok(meta) => meta,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(format!("cannot stat {}: {e}", path.display())),
-            };
-            let written = meta
-                .modified()
-                .map_err(|e| format!("no mtime for {}: {e}", path.display()))?;
-            if written > cutoff {
-                return Ok(Some(path));
-            }
-            if meta.is_dir() {
-                pending.push(path);
-            }
+        found.is_none()
+    })?;
+    Ok(found)
+}
+
+/// The newest write in the checkout `wt` after `cutoff`, over the whole tree
+/// (KT-2084): when a window that restarts at each write ends.
+pub fn checkout_newest_write_since(
+    wt: &Path,
+    cutoff: std::time::SystemTime,
+) -> Result<Option<std::time::SystemTime>, String> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    walk_checkout_writes(wt, |_, written| {
+        if written > cutoff && newest.is_none_or(|known| written > known) {
+            newest = Some(written);
         }
+        true
+    })?;
+    Ok(newest)
+}
+
+/// The most entries a checkout's write walk looks at, and for how long: past either, its
+/// activity is unknown, never idle.
+const CHECKOUT_WALK_ENTRIES: usize = 1_000_000;
+const CHECKOUT_WALK_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Visit the mtime of every file and directory of `wt` but the Git admin entry, until
+/// `visit` returns false. Rooted (KT-2084): a folder is listed through its own handle, so one
+/// swapped for a link is never followed; `Err` past [`CHECKOUT_WALK_ENTRIES`] or
+/// [`CHECKOUT_WALK_TIME`].
+fn walk_checkout_writes(
+    wt: &Path,
+    mut visit: impl FnMut(&Path, std::time::SystemTime) -> bool,
+) -> Result<(), String> {
+    use crate::core::fs_guard::{guarded_walk, Visit, WalkBounds};
+    let bounds = WalkBounds::within(CHECKOUT_WALK_ENTRIES, CHECKOUT_WALK_TIME);
+    // Opened from its parent: a checkout that is a link is never followed (KT-2084).
+    let parent = wt.parent().unwrap_or(wt);
+    let end = guarded_walk(parent, wt, bounds, &mut |entry| {
+        if entry.depth == 1 && entry.path.file_name() == Some(std::ffi::OsStr::new(".git")) {
+            Visit::Skip
+        } else if visit(entry.path, entry.modified) {
+            Visit::Enter
+        } else {
+            Visit::Stop
+        }
+    })
+    .map_err(|e| format!("cannot read {}: {e}", wt.display()))?;
+    match end.bound() {
+        Some(why) => Err(format!(
+            "the writes in {} cannot all be read ({why})",
+            wt.display()
+        )),
+        None => Ok(()),
     }
-    Ok(None)
 }
 
 /// Release the checkout of a task execution that has reached a terminal status
 /// (KT-1397): the branch is kept, the uncommitted changes are saved as a patch
-/// under `evidence_dir` first, and the checkout is then removed.
+/// under `evidence_dir` first, its ignored files that a delete counts as work are
+/// copied to [`RELEASED_WORKTREE_IGNORED_DIR`] there (KT-2084), both within the
+/// cap, and the checkout is then removed.
 ///
 /// The caller proves the execution is terminal and the workspace is Kronn's
 /// (`managed`); this proves the rest against Git: the path is in the managed
@@ -4486,30 +6548,109 @@ pub fn release_terminal_task_worktree_capped(
     evidence_dir: &Path,
     patch_cap_bytes: u64,
 ) -> Result<TerminalWorktreeRelease, String> {
+    release_task_checkout(
+        repo_path,
+        worktree_path,
+        expected_branch,
+        evidence_dir,
+        patch_cap_bytes,
+        TaskRelease::Terminal,
+    )
+}
+
+/// Every release of a task checkout (KT-2084), judged once: its ignored files, its
+/// submodules' included, are copied into `evidence_dir`, and for a [`TaskRelease::Terminal`]
+/// one its modified and untracked files are saved as a patch, all within `patch_cap_bytes`,
+/// before it is removed with its registration. Its branch stays.
+fn release_task_checkout(
+    repo_path: &Path,
+    worktree_path: &str,
+    expected_branch: &str,
+    evidence_dir: &Path,
+    patch_cap_bytes: u64,
+    release: TaskRelease,
+) -> Result<TerminalWorktreeRelease, String> {
+    let label = match release {
+        TaskRelease::Clean => "cancelled",
+        TaskRelease::Terminal => "terminal",
+    };
     reject_option_like_rev(expected_branch)?;
     let wt = Path::new(worktree_path);
     assert_managed_task_worktree_path(repo_path, wt)?;
     if !wt.exists() {
-        let _ = crate::core::cmd::git_cmd()
-            .args(["worktree", "prune"])
-            .current_dir(repo_path)
-            .output();
+        remove_registration_of_gone(repo_path, wt);
         return Ok(TerminalWorktreeRelease::AlreadyGone);
     }
     let actual_branch = find_branch_for_worktree(repo_path, worktree_path).ok_or_else(|| {
-        format!("cannot determine branch for terminal worktree {worktree_path} — preserving it")
+        branch_unknown(
+            worktree_path,
+            format!("cannot determine branch for {label} worktree {worktree_path} — preserving it"),
+        )
     })?;
     if actual_branch != expected_branch {
         return Err(format!(
-            "terminal worktree {worktree_path} is on branch {actual_branch}, expected {expected_branch} — preserving it"
+            "{label} worktree {worktree_path} is on branch {actual_branch}, expected {expected_branch} — preserving it"
         ));
     }
+    let judged = Judgement::of(wt)?;
+    let dirty = !judged_dirty_files(&judged.worktree)?.is_empty();
+    let saved = match release {
+        TaskRelease::Clean if dirty => {
+            return Err(format!(
+                "{label} worktree {worktree_path} has uncommitted changes — preserving it"
+            ))
+        }
+        TaskRelease::Clean => Saved::IgnoredFiles,
+        TaskRelease::Terminal => Saved::Everything,
+    };
+    // The patch saves modified and untracked files, the copy the ignored ones; the removal
+    // takes the rest (KT-2084).
+    let (loss, found) = forced_removal_check(repo_path, &judged, worktree_path, saved)?;
+    if let Some(loss) = loss {
+        return Err(format!("{loss} — preserving it"));
+    }
+    let ignored = ignored_files_to_copy(repo_path, wt, &found).map_err(|e| {
+        format!("the ignored files of {worktree_path} cannot be read: {e} — preserving it")
+    })?;
+    let ignored_bytes = ignored
+        .iter()
+        .fold(0u64, |total, (_, size)| total.saturating_add(*size));
+    if ignored_bytes > patch_cap_bytes {
+        return Err(format!(
+            "the ignored files of {worktree_path} hold {ignored_bytes} bytes, over the \
+             {patch_cap_bytes}-byte evidence cap — preserving it"
+        ));
+    }
+    let patch_cap_bytes = patch_cap_bytes - ignored_bytes;
+    // A previous attempt's copy must not pass for this release's evidence.
+    let copied = evidence_dir.join(RELEASED_WORKTREE_IGNORED_DIR);
+    if std::fs::symlink_metadata(evidence_dir).is_ok_and(|meta| meta.is_dir()) {
+        crate::core::fs_guard::guarded_remove_tree(evidence_dir, &copied).map_err(|e| {
+            format!(
+                "cannot clear {} before the release of {worktree_path}: {e} — preserving it",
+                copied.display()
+            )
+        })?;
+    }
+    if !ignored.is_empty() {
+        std::fs::create_dir_all(evidence_dir).map_err(|e| {
+            format!(
+                "cannot create {} for the ignored files of {worktree_path}: {e} — preserving it",
+                evidence_dir.display()
+            )
+        })?;
+    }
     let mut patch = None;
-    if !worktree_dirty_files(wt)?.is_empty() {
-        if let Some(bytes) = uncommitted_content_over(wt, patch_cap_bytes)? {
+    if dirty {
+        if let Some(bytes) = uncommitted_content_over(&judged.worktree, patch_cap_bytes)? {
+            let left = if ignored_bytes > 0 {
+                " its ignored files leave"
+            } else {
+                ""
+            };
             return Err(format!(
                 "the uncommitted files of {worktree_path} hold {bytes}+ bytes, over the \
-                 {patch_cap_bytes}-byte evidence cap — preserving it"
+                 {patch_cap_bytes}-byte evidence cap{left} — preserving it"
             ));
         }
         std::fs::create_dir_all(evidence_dir).map_err(|e| {
@@ -4522,9 +6663,7 @@ pub fn release_terminal_task_worktree_capped(
         for stale in [RELEASED_WORKTREE_PATCH, RELEASED_WORKTREE_STAGED_PATCH] {
             let _ = std::fs::remove_file(evidence_dir.join(stale));
         }
-        let scratch_index = evidence_dir.join("patch-index.tmp");
-        let saved = write_uncommitted_patches(wt, &scratch_index, evidence_dir, patch_cap_bytes);
-        let _ = std::fs::remove_file(&scratch_index);
+        let saved = write_uncommitted_patches(&judged, evidence_dir, patch_cap_bytes);
         let saved = saved.map_err(|e| {
             format!("cannot save the uncommitted changes of {worktree_path}: {e} — preserving it")
         })?;
@@ -4534,8 +6673,169 @@ pub fn release_terminal_task_worktree_capped(
             patch = Some(evidence_dir.join(RELEASED_WORKTREE_STAGED_PATCH));
         }
     }
-    remove_discussion_worktree(repo_path, worktree_path, false)?;
-    Ok(TerminalWorktreeRelease::Removed { patch })
+    let ignored_copied = match copy_ignored_files(wt, &ignored, evidence_dir, ignored_bytes) {
+        Ok(copied) => copied,
+        Err(e) => {
+            // Half the evidence is worse than none: the checkout stays.
+            let _ = crate::core::fs_guard::guarded_remove_tree(evidence_dir, &copied);
+            for saved in [RELEASED_WORKTREE_PATCH, RELEASED_WORKTREE_STAGED_PATCH] {
+                let _ = std::fs::remove_file(evidence_dir.join(saved));
+            }
+            return Err(format!(
+                "cannot save the ignored files of {worktree_path}: {e} — preserving it"
+            ));
+        }
+    };
+    if let Some(copied) = &ignored_copied {
+        tracing::info!(
+            "{} ignored file(s) of {worktree_path} copied to {} before its release",
+            ignored.len(),
+            copied.display()
+        );
+    }
+    drop(judged);
+    remove_discussion_worktree(repo_path, worktree_path, None)?;
+    Ok(TerminalWorktreeRelease::Removed {
+        patch,
+        ignored_copied,
+    })
+}
+
+/// The ignored files a release copies (KT-2084), its submodules' included, the latter under
+/// their submodule's path: each ignored file `found` counts as work, and each file below
+/// such an ignored folder that a delete counts as work. Links, OS junk, Kronn's files, seeds
+/// and regenerable output are left out; a name that is not UTF-8 refuses. `(path from the
+/// checkout, size)`.
+fn ignored_files_to_copy(
+    repo_path: &Path,
+    checkout: &Path,
+    found: &WorkFound,
+) -> Result<Vec<(String, u64)>, String> {
+    let regenerable = regenerable_outputs();
+    let mut files = Vec::new();
+    let top = IgnoredIn {
+        repo_path: Some(repo_path),
+        checkout,
+        prefix: String::new(),
+        regenerable: &regenerable,
+    };
+    top.collect(&found.files.ignored, &mut files)?;
+    for (relative, submodule) in &found.submodules {
+        let below = regenerable_below(&regenerable, relative);
+        let sub = IgnoredIn {
+            repo_path: None,
+            checkout: &checkout.join(relative),
+            prefix: format!("{relative}/"),
+            regenerable: &below,
+        };
+        sub.collect(&submodule.ignored, &mut files)?;
+    }
+    Ok(files)
+}
+
+/// The ignored files of one work tree, the checkout's or a submodule's at `prefix`.
+struct IgnoredIn<'a> {
+    /// `None`: a submodule, which holds none of Kronn's files.
+    repo_path: Option<&'a Path>,
+    checkout: &'a Path,
+    prefix: String,
+    regenerable: &'a [String],
+}
+
+impl IgnoredIn<'_> {
+    /// Adds the files of `entries` (ignored entries of this work tree) to `files`, by path
+    /// from the checkout.
+    fn collect(&self, entries: &[String], files: &mut Vec<(String, u64)>) -> Result<(), String> {
+        let checkout = self.checkout;
+        let junk = os_junk_patterns();
+        let (_, kronn_files, seeds) = kronn_entries(self.repo_path, checkout);
+        let not_work = NotWork {
+            checkout,
+            regenerable: self.regenerable,
+            junk: &junk,
+            kronn_files: &kronn_files,
+            seeds: &seeds,
+        };
+        let mut pending = Vec::new();
+        for entry in entries {
+            if !plain_relative(entry) {
+                return Err(format!("{entry:?} is not a plain path of the worktree"));
+            }
+            pending.push(entry.trim_end_matches('/').to_string());
+        }
+        while let Some(relative) = pending.pop() {
+            let path = checkout.join(&relative);
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("{}{relative}: {e}", self.prefix)),
+            };
+            if meta.is_file() {
+                if files.len() == MAX_RELEASED_IGNORED_FILES {
+                    return Err(format!(
+                        "more than {MAX_RELEASED_IGNORED_FILES} ignored files"
+                    ));
+                }
+                files.push((format!("{}{relative}", self.prefix), meta.len()));
+                continue;
+            }
+            // A link is never followed, and removing it loses nothing.
+            if !meta.is_dir() {
+                continue;
+            }
+            let names = crate::core::fs_guard::guarded_list(checkout, &path)
+                .map_err(|e| format!("{}{relative}: {e}", self.prefix))?
+                .unwrap_or_default();
+            for name in names {
+                let name = name.into_string().map_err(|name| {
+                    format!("{}{relative}/{name:?} is not a UTF-8 name", self.prefix)
+                })?;
+                let child = format!("{relative}/{name}");
+                if !(is_os_junk(&name, &junk) || not_work.ignored(&child, false)) {
+                    pending.push(child);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Copy `files` of `checkout` into the evidence folder [`RELEASED_WORKTREE_IGNORED_DIR`] of
+/// `evidence_dir`, at their path, within `budget` bytes: read without following a link,
+/// written without replacing anything. A file with another name (a hard link, maybe to a file
+/// elsewhere) is not copied and keeps the checkout. `None` when there was nothing to copy.
+fn copy_ignored_files(
+    checkout: &Path,
+    files: &[(String, u64)],
+    evidence_dir: &Path,
+    budget: u64,
+) -> Result<Option<PathBuf>, String> {
+    let copied = evidence_dir.join(RELEASED_WORKTREE_IGNORED_DIR);
+    let mut left = budget;
+    let mut any = false;
+    for (relative, _) in files {
+        let read = crate::core::fs_guard::guarded_read_head_one_name(
+            checkout,
+            &checkout.join(relative),
+            left.saturating_add(1),
+        )
+        .map_err(|e| format!("{relative}: {e}"))?;
+        // Gone since it was listed: nothing of it is lost.
+        let Some(bytes) = read else {
+            continue;
+        };
+        let size = bytes.len() as u64;
+        if size > left {
+            return Err(format!("{relative} grew past the evidence cap"));
+        }
+        left -= size;
+        if !crate::core::fs_guard::guarded_write_new(evidence_dir, &copied.join(relative), &bytes)?
+        {
+            return Err(format!("{} already holds {relative}", copied.display()));
+        }
+        any = true;
+    }
+    Ok(any.then_some(copied))
 }
 
 /// Remove a task worktree AFTER its candidate was integrated successfully.
@@ -4556,21 +6856,16 @@ pub fn remove_integrated_task_worktree(
     if !wt.exists() {
         return match branch_commit(repo_path, expected_branch) {
             None => {
-                let _ = crate::core::cmd::git_cmd()
-                    .args(["worktree", "prune"])
-                    .current_dir(repo_path)
-                    .output();
+                remove_registration_of_gone(repo_path, wt);
                 Ok(())
             }
             Some(sha) if sha == integrated_sha => {
-                let _ = crate::core::cmd::git_cmd()
-                    .args(["worktree", "prune"])
-                    .current_dir(repo_path)
-                    .output();
-                let output = crate::core::cmd::git_cmd()
-                    .args(["branch", "-D", expected_branch])
-                    .current_dir(repo_path)
-                    .output()
+                remove_registration_of_gone(repo_path, wt);
+                let mut command = crate::core::cmd::git_cmd();
+                command
+                    .args(["branch", "-D", "--end-of-options", expected_branch])
+                    .current_dir(repo_path);
+                let output = bounded(command, "branch -D")
                     .map_err(|e| format!("failed to delete integrated task branch: {e}"))?;
                 if !output.status.success() {
                     return Err(format!(
@@ -4587,74 +6882,32 @@ pub fn remove_integrated_task_worktree(
     }
 
     let actual_branch = find_branch_for_worktree(repo_path, worktree_path).ok_or_else(|| {
-        format!("cannot determine branch for integrated worktree {worktree_path} — preserving it")
+        branch_unknown(
+            worktree_path,
+            format!(
+                "cannot determine branch for integrated worktree {worktree_path} — preserving it"
+            ),
+        )
     })?;
     if actual_branch != expected_branch {
         return Err(format!(
             "integrated worktree {worktree_path} is on branch {actual_branch}, expected {expected_branch} — preserving it"
         ));
     }
-    let head = git_head(wt)?;
+    let judged = Snapshot::of_worktree(wt)?;
+    let head = judged_head(&judged)?;
     if head != integrated_sha {
         return Err(format!(
             "integrated worktree {worktree_path} diverged to {head} (expected {integrated_sha}) — preserving it"
         ));
     }
-    if !worktree_dirty_files(wt)?.is_empty() {
+    if !judged_dirty_files(&judged)?.is_empty() {
         return Err(format!(
             "integrated worktree {worktree_path} has uncommitted changes — preserving it"
         ));
     }
-    remove_discussion_worktree(repo_path, worktree_path, true)
-}
-
-/// List all kronn worktrees for a project.
-pub fn list_project_worktrees(repo_path: &Path) -> Vec<WorktreeInfo> {
-    let output = match crate::core::cmd::git_cmd()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_path)
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut worktrees = Vec::new();
-    let mut current_path: Option<String> = None;
-    let mut current_branch: Option<String> = None;
-
-    for line in text.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            current_path = Some(path.to_string());
-            current_branch = None;
-        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
-            current_branch = Some(branch.to_string());
-        } else if line.is_empty() {
-            if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take()) {
-                if branch.starts_with("kronn/") {
-                    worktrees.push(WorktreeInfo {
-                        path,
-                        branch,
-                        is_main_repo: false,
-                    });
-                }
-            }
-        }
-    }
-
-    // Handle last entry (no trailing empty line)
-    if let (Some(path), Some(branch)) = (current_path, current_branch) {
-        if branch.starts_with("kronn/") {
-            worktrees.push(WorktreeInfo {
-                path,
-                branch,
-                is_main_repo: false,
-            });
-        }
-    }
-
-    worktrees
+    drop(judged);
+    remove_discussion_worktree(repo_path, worktree_path, Some(expected_branch))
 }
 
 /// Validate that a worktree path still exists on disk.
@@ -4703,28 +6956,25 @@ pub struct MainRepoState {
     pub dirty_files: Vec<DirtyFile>,
 }
 
-/// Parse `git status --porcelain=v1` output into a list of dirty files.
-///
-/// Porcelain v1 format: `XY <path>` — two-char status code, space, path.
-/// Some status lines carry a rename (` -> `) — we keep the target side (the
-/// actual file the user needs to be aware of) and discard the arrow.
-fn parse_porcelain(stdout: &str) -> Vec<DirtyFile> {
-    stdout
-        .lines()
-        .filter_map(|line| {
-            if line.len() < 4 {
-                return None;
-            }
-            let status = line[..2].to_string();
-            let rest = line[3..].trim();
-            // Rename / copy lines look like "R  old -> new" — keep only `new`.
-            // Rename / copy lines look like "R  old -> new" — keep only `new`.
-            // `rsplit` iterates right-to-left, so `next()` gives the post-arrow
-            // side; for plain lines it returns the whole thing.
-            let path = rest.rsplit(" -> ").next().unwrap_or(rest).to_string();
-            Some(DirtyFile { path, status })
-        })
-        .collect()
+/// Parse `git status --porcelain=v1 -z` output into a list of dirty files: NUL-ended
+/// `XY path` entries, names unquoted. A rename or a copy (`R`/`C`) is followed by its
+/// source path, which is skipped: the target is the file the user needs to see.
+fn parse_porcelain_z(stdout: &[u8]) -> Vec<DirtyFile> {
+    let mut fields = stdout.split(|byte| *byte == 0);
+    let mut files = Vec::new();
+    while let Some(field) = fields.next() {
+        if field.len() < 4 || field[2] != b' ' {
+            continue;
+        }
+        if matches!(field[0], b'R' | b'C') || matches!(field[1], b'R' | b'C') {
+            fields.next();
+        }
+        files.push(DirtyFile {
+            path: String::from_utf8_lossy(&field[3..]).into_owned(),
+            status: String::from_utf8_lossy(&field[..2]).into_owned(),
+        });
+    }
+    files
 }
 
 /// Check whether the given worktree has uncommitted changes (modified,
@@ -4734,12 +6984,11 @@ fn parse_porcelain(stdout: &str) -> Vec<DirtyFile> {
 /// dirty, unlocking it would lose the changes. We surface the list so the UI
 /// can block with a "commit first" CTA rather than a blind refusal.
 pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, String> {
-    // `--ignore-submodules=dirty` on the command line: a `.gitmodules` the worker
-    // wrote (`ignore = none`) must not make git run `status` inside a submodule.
-    let output = crate::core::lane_git::git(worktree_path)?
-        .args(["status", "--ignore-submodules=dirty", "--porcelain=v1"])
-        .output()
-        .map_err(|e| format!("git status failed in worktree: {}", e))?;
+    let mut command = crate::core::lane_git::git(worktree_path)?;
+    command.args(DIRTY_STATUS);
+    // Within git's time bound (KT-2084): a FIFO in the worktree never holds the caller.
+    let output =
+        bounded(command, "status").map_err(|e| format!("git status failed in worktree: {}", e))?;
     if !output.status.success() {
         return Err(format!(
             "git status failed in worktree ({}): {}",
@@ -4747,43 +6996,98 @@ pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, Stri
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    // An untracked `.DS_Store` is the file manager's, not work: a checkout made
-    // before the local exclude carried it must not stay "dirty" for it (KT-1750).
+    Ok(dirty_files_of(worktree_path, &output.stdout))
+}
+
+/// `--ignore-submodules=dirty` on the command line: a `.gitmodules` the worker
+/// wrote (`ignore = none`) must not make git run `status` inside a submodule.
+const DIRTY_STATUS: [&str; 4] = [
+    "status",
+    "--ignore-submodules=dirty",
+    "--porcelain=v1",
+    "-z",
+];
+
+/// [`worktree_dirty_files`] judged from Kronn's copy `judged` of the worktree's git state, for
+/// a removal or a workspace declaration (KT-2084).
+pub fn judged_dirty_files(judged: &Snapshot) -> Result<Vec<DirtyFile>, String> {
+    let worktree_path = judged
+        .work_tree()
+        .ok_or_else(|| format!("{} has no work tree", judged.source().display()))?;
+    let output = judged.output(&DIRTY_STATUS)?;
+    if !output.status.success() {
+        return Err(format!(
+            "git status failed in worktree ({}): {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(dirty_files_of(worktree_path, &output.stdout))
+}
+
+/// The HEAD commit of Kronn's copy `judged`.
+fn judged_head(judged: &Snapshot) -> Result<String, String> {
+    let output = judged.output(&["rev-parse", "HEAD"])?;
+    if !output.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD failed in {}: {}",
+            judged.work_tree().unwrap_or(judged.source()).display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// The dirty files of `status --porcelain=v1 -z` output in `worktree_path`. An untracked
+/// `.DS_Store` is the file manager's, not work: a checkout made before the local exclude
+/// carried it must not stay "dirty" for it (KT-1750).
+fn dirty_files_of(worktree_path: &Path, stdout: &[u8]) -> Vec<DirtyFile> {
     let junk = os_junk_patterns();
-    Ok(parse_porcelain(&String::from_utf8_lossy(&output.stdout))
+    parse_porcelain_z(stdout)
         .into_iter()
         .filter(|file| {
             !(file.status == "??"
                 && (is_os_junk(&file.path, &junk)
                     || (file.path.ends_with('/')
-                        && holds_only_os_junk(&worktree_path.join(&file.path), &junk))))
+                        && holds_only_os_junk(
+                            worktree_path,
+                            &worktree_path.join(&file.path),
+                            &junk,
+                        ))))
         })
-        .collect())
+        .collect()
 }
 
+/// The most entries, and the longest time, an untracked folder is looked into for OS junk:
+/// past either it is work.
+const JUNK_WALK_ENTRIES: usize = 10_000;
+const JUNK_WALK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// An untracked directory is listed by git as one entry (`?? sub/`): it is junk
-/// when nothing in it, at any depth, is anything else.
-fn holds_only_os_junk(dir: &Path, patterns: &[String]) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return false;
-        };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-        let junk = if is_dir {
-            // A nested repository is somebody's work, whatever is inside.
-            !entry.path().join(".git").exists() && holds_only_os_junk(&entry.path(), patterns)
-        } else {
-            is_os_junk(&name, patterns)
-        };
-        if !junk {
-            return false;
+/// when nothing in it, at any depth, is anything else. A nested repository (a `.git` of any
+/// kind) is somebody's work. Walked rooted at `root` (KT-2084): a folder swapped for a link is
+/// never followed, and a walk that cannot finish within its bounds finds work.
+fn holds_only_os_junk(root: &Path, dir: &Path, patterns: &[String]) -> bool {
+    use crate::core::fs_guard::{guarded_walk, Visit, WalkBounds, WalkEnd};
+    let bounds = WalkBounds::within(JUNK_WALK_ENTRIES, JUNK_WALK_TIME);
+    let mut only_junk = true;
+    let walked = guarded_walk(root, dir, bounds, &mut |entry| {
+        let name = entry
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if entry.depth == 0 || (entry.is_dir && name != ".git") {
+            return Visit::Enter;
         }
-    }
-    true
+        if name != ".git" && is_os_junk(&name, patterns) {
+            Visit::Skip
+        } else {
+            only_junk = false;
+            Visit::Stop
+        }
+    });
+    matches!(walked, Ok(WalkEnd::Done)) && only_junk
 }
 
 /// Return the exact committed file changes between two revisions.
@@ -4803,6 +7107,7 @@ pub fn committed_file_changes(
             "--name-status",
             "--no-renames",
             "-z",
+            "--end-of-options",
             base_rev,
             head_rev,
             "--",
@@ -4912,11 +7217,12 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
     // Branch / detached HEAD detection. `symbolic-ref -q HEAD` returns
     // "refs/heads/<name>" on a branch and fails (exit 1) on detached HEAD —
     // that's how we distinguish the two states without parsing `git status`.
-    let sym = crate::core::cmd::git_cmd()
-        .args(["symbolic-ref", "-q", "--short", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git symbolic-ref failed: {}", e))?;
+    // Each within git's time bound (KT-2084).
+    let mut sym = crate::core::cmd::git_cmd();
+    sym.args(["symbolic-ref", "-q", "--short", "HEAD"])
+        .current_dir(repo_path);
+    let sym =
+        bounded(sym, "symbolic-ref").map_err(|e| format!("git symbolic-ref failed: {}", e))?;
     let (current_branch, is_detached) = if sym.status.success() {
         (
             String::from_utf8_lossy(&sym.stdout).trim().to_string(),
@@ -4926,11 +7232,11 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
         (String::new(), true)
     };
 
-    let status = crate::core::cmd::git_cmd()
-        .args(["status", "--porcelain=v1"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git status failed: {}", e))?;
+    let mut status = crate::core::cmd::git_cmd();
+    status
+        .args(["status", "--porcelain=v1", "-z"])
+        .current_dir(repo_path);
+    let status = bounded(status, "status").map_err(|e| format!("git status failed: {}", e))?;
     if !status.status.success() {
         return Err(format!(
             "git status failed in repo ({}): {}",
@@ -4938,7 +7244,7 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
             String::from_utf8_lossy(&status.stderr)
         ));
     }
-    let dirty_files = parse_porcelain(&String::from_utf8_lossy(&status.stdout));
+    let dirty_files = parse_porcelain_z(&status.stdout);
     Ok(MainRepoState {
         current_branch,
         is_detached,
@@ -4954,11 +7260,14 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
 /// the caller can surface a precise error to the user instead of a
 /// generic 500.
 pub fn checkout_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(["checkout", branch])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git checkout failed: {}", e))?;
+    // A branch name, never an option nor a path (KT-2084).
+    crate::core::lane_git::check_branch_name(branch)?;
+    let mut checkout = crate::core::cmd::git_cmd();
+    checkout
+        .args(["checkout", branch, "--"])
+        .current_dir(repo_path);
+    let output =
+        bounded_change(checkout, "checkout").map_err(|e| format!("git checkout failed: {}", e))?;
     if !output.status.success() {
         return Err(format!(
             "git checkout {} failed: {}",
@@ -4979,11 +7288,11 @@ pub fn checkout_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
 /// `stash_pop_by_message` can find the exact stash even if the user stashed
 /// manually in between.
 pub fn stash_push(repo_path: &Path, message: &str) -> Result<bool, String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(["stash", "push", "-u", "-m", message])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git stash push failed: {}", e))?;
+    let mut push = crate::core::cmd::git_cmd();
+    push.args(["stash", "push", "-u", "-m", message])
+        .current_dir(repo_path);
+    let output =
+        bounded_change(push, "stash push").map_err(|e| format!("git stash push failed: {}", e))?;
     if !output.status.success() {
         return Err(format!(
             "git stash push failed: {}",
@@ -5006,11 +7315,9 @@ pub fn stash_push(repo_path: &Path, message: &str) -> Result<bool, String> {
 pub fn stash_pop_by_message(repo_path: &Path, message: &str) -> Result<(), String> {
     // Find the stash ref matching the message. `git stash list` output
     // looks like: `stash@{0}: On main: <message>`.
-    let list = crate::core::cmd::git_cmd()
-        .args(["stash", "list"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git stash list failed: {}", e))?;
+    let mut list = crate::core::cmd::git_cmd();
+    list.args(["stash", "list"]).current_dir(repo_path);
+    let list = bounded(list, "stash list").map_err(|e| format!("git stash list failed: {}", e))?;
     if !list.status.success() {
         return Err("git stash list failed".into());
     }
@@ -5027,11 +7334,10 @@ pub fn stash_pop_by_message(repo_path: &Path, message: &str) -> Result<(), Strin
             )
         })?;
 
-    let output = crate::core::cmd::git_cmd()
-        .args(["stash", "pop", stash_ref])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git stash pop failed: {}", e))?;
+    let mut pop = crate::core::cmd::git_cmd();
+    pop.args(["stash", "pop", stash_ref]).current_dir(repo_path);
+    let output =
+        bounded_change(pop, "stash pop").map_err(|e| format!("git stash pop failed: {}", e))?;
     if !output.status.success() {
         return Err(format!(
             "git stash pop {} failed (conflicts?): {}",
@@ -5812,11 +8118,10 @@ mod tests {
     }
 
     #[test]
-    fn test_list_project_worktrees_no_repo() {
-        // Should return empty vec for a non-repo path
-        let result = list_project_worktrees(Path::new("/tmp"));
-        // May or may not be empty depending on system, but should not panic
-        let _ = result;
+    fn a_folder_that_is_no_checkout_lists_no_worktree() {
+        // An error, never an empty list.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(registered_worktree_paths(dir.path()).is_err());
     }
 
     // ── Worktree lifecycle tests ─────────────────────────────────────────────
@@ -6028,7 +8333,7 @@ mod tests {
         let wt_path = info.path.clone();
         assert!(Path::new(&wt_path).exists());
 
-        let result = remove_discussion_worktree(repo.path(), &wt_path, false);
+        let result = remove_discussion_worktree(repo.path(), &wt_path, None);
         assert!(result.is_ok());
         assert!(
             !Path::new(&wt_path).exists(),
@@ -6041,7 +8346,7 @@ mod tests {
         let repo = make_test_repo("keep-branch");
         let info = create_discussion_worktree(repo.path(), "proj", "keep-me", "main").unwrap();
 
-        remove_discussion_worktree(repo.path(), &info.path, false).unwrap();
+        remove_discussion_worktree(repo.path(), &info.path, None).unwrap();
 
         // Branch should still exist
         let output = std::process::Command::new("git")
@@ -6061,7 +8366,7 @@ mod tests {
         let repo = make_test_repo("del-branch");
         let info = create_discussion_worktree(repo.path(), "proj", "delete-me", "main").unwrap();
 
-        remove_discussion_worktree(repo.path(), &info.path, true).unwrap();
+        remove_discussion_worktree(repo.path(), &info.path, Some(&info.branch)).unwrap();
 
         let output = std::process::Command::new("git")
             .args(["branch", "--list", &info.branch])
@@ -6075,6 +8380,905 @@ mod tests {
         );
     }
 
+    /// KT-2084 — the branch of a deleted discussion goes only when another ref
+    /// reaches every commit on it. The other ref here is not `HEAD`, so a
+    /// `--exclude` that missed the branch itself, or excluded too much, fails.
+    #[test]
+    fn a_deleted_discussion_branch_goes_only_when_another_ref_holds_its_commits() {
+        let repo = make_test_repo("deleted-disc-branch");
+        let update_ref = |name: &str, sha: &str| {
+            let out = std::process::Command::new("git")
+                .args(["update-ref", name, sha])
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        };
+
+        let pushed = create_discussion_worktree(repo.path(), "proj", "pushed", "main").unwrap();
+        let sha = commit_file(Path::new(&pushed.path), "a.txt", "a", "pushed work");
+        update_ref("refs/remotes/origin/kronn/pushed", &sha);
+        assert_eq!(
+            remove_deleted(repo.path(), &pushed.path).unwrap(),
+            DeletedDiscussionBranch::Deleted(pushed.branch.clone())
+        );
+        assert!(!Path::new(&pushed.path).exists());
+        assert!(branch_commit(repo.path(), &pushed.branch).is_none());
+
+        let local = create_discussion_worktree(repo.path(), "proj", "local", "main").unwrap();
+        let only_here = commit_file(Path::new(&local.path), "b.txt", "b", "local work");
+        let outcome = remove_deleted(repo.path(), &local.path).unwrap();
+        assert!(
+            matches!(&outcome, DeletedDiscussionBranch::Kept { branch, reason }
+                if branch == &local.branch && reason.contains(&only_here)),
+            "{outcome:?}"
+        );
+        assert!(!Path::new(&local.path).exists(), "the checkout still goes");
+        assert_eq!(branch_commit(repo.path(), &local.branch), Some(only_here));
+
+        let other = create_discussion_worktree(repo.path(), "proj", "other", "main").unwrap();
+        let sha = commit_file(Path::new(&other.path), "c.txt", "c", "kept elsewhere");
+        update_ref("refs/heads/backup/other", &sha);
+        assert_eq!(
+            remove_deleted(repo.path(), &other.path).unwrap(),
+            DeletedDiscussionBranch::Deleted(other.branch.clone()),
+            "another local branch holds it"
+        );
+
+        // Neither a stash (dropped at will), a backup ref nor a detached HEAD keeps
+        // a commit: the main checkout's HEAD comes last, it moves for good.
+        let stashed = create_discussion_worktree(repo.path(), "proj", "stashed", "main").unwrap();
+        let sha = commit_file(Path::new(&stashed.path), "d.txt", "d", "stashed work");
+        update_ref("refs/stash", &sha);
+        update_ref("refs/kronn-backup/stashed", &sha);
+        let outcome = remove_deleted(repo.path(), &stashed.path).unwrap();
+        assert!(
+            matches!(&outcome, DeletedDiscussionBranch::Kept { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(branch_commit(repo.path(), &stashed.branch), Some(sha));
+
+        let detached = create_discussion_worktree(repo.path(), "proj", "detached", "main").unwrap();
+        let sha = commit_file(Path::new(&detached.path), "e.txt", "e", "seen detached");
+        let out = std::process::Command::new("git")
+            .args(["checkout", "-q", "--detach", &sha])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let outcome = remove_deleted(repo.path(), &detached.path).unwrap();
+        assert!(
+            matches!(&outcome, DeletedDiscussionBranch::Kept { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(branch_commit(repo.path(), &detached.branch), Some(sha));
+    }
+
+    /// KT-2084 — a file written after the handler's look is seen by Kronn's own look right
+    /// before the removal: the worktree stays, the file with it.
+    #[test]
+    fn a_deleted_discussion_worktree_written_after_the_check_is_kept() {
+        let repo = make_test_repo("deleted-disc-late-write");
+        let info = create_discussion_worktree(repo.path(), "proj", "late", "main").unwrap();
+        fs::write(Path::new(&info.path).join("late.txt"), "late").unwrap();
+
+        let outcome = remove_deleted(repo.path(), &info.path);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(Path::new(&info.path).join("late.txt")).unwrap(),
+            "late"
+        );
+        assert!(branch_commit(repo.path(), &info.branch).is_some());
+    }
+
+    /// A populated submodule makes git refuse any removal without `--force`:
+    /// clean, the worktree still goes.
+    #[test]
+    fn a_deleted_discussion_worktree_with_a_clean_submodule_is_removed() {
+        let (repo, _upstream) = make_test_repo_with_submodule("deleted-disc-submodule");
+        let info = create_discussion_worktree(repo.path(), "proj", "submod", "main").unwrap();
+        let init = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+            ])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        assert!(Path::new(&info.path).join("sub/lib.txt").exists());
+
+        remove_deleted(repo.path(), &info.path).unwrap();
+
+        assert!(!Path::new(&info.path).exists());
+    }
+
+    /// A discussion worktree of a repository with a submodule, populated.
+    fn discussion_worktree_with_submodule(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let (repo, upstream) = make_test_repo_with_submodule(name);
+        // The upstream is only needed to populate: keep it until then.
+        let info = create_discussion_worktree(repo.path(), "proj", name, "main").unwrap();
+        let checkout = PathBuf::from(&info.path);
+        let init = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+            ])
+            .current_dir(&checkout)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        drop(upstream);
+        (repo, checkout)
+    }
+
+    fn git_dir_of(dir: &Path) -> PathBuf {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    }
+
+    /// KT-2084 — `--force` deletes the worktree's submodule repositories: a
+    /// commit none of the submodule's remotes has keeps the worktree.
+    #[test]
+    fn a_submodule_commit_missing_from_its_remote_keeps_the_deleted_discussion_worktree() {
+        let (repo, checkout) = discussion_worktree_with_submodule("deleted-disc-sub-commit");
+        let sub = checkout.join("sub");
+        fs::write(sub.join("lib.txt"), "local only").unwrap();
+        let identity = ["-c", "user.email=t@t.com", "-c", "user.name=T"];
+        git(
+            &sub,
+            &[&identity[..], &["commit", "-qam", "local"]].concat(),
+        );
+        let commit = head_sha(&sub);
+        // The gitlink is committed too: the worktree itself is clean.
+        git(
+            &checkout,
+            &[&identity[..], &["commit", "-qam", "bump"]].concat(),
+        );
+
+        let outcome = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(
+            outcome.as_ref().is_err_and(|error| error.contains(&commit)),
+            "{outcome:?}"
+        );
+        assert_eq!(head_sha(&sub), commit, "the commit is intact");
+    }
+
+    #[test]
+    fn a_submodule_holding_an_ignored_file_keeps_the_deleted_discussion_worktree() {
+        let (repo, checkout) = discussion_worktree_with_submodule("deleted-disc-sub-env");
+        let sub = checkout.join("sub");
+        let info = git_dir_of(&sub).join("info");
+        fs::create_dir_all(&info).unwrap();
+        fs::write(info.join("exclude"), ".env\n").unwrap();
+        fs::write(sub.join(".env"), "TOKEN=1").unwrap();
+
+        let outcome = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(
+            outcome
+                .as_ref()
+                .is_err_and(|error| error.contains(".env") && error.contains("sub")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read_to_string(sub.join(".env")).unwrap(), "TOKEN=1");
+    }
+
+    /// KT-2084 — when the delete keeps the worktree, Kronn's untracked agent-config copy
+    /// stays with it: a same-slug reuse runs with it.
+    #[test]
+    fn a_kept_discussion_worktree_keeps_its_agent_config_copy() {
+        let repo = make_test_repo("deleted-disc-copy-kept");
+        fs::write(repo.path().join(".mcp.json"), "{}").unwrap();
+        let info = create_discussion_worktree(repo.path(), "proj", "copy-kept", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        assert!(checkout.join(".mcp.json").is_file());
+        fs::write(checkout.join("late.txt"), "late").unwrap();
+
+        let outcome = remove_deleted(repo.path(), &info.path);
+
+        assert!(
+            outcome
+                .as_ref()
+                .is_err_and(|error| !error.trim().is_empty()),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.join(".mcp.json")).unwrap(),
+            "{}"
+        );
+        assert!(checkout.join("late.txt").exists());
+    }
+
+    /// KT-2084 — untracked OS junk and an untracked `.kronn/` are not work: they go with
+    /// the worktree.
+    #[test]
+    fn untracked_os_junk_never_keeps_a_deleted_discussion_worktree() {
+        let repo = make_test_repo("deleted-disc-junk");
+        let info = create_discussion_worktree(repo.path(), "proj", "junk", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        // A repository whose exclude file names none of them (made before KT-1750).
+        let exclude = repo.path().join(".git/info/exclude");
+        let kept: String = fs::read_to_string(&exclude)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("worktrees"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        fs::write(&exclude, kept).unwrap();
+        fs::write(checkout.join(".DS_Store"), "junk").unwrap();
+        fs::create_dir_all(checkout.join(".kronn")).unwrap();
+        fs::write(checkout.join(".kronn/state.json"), "{}").unwrap();
+
+        remove_deleted(repo.path(), &info.path).unwrap();
+
+        assert!(!checkout.exists());
+    }
+
+    /// KT-2084 — the delete runs git where an agent wrote: a `core.fsmonitor` it
+    /// configured never runs.
+    #[cfg(unix)] // the fsmonitor hook is a #!/bin/sh script, executable through unix mode bits
+    #[test]
+    fn deleting_a_discussion_worktree_never_runs_its_configured_fsmonitor() {
+        let repo = make_test_repo("deleted-disc-fsmonitor");
+        let info = create_discussion_worktree(repo.path(), "proj", "fsmonitor", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        let (_hooks, hook, ran) = fsmonitor_hook("worktree");
+        git(
+            checkout,
+            &["config", "core.fsmonitor", &hook.to_string_lossy()],
+        );
+
+        let _ = remove_deleted(repo.path(), &info.path);
+
+        assert!(!ran.exists(), "the worktree's fsmonitor ran");
+    }
+
+    #[cfg(unix)] // the fsmonitor hook is a #!/bin/sh script, executable through unix mode bits
+    #[test]
+    fn deleting_a_discussion_worktree_never_runs_a_submodule_fsmonitor() {
+        let (repo, checkout) = discussion_worktree_with_submodule("deleted-disc-sub-fsmonitor");
+        let (_hooks, hook, ran) = fsmonitor_hook("submodule");
+        git(
+            &checkout.join("sub"),
+            &["config", "core.fsmonitor", &hook.to_string_lossy()],
+        );
+
+        let _ = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(!ran.exists(), "the submodule's fsmonitor ran");
+    }
+
+    /// An fsmonitor hook that leaves a mark, in a directory of its own.
+    #[cfg(unix)]
+    fn fsmonitor_hook(name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("kronn-fsmonitor-{name}"))
+            .tempdir()
+            .unwrap();
+        let ran = dir.path().join("ran");
+        let hook = dir.path().join("hook.sh");
+        fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, hook, ran)
+    }
+
+    fn regenerable_defaults() -> Vec<String> {
+        regenerable_outputs_with(&[])
+    }
+
+    /// KT-2084 — what a discussion delete counts as work: a gitignored `.env`, a
+    /// dirty submodule; never Kronn's agent-config copies, ignored or not.
+    #[test]
+    fn a_delete_counts_ignored_files_and_dirty_submodules_as_work() {
+        let uncommitted = |repo: &Path, checkout: &Path| {
+            let judged = Snapshot::of_worktree(checkout).unwrap();
+            let files = worktree_files(Some(repo), &judged, &regenerable_defaults()).unwrap();
+            [files.uncommitted, files.ignored].concat()
+        };
+        let (repo, _upstream) = make_test_repo_with_submodule("disc-ignored");
+        fs::write(
+            repo.path().join(".gitignore"),
+            ".env\n.mcp.json\n.gemini/\n",
+        )
+        .unwrap();
+        for args in [vec!["add", ".gitignore"], vec!["commit", "-m", "ignore"]] {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+        }
+        fs::write(repo.path().join(".mcp.json"), "{}").unwrap();
+        fs::create_dir_all(repo.path().join(".gemini")).unwrap();
+        fs::write(repo.path().join(".gemini/settings.json"), "{}").unwrap();
+        let info = create_discussion_worktree(repo.path(), "proj", "ignored", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        assert!(checkout.join(".gemini/settings.json").is_file());
+        assert_eq!(
+            uncommitted(repo.path(), checkout),
+            Vec::<String>::new(),
+            "Kronn's copies are not work"
+        );
+
+        fs::write(checkout.join(".env"), "TOKEN=1").unwrap();
+        assert_eq!(uncommitted(repo.path(), checkout), vec![".env".to_string()]);
+        fs::remove_file(checkout.join(".env")).unwrap();
+
+        let init = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+            ])
+            .current_dir(checkout)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        fs::write(checkout.join("sub/lib.txt"), "edited in the submodule").unwrap();
+        // The submodule's files are judged by Kronn's own command in it, not by git
+        // descending into it from the worktree.
+        assert_eq!(uncommitted(repo.path(), checkout), Vec::<String>::new());
+        let work = unsaved_work_with(repo.path(), checkout, "wt", &regenerable_defaults())
+            .unwrap()
+            .unwrap_or_default();
+        assert!(
+            work.contains("the submodule sub of wt") && work.contains("lib.txt"),
+            "{work}"
+        );
+    }
+
+    /// KT-2084 — `server.regenerable_outputs` adds names to the built-in list, trimmed, with
+    /// no process-wide state touched.
+    #[test]
+    fn a_configured_regenerable_directory_is_not_work() {
+        let repo = make_test_repo("disc-regenerable");
+        fs::write(repo.path().join(".gitignore"), "generated/\n").unwrap();
+        git(repo.path(), &["add", ".gitignore"]);
+        git(repo.path(), &["commit", "-qm", "ignore"]);
+        let info = create_discussion_worktree(repo.path(), "proj", "regenerable", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        fs::create_dir_all(checkout.join("generated/deep")).unwrap();
+        fs::write(checkout.join("generated/deep/out.js"), "built").unwrap();
+        let refused = unsaved_work_with(repo.path(), checkout, "wt", &regenerable_defaults());
+        assert!(
+            refused
+                .as_ref()
+                .is_ok_and(|work| work.as_ref().is_some_and(|w| w.contains("generated/"))),
+            "{refused:?}"
+        );
+
+        let configured = regenerable_outputs_with(&[" generated/ ".to_string(), String::new()]);
+        assert!(
+            configured.contains(&"generated".to_string()),
+            "{configured:?}"
+        );
+        assert!(configured.contains(&"node_modules".to_string()));
+        assert!(!configured.contains(&String::new()));
+        assert_eq!(
+            unsaved_work_with(repo.path(), checkout, "wt", &configured),
+            Ok(None)
+        );
+    }
+
+    /// The delete of a discussion whose stored branch is the one its worktree is on.
+    fn remove_deleted(repo: &Path, path: &str) -> Result<DeletedDiscussionBranch, String> {
+        let own = find_branch_for_worktree(repo, path);
+        remove_deleted_discussion_worktree(repo, path, own.as_deref(), &Default::default())
+    }
+
+    /// `patterns` committed to `repo` as its `.gitignore`.
+    fn commit_ignore(repo: &Path, patterns: &str) {
+        fs::write(repo.join(".gitignore"), patterns).unwrap();
+        git(repo, &["add", ".gitignore"]);
+        git(repo, &["commit", "-qm", "ignore"]);
+    }
+
+    fn write_file(root: &Path, relative: &str, content: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    fn work_in(repo: &Path, checkout: &Path, regenerable: &[String]) -> String {
+        unsaved_work_with(repo, checkout, "wt", regenerable)
+            .unwrap()
+            .unwrap_or_default()
+    }
+
+    /// KT-2084 — what tools write again (a TypeScript build cache, a test report, an agent
+    /// CLI's write log) is not work; a `.env` beside it, or a whole `.claude/`, still is.
+    #[test]
+    fn routine_tool_output_is_not_work() {
+        let repo = make_test_repo("disc-tool-output");
+        commit_ignore(
+            repo.path(),
+            "*.tsbuildinfo\ntest-results/\n.claude/\n.env\n",
+        );
+        let info = create_discussion_worktree(repo.path(), "proj", "tool-output", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        for file in [
+            "frontend/tsconfig.tsbuildinfo",
+            "frontend/test-results/run/trace.zip",
+            ".claude/.cc-writes/1",
+            "backend/.claude/.cc-writes/2",
+        ] {
+            write_file(checkout, file, "made again");
+        }
+        let defaults = regenerable_defaults();
+        assert_eq!(work_in(repo.path(), checkout, &defaults), "");
+
+        write_file(checkout, ".claude/settings.local.json", "{}");
+        let work = work_in(repo.path(), checkout, &defaults);
+        assert!(
+            work.contains("1 ignored folder(s)") && work.contains(".claude/"),
+            "{work}"
+        );
+        fs::remove_file(checkout.join(".claude/settings.local.json")).unwrap();
+
+        write_file(checkout, "frontend/.env", "TOKEN=1");
+        let work = work_in(repo.path(), checkout, &defaults);
+        assert!(work.contains("frontend/.env"), "{work}");
+    }
+
+    /// KT-2084 — a configured glob matches an ignored file's name at any depth.
+    #[test]
+    fn a_configured_regenerable_glob_is_not_work() {
+        let repo = make_test_repo("disc-regenerable-glob");
+        commit_ignore(repo.path(), "*.gen.ts\n");
+        let info = create_discussion_worktree(repo.path(), "proj", "glob", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        write_file(checkout, "src/api/client.gen.ts", "generated");
+        let work = work_in(repo.path(), checkout, &regenerable_defaults());
+        assert!(work.contains("src/api/client.gen.ts"), "{work}");
+
+        let mut configured = regenerable_defaults();
+        configured.push("*.gen.ts".to_string());
+        assert_eq!(work_in(repo.path(), checkout, &configured), "");
+    }
+
+    /// KT-2084 — git quotes a name holding a space or a non-ASCII letter unless asked for
+    /// NUL-separated output: the delete reads each name as git names it.
+    #[test]
+    fn names_with_spaces_or_accents_are_read_as_git_names_them() {
+        let repo = make_test_repo("disc-quoted-names");
+        commit_ignore(repo.path(), "node_modules/\n");
+        let info = create_discussion_worktree(repo.path(), "proj", "quoted", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        write_file(checkout, "my app/node_modules/pkg/index.js", "installed");
+        write_file(checkout, "café/node_modules/pkg/index.js", "installed");
+        assert_eq!(work_in(repo.path(), checkout, &regenerable_defaults()), "");
+
+        write_file(checkout, "notes é.md", "mine");
+        let work = work_in(repo.path(), checkout, &regenerable_defaults());
+        assert!(work.contains("(notes é.md)"), "{work}");
+    }
+
+    /// KT-2084 — a name is read whole, whatever it holds.
+    #[test]
+    fn a_name_holding_an_arrow_or_a_quote_is_read_whole() {
+        let repo = make_test_repo("disc-arrow-name");
+        let info = create_discussion_worktree(repo.path(), "proj", "arrow", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        write_file(checkout, "x -> .kronn/notes.md", "mine");
+        write_file(checkout, "say \"hi\".md", "mine");
+        let work = work_in(repo.path(), checkout, &regenerable_defaults());
+        assert!(
+            work.contains("2 uncommitted file(s)")
+                && work.contains("x -> .kronn/notes.md")
+                && work.contains("say \"hi\".md"),
+            "{work}"
+        );
+    }
+
+    /// KT-2084 — seeds under a wholly ignored directory are Kronn's copies; anything
+    /// else in that directory is still work.
+    #[test]
+    fn seeds_under_a_wholly_ignored_directory_are_not_work() {
+        let repo = make_test_repo("disc-seeds-parent");
+        commit_ignore(repo.path(), "public/\n");
+        let info = create_discussion_worktree(repo.path(), "proj", "seeds", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        let admin = registered_worktree_git_dir(repo.path(), checkout).unwrap();
+        fs::write(
+            admin.join(LANE_SEEDS_MARKER_FILE),
+            r#"{"seeds":{"public/build":"fingerprint"}}"#,
+        )
+        .unwrap();
+        write_file(checkout, "public/build/app.js", "seeded");
+        assert_eq!(work_in(repo.path(), checkout, &regenerable_defaults()), "");
+
+        write_file(checkout, "public/notes.txt", "mine");
+        let work = work_in(repo.path(), checkout, &regenerable_defaults());
+        assert!(work.contains("public/"), "{work}");
+    }
+
+    /// KT-2084 — `--force` keeps nothing of a submodule's repository: a pin that only a
+    /// tag reaches is safe on the remote, and the worktree goes.
+    #[test]
+    fn a_submodule_pinned_to_a_tag_only_commit_is_removed_with_its_worktree() {
+        let (repo, upstream) = make_test_repo_with_submodule("deleted-disc-sub-tag");
+        let up = upstream.path();
+        git(up, &["checkout", "-q", "--detach"]);
+        write_file(up, "release.txt", "v1");
+        git(up, &["add", "release.txt"]);
+        git(up, &["commit", "-qm", "release"]);
+        git(up, &["tag", "v1"]);
+        let pinned = head_sha(up);
+        git(up, &["checkout", "-q", "main"]);
+        let sub = repo.path().join("sub");
+        git(&sub, &["fetch", "-q", "origin", "--tags"]);
+        git(&sub, &["checkout", "-q", &pinned]);
+        git(repo.path(), &["commit", "-qam", "pin v1"]);
+        let info = create_discussion_worktree(repo.path(), "proj", "sub-tag", "main").unwrap();
+        git(
+            Path::new(&info.path),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "-q",
+            ],
+        );
+        assert_eq!(head_sha(&Path::new(&info.path).join("sub")), pinned);
+        drop(upstream);
+
+        let outcome = remove_deleted(repo.path(), &info.path);
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(!Path::new(&info.path).exists());
+    }
+
+    /// KT-2084 — a tracked agent config Kronn rewrote in the worktree (`.mcp.json` committed
+    /// by the project) never keeps it; Kronn's copy stays when other work keeps it.
+    #[test]
+    fn a_tracked_agent_config_copy_never_keeps_a_deleted_discussion_worktree() {
+        let repo = make_test_repo("deleted-disc-tracked-copy");
+        fs::write(repo.path().join(".mcp.json"), "{}").unwrap();
+        git(repo.path(), &["add", ".mcp.json"]);
+        git(repo.path(), &["commit", "-qm", "mcp"]);
+        fs::write(repo.path().join(".mcp.json"), r#"{"local":1}"#).unwrap();
+        let kept = create_discussion_worktree(repo.path(), "proj", "copy-kept", "main").unwrap();
+        let kept_checkout = Path::new(&kept.path);
+        assert_eq!(
+            fs::read_to_string(kept_checkout.join(".mcp.json")).unwrap(),
+            r#"{"local":1}"#
+        );
+        fs::write(kept_checkout.join("late.txt"), "late").unwrap();
+
+        let outcome = remove_deleted(repo.path(), &kept.path);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(kept_checkout.join(".mcp.json")).unwrap(),
+            r#"{"local":1}"#,
+            "Kronn's copy stays"
+        );
+
+        let info = create_discussion_worktree(repo.path(), "proj", "copy-gone", "main").unwrap();
+        let outcome = remove_deleted(repo.path(), &info.path);
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(!Path::new(&info.path).exists());
+    }
+
+    /// KT-2084 — a repository inside Kronn's own untracked directory is never removed by
+    /// hand: the worktree stays and the reason names it.
+    #[test]
+    fn a_repository_inside_an_untracked_kronn_directory_keeps_the_worktree() {
+        let repo = make_test_repo("deleted-disc-nested-repo");
+        let info = create_discussion_worktree(repo.path(), "proj", "nested", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        let exclude = repo.path().join(".git/info/exclude");
+        let kept: String = fs::read_to_string(&exclude)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("worktrees"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        fs::write(&exclude, kept).unwrap();
+        fs::create_dir_all(checkout.join(".kronn/data")).unwrap();
+        git(&checkout.join(".kronn/data"), &["init", "-q", "mirror"]);
+        write_file(checkout, ".kronn/data/mirror/notes.txt", "mine");
+
+        let outcome = remove_deleted(repo.path(), &info.path);
+
+        assert!(
+            outcome
+                .as_ref()
+                .is_err_and(|error| error.contains(".kronn/data/mirror")),
+            "{outcome:?}"
+        );
+        assert!(checkout.join(".kronn/data/mirror/.git").is_dir());
+        assert_eq!(
+            fs::read_to_string(checkout.join(".kronn/data/mirror/notes.txt")).unwrap(),
+            "mine"
+        );
+    }
+
+    // ── KT-2084 — the delete path stays inside the worktree ──
+
+    /// An outside directory holding one file, to prove it survives.
+    fn outside_file() -> (tempfile::TempDir, PathBuf) {
+        let outside = tempfile::Builder::new()
+            .prefix("kronn-wt-outside-")
+            .tempdir()
+            .unwrap();
+        let file = outside.path().join("kept.txt");
+        fs::write(&file, "outside").unwrap();
+        (outside, file)
+    }
+
+    /// A submodule repository whose configuration Kronn does not trust keeps the worktree,
+    /// and no git command runs inside it.
+    #[test]
+    fn an_untrusted_submodule_repository_keeps_the_worktree_and_runs_nothing_in_it() {
+        let (repo, checkout) = discussion_worktree_with_submodule("deleted-disc-planted-sub");
+        let sub = checkout.join("sub");
+        fs::remove_file(sub.join(".git")).unwrap();
+        git(&sub, &["init", "-q", "-b", "main"]);
+        let identity = ["-c", "user.email=t@t.com", "-c", "user.name=T"];
+        git(&sub, &["add", "lib.txt"]);
+        git(
+            &sub,
+            &[&identity[..], &["commit", "-qm", "planted"]].concat(),
+        );
+        let (elsewhere, _) = outside_file();
+        git(
+            &sub,
+            &[
+                "config",
+                "core.worktree",
+                &elsewhere.path().to_string_lossy(),
+            ],
+        );
+        fs::write(sub.join(".git/info/attributes"), "* filter=lfs\n").unwrap();
+        let index = sub.join(".git/index");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        fs::File::options()
+            .append(true)
+            .open(&index)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let outcome = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(checkout.exists());
+        assert_eq!(
+            fs::metadata(&index).unwrap().modified().unwrap(),
+            old,
+            "a git command ran inside the planted repository"
+        );
+    }
+
+    /// The owner's filter naming a program by a path relative to the worktree never runs
+    /// during the removal itself.
+    #[cfg(unix)] // plants #!/bin/sh programs, executable through unix mode bits
+    #[test]
+    fn removing_a_discussion_worktree_runs_no_program_it_holds() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = make_test_repo("deleted-disc-relative-filter");
+        fs::write(repo.path().join(".gitattributes"), "README.md filter=kt\n").unwrap();
+        git(repo.path(), &["add", ".gitattributes"]);
+        git(repo.path(), &["commit", "-qm", "attributes"]);
+        git(repo.path(), &["config", "filter.kt.clean", "./tool.sh"]);
+        let info = create_discussion_worktree(repo.path(), "proj", "rel-filter", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        let (marks, _) = outside_file();
+        let ran = marks.path().join("ran");
+        let tool = checkout.join("tool.sh");
+        fs::write(
+            &tool,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", ran.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::File::options()
+            .append(true)
+            .open(checkout.join("README.md"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+
+        let _ = remove_deleted(repo.path(), &info.path);
+
+        assert!(!ran.exists(), "a program in the worktree ran");
+    }
+
+    #[test]
+    fn only_a_plain_relative_path_is_judged() {
+        for plain in ["a", "a/b", "dir/", ".kronn/x", "caf\u{e9} \"q\" -> b"] {
+            assert!(plain_relative(plain), "{plain}");
+        }
+        for odd in [
+            "", "/", "/abs", "a//b", "./a", "a/./b", "../a", "a/..", "a/../b",
+        ] {
+            assert!(!plain_relative(odd), "{odd}");
+        }
+    }
+
+    /// A path that only ends like a registered worktree's is not that worktree.
+    #[test]
+    fn a_worktree_path_sharing_a_suffix_is_not_matched() {
+        let repo = make_test_repo("branch-suffix");
+        let info = create_discussion_worktree(repo.path(), "proj", "suffix", "main").unwrap();
+        let name = Path::new(&info.path).file_name().unwrap().to_string_lossy();
+        let elsewhere = format!("/elsewhere/{name}");
+        assert_eq!(find_branch_for_worktree(repo.path(), &elsewhere), None);
+        assert_eq!(
+            find_branch_for_worktree(repo.path(), &info.path),
+            Some(info.branch.clone())
+        );
+    }
+
+    /// KT-2084 — the branch is read from the worktree's own registration: Kronn's relative
+    /// `gitdir` finds it, whatever form `git worktree list` gives the path in.
+    #[test]
+    fn the_branch_of_a_worktree_registered_with_a_relative_gitdir_is_found() {
+        let repo = make_test_repo("branch-relative-gitdir");
+        let info = create_discussion_worktree(repo.path(), "proj", "relative", "main").unwrap();
+        let admin = registered_worktree_git_dir(repo.path(), Path::new(&info.path)).unwrap();
+        let gitdir = fs::read_to_string(admin.join("gitdir")).unwrap();
+        assert!(Path::new(gitdir.trim()).is_relative(), "{gitdir}");
+
+        assert_eq!(
+            find_branch_for_worktree(repo.path(), &info.path),
+            Some(info.branch.clone())
+        );
+        git(Path::new(&info.path), &["checkout", "-q", "--detach"]);
+        assert_eq!(find_branch_for_worktree(repo.path(), &info.path), None);
+    }
+
+    /// KT-2084 — Kronn's `.kronn/` is ignored in every worktree; a linked worktree inside it
+    /// (a PR checkout) is still a repository the delete never takes.
+    #[test]
+    fn a_worktree_inside_the_ignored_kronn_directory_keeps_the_worktree() {
+        let repo = make_test_repo("deleted-disc-ignored-nested");
+        let info =
+            create_discussion_worktree(repo.path(), "proj", "ignored-nested", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        let exclude = fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+        assert!(
+            exclude.lines().any(|line| line.trim() == ".kronn/"),
+            "{exclude}"
+        );
+        let pr = checkout.join(".kronn/pr-1");
+        git(
+            repo.path(),
+            &["worktree", "add", "-q", "-b", "pr-1", &pr.to_string_lossy()],
+        );
+        write_file(&pr, "wip.txt", "uncommitted");
+
+        let outcome = remove_deleted(repo.path(), &info.path);
+
+        assert!(
+            outcome
+                .as_ref()
+                .is_err_and(|error| error.contains(".kronn/")),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(pr.join("wip.txt")).unwrap(),
+            "uncommitted"
+        );
+    }
+
+    /// KT-2084 — a regenerable name is matched against the ignored entry itself, never a
+    /// folder above it: a `.env` in a tracked `build/` is work.
+    #[test]
+    fn an_ignored_file_in_a_tracked_build_folder_is_work() {
+        let repo = make_test_repo("disc-tracked-build");
+        write_file(repo.path(), "build/keep.txt", "tracked");
+        git(repo.path(), &["add", "build/keep.txt"]);
+        git(repo.path(), &["commit", "-qm", "tracked build"]);
+        commit_ignore(repo.path(), ".env\n");
+        let info =
+            create_discussion_worktree(repo.path(), "proj", "tracked-build", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        write_file(checkout, "build/.env", "TOKEN=1");
+
+        let work = work_in(repo.path(), checkout, &regenerable_defaults());
+
+        assert!(work.contains("build/.env"), "{work}");
+    }
+
+    /// KT-2084 — an entry holding `/` names a path from the worktree root: that folder, not
+    /// another of the same name.
+    #[test]
+    fn a_regenerable_path_entry_names_that_folder_only() {
+        let repo = make_test_repo("disc-regenerable-path");
+        commit_ignore(repo.path(), "bindings/\nbundle/\n");
+        let info = create_discussion_worktree(repo.path(), "proj", "regen-path", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        write_file(checkout, "backend/bindings/Task.ts", "generated");
+        write_file(checkout, "vendor/bundle/gems/x.rb", "installed");
+        write_file(checkout, "other/bindings/Hand.ts", "hand-written");
+        let configured =
+            regenerable_outputs_with(&["backend/bindings".to_string(), "/vendor/bundle/".into()]);
+
+        let work = work_in(repo.path(), checkout, &configured);
+
+        assert!(work.contains("other/bindings/"), "{work}");
+        assert!(
+            !work.contains("backend/bindings") && !work.contains("vendor/bundle"),
+            "{work}"
+        );
+    }
+
+    /// KT-2084 — a wholly ignored folder is named as a folder, with the way to declare it
+    /// generated output.
+    #[test]
+    fn an_ignored_folder_is_counted_as_a_folder() {
+        let repo = make_test_repo("disc-ignored-folder");
+        commit_ignore(repo.path(), "bindings/\n.env\n");
+        let info = create_discussion_worktree(repo.path(), "proj", "ign-folder", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        write_file(checkout, "backend/bindings/A.ts", "generated");
+        write_file(checkout, "backend/bindings/B.ts", "generated");
+        write_file(checkout, ".env", "TOKEN=1");
+
+        let work = work_in(repo.path(), checkout, &regenerable_defaults());
+
+        assert!(
+            work.contains(
+                "1 ignored file(s) and 1 ignored folder(s) in wt (.env, backend/bindings/)"
+            ),
+            "{work}"
+        );
+        assert!(work.contains("`server.regenerable_outputs`"), "{work}");
+    }
+
+    /// KT-2084 — an untracked link stays as it is when the delete keeps the worktree.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn a_kept_worktree_gets_its_untracked_link_back() {
+        let repo = make_test_repo("deleted-disc-link-back");
+        let info = create_discussion_worktree(repo.path(), "proj", "link-back", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        let (store, _) = outside_file();
+        std::os::unix::fs::symlink(store.path(), checkout.join("node_modules")).unwrap();
+        fs::write(checkout.join("late.txt"), "late").unwrap();
+
+        let outcome = remove_deleted(repo.path(), &info.path);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_link(checkout.join("node_modules")).unwrap(),
+            store.path()
+        );
+        assert!(checkout.join("late.txt").exists());
+    }
+
     #[test]
     fn test_reattach_worktree_after_remove() {
         let repo = make_test_repo("reattach");
@@ -6083,7 +9287,7 @@ mod tests {
         let branch = info.branch.clone();
 
         // Remove worktree but keep branch
-        remove_discussion_worktree(repo.path(), &info.path, false).unwrap();
+        remove_discussion_worktree(repo.path(), &info.path, None).unwrap();
         assert!(!Path::new(&info.path).exists());
 
         // Re-attach
@@ -6146,17 +9350,17 @@ mod tests {
     #[test]
     fn test_branch_checked_out_at_finds_main() {
         let repo = make_test_repo("checkout-at");
-        let result = branch_checked_out_at(repo.path(), "main");
+        let result = branch_checked_out_at(repo.path(), "main").unwrap();
         assert!(result.is_some(), "main should be found as checked out");
         // Compare through same_path: git canonicalizes (`/private/var/…` on
         // macOS) while tempfile returns the symlinked spelling (`/var/…`).
-        assert!(same_path(&result.unwrap(), repo.path()));
+        assert!(same_path(&result.unwrap().path, repo.path()));
     }
 
     #[test]
     fn test_branch_checked_out_at_returns_none_for_nonexistent() {
         let repo = make_test_repo("checkout-none");
-        let result = branch_checked_out_at(repo.path(), "kronn/does-not-exist");
+        let result = branch_checked_out_at(repo.path(), "kronn/does-not-exist").unwrap();
         assert!(result.is_none());
     }
 
@@ -6171,24 +9375,24 @@ mod tests {
 
     #[test]
     fn test_parse_porcelain_basic_shapes() {
-        // Explicit \n join — a multi-line literal with `"\` would let the
-        // line-continuation escape eat the leading space on the " M" line.
-        let out = [
-            " M src/lib.rs",
-            "?? newfile.txt",
-            "A  staged.rs",
-            "R  old.rs -> new.rs",
-        ]
-        .join("\n");
-        let files = parse_porcelain(&out);
-        assert_eq!(files.len(), 4);
-        assert_eq!(files[0].status, " M");
-        assert_eq!(files[0].path, "src/lib.rs");
-        assert_eq!(files[1].status, "??");
-        assert_eq!(files[1].path, "newfile.txt");
-        assert_eq!(files[3].status, "R ");
-        // Rename: we keep the target filename (post-arrow).
-        assert_eq!(files[3].path, "new.rs");
+        let out = b" M src/lib.rs\0?? new file.txt\0A  staged.rs\0R  new.rs\0old.rs\0 C copy -> x\0orig\0!! a \"b\".log\0";
+        let files = parse_porcelain_z(out);
+        let shapes: Vec<(&str, &str)> = files
+            .iter()
+            .map(|file| (file.status.as_str(), file.path.as_str()))
+            .collect();
+        // A rename or a copy keeps its target; its source is never read as an entry.
+        assert_eq!(
+            shapes,
+            [
+                (" M", "src/lib.rs"),
+                ("??", "new file.txt"),
+                ("A ", "staged.rs"),
+                ("R ", "new.rs"),
+                (" C", "copy -> x"),
+                ("!!", "a \"b\".log"),
+            ]
+        );
     }
 
     #[test]
@@ -7331,9 +10535,13 @@ mod tests {
     fn task_cleanup_refuses_an_external_checkout_path() {
         let repo = make_test_repo("task-external-cleanup");
         let external = tempfile::tempdir().unwrap();
-        let error =
-            remove_cancelled_task_worktree(repo.path(), &external.path().to_string_lossy(), "main")
-                .unwrap_err();
+        let error = remove_cancelled_task_worktree(
+            repo.path(),
+            &external.path().to_string_lossy(),
+            "main",
+            external.path(),
+        )
+        .unwrap_err();
         assert!(error.contains("outside managed root"), "{error}");
         assert!(external.path().exists());
     }
@@ -7349,8 +10557,14 @@ mod tests {
             &head_sha(old_repo.path()),
         )
         .unwrap();
-        let error =
-            remove_cancelled_task_worktree(new_repo.path(), &info.path, &info.branch).unwrap_err();
+        let evidence = tempfile::tempdir().unwrap();
+        let error = remove_cancelled_task_worktree(
+            new_repo.path(),
+            &info.path,
+            &info.branch,
+            evidence.path(),
+        )
+        .unwrap_err();
         assert!(error.contains("outside managed root"), "{error}");
         assert!(Path::new(&info.path).exists());
     }
@@ -8003,8 +11217,10 @@ mod tests {
         let base = head_sha(repo.path());
         let info = create_task_worktree(repo.path(), "KT-322", "cancel", &base).unwrap();
         let worker_head = commit_file(Path::new(&info.path), "worker.txt", "keep", "worker work");
+        let evidence = tempfile::tempdir().unwrap();
 
-        remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch).unwrap();
+        remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+            .unwrap();
         assert!(
             !Path::new(&info.path).exists(),
             "clean checkout was removed"
@@ -8023,7 +11239,14 @@ mod tests {
         let info = create_task_worktree(repo.path(), "KT-322", "dirty", &base).unwrap();
         fs::write(Path::new(&info.path).join("scratch.txt"), "uncommitted").unwrap();
 
-        assert!(remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch).is_err());
+        let evidence = tempfile::tempdir().unwrap();
+        assert!(remove_cancelled_task_worktree(
+            repo.path(),
+            &info.path,
+            &info.branch,
+            evidence.path()
+        )
+        .is_err());
         assert!(Path::new(&info.path).exists());
     }
 
@@ -8043,7 +11266,10 @@ mod tests {
             release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
                 .unwrap();
 
-        let TerminalWorktreeRelease::Removed { patch: Some(patch) } = released else {
+        let TerminalWorktreeRelease::Removed {
+            patch: Some(patch), ..
+        } = released
+        else {
             panic!("expected a removal with a saved patch, got {released:?}");
         };
         let saved = fs::read_to_string(patch).unwrap();
@@ -8126,9 +11352,146 @@ mod tests {
         .unwrap();
         assert!(matches!(
             released,
-            TerminalWorktreeRelease::Removed { patch: Some(_) }
+            TerminalWorktreeRelease::Removed { patch: Some(_), .. }
         ));
         assert!(!Path::new(&info.path).exists());
+    }
+
+    /// A task worktree whose `.env` and `backend/bindings/` are ignored, with a link inside the
+    /// folder to `outside`.
+    fn task_with_ignored_files(name: &str) -> (tempfile::TempDir, WorktreeInfo, tempfile::TempDir) {
+        let repo = make_test_repo(name);
+        commit_ignore(repo.path(), ".env\nbindings/\n");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-2084", "ignored", &base).unwrap();
+        let checkout = Path::new(&info.path);
+        write_file(checkout, ".env", "TOKEN=1");
+        write_file(
+            checkout,
+            "backend/bindings/Task.ts",
+            "export type Task = {};",
+        );
+        write_file(
+            checkout,
+            "backend/bindings/deep/Run.ts",
+            "export type Run = {};",
+        );
+        let (outside, _) = outside_file();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), checkout.join("backend/bindings/linked"))
+            .unwrap();
+        (repo, info, outside)
+    }
+
+    /// KT-2084 — a finished checkout's ignored files are copied into its evidence, then it
+    /// is released; a link among them is not followed and a stale copy goes first.
+    #[test]
+    fn release_terminal_task_worktree_keeps_ignored_files_as_evidence() {
+        let (repo, info, outside) = task_with_ignored_files("task-release-ignored");
+        let evidence = tempfile::tempdir().unwrap();
+        write_file(evidence.path(), "ignored/stale.txt", "earlier attempt");
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path());
+
+        let copied = evidence.path().join(RELEASED_WORKTREE_IGNORED_DIR);
+        assert_eq!(
+            released,
+            Ok(TerminalWorktreeRelease::Removed {
+                patch: None,
+                ignored_copied: Some(copied.clone()),
+            })
+        );
+        assert!(!Path::new(&info.path).exists());
+        assert_eq!(fs::read(copied.join(".env")).unwrap(), b"TOKEN=1");
+        assert_eq!(
+            fs::read_to_string(copied.join("backend/bindings/Task.ts")).unwrap(),
+            "export type Task = {};"
+        );
+        assert_eq!(
+            fs::read_to_string(copied.join("backend/bindings/deep/Run.ts")).unwrap(),
+            "export type Run = {};"
+        );
+        assert!(fs::symlink_metadata(copied.join("backend/bindings/linked")).is_err());
+        assert!(!copied.join("stale.txt").exists());
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
+    }
+
+    /// KT-2084 — the ignored files count against the evidence cap with the patch: over it,
+    /// the checkout stays and nothing is left in the evidence.
+    #[test]
+    fn release_terminal_task_worktree_keeps_a_checkout_whose_ignored_files_exceed_the_cap() {
+        let (repo, info, _outside) = task_with_ignored_files("task-release-ignored-cap");
+        let env = "x".repeat(1000);
+        fs::write(Path::new(&info.path).join(".env"), &env).unwrap();
+        // The ignored files (1042 bytes) and the patch (about 190) each fit; together they
+        // do not.
+        fs::write(Path::new(&info.path).join("README.md"), "# edited").unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let error = release_terminal_task_worktree_capped(
+            repo.path(),
+            &info.path,
+            &info.branch,
+            evidence.path(),
+            1100,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("evidence cap"), "{error}");
+        assert_eq!(
+            fs::read_to_string(Path::new(&info.path).join(".env")).unwrap(),
+            env
+        );
+        assert!(!evidence.path().join("ignored").exists());
+        assert!(!evidence.path().join(RELEASED_WORKTREE_PATCH).exists());
+    }
+
+    /// KT-2084 — a task submodule is cloned from the project's own submodule repository: a
+    /// pin that repository holds is saved, even when none of its branches reaches it. A
+    /// commit only the task's clone holds still keeps the checkout.
+    #[test]
+    fn a_task_submodule_pinned_from_the_project_checkout_is_saved_there() {
+        let repo = make_test_repo("task-release-sub-pin");
+        let upstream = add_materialized_test_submodule(repo.path());
+        let pinned = commit_file(upstream.path(), "bump.txt", "v2", "upstream bump");
+        let source = repo.path().join("deps/required");
+        git(&source, &["fetch", "-q", "origin"]);
+        git(&source, &["checkout", "-q", "--detach", &pinned]);
+        git(repo.path(), &["commit", "-qam", "bump the submodule"]);
+        let base = head_sha(repo.path());
+        let saved = create_task_worktree(repo.path(), "KT-2084", "sub-saved", &base).unwrap();
+        let own = create_task_worktree(repo.path(), "KT-2084", "sub-own", &base).unwrap();
+        let own_commit = commit_file(
+            &Path::new(&own.path).join("deps/required"),
+            "local.txt",
+            "only here",
+            "task-only commit",
+        );
+        let evidence = tempfile::tempdir().unwrap();
+
+        let released = release_terminal_task_worktree(
+            repo.path(),
+            &saved.path,
+            &saved.branch,
+            evidence.path(),
+        );
+        let kept =
+            release_terminal_task_worktree(repo.path(), &own.path, &own.branch, evidence.path());
+
+        assert!(
+            matches!(released, Ok(TerminalWorktreeRelease::Removed { .. })),
+            "{released:?}"
+        );
+        assert!(!Path::new(&saved.path).exists());
+        assert!(
+            kept.as_ref()
+                .is_err_and(|error| error.contains("deps/required") && error.contains(&own_commit)),
+            "{kept:?}"
+        );
+        assert!(Path::new(&own.path)
+            .join("deps/required/local.txt")
+            .exists());
     }
 
     /// KT-1397 — the patch itself is streamed under the cap: a tracked edit
@@ -8136,12 +11499,13 @@ mod tests {
     #[test]
     fn write_uncommitted_patches_stop_at_the_cap_and_leave_nothing() {
         let repo = make_test_repo("task-patch-cap");
-        fs::write(repo.path().join("big.txt"), "x".repeat(8192)).unwrap();
+        let info = create_discussion_worktree(repo.path(), "proj", "patch-cap", "main").unwrap();
+        let wt = Path::new(&info.path);
+        fs::write(wt.join("big.txt"), "x".repeat(8192)).unwrap();
         let evidence = tempfile::tempdir().unwrap();
-        let index = evidence.path().join("scratch-index");
+        let judged = Judgement::of(wt).unwrap();
 
-        let error =
-            write_uncommitted_patches(repo.path(), &index, evidence.path(), 1024).unwrap_err();
+        let error = write_uncommitted_patches(&judged, evidence.path(), 1024).unwrap_err();
 
         assert!(error.contains("cap"), "{error}");
         let left: Vec<_> = fs::read_dir(evidence.path())
@@ -8149,7 +11513,8 @@ mod tests {
             .flatten()
             .map(|entry| entry.file_name())
             .collect();
-        assert_eq!(left.len(), 1, "only the scratch index remains: {left:?}");
+        // The scratch index lives in Kronn's copy of the git state, not in the evidence.
+        assert!(left.is_empty(), "nothing remains: {left:?}");
     }
 
     /// Git state of a checkout as a comparable value: the index (as a patch
@@ -8229,7 +11594,7 @@ mod tests {
 
         assert!(matches!(
             released,
-            TerminalWorktreeRelease::Removed { patch: Some(_) }
+            TerminalWorktreeRelease::Removed { patch: Some(_), .. }
         ));
         assert!(!wt.exists());
         let staged = evidence.path().join(RELEASED_WORKTREE_STAGED_PATCH);
@@ -8404,6 +11769,31 @@ mod tests {
             .is_none());
     }
 
+    /// KT-2084 — the newest write of the whole tree, not the first one found:
+    /// the delete's "retry after" is when the window really ends.
+    #[test]
+    fn checkout_newest_write_since_finds_the_latest_write_anywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("a/b/old.txt"), "o").unwrap();
+        fs::write(root.join("new.txt"), "n").unwrap();
+        let now = std::time::SystemTime::now();
+        let at = |secs: u64| now - std::time::Duration::from_secs(secs);
+        set_mtime(&root.join("a/b/old.txt"), at(120));
+        set_mtime(&root.join("new.txt"), at(30));
+        for path in [root.join("a/b"), root.join("a"), root.to_path_buf()] {
+            set_mtime(&path, at(600));
+        }
+
+        let newest = checkout_newest_write_since(root, at(300)).unwrap().unwrap();
+        let drift = newest
+            .duration_since(at(30))
+            .unwrap_or_else(|e| e.duration());
+        assert!(drift < std::time::Duration::from_secs(1), "{newest:?}");
+        assert_eq!(checkout_newest_write_since(root, at(10)).unwrap(), None);
+    }
+
     /// KT-514/KT-478 — the reclaim must succeed on a task worktree that carries a
     /// materialized submodule, which `git worktree remove` refuses without
     /// `--force`. An abandoned generation's checkout goes; its branch and the
@@ -8419,8 +11809,10 @@ mod tests {
             "submodule must be materialized in the task worktree"
         );
         let worker_head = commit_file(Path::new(&info.path), "worker.txt", "keep", "worker work");
+        let evidence = tempfile::tempdir().unwrap();
 
-        remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch).unwrap();
+        remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+            .unwrap();
 
         assert!(
             !Path::new(&info.path).exists(),
@@ -8473,7 +11865,7 @@ mod tests {
         // Simulate a partial prior cleanup: the directory is gone, the admin
         // entry may linger.
         std::fs::remove_dir_all(&info.path).unwrap();
-        remove_discussion_worktree(repo.path(), &info.path, false).unwrap();
+        remove_discussion_worktree(repo.path(), &info.path, None).unwrap();
         assert!(!Path::new(&info.path).exists());
     }
 
@@ -8751,5 +12143,2706 @@ mod tests {
                 "expected {rev:?} to pass"
             );
         }
+    }
+
+    // ── KT-2084 — Kronn removes only the worktrees and registrations it owns ─
+
+    /// A path spelled under `from` that climbs to the root and ends at `to`.
+    #[cfg(unix)]
+    fn through_parents(from: &Path, to: &Path) -> String {
+        format!(
+            "{}/{}{}",
+            from.display(),
+            "../".repeat(from.components().count() - 1),
+            to.display().to_string().trim_start_matches('/')
+        )
+    }
+
+    /// The registration of a new discussion worktree `name` of `repo`, its `gitdir` file
+    /// then saying `content`.
+    fn registration_saying(repo: &Path, name: &str, content: &str) -> PathBuf {
+        let info = create_discussion_worktree(repo, "proj", name, "main").unwrap();
+        let admin = git_dir_of(Path::new(&info.path));
+        fs::write(admin.join("gitdir"), content).unwrap();
+        admin
+    }
+
+    fn a_canonical_worktree(repo: &Path, name: &str) -> PathBuf {
+        let info = create_discussion_worktree(repo, "proj", name, "main").unwrap();
+        Path::new(&info.path).canonicalize().unwrap()
+    }
+
+    fn listed_worktrees(repo: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .args(["worktree", "list", "--porcelain", "-z"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn stale_stat(file: &Path) {
+        fs::File::options()
+            .append(true)
+            .open(file)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+    }
+
+    #[cfg(unix)] // spells a POSIX absolute path through `../` up to `/`
+    #[test]
+    fn the_boot_prune_never_removes_a_directory_named_through_a_parent() {
+        let repo = make_test_repo("prune-through-parent");
+        let (outside, kept) = outside_file();
+        let victim = outside.path().canonicalize().unwrap();
+        let kronn = repo.path().canonicalize().unwrap().join(".kronn");
+        let gitdir = format!("{}/.git\n", through_parents(&kronn, &victim));
+        let admin = registration_saying(repo.path(), "through-parent", &gitdir);
+
+        prune_kronn_worktrees(repo.path()).unwrap();
+
+        assert!(
+            kept.exists(),
+            "a directory outside the repository was removed"
+        );
+        assert!(
+            admin.exists(),
+            "a registration Kronn does not own was removed"
+        );
+    }
+
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn the_boot_prune_never_removes_a_directory_named_through_a_link() {
+        let repo = make_test_repo("prune-through-link");
+        let (outside, _) = outside_file();
+        write_file(outside.path(), "v/precious.txt", "outside");
+        let admin = registration_saying(repo.path(), "through-link", "");
+        let base = repo.path().canonicalize().unwrap().join(".kronn/worktrees");
+        std::os::unix::fs::symlink(outside.path(), base.join("ln")).unwrap();
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}/ln/v/.git\n", base.display()),
+        )
+        .unwrap();
+
+        prune_kronn_worktrees(repo.path()).unwrap();
+
+        assert!(
+            outside.path().join("v/precious.txt").exists(),
+            "a directory reached through a link was removed"
+        );
+        assert!(
+            admin.exists(),
+            "a registration Kronn does not own was removed"
+        );
+    }
+
+    #[cfg(unix)] // writes a POSIX absolute path into a registration's gitdir
+    #[test]
+    fn a_registration_spelling_several_entries_never_gets_another_worktree_removed() {
+        let repo = make_test_repo("prune-several-entries");
+        let other = a_canonical_worktree(repo.path(), "other");
+        fs::write(other.join("notes.txt"), "work").unwrap();
+        let other_admin = git_dir_of(&other);
+        let base = repo.path().canonicalize().unwrap().join(".kronn/worktrees");
+        let gitdir = format!(
+            "{base}/gone\nworktree {}\nprunable\nworktree {base}/gone2/.git\n",
+            other.display(),
+            base = base.display()
+        );
+        registration_saying(repo.path(), "several-entries", &gitdir);
+
+        prune_kronn_worktrees(repo.path()).unwrap();
+
+        assert!(
+            other.join("notes.txt").exists(),
+            "another worktree was removed"
+        );
+        assert!(
+            other_admin.exists(),
+            "another worktree's registration was removed"
+        );
+    }
+
+    #[cfg(unix)] // spells a POSIX absolute path through `../` up to `/`
+    #[test]
+    fn the_run_cleanup_never_removes_what_a_nested_registration_names_outside_the_run() {
+        let repo = make_test_repo("nested-outside");
+        let (outside, kept) = outside_file();
+        let victim = outside.path().canonicalize().unwrap();
+        let run = a_canonical_worktree(repo.path(), "run");
+        let other = a_canonical_worktree(repo.path(), "other");
+        fs::write(other.join("notes.txt"), "work").unwrap();
+        let gitdir = format!("{}/.git\n", through_parents(&run, &victim));
+        registration_saying(repo.path(), "nested-parent", &gitdir);
+        let gitdir = format!(
+            "{run}/gone\nworktree {run}/../{}\nprunable\nworktree {run}/gone2/.git\n",
+            other.file_name().unwrap().to_string_lossy(),
+            run = run.display()
+        );
+        registration_saying(repo.path(), "nested-several", &gitdir);
+
+        let found = nested_worktrees(repo.path(), &run).unwrap();
+        remove_nested_worktrees(repo.path(), &run).unwrap();
+
+        assert!(kept.exists(), "a directory outside the run was removed");
+        assert!(
+            other.join("notes.txt").exists(),
+            "another worktree was removed"
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// A registration naming the worktree through `s/..` is not one Kronn wrote: the delete
+    /// keeps the worktree and that registration, whatever the path resolves to.
+    #[cfg(unix)] // writes a POSIX absolute path into a registration's gitdir
+    #[test]
+    fn a_worktree_registered_through_a_parent_is_kept_with_its_registration() {
+        let repo = make_test_repo("gitdir-through-parent");
+        commit_ignore(repo.path(), "s\n");
+        let info =
+            create_discussion_worktree(repo.path(), "proj", "through-parent", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        fs::create_dir(checkout.join("s")).unwrap();
+        let admin = git_dir_of(&checkout);
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}/s/../.git\n", checkout.display()),
+        )
+        .unwrap();
+
+        let removed = remove_deleted(repo.path(), &info.path);
+
+        assert!(removed.is_err(), "{removed:?}");
+        assert!(admin.join("HEAD").exists(), "its registration was removed");
+        assert!(checkout.join("README.md").exists() && checkout.join(".git").exists());
+    }
+
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn a_link_swapped_in_while_kronn_removes_a_worktree_is_never_followed() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("removal-swap");
+        commit_ignore(repo.path(), "s\n");
+        let info = create_discussion_worktree(repo.path(), "proj", "removal-swap", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let (outside, _) = outside_file();
+        let victim = outside.path().canonicalize().unwrap().join("a");
+        write_file(&victim, "b/keep.txt", "outside");
+        write_file(&victim, "precious.txt", "outside");
+        let s = checkout.join("s");
+        fs::create_dir(&s).unwrap();
+        let admin = git_dir_of(&checkout);
+        let (gitdir, target) = (admin.join("gitdir"), victim.join("b"));
+        let through_s = format!("{}/s/../.git\n", checkout.display());
+        swap_probe::arm_hook(checkout.parent().unwrap(), 0, move |_| {
+            fs::write(&gitdir, through_s).unwrap();
+            fs::remove_dir(&s).unwrap();
+            std::os::unix::fs::symlink(&target, &s).unwrap();
+        });
+
+        let removed = remove_deleted(repo.path(), &info.path);
+
+        let fired = swap_probe::fired();
+        assert!(
+            victim.join("precious.txt").exists() && victim.join("b/keep.txt").exists(),
+            "a directory outside the worktree was removed"
+        );
+        assert!(fired, "the swap must land during Kronn's removal");
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(!checkout.exists());
+        assert!(!admin.exists());
+    }
+
+    /// Once Kronn judged the worktree, nothing runs in it: a filter its submodule's
+    /// configuration names, and assigns, as the removal starts never runs.
+    #[cfg(unix)] // the planted clean filter is a POSIX shell command line
+    #[test]
+    fn a_submodule_filter_never_runs_while_its_worktree_is_removed() {
+        use crate::core::fs_guard::swap_probe;
+        let (repo, checkout) = discussion_worktree_with_submodule("removal-sub-filter");
+        let checkout = checkout.canonicalize().unwrap();
+        let sub = checkout.join("sub");
+        let module = git_dir_of(&sub);
+        let (marks, _) = outside_file();
+        let ran = marks.path().join("ran");
+        let filter = format!("touch '{}'; cat", ran.display());
+        swap_probe::arm_hook(checkout.parent().unwrap(), 0, move |_| {
+            git(&sub, &["config", "filter.x.clean", &filter]);
+            fs::create_dir_all(module.join("info")).unwrap();
+            fs::write(module.join("info/attributes"), "* filter=x\n").unwrap();
+            stale_stat(&sub.join("lib.txt"));
+        });
+
+        let _ = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(
+            swap_probe::fired(),
+            "the filter must appear as Kronn removes the worktree"
+        );
+        assert!(
+            !ran.exists(),
+            "a program of the submodule's configuration ran"
+        );
+    }
+
+    // ── KT-2084 — an ownerless worktree is judged and removed as a discussion's ──
+
+    /// A worktree of `.kronn/worktrees` spelled as Kronn spells it, which no row will name.
+    fn ownerless_worktree(repo: &Path, name: &str) -> PathBuf {
+        PathBuf::from(
+            create_discussion_worktree(repo, "proj", name, "main")
+                .unwrap()
+                .path,
+        )
+    }
+
+    /// An ownerless worktree whose registration names it through `s/..` or through a link is
+    /// not one Kronn wrote: nothing outside it is removed, and it is kept with the reason.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn an_ownerless_worktree_registered_through_a_parent_or_a_link_is_kept_with_the_reason() {
+        let repo = make_test_repo("ownerless-indirect");
+        let (outside, kept) = outside_file();
+        let through_parent = ownerless_worktree(repo.path(), "through-parent");
+        fs::create_dir(through_parent.join("s")).unwrap();
+        let parent_admin = git_dir_of(&through_parent);
+        let gitdir = format!(
+            "{}/s/../.git\n",
+            through_parent.canonicalize().unwrap().display()
+        );
+        fs::write(parent_admin.join("gitdir"), gitdir).unwrap();
+        let through_link = ownerless_worktree(repo.path(), "through-link");
+        let link = outside.path().join("ln");
+        std::os::unix::fs::symlink(through_link.canonicalize().unwrap(), &link).unwrap();
+        let link_admin = git_dir_of(&through_link);
+        fs::write(
+            link_admin.join("gitdir"),
+            format!("{}/.git\n", link.display()),
+        )
+        .unwrap();
+
+        // A path outside the checkout is never resolved (KT-2084): the link there is not
+        // followed, so that registration names no worktree of Kronn's.
+        for (checkout, admin, why) in [
+            (&through_parent, &parent_admin, "registered through"),
+            (&through_link, &link_admin, "is not a worktree registered"),
+        ] {
+            let removed = remove_ownerless_worktree(repo.path(), checkout);
+
+            let reason = removed.expect_err("kept: its registration is not one Kronn wrote");
+            assert!(reason.contains(why), "{reason}");
+            assert!(checkout.join("README.md").exists() && checkout.join(".git").exists());
+            assert!(admin.join("HEAD").exists(), "its registration was removed");
+        }
+        assert!(kept.exists(), "a file outside the repository was removed");
+        assert!(fs::symlink_metadata(&link).is_ok(), "the link was removed");
+    }
+
+    /// A filter the submodule's own configuration declares never runs while Kronn judges an
+    /// ownerless worktree: one with a populated submodule is kept, as git kept it.
+    #[cfg(unix)] // the planted clean filter is a POSIX shell command line
+    #[test]
+    fn a_submodule_filter_never_runs_while_an_ownerless_worktree_is_judged() {
+        let (repo, checkout) = discussion_worktree_with_submodule("ownerless-sub-filter");
+        let sub = checkout.join("sub");
+        let module = git_dir_of(&sub);
+        let (marks, _) = outside_file();
+        let ran = marks.path().join("ran");
+        let filter = format!("touch '{}'; cat", ran.display());
+        git(&sub, &["config", "filter.x.clean", &filter]);
+        fs::create_dir_all(module.join("info")).unwrap();
+        fs::write(module.join("info/attributes"), "* filter=x\n").unwrap();
+        stale_stat(&sub.join("lib.txt"));
+
+        let removed = remove_ownerless_worktree(repo.path(), &checkout);
+
+        assert!(
+            !ran.exists(),
+            "a program of the submodule's configuration ran"
+        );
+        let reason = removed.expect_err("kept: it has a populated submodule");
+        assert!(reason.contains("submodule"), "{reason}");
+        assert!(sub.join("lib.txt").exists());
+    }
+
+    /// A clean ownerless worktree goes with its registration: git no longer lists it.
+    #[test]
+    fn a_clean_ownerless_worktree_goes_with_its_registration() {
+        let repo = make_test_repo("ownerless-clean");
+        let checkout = ownerless_worktree(repo.path(), "gone-clean");
+        let admin = git_dir_of(&checkout);
+
+        remove_ownerless_worktree(repo.path(), &checkout).expect("a clean worktree goes");
+
+        assert!(!checkout.exists() && !admin.exists());
+        let listed = listed_worktrees(repo.path());
+        assert!(!listed.contains("gone-clean"), "{listed}");
+    }
+
+    /// Git's own removal never kept a worktree for its ignored files: an ownerless worktree
+    /// holding a `.env` and generated bindings goes with its registration.
+    #[test]
+    fn an_ownerless_worktree_holding_ignored_files_goes_with_its_registration() {
+        let repo = make_test_repo("ownerless-ignored");
+        commit_ignore(repo.path(), ".env\nbackend/bindings/\nnode_modules/\n");
+        let checkout = ownerless_worktree(repo.path(), "gone-ignored");
+        write_file(&checkout, "node_modules/x/index.js", "x");
+        write_file(&checkout, ".env", "TOKEN=mine");
+        write_file(
+            &checkout,
+            "backend/bindings/Task.ts",
+            "export type Task = {};",
+        );
+        let admin = git_dir_of(&checkout);
+
+        remove_ownerless_worktree(repo.path(), &checkout).expect("ignored files go with it");
+
+        assert!(!checkout.exists() && !admin.exists());
+        let listed = listed_worktrees(repo.path());
+        assert!(!listed.contains("gone-ignored"), "{listed}");
+    }
+
+    /// Whether a registration names a worktree whose directory is named `name`.
+    fn lists_worktree_named(repo: &Path, name: &std::ffi::OsStr) -> bool {
+        worktree_entries(repo)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.path.file_name() == Some(name))
+    }
+
+    #[test]
+    fn a_clean_delete_leaves_neither_the_checkout_nor_its_registration() {
+        let repo = make_test_repo("clean-delete-registration");
+        let info = create_discussion_worktree(repo.path(), "proj", "clean-reg", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let admin = git_dir_of(&checkout);
+        let name = checkout.file_name().unwrap().to_os_string();
+        assert!(lists_worktree_named(repo.path(), &name), "listed before");
+
+        remove_deleted(repo.path(), &info.path).unwrap();
+
+        assert!(!checkout.exists());
+        assert!(!admin.exists());
+        assert!(
+            !lists_worktree_named(repo.path(), &name),
+            "a registration still names it: {:?}",
+            registered_worktree_paths(repo.path())
+        );
+    }
+
+    /// KT-2084 — a stash in a submodule lives only in the worktree's copy of that submodule's
+    /// repository: the delete keeps the worktree and names the submodule.
+    #[test]
+    fn a_stash_in_a_submodule_keeps_the_worktree_of_a_deleted_discussion() {
+        let (repo, checkout) = discussion_worktree_with_submodule("deleted-disc-sub-stash");
+        let sub = checkout.join("sub");
+        fs::write(sub.join("lib.txt"), "stashed work").unwrap();
+        git(
+            &sub,
+            &[
+                "-c",
+                "user.email=t@t.com",
+                "-c",
+                "user.name=T",
+                "stash",
+                "-q",
+            ],
+        );
+        assert_eq!(fs::read_to_string(sub.join("lib.txt")).unwrap(), "shared");
+
+        let kept = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(
+            kept.as_ref()
+                .is_err_and(|reason| reason.contains("submodule sub")),
+            "{kept:?}"
+        );
+        assert!(sub.join("lib.txt").exists());
+    }
+
+    /// KT-2084 — the ignored files of a task checkout's submodule are copied into its
+    /// evidence, under the submodule's path, before its release.
+    #[test]
+    fn a_task_checkout_copies_its_submodule_ignored_files_before_its_release() {
+        let repo = make_test_repo("task-release-sub-ignored");
+        let _upstream = add_materialized_test_submodule(repo.path());
+        let source = repo.path().join("deps/required");
+        fs::write(source.join(".gitignore"), ".env\n").unwrap();
+        let identity = ["-c", "user.email=t@t.com", "-c", "user.name=T"];
+        git(&source, &["add", ".gitignore"]);
+        git(
+            &source,
+            &[&identity[..], &["commit", "-qm", "ignore"]].concat(),
+        );
+        git(repo.path(), &["add", "deps/required"]);
+        git(
+            repo.path(),
+            &[&identity[..], &["commit", "-qm", "bump the submodule"]].concat(),
+        );
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-2084", "sub-ignored", &base).unwrap();
+        let sub = Path::new(&info.path).join("deps/required");
+        assert!(sub.join(".gitignore").is_file());
+        write_file(&sub, ".env", "TOKEN=sub");
+        let evidence = tempfile::tempdir().unwrap();
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path());
+
+        assert!(
+            matches!(released, Ok(TerminalWorktreeRelease::Removed { .. })),
+            "{released:?}"
+        );
+        assert!(!Path::new(&info.path).exists());
+        assert_eq!(
+            fs::read(
+                evidence
+                    .path()
+                    .join(RELEASED_WORKTREE_IGNORED_DIR)
+                    .join("deps/required/.env")
+            )
+            .unwrap(),
+            b"TOKEN=sub"
+        );
+    }
+
+    /// KT-2084 — with `core.splitIndex` a worktree's index names a shared index beside it:
+    /// Kronn's copy holds both, and a clean worktree is deleted.
+    #[test]
+    fn a_clean_worktree_with_a_split_index_is_deleted() {
+        let repo = make_test_repo("split-index");
+        let info = create_discussion_worktree(repo.path(), "proj", "split", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        git(checkout, &["config", "core.splitIndex", "true"]);
+        git(checkout, &["update-index", "--split-index"]);
+        let admin = git_dir_of(checkout);
+        let shared = fs::read_dir(&admin).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("sharedindex.")
+        });
+        assert!(shared, "git wrote no shared index in {}", admin.display());
+
+        let removed = remove_deleted(repo.path(), &info.path);
+
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(!checkout.exists());
+    }
+
+    /// KT-2084 — Kronn cannot judge a repository whose refs are in the reftable format yet
+    /// (KT-2101): it creates no worktree there, and keeps one git made in its layout; each
+    /// refusal names the format and what to do.
+    #[test]
+    fn a_reftable_repository_names_its_format_where_kronn_keeps_a_worktree() {
+        let dir = tempfile::Builder::new()
+            .prefix("kronn-wt-reftable")
+            .tempdir()
+            .unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main", "--ref-format=reftable"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        if !init.status.success() {
+            eprintln!(
+                "skipped: this git cannot create a reftable repository ({})",
+                String::from_utf8_lossy(&init.stderr).trim()
+            );
+            return;
+        }
+        let repo = dir.path();
+        fs::write(repo.join("README.md"), "# test").unwrap();
+        git(repo, &["add", "."]);
+        git(
+            repo,
+            &[
+                "-c",
+                "user.email=t@t.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
+        let base = head_sha(repo);
+        let created = create_discussion_worktree(repo, "proj", "reftable", "main");
+        let task_created = create_task_worktree(repo, "KT-2084", "reftable", &base);
+        let discussion = worktree_base_dir(repo).join("proj--reftable");
+        let (task_path, task_branch) = task_worktree_layout(repo, "KT-2084", "reftable").unwrap();
+        assert!(!discussion.exists() && !task_path.exists());
+        for (path, branch) in [
+            (&discussion, "kronn/reftable"),
+            (&task_path, task_branch.as_str()),
+        ] {
+            git(
+                repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    branch,
+                    path.to_str().unwrap(),
+                    &base,
+                ],
+            );
+        }
+        let evidence = tempfile::tempdir().unwrap();
+
+        let refused = unsaved_work(repo, &discussion, "wt");
+        let kept = remove_deleted(repo, discussion.to_str().unwrap());
+        let released = release_terminal_task_worktree(
+            repo,
+            task_path.to_str().unwrap(),
+            &task_branch,
+            evidence.path(),
+        );
+
+        for reason in [
+            created.map(|_| String::new()).unwrap_err(),
+            task_created.map(|_| String::new()).unwrap_err(),
+            refused.map(|_| String::new()).unwrap_err(),
+            kept.unwrap_err(),
+            released.unwrap_err(),
+        ] {
+            assert!(
+                reason.contains("reftable format") && reason.contains("by hand"),
+                "{reason}"
+            );
+        }
+        assert!(discussion.join("README.md").exists());
+        assert!(task_path.join("README.md").exists());
+    }
+
+    /// KT-2084 — what package managers and build tools make again is matched by its own name
+    /// when ignored. `bin`, `deps` and `obj` are not among them: generic names that may hold
+    /// hand-written scripts or hand-placed SDKs (`server.regenerable_outputs` names them).
+    #[test]
+    fn vendored_dependencies_and_build_folders_are_regenerable_and_generic_names_are_not() {
+        let repo = make_test_repo("disc-regenerable-defaults");
+        commit_ignore(
+            repo.path(),
+            "vendor/\nPods/\n.terraform/\n_build/\ndeps/\n.build/\nobj/\nbin/\n",
+        );
+        let info = create_discussion_worktree(repo.path(), "proj", "defaults", "main").unwrap();
+        let checkout = Path::new(&info.path);
+        for dir in ["vendor", "Pods", ".terraform", "_build", ".build"] {
+            write_file(checkout, &format!("app/{dir}/made/again.txt"), "x");
+        }
+        assert_eq!(work_in(repo.path(), checkout, &regenerable_defaults()), "");
+
+        for dir in ["bin", "deps", "obj"] {
+            write_file(checkout, &format!("{dir}/hand-placed.txt"), "x");
+        }
+        let work = work_in(repo.path(), checkout, &regenerable_defaults());
+        for dir in ["bin/", "deps/", "obj/"] {
+            assert!(work.contains(dir), "{dir}: {work}");
+        }
+    }
+
+    #[cfg(unix)] // writes a POSIX absolute path into a registration's gitdir
+    #[test]
+    fn a_worktree_two_registrations_name_is_kept() {
+        let repo = make_test_repo("two-registrations");
+        let info = create_discussion_worktree(repo.path(), "proj", "named-twice", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let own_admin = git_dir_of(&checkout);
+        let other = a_canonical_worktree(repo.path(), "naming");
+        let other_admin = git_dir_of(&other);
+        fs::write(
+            other_admin.join("gitdir"),
+            format!("{}/.git\n", checkout.display()),
+        )
+        .unwrap();
+
+        let removed = remove_discussion_worktree(repo.path(), &info.path, None);
+
+        assert!(removed.is_err(), "{removed:?}");
+        assert!(checkout.join("README.md").exists());
+        assert!(own_admin.exists() && other_admin.exists());
+    }
+
+    #[test]
+    fn a_branch_other_than_the_expected_one_is_never_deleted_with_its_worktree() {
+        let repo = make_test_repo("expected-branch");
+        git(repo.path(), &["branch", "feature"]);
+        let info = create_discussion_worktree(repo.path(), "proj", "expected", "main").unwrap();
+        git(Path::new(&info.path), &["checkout", "-q", "feature"]);
+
+        remove_discussion_worktree(repo.path(), &info.path, Some(&info.branch)).unwrap();
+
+        assert!(!Path::new(&info.path).exists());
+        assert!(
+            branch_commit(repo.path(), "feature").is_some(),
+            "a branch the worktree was switched to was deleted"
+        );
+    }
+
+    #[test]
+    fn removing_a_gone_worktree_keeps_the_registration_of_another_missing_checkout() {
+        let repo = make_test_repo("targeted-registration");
+        let elsewhere = tempfile::Builder::new()
+            .prefix("kronn-wt-user-")
+            .tempdir()
+            .unwrap();
+        let mine = elsewhere.path().join("mine");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "mine",
+                mine.to_str().unwrap(),
+            ],
+        );
+        let user_admin = git_dir_of(&mine);
+        fs::rename(&mine, elsewhere.path().join("unmounted")).unwrap();
+        let info = create_discussion_worktree(repo.path(), "proj", "gone", "main").unwrap();
+        let admin = git_dir_of(Path::new(&info.path));
+        fs::remove_dir_all(&info.path).unwrap();
+
+        remove_deleted(repo.path(), &info.path).unwrap();
+
+        assert!(
+            user_admin.exists(),
+            "the registration of a checkout outside Kronn's directory was dropped"
+        );
+        assert!(!admin.exists(), "the gone worktree's registration stays");
+    }
+
+    // ── KT-2084: a judgement reads Kronn's own copy of the git state ─────────
+
+    #[cfg(unix)]
+    fn fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
+
+    /// Releases the FIFO once dropped: held open read-write it lets every pending open
+    /// through, removed no later open waits on it, and closed every reader reads an end of
+    /// file. A git a regression left blocked on it stops.
+    #[cfg(unix)]
+    struct Unblock(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for Unblock {
+        fn drop(&mut self) {
+            use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+            if !fs::symlink_metadata(&self.0).is_ok_and(|meta| meta.file_type().is_fifo()) {
+                return;
+            }
+            let held = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&self.0);
+            let _ = fs::remove_file(&self.0);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        }
+    }
+
+    /// What `f` returns, or `None` when it has not returned within `bound`.
+    fn within<T: Send + 'static>(
+        bound: std::time::Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(f());
+        });
+        received.recv_timeout(bound).ok()
+    }
+
+    /// An index git reads (version 2, no extension, a zero checksum) holding `entries`
+    /// `(mode, path)`, each naming the same object.
+    #[cfg(unix)]
+    fn crafted_index(entries: &[(u32, &str)]) -> Vec<u8> {
+        let mut sorted: Vec<&(u32, &str)> = entries.iter().collect();
+        sorted.sort_by(|a, b| a.1.as_bytes().cmp(b.1.as_bytes()));
+        let mut out = b"DIRC".to_vec();
+        out.extend(2u32.to_be_bytes());
+        out.extend((sorted.len() as u32).to_be_bytes());
+        for (mode, path) in sorted {
+            let start = out.len();
+            for field in [0u32, 0, 0, 0, 0, 0, *mode, 0, 0, 0] {
+                out.extend(field.to_be_bytes());
+            }
+            out.extend([0x11u8; 20]);
+            out.extend((path.len() as u16).to_be_bytes());
+            out.extend(path.as_bytes());
+            let padded = (out.len() - start + 8) / 8 * 8;
+            out.resize(start + padded, 0);
+        }
+        out.extend([0u8; 20]);
+        out
+    }
+
+    #[cfg(unix)]
+    fn modified(path: &Path) -> std::time::SystemTime {
+        fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn backdate(path: &Path) -> std::time::SystemTime {
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        fs::File::options()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        modified(path)
+    }
+
+    /// A filter a submodule repository's own configuration declares, assigned by the
+    /// attributes of its git directory (`<admin>/modules/<name>/info/attributes`), never runs
+    /// while a delete judges the worktree. That repository is vetted like a `.git` directory
+    /// (KT-2084): Kronn does not judge it, and the worktree stays, work or not.
+    #[cfg(unix)] // the planted clean filter is a POSIX shell command line
+    #[test]
+    fn a_submodule_repository_filter_never_runs_while_a_delete_judges() {
+        for (name, work) in [
+            ("judge-sub-filter-clean", false),
+            ("judge-sub-filter-work", true),
+        ] {
+            let (repo, checkout) = discussion_worktree_with_submodule(name);
+            let sub = checkout.join("sub");
+            let module = git_dir_of(&sub);
+            assert!(
+                module.starts_with(git_dir_of(&checkout).join("modules")),
+                "{}",
+                module.display()
+            );
+            let (marks, _) = outside_file();
+            let ran = marks.path().join("ran");
+            git(
+                &sub,
+                &[
+                    "config",
+                    "filter.x.clean",
+                    &format!("touch '{}'; cat", ran.display()),
+                ],
+            );
+            fs::create_dir_all(module.join("info")).unwrap();
+            fs::write(module.join("info/attributes"), "* filter=x\n").unwrap();
+            stale_stat(&sub.join("lib.txt"));
+            if work {
+                fs::write(sub.join("notes.txt"), "the agent's").unwrap();
+            }
+
+            let outcome = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+            assert!(
+                !ran.exists(),
+                "{name}: a program of the submodule's configuration ran"
+            );
+            assert!(
+                outcome
+                    .as_ref()
+                    .is_err_and(|error| error.contains("info/attributes")),
+                "{name}: {outcome:?}"
+            );
+            assert!(checkout.exists(), "{name}");
+        }
+    }
+
+    /// A `commondir` in the registration naming another repository, whose configuration
+    /// includes a FIFO: the delete answers at once and keeps the worktree.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn a_registration_naming_another_common_directory_is_refused_at_once() {
+        let repo = make_test_repo("judge-planted-commondir");
+        let info =
+            create_discussion_worktree(repo.path(), "proj", "planted-common", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let admin = git_dir_of(&checkout);
+        let (elsewhere, _) = outside_file();
+        git(elsewhere.path(), &["init", "-q", "--bare", "common"]);
+        let planted = elsewhere.path().join("common");
+        let pipe = elsewhere.path().join("pipe");
+        fifo(&pipe);
+        let _unblock = Unblock(pipe.clone());
+        let config = format!(
+            "[core]\n\trepositoryformatversion = 0\n\tbare = true\n[include]\n\tpath = {}\n",
+            pipe.display()
+        );
+        fs::write(planted.join("config"), config).unwrap();
+        fs::write(admin.join("commondir"), format!("{}\n", planted.display())).unwrap();
+        let (repo_path, path) = (repo.path().to_path_buf(), info.path.clone());
+
+        let outcome = within(std::time::Duration::from_secs(30), move || {
+            remove_deleted(&repo_path, &path)
+        });
+
+        assert!(
+            outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.as_ref().is_err_and(|e| e.contains("commondir"))),
+            "{outcome:?}"
+        );
+        assert!(checkout.exists());
+    }
+
+    /// A FIFO in place of the registration's index: the delete answers at once and keeps
+    /// the worktree.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn a_fifo_in_place_of_the_index_is_refused_at_once() {
+        let repo = make_test_repo("judge-fifo-index");
+        let info = create_discussion_worktree(repo.path(), "proj", "fifo-index", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let index = git_dir_of(&checkout).join("index");
+        fs::remove_file(&index).unwrap();
+        fifo(&index);
+        let _unblock = Unblock(index.clone());
+        let (repo_path, path) = (repo.path().to_path_buf(), info.path.clone());
+
+        let outcome = within(std::time::Duration::from_secs(30), move || {
+            remove_deleted(&repo_path, &path)
+        });
+
+        assert!(
+            outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.as_ref().is_err_and(|e| e.contains("index"))),
+            "{outcome:?}"
+        );
+        assert!(checkout.exists());
+    }
+
+    /// A filter a task submodule's own `.git` configuration declares, assigned in its tree,
+    /// never runs while a release judges the checkout; Kronn's own layout of the same
+    /// submodule still releases when nothing is in it.
+    #[cfg(unix)] // the planted clean filter is a POSIX shell command line
+    #[test]
+    fn a_task_submodule_filter_never_runs_and_a_clean_task_checkout_still_releases() {
+        let repo = make_test_repo("judge-task-sub-filter");
+        let _upstream = add_materialized_test_submodule(repo.path());
+        let base = head_sha(repo.path());
+        let clean = create_task_worktree(repo.path(), "KT-2084", "sub-clean", &base).unwrap();
+        let planted = create_task_worktree(repo.path(), "KT-2084", "sub-filter", &base).unwrap();
+        let sub = Path::new(&planted.path).join("deps/required");
+        assert!(sub.join(".git").is_dir());
+        let (marks, _) = outside_file();
+        let ran = marks.path().join("ran");
+        git(
+            &sub,
+            &[
+                "config",
+                "filter.x.clean",
+                &format!("touch '{}'; cat", ran.display()),
+            ],
+        );
+        fs::write(sub.join(".gitattributes"), "* filter=x\n").unwrap();
+        stale_stat(&sub.join("bin/bats"));
+        let evidence = tempfile::tempdir().unwrap();
+
+        let kept = release_terminal_task_worktree(
+            repo.path(),
+            &planted.path,
+            &planted.branch,
+            evidence.path(),
+        );
+        let released = release_terminal_task_worktree(
+            repo.path(),
+            &clean.path,
+            &clean.branch,
+            evidence.path(),
+        );
+
+        assert!(
+            !ran.exists(),
+            "a program of the submodule's configuration ran"
+        );
+        assert!(kept.is_err(), "{kept:?}");
+        assert!(sub.exists());
+        assert!(
+            matches!(released, Ok(TerminalWorktreeRelease::Removed { .. })),
+            "{released:?}"
+        );
+        assert!(!Path::new(&clean.path).exists());
+    }
+
+    /// A submodule path the agent replaced by a link to another repository: no git runs
+    /// there, and the worktree is kept with the reason.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn a_submodule_path_turned_into_a_link_keeps_the_worktree_and_runs_nothing_there() {
+        let (repo, checkout) = discussion_worktree_with_submodule("judge-sub-link");
+        let (elsewhere, _) = outside_file();
+        let other = elsewhere.path().join("other");
+        fs::create_dir(&other).unwrap();
+        git(&other, &["init", "-q", "-b", "main"]);
+        fs::write(other.join("a.txt"), "a").unwrap();
+        git(&other, &["add", "a.txt"]);
+        let index = other.join(".git/index");
+        let old = backdate(&index);
+        let sub = checkout.join("sub");
+        fs::remove_dir_all(&sub).unwrap();
+        std::os::unix::fs::symlink(&other, &sub).unwrap();
+
+        let outcome = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(
+            outcome.as_ref().is_err_and(|error| error.contains("sub")),
+            "{outcome:?}"
+        );
+        assert!(checkout.exists());
+        assert_eq!(
+            modified(&index),
+            old,
+            "a git command ran in the repository the link leads to"
+        );
+    }
+
+    /// A gitlink reached through a linked directory, into a repository laid out inside the
+    /// worktree's registration: refused, and nothing it configures runs.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn a_gitlink_through_a_linked_directory_into_the_registration_is_refused() {
+        let repo = make_test_repo("judge-gitlink-through-link");
+        let info = create_discussion_worktree(repo.path(), "proj", "through-link", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let admin = git_dir_of(&checkout);
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "-q", "-b", "main"]);
+        fs::write(source.path().join("f.txt"), "f").unwrap();
+        git(source.path(), &["add", "f.txt"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.email=t@t.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-qm",
+                "f",
+            ],
+        );
+        let sha = head_sha(source.path());
+        let module = admin.join("modules/other");
+        fs::create_dir_all(admin.join("modules")).unwrap();
+        fs::rename(source.path().join(".git"), &module).unwrap();
+        let tree = admin.join("sub");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("f.txt"), "f").unwrap();
+        fs::write(tree.join(".git"), format!("gitdir: {}\n", module.display())).unwrap();
+        let (marks, _) = outside_file();
+        let ran = marks.path().join("ran");
+        git(
+            &tree,
+            &[
+                "config",
+                "filter.x.clean",
+                &format!("touch '{}'; cat", ran.display()),
+            ],
+        );
+        fs::create_dir_all(module.join("info")).unwrap();
+        fs::write(module.join("info/attributes"), "* filter=x\n").unwrap();
+        stale_stat(&tree.join("f.txt"));
+        std::os::unix::fs::symlink(&admin, checkout.join("lnk")).unwrap();
+        git(
+            &checkout,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{sha},lnk/sub"),
+            ],
+        );
+
+        let outcome = remove_deleted(repo.path(), &info.path);
+
+        assert!(
+            !ran.exists(),
+            "a program of that repository's configuration ran"
+        );
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(checkout.exists());
+    }
+
+    /// Gitlink paths git never writes (`..`, absolute), in a crafted index: refused, and no
+    /// git runs in the repository they lead to.
+    #[cfg(unix)] // the crafted index names a POSIX absolute path and `..` parts
+    #[test]
+    fn gitlink_paths_that_are_not_plain_are_refused() {
+        for (name, odd) in [
+            ("judge-gitlink-parent", "../../../outside"),
+            ("judge-gitlink-absolute", ""),
+        ] {
+            let repo = make_test_repo(name);
+            let info = create_discussion_worktree(repo.path(), "proj", name, "main").unwrap();
+            let checkout = Path::new(&info.path).canonicalize().unwrap();
+            let outside = repo.path().canonicalize().unwrap().join("outside");
+            fs::create_dir(&outside).unwrap();
+            git(&outside, &["init", "-q", "-b", "main"]);
+            fs::write(outside.join("a.txt"), "a").unwrap();
+            git(&outside, &["add", "a.txt"]);
+            let index = outside.join(".git/index");
+            let old = backdate(&index);
+            let absolute = outside.to_string_lossy().into_owned();
+            let odd = if odd.is_empty() {
+                absolute.as_str()
+            } else {
+                odd
+            };
+            fs::write(
+                git_dir_of(&checkout).join("index"),
+                crafted_index(&[(0o160000, odd)]),
+            )
+            .unwrap();
+
+            let outcome = remove_deleted(repo.path(), &info.path);
+
+            assert!(outcome.is_err(), "{name}: {outcome:?}");
+            assert!(checkout.exists());
+            assert_eq!(modified(&index), old, "{name}: a git command ran there");
+        }
+    }
+
+    /// A link at the registration's `modules` folder: the submodule repositories are not
+    /// judged through it, and the worktree is kept.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn a_link_at_the_registration_modules_keeps_the_worktree() {
+        let repo = make_test_repo("judge-modules-link");
+        let info = create_discussion_worktree(repo.path(), "proj", "modules-link", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let admin = git_dir_of(&checkout);
+        let (elsewhere, _) = outside_file();
+        git(
+            elsewhere.path(),
+            &["clone", "-q", &repo.path().to_string_lossy(), "clone"],
+        );
+        let modules = elsewhere.path().join("modules");
+        fs::create_dir(&modules).unwrap();
+        fs::rename(elsewhere.path().join("clone/.git"), modules.join("x")).unwrap();
+        std::os::unix::fs::symlink(&modules, admin.join("modules")).unwrap();
+
+        let outcome = remove_deleted(repo.path(), &info.path);
+
+        assert!(
+            outcome.as_ref().is_err_and(|error| error.contains("link")),
+            "{outcome:?}"
+        );
+        assert!(checkout.exists());
+    }
+
+    /// A `modules` folder wider or deeper than the walk's bounds: the walk stops there and
+    /// the worktree is kept.
+    #[cfg(unix)] // git runs in a `canonicalize()`d folder: Windows does not spell it as git takes it
+    #[test]
+    fn a_module_walk_past_its_bounds_keeps_the_worktree() {
+        for (name, deep) in [("judge-modules-wide", false), ("judge-modules-deep", true)] {
+            let repo = make_test_repo(name);
+            let info = create_discussion_worktree(repo.path(), "proj", name, "main").unwrap();
+            let checkout = Path::new(&info.path).canonicalize().unwrap();
+            let modules = git_dir_of(&checkout).join("modules");
+            if deep {
+                fs::create_dir_all(modules.join(["d"; 20].join("/"))).unwrap();
+            } else {
+                for n in 0..1100 {
+                    fs::create_dir_all(modules.join(format!("m{n}"))).unwrap();
+                }
+            }
+
+            let outcome = remove_deleted(repo.path(), &info.path);
+
+            let why = if deep { "levels deep" } else { "directories" };
+            assert!(
+                outcome.as_ref().is_err_and(|error| error.contains(why)),
+                "{name}: {outcome:?}"
+            );
+            assert!(checkout.exists());
+        }
+    }
+
+    /// Kronn reads the worktree's own configuration once, into its copy: a filter written
+    /// there afterwards is never what git reads.
+    #[cfg(unix)] // the swap probe (unix-only) plants a POSIX shell filter mid-read
+    #[test]
+    fn a_worktree_configuration_written_after_kronn_read_it_is_not_used() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("judge-wtconfig-race");
+        git(
+            repo.path(),
+            &["config", "core.repositoryformatversion", "1"],
+        );
+        git(
+            repo.path(),
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        fs::create_dir_all(repo.path().join(".git/info")).unwrap();
+        fs::write(repo.path().join(".git/info/attributes"), "* filter=x\n").unwrap();
+        let info =
+            create_discussion_worktree(repo.path(), "proj", "wtconfig-race", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let admin = git_dir_of(&checkout).canonicalize().unwrap();
+        let plain = "[user]\n\tname = T\n";
+        let config = admin.join("config.worktree");
+        fs::write(&config, plain).unwrap();
+        let (marks, _) = outside_file();
+        let ran = marks.path().join("ran");
+        let filter = format!("[filter \"x\"]\n\tclean = touch '{}'; cat\n", ran.display());
+        // Past the reads of its `gitdir`, `commondir` and `config.worktree`: as HEAD is copied.
+        swap_probe::arm_hook(&admin, 3, move |_| fs::write(&config, filter).unwrap());
+
+        let judged = Snapshot::of_worktree(&checkout).unwrap();
+
+        assert!(
+            swap_probe::fired(),
+            "the filter must appear once Kronn read the configuration"
+        );
+        assert_eq!(
+            fs::read_to_string(judged.dir().join("config.worktree")).unwrap(),
+            plain
+        );
+        stale_stat(&checkout.join("README.md"));
+        let dirty = judged_dirty_files(&judged);
+        assert!(
+            !ran.exists(),
+            "a filter of the configuration written afterwards ran"
+        );
+        assert_eq!(dirty, Ok(Vec::new()));
+        // The next judgement reads the filter and does not judge.
+        let next = Snapshot::of_worktree(&checkout).map(|_| ());
+        assert!(
+            next.as_ref()
+                .is_err_and(|error| error.contains("config.worktree")),
+            "{next:?}"
+        );
+        assert!(!ran.exists());
+    }
+
+    /// A git command that never ends (a FIFO where git reads an ignore file): the delete
+    /// stops at its time bound, keeps the worktree and says why.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn a_git_command_that_never_ends_keeps_the_worktree_and_names_the_timeout() {
+        let repo = make_test_repo("judge-timeout");
+        let info = create_discussion_worktree(repo.path(), "proj", "timeout", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let pipe = checkout.join(".gitignore");
+        fifo(&pipe);
+        let _unblock = Unblock(pipe.clone());
+        let (repo_path, path) = (repo.path().to_path_buf(), info.path.clone());
+        let started = std::time::Instant::now();
+
+        let outcome = within(std::time::Duration::from_secs(60), move || {
+            crate::core::lane_git::snapshot::set_timeout_for_tests(Some(
+                std::time::Duration::from_secs(2),
+            ));
+            remove_deleted(&repo_path, &path)
+        });
+
+        assert!(
+            outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.as_ref().is_err_and(|e| e.contains("timeout"))),
+            "{outcome:?}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        assert!(checkout.exists());
+    }
+
+    /// The copy lives in Kronn's data directory and goes with the judgement.
+    #[cfg(unix)] // Windows does not spell `canonicalize()` (a `\\?\` path) like Kronn's copy
+    #[test]
+    fn kronns_copy_of_the_git_state_is_removed_after_use() {
+        let repo = make_test_repo("judge-copy-removed");
+        let info = create_discussion_worktree(repo.path(), "proj", "copy-removed", "main").unwrap();
+        let checkout = Path::new(&info.path).canonicalize().unwrap();
+        let judged = Snapshot::of_worktree(&checkout).unwrap();
+        let copy = judged.dir().to_path_buf();
+        let data = crate::core::config::config_dir().unwrap();
+        assert!(
+            copy.starts_with(data.canonicalize().unwrap()),
+            "{}",
+            copy.display()
+        );
+        assert!(!copy.starts_with(&checkout));
+        assert!(copy.join("HEAD").is_file());
+
+        drop(judged);
+
+        assert!(!copy.exists());
+    }
+
+    // ── KT-2084: no git in a submodule, bounded listings and locks, rooted walks ──
+
+    /// A filter written into a task submodule's own configuration once Kronn judged the
+    /// checkout never runs while the release saves its patch: no git starts in the submodule,
+    /// and the patch holds the checkout's own change.
+    #[cfg(unix)] // the swap probe (unix-only) plants a POSIX shell filter mid-release
+    #[test]
+    fn a_release_starts_no_git_in_a_submodule_while_it_saves_the_patch() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("release-no-sub-child");
+        let _upstream = add_materialized_test_submodule(repo.path());
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-2084", "no-sub-child", &base).unwrap();
+        let checkout = Path::new(&info.path);
+        let module = checkout.join("deps/required/.git");
+        assert!(module.is_dir());
+        let (marks, _) = outside_file();
+        let ran = marks.path().join("ran");
+        let trace = marks.path().join("trace");
+        let filter = format!("[filter \"x\"]\n\tclean = touch '{}'; cat\n", ran.display());
+        stale_stat(&checkout.join("deps/required/bin/bats"));
+        fs::write(checkout.join("README.md"), "the agent's change\n").unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+        // As the release clears its evidence folder: the judgement and its vetting are done.
+        swap_probe::arm_hook(evidence.path(), 0, move |_| {
+            let mut config = fs::OpenOptions::new()
+                .append(true)
+                .open(module.join("config"))
+                .unwrap();
+            std::io::Write::write_all(&mut config, filter.as_bytes()).unwrap();
+            fs::create_dir_all(module.join("info")).unwrap();
+            fs::write(module.join("info/attributes"), "* filter=x\n").unwrap();
+        });
+        crate::core::lane_git::snapshot::set_trace_for_tests(Some(trace.clone()));
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path());
+
+        crate::core::lane_git::snapshot::set_trace_for_tests(None);
+        assert!(
+            swap_probe::fired(),
+            "the filter must appear once Kronn judged the checkout"
+        );
+        assert!(
+            !ran.exists(),
+            "a program of the submodule's configuration ran"
+        );
+        let traced = fs::read_to_string(&trace).unwrap_or_default();
+        assert!(!traced.is_empty(), "git traced nothing");
+        assert!(
+            !traced.contains("run_command"),
+            "git started a program: {traced}"
+        );
+        let patch = match released {
+            Ok(TerminalWorktreeRelease::Removed {
+                patch: Some(patch), ..
+            }) => fs::read_to_string(patch).unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert!(patch.contains("README.md"), "{patch}");
+    }
+
+    /// A task submodule whose HEAD moved to a commit a tag holds: the release's patch records
+    /// the submodule at that commit.
+    #[test]
+    fn a_moved_submodule_head_is_recorded_in_the_release_patch() {
+        let repo = make_test_repo("release-sub-moved");
+        let _upstream = add_materialized_test_submodule(repo.path());
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-2084", "sub-moved", &base).unwrap();
+        let sub = Path::new(&info.path).join("deps/required");
+        fs::write(sub.join("bin/extra"), "extra\n").unwrap();
+        git(&sub, &["add", "bin/extra"]);
+        git(
+            &sub,
+            &[
+                "-c",
+                "user.email=t@t.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-qm",
+                "extra",
+            ],
+        );
+        git(&sub, &["tag", "kept"]);
+        let moved = head_sha(&sub);
+        let evidence = tempfile::tempdir().unwrap();
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path());
+
+        let patch = match released {
+            Ok(TerminalWorktreeRelease::Removed {
+                patch: Some(patch), ..
+            }) => fs::read_to_string(patch).unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            patch.contains(&format!("+Subproject commit {moved}")),
+            "{patch}"
+        );
+    }
+
+    /// An untracked repository in a task checkout never becomes a submodule line of the
+    /// release's patch: the checkout is kept and the repository named.
+    #[test]
+    fn an_untracked_repository_keeps_a_released_task_checkout() {
+        let repo = make_test_repo("release-untracked-repo");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-2084", "untracked-repo", &base).unwrap();
+        let nested = Path::new(&info.path).join("vendored");
+        fs::create_dir(&nested).unwrap();
+        git(&nested, &["init", "-q", "-b", "main"]);
+        fs::write(nested.join("a.txt"), "only here").unwrap();
+        git(&nested, &["add", "a.txt"]);
+        git(
+            &nested,
+            &[
+                "-c",
+                "user.email=t@t.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-qm",
+                "only here",
+            ],
+        );
+        let evidence = tempfile::tempdir().unwrap();
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path());
+
+        assert!(
+            released
+                .as_ref()
+                .is_err_and(|reason| reason.contains("vendored") && reason.contains("repository")),
+            "{released:?}"
+        );
+        assert!(nested.join(".git").is_dir() && nested.join("a.txt").exists());
+    }
+
+    /// A FIFO in another worktree's registration (its `locked`, `gitdir` or `HEAD`): the
+    /// prune answers at once and removes no registration.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn a_fifo_in_a_registration_keeps_the_prune_bounded_and_removes_nothing() {
+        for file in ["locked", "gitdir", "HEAD"] {
+            let repo = make_test_repo(&format!("prune-fifo-{}", file.to_lowercase()));
+            let gone = a_canonical_worktree(repo.path(), "gone");
+            let gone_admin = git_dir_of(&gone);
+            fs::remove_dir_all(&gone).unwrap();
+            let other = a_canonical_worktree(repo.path(), "other");
+            let pipe = git_dir_of(&other).join(file);
+            let _ = fs::remove_file(&pipe);
+            fifo(&pipe);
+            let _unblock = Unblock(pipe.clone());
+            let repo_path = repo.path().to_path_buf();
+
+            let pruned = within(std::time::Duration::from_secs(20), move || {
+                let _ = prune_kronn_worktrees(&repo_path);
+            });
+
+            assert!(pruned.is_some(), "{file}: the prune did not return");
+            assert!(
+                gone_admin.join("HEAD").exists(),
+                "{file}: a registration was removed"
+            );
+        }
+    }
+
+    /// A Cargo lock name that is not a regular file (a FIFO, a link to an outside FIFO or
+    /// file): the lane target's removal answers at once, refuses with the reason and keeps it.
+    #[cfg(unix)] // FIFO made with libc::mkfifo, symlinks through std::os::unix
+    #[test]
+    fn a_lock_name_that_is_not_a_file_refuses_the_lane_target_removal_at_once() {
+        for case in ["fifo", "link-to-fifo", "link-to-file"] {
+            let repo = make_test_repo(&format!("lane-lock-{case}"));
+            let lane = seed_lane_target(repo.path(), "kt-7-abcd");
+            let (outside, kept) = outside_file();
+            let lock = lane.join("debug/.cargo-lock");
+            let pipe = outside.path().join("pipe");
+            match case {
+                "fifo" => fifo(&lock),
+                "link-to-fifo" => {
+                    fifo(&pipe);
+                    std::os::unix::fs::symlink(&pipe, &lock).unwrap();
+                }
+                _ => std::os::unix::fs::symlink(&kept, &lock).unwrap(),
+            }
+            let _unblock = (Unblock(lock.clone()), Unblock(pipe.clone()));
+            let (repo_path, target) = (repo.path().to_path_buf(), lane.clone());
+
+            let outcome = within(std::time::Duration::from_secs(5), move || {
+                remove_lane_target(&repo_path, &target)
+            });
+
+            assert!(
+                outcome.as_ref().is_some_and(|outcome| outcome
+                    .as_ref()
+                    .is_err_and(|error| error.contains(".cargo-lock"))),
+                "{case}: {outcome:?}"
+            );
+            assert!(lane.join("debug/kronn").exists(), "{case}: the lane went");
+            assert_eq!(fs::read_to_string(&kept).unwrap(), "outside");
+        }
+    }
+
+    /// A lane owner marker that is a FIFO: the sweep's read of it answers at once, and the
+    /// lane is not marked.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn a_lane_owner_marker_that_is_a_fifo_is_read_at_once() {
+        let repo = make_test_repo("lane-marker-fifo");
+        let lane = seed_lane_target(repo.path(), "kt-8-abcd");
+        let marker = lane.join(LANE_OWNER_MARKER);
+        fifo(&marker);
+        let _unblock = Unblock(marker.clone());
+        let repo_path = repo.path().to_path_buf();
+
+        let owners = within(std::time::Duration::from_secs(5), move || {
+            lane_target_owners(&repo_path)
+        });
+
+        assert_eq!(owners, Some(Vec::new()));
+        assert!(lane.exists());
+    }
+
+    /// A folder of a checkout swapped for a link to an outside folder while Kronn walks it:
+    /// no outside name is ever visited.
+    #[cfg(unix)] // the swap probe puts a symlink in place of a folder (std::os::unix)
+    #[test]
+    fn a_checkout_walk_never_lists_a_folder_swapped_for_a_link() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("walk-swap");
+        let checkout = a_canonical_worktree(repo.path(), "walk-swap");
+        write_file(&checkout, "inner/inside.txt", "in");
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("outside-only.txt"), "out").unwrap();
+        swap_probe::arm(&checkout.join("inner"), outside.path());
+        let mut seen = Vec::new();
+
+        let _ = walk_checkout_writes(&checkout, |path, _| {
+            seen.push(path.to_path_buf());
+            true
+        });
+
+        assert!(swap_probe::fired(), "the folder must be swapped mid-walk");
+        assert!(
+            !seen.iter().any(|path| path.ends_with("outside-only.txt")),
+            "{seen:?}"
+        );
+    }
+
+    /// An untracked folder of OS junk whose subfolder is swapped for a link to an outside
+    /// folder holding work while Kronn walks it: the outside work is never seen.
+    #[cfg(unix)] // the swap probe puts a symlink in place of a folder (std::os::unix)
+    #[test]
+    fn an_os_junk_walk_never_lists_a_folder_swapped_for_a_link() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("junk-walk-swap");
+        let checkout = a_canonical_worktree(repo.path(), "junk-walk-swap");
+        write_file(&checkout, "junk/sub/.DS_Store", "x");
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("work.txt"), "work").unwrap();
+        swap_probe::arm(&checkout.join("junk/sub"), outside.path());
+
+        let dirty = dirty_files_of(&checkout, b"?? junk/\0");
+
+        assert!(swap_probe::fired(), "the folder must be swapped mid-walk");
+        assert!(dirty.is_empty(), "{dirty:?}");
+    }
+
+    /// A lane target's folder swapped for a link to an outside folder written later while
+    /// Kronn looks for its last write: the outside write is never seen.
+    #[cfg(unix)] // the swap probe puts a symlink in place of a folder (std::os::unix)
+    #[test]
+    fn a_lane_target_last_write_never_lists_a_folder_swapped_for_a_link() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("lane-write-swap");
+        let lane = seed_lane_target(repo.path(), "kt-9-abcd");
+        let outside = tempfile::tempdir().unwrap();
+        let later = outside.path().join("later");
+        fs::write(&later, "later").unwrap();
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(10 * 86_400);
+        fs::File::options()
+            .append(true)
+            .open(&later)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        swap_probe::arm(&lane.join("debug"), outside.path());
+
+        let written = lane_target_last_write(&lane);
+
+        assert!(swap_probe::fired(), "the folder must be swapped mid-walk");
+        assert!(
+            written.is_some_and(|written| written < future),
+            "{written:?}"
+        );
+    }
+
+    /// A setting Kronn does not trust in a submodule's module repository (the `.git` file
+    /// layout): the delete keeps the worktree and names it.
+    #[test]
+    fn a_module_repository_setting_kronn_does_not_trust_keeps_the_worktree() {
+        let (repo, checkout) = discussion_worktree_with_submodule("module-config-vetted");
+        let sub = checkout.join("sub");
+        git(&sub, &["config", "filter.x.clean", "cat"]);
+
+        let kept = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(
+            kept.as_ref()
+                .is_err_and(|reason| reason.contains("filter.x.clean")),
+            "{kept:?}"
+        );
+        assert!(sub.join("lib.txt").exists());
+    }
+
+    /// An `objects/info/alternates` in a submodule's repository: Kronn does not judge it, and
+    /// the delete keeps the worktree with the reason and what to do.
+    #[test]
+    fn a_submodule_repository_with_alternates_keeps_the_worktree() {
+        let (repo, checkout) = discussion_worktree_with_submodule("module-alternates");
+        let module = git_dir_of(&checkout.join("sub"));
+        let (elsewhere, _) = outside_file();
+        fs::create_dir_all(module.join("objects/info")).unwrap();
+        fs::write(
+            module.join("objects/info/alternates"),
+            format!("{}\n", elsewhere.path().display()),
+        )
+        .unwrap();
+
+        let kept = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(
+            kept.as_ref()
+                .is_err_and(|reason| reason.contains("alternates")
+                    && reason.contains("--reference")
+                    && reason.contains("by hand")),
+            "{kept:?}"
+        );
+        assert!(checkout.join("sub/lib.txt").exists());
+    }
+
+    /// A judgement never reads git's untracked cache: every command against Kronn's copy
+    /// turns it off.
+    #[test]
+    fn a_judgement_turns_the_untracked_cache_off() {
+        let repo = make_test_repo("judge-untracked-cache");
+        let checkout = a_canonical_worktree(repo.path(), "untracked-cache");
+        let judged = Snapshot::of_worktree(&checkout).unwrap();
+
+        let args: Vec<String> = judged
+            .command()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == "core.untrackedCache=false"),
+            "{args:?}"
+        );
+    }
+
+    /// An ignored file of a task checkout with another name (a hard link): its content is not
+    /// copied into the evidence, and the checkout is kept with the reason.
+    #[cfg(unix)] // a hard link's name count is read through std::os::unix only
+    #[test]
+    fn an_ignored_file_with_another_name_keeps_a_released_task_checkout() {
+        let repo = make_test_repo("release-hard-link");
+        commit_ignore(repo.path(), ".env\n");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-2084", "hard-link", &base).unwrap();
+        let (_outside, kept) = outside_file();
+        let env = Path::new(&info.path).join(".env");
+        fs::hard_link(&kept, &env).unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path());
+
+        assert!(
+            released
+                .as_ref()
+                .is_err_and(|reason| reason.contains(".env") && reason.contains("link")),
+            "{released:?}"
+        );
+        assert!(env.exists());
+        assert!(!evidence
+            .path()
+            .join(RELEASED_WORKTREE_IGNORED_DIR)
+            .join(".env")
+            .exists());
+    }
+
+    /// An ownerless worktree whose `target` is a link to an outside folder holding a Cargo
+    /// lock: the link is not followed to look for a build, and goes as a link.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn an_ownerless_worktree_target_link_is_never_followed() {
+        use fs2::FileExt;
+        let repo = make_test_repo("ownerless-target-link");
+        let checkout = ownerless_worktree(repo.path(), "target-link");
+        let (outside, kept) = outside_file();
+        let lock = fs::File::create(outside.path().join(".cargo-lock")).unwrap();
+        lock.lock_exclusive().unwrap();
+        std::os::unix::fs::symlink(outside.path(), checkout.join("target")).unwrap();
+
+        let removed = remove_ownerless_worktree(repo.path(), &checkout);
+
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(!checkout.exists());
+        assert!(kept.exists() && outside.path().join(".cargo-lock").exists());
+    }
+
+    // ── KT-2084 seventh round ───────────────────────────────────────────────
+
+    /// A git repository in `dir` holding `file`, committed.
+    fn upstream_repo(dir: &Path, file: &str) {
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            git(dir, &args);
+        }
+        fs::write(dir.join(file), "shared").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-qm", "init"]);
+    }
+
+    /// A discussion worktree whose submodule `sub` has a submodule `in` of its own, set up by
+    /// `git submodule update --init --recursive` in the worktree. `update`: the strategy the
+    /// outer submodule's `.gitmodules` names for `in`.
+    fn discussion_worktree_with_nested_submodule(
+        name: &str,
+        update: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let inner = tempfile::Builder::new()
+            .prefix(&format!("kronn-wt-{name}-in"))
+            .tempdir()
+            .unwrap();
+        upstream_repo(inner.path(), "inner.txt");
+        let outer = tempfile::Builder::new()
+            .prefix(&format!("kronn-wt-{name}-out"))
+            .tempdir()
+            .unwrap();
+        upstream_repo(outer.path(), "outer.txt");
+        let file_allowed = ["-c", "protocol.file.allow=always"];
+        let inner_url = inner.path().to_string_lossy().to_string();
+        git(
+            outer.path(),
+            &[
+                &file_allowed[..],
+                &["submodule", "add", "-q", &inner_url, "in"],
+            ]
+            .concat(),
+        );
+        if let Some(update) = update {
+            git(
+                outer.path(),
+                &[
+                    "config",
+                    "--file",
+                    ".gitmodules",
+                    "submodule.in.update",
+                    update,
+                ],
+            );
+            git(outer.path(), &["add", ".gitmodules"]);
+        }
+        git(outer.path(), &["commit", "-qm", "nested"]);
+        let repo = make_test_repo(name);
+        let outer_url = outer.path().to_string_lossy().to_string();
+        git(
+            repo.path(),
+            &[
+                &file_allowed[..],
+                &["submodule", "add", "-q", &outer_url, "sub"],
+            ]
+            .concat(),
+        );
+        git(repo.path(), &["commit", "-qm", "add submodule"]);
+        let info = create_discussion_worktree(repo.path(), "proj", name, "main").unwrap();
+        let checkout = PathBuf::from(&info.path).canonicalize().unwrap();
+        git(
+            &checkout,
+            &[
+                &file_allowed[..],
+                &["submodule", "update", "--init", "--recursive", "-q"],
+            ]
+            .concat(),
+        );
+        assert!(checkout.join("sub/in/inner.txt").exists());
+        (repo, checkout)
+    }
+
+    /// The configuration of the outer submodule's repository, as git set it up.
+    fn outer_module_config(checkout: &Path) -> PathBuf {
+        git_dir_of(&checkout.join("sub")).join("config")
+    }
+
+    /// KT-2084 — a recursive setup writes the inner submodule's `url` and `active` into the
+    /// outer one's configuration: Kronn's lane git still resolves, and a clean delete goes.
+    #[test]
+    fn a_submodule_with_its_own_submodule_set_up_is_judged_and_removed() {
+        let (repo, checkout) = discussion_worktree_with_nested_submodule("nested-sub", None);
+        let config = fs::read_to_string(outer_module_config(&checkout)).unwrap();
+        assert!(config.contains("[submodule \"in\"]"), "{config}");
+
+        let resolved = crate::core::lane_git::git(&checkout).map(|_| ());
+        let removed = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert_eq!(resolved, Ok(()));
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(!checkout.exists());
+    }
+
+    /// The same with an update strategy `git submodule init` copies from `.gitmodules`.
+    #[test]
+    fn a_nested_submodule_with_a_rebase_update_is_judged_and_removed() {
+        let (repo, checkout) =
+            discussion_worktree_with_nested_submodule("nested-sub-rebase", Some("rebase"));
+        let config = fs::read_to_string(outer_module_config(&checkout)).unwrap();
+        assert!(config.contains("update = rebase"), "{config}");
+
+        let resolved = crate::core::lane_git::git(&checkout).map(|_| ());
+        let removed = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert_eq!(resolved, Ok(()));
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(!checkout.exists());
+    }
+
+    /// A command as update strategy, or an `ignore` setting, in a module's configuration:
+    /// the worktree is kept and Kronn's lane git refuses it.
+    #[test]
+    fn a_command_update_or_an_ignore_in_a_module_configuration_is_refused() {
+        for (name, key, value) in [
+            ("nested-sub-command", "submodule.in.update", "!touch ran"),
+            ("nested-sub-ignore", "submodule.in.ignore", "all"),
+        ] {
+            let (repo, checkout) = discussion_worktree_with_nested_submodule(name, None);
+            let config = outer_module_config(&checkout);
+            git(
+                &checkout,
+                &["config", "--file", &config.to_string_lossy(), key, value],
+            );
+
+            let resolved = crate::core::lane_git::git(&checkout).map(|_| ());
+            let kept = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+            assert!(
+                resolved.as_ref().is_err_and(|error| error.contains(key)),
+                "{name}: {resolved:?}"
+            );
+            assert!(
+                kept.as_ref().is_err_and(|error| error.contains(key)),
+                "{name}: {kept:?}"
+            );
+            assert!(checkout.join("sub/in/inner.txt").exists());
+        }
+    }
+
+    /// A stray file among git's worktree records (a `.DS_Store`) is no registration: git skips
+    /// it, and so does Kronn's listing.
+    #[test]
+    fn a_stray_file_among_the_worktree_records_is_skipped() {
+        let repo = make_test_repo("stray-record");
+        create_discussion_worktree(repo.path(), "proj", "first", "main").unwrap();
+        fs::write(repo.path().join(".git/worktrees/.DS_Store"), "junk").unwrap();
+
+        let created = create_discussion_worktree(repo.path(), "proj", "second", "main");
+
+        assert!(created.is_ok(), "{created:?}");
+        assert_eq!(registered_worktree_paths(repo.path()).unwrap().len(), 3);
+    }
+
+    /// A bare repository has no main checkout: only its linked worktrees are listed, even
+    /// when its folder is named `.git`.
+    #[test]
+    fn a_bare_repository_lists_only_its_linked_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let upstream = make_test_repo("bare-source");
+        let bare = dir.path().join(".git");
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                upstream.path().to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let linked = dir.path().join("linked");
+        git(
+            &bare,
+            &["worktree", "add", "-q", linked.to_str().unwrap(), "main"],
+        );
+
+        let listed = registered_worktree_paths(&bare).unwrap();
+
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(same_path(&listed[0], &linked), "{listed:?}");
+    }
+
+    /// A link in place of a registration directory still fails the listing.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn a_link_among_the_worktree_records_fails_the_listing() {
+        let repo = make_test_repo("linked-record");
+        create_discussion_worktree(repo.path(), "proj", "first", "main").unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("gitdir"), "/nowhere/.git\n").unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), repo.path().join(".git/worktrees/linked"))
+            .unwrap();
+
+        let listed = registered_worktree_paths(repo.path());
+
+        assert!(
+            listed.as_ref().is_err_and(|error| error.contains("linked")),
+            "{listed:?}"
+        );
+    }
+
+    /// The `HEAD` of a reftable repository is a stub naming no branch: the branch a checkout
+    /// is on is unknown, never read as `.invalid`.
+    #[test]
+    fn a_reftable_head_makes_the_worktree_listing_name_the_format() {
+        let repo = make_test_repo("reftable-listing");
+        let checkout = a_canonical_worktree(repo.path(), "reftable-head");
+        fs::write(
+            git_dir_of(&checkout).join("HEAD"),
+            crate::core::lane_git::snapshot::REFTABLE_STUB,
+        )
+        .unwrap();
+
+        let listed = registered_worktree_paths(repo.path());
+
+        assert!(
+            listed.as_ref().is_err_and(|error| error
+                .contains(crate::core::lane_git::snapshot::REFTABLE_FORMAT)
+                && error.contains("by hand")),
+            "{listed:?}"
+        );
+    }
+
+    /// A submodule whose refs are in the reftable format is named as such, with what to do.
+    #[test]
+    fn a_reftable_submodule_keeps_the_worktree_with_the_format_named() {
+        let (repo, checkout) = discussion_worktree_with_submodule("module-reftable");
+        let config = git_dir_of(&checkout.join("sub")).join("config");
+        let config = config.to_string_lossy();
+        git(
+            &checkout,
+            &[
+                "config",
+                "--file",
+                &config,
+                "core.repositoryformatversion",
+                "1",
+            ],
+        );
+        git(
+            &checkout,
+            &[
+                "config",
+                "--file",
+                &config,
+                "extensions.refStorage",
+                "reftable",
+            ],
+        );
+
+        let kept = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+        assert!(
+            kept.as_ref().is_err_and(|reason| reason
+                .contains(crate::core::lane_git::snapshot::REFTABLE_FORMAT)
+                && reason.contains("by hand")),
+            "{kept:?}"
+        );
+        assert!(checkout.join("sub/lib.txt").exists());
+    }
+
+    /// A partial clone of a submodule (`--filter`) fetches its objects on demand: Kronn does
+    /// not judge it, and says what to do. Git writes a promisor remote; older versions wrote
+    /// `extensions.partialClone`.
+    #[test]
+    fn a_partial_clone_submodule_keeps_the_worktree_with_what_to_do() {
+        let written: [&[(&str, &str)]; 2] = [
+            &[
+                ("remote.origin.promisor", "true"),
+                ("remote.origin.partialclonefilter", "blob:none"),
+            ],
+            &[("extensions.partialClone", "origin")],
+        ];
+        for (n, settings) in written.into_iter().enumerate() {
+            let (repo, checkout) =
+                discussion_worktree_with_submodule(&format!("module-partial{n}"));
+            let config = git_dir_of(&checkout.join("sub")).join("config");
+            let config = config.to_string_lossy();
+            git(
+                &checkout,
+                &[
+                    "config",
+                    "--file",
+                    &config,
+                    "core.repositoryformatversion",
+                    "1",
+                ],
+            );
+            for (key, value) in settings {
+                git(&checkout, &["config", "--file", &config, key, value]);
+            }
+
+            let kept = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+            assert!(
+                kept.as_ref().is_err_and(
+                    |reason| reason.contains("partial clone") && reason.contains("by hand")
+                ),
+                "{settings:?}: {kept:?}"
+            );
+            assert!(checkout.join("sub/lib.txt").exists());
+        }
+    }
+
+    // ── KT-2084: Kronn's own registrations, one file system, git within bounds ──
+
+    /// The registration of the discussion worktree `proj--<slug>` of `repo`.
+    fn admin_of(repo: &Path, slug: &str) -> PathBuf {
+        repo.join(".git/worktrees").join(format!("proj--{slug}"))
+    }
+
+    /// Lanes `a` and `b`, the `gitdir` of `a` rewritten to name `b`'s `.git` (`a` sorts
+    /// first: git's own pruning keeps it and deletes `b`'s registration).
+    fn lane_a_naming_lane_b(name: &str) -> (tempfile::TempDir, WorktreeInfo, WorktreeInfo) {
+        let repo = make_test_repo(name);
+        let a = create_discussion_worktree(repo.path(), "proj", "a", "main").unwrap();
+        let b = create_discussion_worktree(repo.path(), "proj", "b", "main").unwrap();
+        let named = fs::read(admin_of(repo.path(), "b").join("gitdir")).unwrap();
+        fs::write(admin_of(repo.path(), "a").join("gitdir"), named).unwrap();
+        (repo, a, b)
+    }
+
+    #[test]
+    fn a_registration_naming_another_lane_costs_that_lane_nothing_on_a_reattach() {
+        let (repo, _a, b) = lane_a_naming_lane_b("dup-reattach");
+        git(repo.path(), &["branch", "kronn/c"]);
+
+        let _ = reattach_worktree(repo.path(), "proj", "c", "kronn/c");
+
+        let admin = admin_of(repo.path(), "b");
+        assert!(
+            admin.join("index").is_file(),
+            "the registration of {} lost its index",
+            b.path
+        );
+        assert!(admin.join("HEAD").is_file());
+    }
+
+    #[test]
+    fn removing_a_lane_whose_registration_names_another_removes_its_own_and_keeps_the_other() {
+        let (repo, a, b) = lane_a_naming_lane_b("dup-remove");
+
+        let removed = remove_owned_worktree(repo.path(), Path::new(&a.path));
+
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(!Path::new(&a.path).exists());
+        assert!(
+            !admin_of(repo.path(), "a").exists(),
+            "the rewritten registration was left behind"
+        );
+        assert!(admin_of(repo.path(), "b").join("index").is_file());
+        assert!(Path::new(&b.path).join("README.md").exists());
+    }
+
+    #[test]
+    fn two_registrations_naming_one_worktree_fail_every_listing_with_both_names() {
+        let (repo, _a, b) = lane_a_naming_lane_b("dup-listing");
+        let both = |error: &String| error.contains("proj--a") && error.contains("proj--b");
+        // As git can open them: Windows canonicalises to `\\?\C:\…`, which no record spells.
+        let plain = crate::core::lane_git::without_verbatim_prefix;
+        let root = plain(repo.path().canonicalize().unwrap());
+        let lane = plain(Path::new(&b.path).canonicalize().unwrap());
+
+        let listed = registered_worktree_paths(repo.path());
+        assert!(listed.as_ref().is_err_and(both), "{listed:?}");
+        let found = crate::core::lane_git::registration_of(&root, &lane);
+        assert!(found.as_ref().is_err_and(both), "{found:?}");
+
+        // The same path in another case, on a volume that ignores case (`core.ignorecase`).
+        let ignores_case = std::process::Command::new("git")
+            .args(["config", "--bool", "core.ignorecase"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        if String::from_utf8_lossy(&ignores_case.stdout).trim() == "true" {
+            let upper = root.join(".kronn/worktrees/PROJ--B/.git");
+            fs::write(
+                admin_of(repo.path(), "a").join("gitdir"),
+                format!("{}\n", upper.display()),
+            )
+            .unwrap();
+            let listed = registered_worktree_paths(repo.path());
+            assert!(listed.as_ref().is_err_and(both), "{listed:?}");
+            let found = crate::core::lane_git::registration_of(&root, &lane);
+            assert!(found.as_ref().is_err_and(both), "{found:?}");
+        }
+    }
+
+    /// A registration naming a path outside the owner's checkout is not Kronn's: listed as
+    /// written, never looked at (an automounted `/net/<host>` would make the server resolve
+    /// and mount that host) and never pruned. Unix only: `/net/…` is absolute there.
+    #[cfg(unix)] // `/net/<host>` is an absolute path on POSIX only
+    #[test]
+    fn a_registration_naming_a_path_outside_the_checkout_is_listed_without_a_look_there() {
+        let repo = make_test_repo("foreign-gitdir");
+        create_discussion_worktree(repo.path(), "proj", "lane", "main").unwrap();
+        let gitdir = admin_of(repo.path(), "lane").join("gitdir");
+        let listed_lane = |repo: &Path| {
+            crate::core::lane_git::registered_worktrees(repo)
+                .unwrap()
+                .into_iter()
+                .find(|entry| {
+                    entry
+                        .admin
+                        .as_deref()
+                        .is_some_and(|admin| admin.ends_with("proj--lane"))
+                })
+                .unwrap()
+        };
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(
+            &gitdir,
+            format!("{}/gone/.git\n", elsewhere.path().display()),
+        )
+        .unwrap();
+
+        let entry = listed_lane(repo.path());
+        assert!(!entry.prunable && !entry.inside_checkout, "{entry:?}");
+
+        fs::write(&gitdir, "/net/kronn-test.invalid/x/.git\n").unwrap();
+        let started = std::time::Instant::now();
+        let entry = listed_lane(repo.path());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(entry.path, Path::new("/net/kronn-test.invalid/x"));
+        assert!(!entry.prunable && !entry.inside_checkout, "{entry:?}");
+    }
+
+    /// A `target` deeper than a removal goes: the cleanup says it removed only part of it.
+    /// Unix only: the Windows removal has no depth bound of its own.
+    #[cfg(unix)] // Windows has no depth bound in its removal: nothing to report
+    #[test]
+    fn a_build_folder_deeper_than_the_removal_goes_is_reported_partly_removed() {
+        let repo = make_test_repo("clean-deep");
+        let worktree = repo.path().join(".kronn/worktrees/KT-9-aaaa0009");
+        let target = managed_target(repo.path(), "KT-9-aaaa0009", 16);
+        let mut deep = target.join("deep");
+        for _ in 0..70 {
+            deep.push("d");
+        }
+        fs::create_dir_all(&deep).unwrap();
+
+        let cleaned =
+            clean_worktree_build_artifacts(repo.path(), &worktree, ExecutionLiveness::Terminal);
+
+        assert!(
+            cleaned
+                .as_ref()
+                .is_err_and(|error| error.contains(PARTLY_REMOVED)),
+            "{cleaned:?}"
+        );
+        assert!(worktree.exists());
+    }
+
+    /// The registered git directory of a lane comes from the owner's records alone: a `.git`
+    /// pointer moved to a git directory whose configuration never ends is refused at once.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn the_registered_git_dir_of_a_lane_is_found_without_running_git_in_it() {
+        let repo = make_test_repo("lane-git-dir");
+        let info = create_discussion_worktree(repo.path(), "proj", "lane", "main").unwrap();
+        let lane = PathBuf::from(&info.path);
+        let fake = lane.join("fake");
+        fs::create_dir_all(fake.join("objects")).unwrap();
+        fs::create_dir_all(fake.join("refs")).unwrap();
+        fs::write(fake.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fifo(&fake.join("config"));
+        let _unblock = Unblock(fake.join("config"));
+        fs::write(lane.join(".git"), format!("gitdir: {}\n", fake.display())).unwrap();
+        let main = repo.path().to_path_buf();
+
+        let found = within(std::time::Duration::from_secs(30), move || {
+            registered_worktree_git_dir(&main, &lane)
+        });
+
+        let found = found.expect("the lookup waited on the lane's git directory");
+        assert!(
+            found
+                .as_ref()
+                .is_err_and(|error| error.contains("pointer was moved")),
+            "{found:?}"
+        );
+    }
+
+    /// Counts the opens of the FIFO `path`: each reader gets an end of file at once, so
+    /// nothing that reads it waits.
+    #[cfg(unix)]
+    struct OpenCounter {
+        path: PathBuf,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        opens: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        writer: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(unix)]
+    impl OpenCounter {
+        fn start(path: &Path) -> Self {
+            use std::sync::atomic::Ordering;
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let writer = {
+                let (path, stop, opens) = (path.to_path_buf(), stop.clone(), opens.clone());
+                std::thread::spawn(move || loop {
+                    // Waits for a reader.
+                    let opened = fs::OpenOptions::new().write(true).open(&path);
+                    if stop.load(Ordering::SeqCst) || opened.is_err() {
+                        break;
+                    }
+                    opens.fetch_add(1, Ordering::SeqCst);
+                    drop(opened);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                })
+            };
+            Self {
+                path: path.to_path_buf(),
+                stop,
+                opens,
+                writer: Some(writer),
+            }
+        }
+
+        /// How many times it was opened; a reader of its own lets the waiting writer end.
+        fn stop(mut self) -> usize {
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::sync::atomic::Ordering;
+            self.stop.store(true, Ordering::SeqCst);
+            let _reader = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&self.path);
+            if let Some(writer) = self.writer.take() {
+                writer.join().unwrap();
+            }
+            self.opens.load(Ordering::SeqCst)
+        }
+    }
+
+    /// A gitlink whose path leads into a folder of the owner's checkout a worker writes (a lane
+    /// target) holding a `.git` it planted (a folder, a link to one, a `gitdir:` file): it is
+    /// no source the owner declares, no git runs there, and the commit only the task's
+    /// submodule holds keeps the checkout.
+    #[cfg(unix)] // FIFO made with libc::mkfifo, symlinks through std::os::unix
+    #[test]
+    fn a_planted_source_of_a_task_submodule_runs_no_git_and_saves_no_commit() {
+        let repo = make_test_repo("planted-source");
+        let upstream = make_test_repo("planted-upstream");
+        let base = head_sha(repo.path());
+        let task = create_task_worktree(repo.path(), "KT-2084", "planted", &base).unwrap();
+        let checkout = PathBuf::from(&task.path);
+        let lane = "target/wt-kt-2084-planted";
+        for name in ["a", "b", "c"] {
+            let relative = format!("{lane}/{name}");
+            git(
+                &checkout,
+                &["clone", "-q", upstream.path().to_str().unwrap(), &relative],
+            );
+            git(
+                &checkout,
+                &["-c", "advice.addEmbeddedRepo=false", "add", "-f", &relative],
+            );
+        }
+        let own = commit_file(
+            &checkout.join(lane).join("a"),
+            "local.txt",
+            "only here",
+            "task-only commit",
+        );
+        let planted = repo.path().join(lane);
+        fs::create_dir_all(planted.join("b")).unwrap();
+        fs::create_dir_all(planted.join("c")).unwrap();
+        git(
+            repo.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                checkout.join(lane).join("a").to_str().unwrap(),
+                planted.join("a/.git").to_str().unwrap(),
+            ],
+        );
+        let config = planted.join("a/.git/config");
+        fs::remove_file(&config).unwrap();
+        fifo(&config);
+        let _unblock = Unblock(config.clone());
+        std::os::unix::fs::symlink(planted.join("a/.git"), planted.join("b/.git")).unwrap();
+        fs::write(
+            planted.join("c/.git"),
+            format!("gitdir: {}\n", planted.join("a/.git").display()),
+        )
+        .unwrap();
+        let opens = OpenCounter::start(&config);
+        let evidence = tempfile::tempdir().unwrap();
+        let (owner, path, branch, kept_in) = (
+            repo.path().to_path_buf(),
+            task.path.clone(),
+            task.branch.clone(),
+            evidence.path().to_path_buf(),
+        );
+
+        let released = within(std::time::Duration::from_secs(120), move || {
+            crate::core::lane_git::snapshot::set_timeout_for_tests(Some(
+                std::time::Duration::from_secs(10),
+            ));
+            release_terminal_task_worktree(&owner, &path, &branch, &kept_in)
+        });
+
+        let opened = opens.stop();
+        assert_eq!(opened, 0, "git read the planted configuration");
+        let released = released.expect("the release did not return");
+        assert!(
+            released
+                .as_ref()
+                .is_err_and(|error| error.contains(&format!("{lane}/a")) && error.contains(&own)),
+            "{released:?}"
+        );
+        assert!(checkout.join(lane).join("a/local.txt").exists());
+    }
+
+    // ── KT-2084 round 8: records Kronn owns, reuse, repair steps, bounded test mode ──
+
+    /// A lane's record rewritten to name a folder of `.kronn/worktrees` that carries another
+    /// registration's name: the prune removes a record only when its own `gitdir` names a gone
+    /// checkout as Kronn or git writes it, never one found by a name.
+    #[test]
+    fn the_prune_removes_no_registration_a_rewritten_record_only_names() {
+        let repo = make_test_repo("prune-by-name");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let own = elsewhere.path().join("feature");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                own.to_str().unwrap(),
+            ],
+        );
+        create_discussion_worktree(repo.path(), "proj", "a", "main").unwrap();
+        let gone = a_canonical_worktree(repo.path(), "gone");
+        fs::remove_dir_all(&gone).unwrap();
+        let root =
+            crate::core::lane_git::without_verbatim_prefix(repo.path().canonicalize().unwrap());
+        fs::write(
+            admin_of(repo.path(), "a").join("gitdir"),
+            format!("{}/.kronn/worktrees/feature\n", root.display()),
+        )
+        .unwrap();
+        let kept = repo.path().join(".git/worktrees/feature");
+
+        let pruned = prune_kronn_worktrees(repo.path());
+
+        assert!(
+            kept.join("HEAD").is_file() && kept.join("gitdir").is_file(),
+            "{pruned:?}: the registration of {} was removed",
+            own.display()
+        );
+        assert!(
+            admin_of(repo.path(), "a").join("HEAD").is_file(),
+            "{pruned:?}"
+        );
+        // Its own gone checkout's record still goes.
+        assert_eq!(pruned, Ok(1));
+        assert!(!admin_of(repo.path(), "gone").exists());
+    }
+
+    /// Git registers a worktree under another name (`<folder>1`) when the folder's name is
+    /// taken: Kronn undoes that creation and refuses it, and the holder's record is untouched.
+    #[test]
+    fn a_worktree_git_registers_under_another_name_is_refused_and_undone() {
+        let repo = make_test_repo("taken-id");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let own = elsewhere.path().join("proj--x");
+        git(
+            repo.path(),
+            &["worktree", "add", "-q", "-b", "own", own.to_str().unwrap()],
+        );
+        let taken = repo.path().join(".git/worktrees/proj--x");
+        let before = fs::read(taken.join("gitdir")).unwrap();
+
+        let created = create_discussion_worktree(repo.path(), "proj", "x", "main");
+
+        assert!(
+            created.as_ref().is_err_and(
+                |error| error.contains("`proj--x1`") && error.contains("git worktree remove")
+            ),
+            "{created:?}"
+        );
+        assert_eq!(
+            fs::read(taken.join("gitdir")).unwrap(),
+            before,
+            "the record of {} was rewritten",
+            own.display()
+        );
+        assert!(own.join("README.md").exists());
+        assert!(!repo.path().join(".kronn/worktrees/proj--x").exists());
+        assert!(!repo.path().join(".git/worktrees/proj--x1").exists());
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", "kronn/x"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(branches.stdout.is_empty(), "the new branch was left");
+    }
+
+    /// A discussion reuses the checkout Kronn gave it, and no other worktree its branch is
+    /// checked out in: that one is the user's own, or another lane's.
+    #[test]
+    fn a_discussion_reuses_its_own_checkout_and_no_other_worktree_on_its_branch() {
+        let repo = make_test_repo("reuse-own-only");
+        let own = repo.path().join("own-wt");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "kronn/my-topic",
+                own.to_str().unwrap(),
+            ],
+        );
+
+        let refused = create_discussion_worktree(repo.path(), "proj", "my-topic", "main");
+
+        assert!(
+            refused.as_ref().is_err_and(
+                |error| error.contains("own-wt") && error.contains("git worktree remove")
+            ),
+            "{refused:?}"
+        );
+        let first = create_discussion_worktree(repo.path(), "proj", "mine", "main").unwrap();
+        let again = create_discussion_worktree(repo.path(), "proj", "mine", "main").unwrap();
+        assert!(same_path(Path::new(&first.path), Path::new(&again.path)));
+        assert!(!again.is_main_repo);
+    }
+
+    /// Another lane's record that names this lane with a byte added, or grown past the cap, is
+    /// not this lane's registration: the lane is still found, by its own record alone.
+    #[test]
+    fn a_padded_or_oversized_record_of_another_lane_is_not_this_lanes_registration() {
+        for (case, padding) in [("space", " \n".to_string()), ("grown", "\n".repeat(8192))] {
+            let repo = make_test_repo(&format!("seed-gitdir-{case}"));
+            create_discussion_worktree(repo.path(), "proj", "a", "main").unwrap();
+            let b = create_discussion_worktree(repo.path(), "proj", "b", "main").unwrap();
+            let named = fs::read_to_string(admin_of(repo.path(), "b").join("gitdir")).unwrap();
+            fs::write(
+                admin_of(repo.path(), "a").join("gitdir"),
+                format!("{}{padding}", named.trim_end()),
+            )
+            .unwrap();
+
+            let found = registered_worktree_git_dir(repo.path(), Path::new(&b.path));
+
+            assert!(
+                found.as_ref().is_ok_and(|admin| admin.ends_with("proj--b")),
+                "{case}: {found:?}"
+            );
+        }
+    }
+
+    /// Two registrations naming one worktree: the refusal names both, says which one the
+    /// worktree uses, and gives the one-file step that repairs it, with no git command to
+    /// paste. A panel action gets the same text.
+    #[test]
+    fn the_refusal_of_two_registrations_gives_the_command_that_repairs() {
+        let (repo, a, b) = lane_a_naming_lane_b("dup-repair-step");
+        let owner =
+            crate::core::lane_git::without_verbatim_prefix(repo.path().canonicalize().unwrap());
+        let lane_a = crate::core::lane_git::without_verbatim_prefix(
+            Path::new(&a.path).canonicalize().unwrap(),
+        );
+        let stale = owner.join(".git/worktrees/proj--a/gitdir");
+        let line = format!("{}/.git", lane_a.display());
+        let step = format!(
+            "replace the content of the file\n    {}\nwith this single line:\n    {line}\n",
+            stale.display()
+        );
+
+        let refused = create_discussion_worktree(repo.path(), "proj", "c", "main").unwrap_err();
+        let panel = crate::api::git_ops::run_git_push(Path::new(&b.path), &[])
+            .expect_err("the panel's push is refused");
+
+        for message in [&refused, &panel] {
+            assert!(
+                message.contains("proj--a") && message.contains("proj--b"),
+                "{message}"
+            );
+            assert!(message.contains(&step), "{message}");
+            // No git command to paste: one that repairs a record rewrites others too.
+            assert!(
+                !message.contains("worktree repair") && !message.contains("worktree prune"),
+                "{message}"
+            );
+        }
+        // The step it gives is the repair.
+        fs::write(&stale, format!("{line}\n")).unwrap();
+        let listed = registered_worktree_paths(repo.path());
+        assert!(listed.is_ok(), "{listed:?}");
+        let again = create_discussion_worktree(repo.path(), "proj", "c", "main");
+        assert!(again.is_ok(), "{again:?}");
+    }
+
+    /// A reattach git refuses because another worktree holds the branch: the reason names that
+    /// one registration and the command that removes it, whatever git's own words are.
+    #[test]
+    fn a_refused_reattach_names_the_one_registration_that_holds_the_branch() {
+        let repo = make_test_repo("reattach-holder");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let own = elsewhere.path().join("held");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "kronn/c",
+                own.to_str().unwrap(),
+            ],
+        );
+        let admin = Path::new("worktrees").join("held");
+
+        let refused = reattach_worktree(repo.path(), "proj", "c", "kronn/c").unwrap_err();
+
+        // A path no shell reads goes into the command, in single quotes.
+        let removal = format!(
+            "worktree remove '{}'`",
+            own.canonicalize().unwrap().display()
+        );
+        assert!(
+            refused.contains(&admin.display().to_string()) && refused.contains(&removal),
+            "{refused}"
+        );
+        assert!(!refused.contains("worktree prune"), "{refused}");
+        assert!(own.join("README.md").exists());
+
+        // A path a shell would read is shown as data, with no command to paste.
+        let odd = elsewhere.path().join("he$(touch x)`l\"d");
+        fs::write(
+            repo.path().join(".git/worktrees/held/gitdir"),
+            format!("{}/.git\n", odd.display()),
+        )
+        .unwrap();
+        let refused = reattach_worktree(repo.path(), "proj", "c", "kronn/c").unwrap_err();
+        assert!(
+            refused.contains(&format!("\n    {}\n", odd.display())),
+            "{refused}"
+        );
+        assert!(
+            !refused.contains("git -C") && !refused.contains("worktree remove"),
+            "{refused}"
+        );
+    }
+
+    /// A path with anything a shell reads never enters a command a message prints; shown as
+    /// data, its control characters start no line of their own.
+    #[test]
+    fn a_path_a_shell_would_read_is_never_put_in_a_printed_command() {
+        use crate::core::lane_git::{path_as_data, quoted_for_command};
+        if cfg!(unix) {
+            assert_eq!(
+                quoted_for_command(Path::new("/srv/p-1/.kronn/worktrees/a_b")).as_deref(),
+                Some("'/srv/p-1/.kronn/worktrees/a_b'")
+            );
+        }
+        for odd in [
+            "/r/$(touch x)",
+            "/r/`id`",
+            "/r/it's",
+            "/r/a\"b",
+            "/r/a b",
+            "/r/a\nb",
+            "/r/a;b",
+            "/r/~a",
+            "/r/../b",
+            "relative/a",
+        ] {
+            assert_eq!(quoted_for_command(Path::new(odd)), None, "{odd}");
+        }
+        assert_eq!(
+            path_as_data(Path::new("/r/a\nrm -rf $(touch x)`")),
+            "\n    /r/a\\nrm -rf $(touch x)`\n"
+        );
+    }
+
+    /// A sparse-checkout lane whose pattern file is a link or a FIFO: git would read through
+    /// it, so no lane git runs there, and the refusal names the file at once.
+    #[cfg(unix)] // FIFO made with libc::mkfifo, symlink made through std::os::unix
+    #[test]
+    fn a_sparse_pattern_file_that_is_a_link_or_a_fifo_refuses_the_lane() {
+        for case in ["link", "fifo"] {
+            let repo = make_test_repo(&format!("sparse-{case}"));
+            fs::create_dir_all(repo.path().join("kept")).unwrap();
+            fs::write(repo.path().join("kept/a.txt"), "a").unwrap();
+            git(repo.path(), &["add", "."]);
+            git(repo.path(), &["commit", "-qm", "a folder"]);
+            git(repo.path(), &["sparse-checkout", "set", "kept"]);
+            let lane = a_canonical_worktree(repo.path(), "sparse");
+            assert!(crate::core::lane_git::git(&lane).is_ok());
+            let patterns = git_dir_of(&lane).join("info/sparse-checkout");
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("secret"), "outside line\n").unwrap();
+            let _ = fs::remove_file(&patterns);
+            fs::create_dir_all(patterns.parent().unwrap()).unwrap();
+            if case == "link" {
+                std::os::unix::fs::symlink(outside.path().join("secret"), &patterns).unwrap();
+            } else {
+                fifo(&patterns);
+            }
+            let _unblock = Unblock(patterns.clone());
+
+            let checked = within(std::time::Duration::from_secs(30), move || {
+                crate::core::lane_git::git(&lane).map(|_| ())
+            });
+
+            let refused = checked.expect("the lane's check waited on the file");
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|error| error.contains("info/sparse-checkout")),
+                "{case}: {refused:?}"
+            );
+        }
+    }
+
+    /// A project that keeps a submodule's repository in the submodule's own `.git` directory:
+    /// Kronn does not read that copy, and the reason a task checkout is kept says so.
+    #[test]
+    fn a_kept_task_submodule_says_why_the_projects_own_copy_was_not_read() {
+        let repo = make_test_repo("task-release-sub-dir");
+        let upstream = add_materialized_test_submodule(repo.path());
+        let pinned = commit_file(upstream.path(), "bump.txt", "v2", "upstream bump");
+        let source = repo.path().join("deps/required");
+        git(&source, &["fetch", "-q", "origin"]);
+        git(&source, &["checkout", "-q", "--detach", &pinned]);
+        git(repo.path(), &["commit", "-qam", "bump the submodule"]);
+        let base = head_sha(repo.path());
+        let task = create_task_worktree(repo.path(), "KT-2084", "sub-dir", &base).unwrap();
+        let module = git_dir_of(&source);
+        git(
+            repo.path(),
+            &[
+                "config",
+                "-f",
+                module.join("config").to_str().unwrap(),
+                "--unset",
+                "core.worktree",
+            ],
+        );
+        fs::remove_file(source.join(".git")).unwrap();
+        fs::rename(&module, source.join(".git")).unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let kept =
+            release_terminal_task_worktree(repo.path(), &task.path, &task.branch, evidence.path());
+
+        assert!(
+            kept.as_ref()
+                .is_err_and(|error| error.contains("deps/required")
+                    && error.contains(&pinned)
+                    && error.contains("its own .git directory")
+                    && error.contains("submodule absorbgitdirs")),
+            "{kept:?}"
+        );
+        assert!(Path::new(&task.path).join("deps/required").exists());
+    }
+
+    /// A project that uses `git sparse-checkout`: git copies its own sparse switches into
+    /// each new worktree's `config.worktree`, and Kronn's git still runs and judges there.
+    #[test]
+    fn a_sparse_checkout_project_keeps_its_discussion_worktrees_usable() {
+        let repo = make_test_repo("sparse-project");
+        fs::create_dir_all(repo.path().join("kept")).unwrap();
+        fs::create_dir_all(repo.path().join("left")).unwrap();
+        fs::write(repo.path().join("kept/a.txt"), "a").unwrap();
+        fs::write(repo.path().join("left/b.txt"), "b").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-qm", "two folders"]);
+        git(repo.path(), &["sparse-checkout", "set", "kept"]);
+        let lane = create_discussion_worktree(repo.path(), "proj", "sparse", "main").unwrap();
+        let lane = Path::new(&lane.path);
+
+        let status = crate::core::lane_git::git(lane).and_then(|mut git| {
+            git.args(["status", "--porcelain"]);
+            bounded(git, "status")
+        });
+        let judged = Snapshot::of_worktree(lane).and_then(|judged| judged_dirty_files(&judged));
+
+        assert!(
+            status.as_ref().is_ok_and(|output| output.status.success()),
+            "{status:?}"
+        );
+        assert!(
+            judged.as_ref().is_ok_and(Vec::is_empty),
+            "{:?}",
+            judged.err()
+        );
+    }
+
+    /// A FIFO named `.gitignore` in a lane or in the project's checkout: the checks test mode
+    /// runs first answer within git's time bound instead of waiting on it.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn a_fifo_gitignore_keeps_the_test_mode_checks_within_their_bound() {
+        let repo = make_test_repo("test-mode-fifo");
+        let lane = a_canonical_worktree(repo.path(), "lane");
+        let owner = repo.path().to_path_buf();
+        let pipes = [lane.join(".gitignore"), owner.join(".gitignore")];
+        for pipe in &pipes {
+            fifo(pipe);
+        }
+        let _unblock = (Unblock(pipes[0].clone()), Unblock(pipes[1].clone()));
+
+        let checked = within(std::time::Duration::from_secs(60), move || {
+            crate::core::lane_git::snapshot::set_timeout_for_tests(Some(
+                std::time::Duration::from_secs(2),
+            ));
+            (
+                worktree_dirty_files(&lane).map(|files| files.len()),
+                main_repo_state(&owner).map(|state| state.dirty_files.len()),
+            )
+        });
+
+        let (lane_files, owner_state) = checked.expect("a test-mode check did not return");
+        assert!(
+            lane_files
+                .as_ref()
+                .is_err_and(|error| error.contains("timeout")),
+            "{lane_files:?}"
+        );
+        assert!(
+            owner_state
+                .as_ref()
+                .is_err_and(|error| error.contains("timeout")),
+            "{owner_state:?}"
+        );
     }
 }

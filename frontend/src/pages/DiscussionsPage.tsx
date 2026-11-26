@@ -58,6 +58,7 @@ import { useMessageQueue, type QueuedMessage, type QueuedMessageControl } from '
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
 import { findLastAgentMessage } from '../lib/discussionHelpers';
+import { DeletingDiscussions, deleteDiscussions, DiscussionsDeleteRefused } from '../lib/discussionDelete';
 import { saveDraft } from '../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft, saveReplyDraft } from '../lib/chat-reply-drafts';
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
@@ -659,12 +660,6 @@ export function DiscussionsPage({
       setExportingDiscussion(false);
     }
   }, [toast, t]);
-  const deleteActiveDiscussion = useCallback(async (discId: string) => {
-    if (!confirm(t('disc.confirmDelete'))) return;
-    await discussionsApi.delete(discId);
-    setActiveDiscussionId(null);
-    refetchDiscussions();
-  }, [t, refetchDiscussions]);
 
   // One panel at a time, decided here rather than in the switcher: the rule
   // already lived in this file (Escape closes them all), and splitting it in
@@ -1129,6 +1124,11 @@ export function DiscussionsPage({
   const chatEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const optimisticMessageIdsRef = useRef<Set<string>>(new Set());
+  // KT-2084 — the server cancels the agents of a discussion it deletes: the error of
+  // a stream it closes waits for the delete's outcome, and is dropped once deleted.
+  const deletingDiscussionsRef = useRef(new DeletingDiscussions());
+  const onStreamError = useCallback((discId: string, handle: () => void) =>
+    deletingDiscussionsRef.current.onStreamError(discId, handle), []);
   // True when the user is reading higher up in the message log. We freeze
   // the auto-scroll behavior so the streaming output doesn't yank the
   // scroll position back to the bottom every chunk. Re-enabled the moment
@@ -2324,7 +2324,7 @@ export function DiscussionsPage({
         discId,
         (text) => appendRememberedStreamChunk(discId, text),
         () => cleanupStream(discId),
-        (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+        (error) => onStreamError(discId, () => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); }),
         controller.signal,
         onAgentLog,
       );
@@ -2538,7 +2538,7 @@ export function DiscussionsPage({
       discId,
       (text) => appendRememberedStreamChunk(discId, text),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+      (error) => onStreamError(discId, () => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); }),
       controller.signal,
       onAgentLog,
       undefined,
@@ -2656,10 +2656,10 @@ export function DiscussionsPage({
           () => {
             if (!accepted) rollback();
           },
-          error => {
+          error => onStreamError(discId, () => {
             if (!accepted) rollback();
             toast(userError(error), 'error');
-          },
+          }),
           undefined,
           undefined,
           undefined,
@@ -2805,6 +2805,9 @@ export function DiscussionsPage({
     const handleSendError = (error: string) => {
       if (sendErrorHandled) return;
       sendErrorHandled = true;
+      onStreamError(discId, () => handleHeldSendError(error));
+    };
+    const handleHeldSendError = (error: string) => {
       console.error('Agent error:', error);
       if (!acceptedReceipt) {
         optimisticMessageIdsRef.current.delete(clientMessageId);
@@ -3318,7 +3321,7 @@ export function DiscussionsPage({
         },
         (text) => appendRememberedStreamChunk(discId, text),
         () => cleanupStream(discId),
-        (error) => {
+        (error) => onStreamError(discId, () => {
           console.error('Agent error:', error);
           const errStr = userError(error);
           if (errStr.startsWith('HTTP 409') && errStr.includes('already in progress')) {
@@ -3329,7 +3332,7 @@ export function DiscussionsPage({
             toast(errStr, 'error');
           }
           cleanupStream(discId);
-        },
+        }),
         controller.signal,
         undefined,
         onAgentLog,
@@ -3469,17 +3472,25 @@ export function DiscussionsPage({
       toast(t('disc.stopAgentError', userError(e)), 'error');
     }
   }, [refetchDiscussions, t, toast]);
-  const handleDiscDelete = useCallback(async (discId: string) => {
-    if (!confirm(t('disc.confirmDelete'))) return;
-    // Abort any in-flight stream + clear lifted streaming state BEFORE the
-    // delete request so a slow agent reply doesn't try to write back to a
-    // disc that's about to vanish from the DB.
+  // KT-2084 — the stream is cut only once the server deleted the discussion (it
+  // cancels the agent itself first): a refused delete leaves it running.
+  const forgetDeletedDiscussion = useCallback((discId: string, keptWorktree?: string) => {
     try { abortControllers.current[discId]?.abort(); } catch { /* noop */ }
     cleanupStreamBase(discId);
-    await discussionsApi.delete(discId);
+    if (keptWorktree) toast(t('disc.deleteWorktreeKept', keptWorktree), 'info');
+  }, [abortControllers, cleanupStreamBase, t, toast]);
+  const handleDiscDelete = useCallback(async (discId: string) => {
+    if (!confirm(t('disc.confirmDelete'))) return;
+    const [refusal] = await deleteDiscussions(
+      [discId], discussionsApi.delete, forgetDeletedDiscussion, deletingDiscussionsRef.current,
+    );
+    if (refusal) {
+      toast(t('disc.deleteRefused', refusal.reason), 'error');
+      return;
+    }
     setActiveDiscussionId(prev => prev === discId ? null : prev);
     refetchDiscussions();
-  }, [refetchDiscussions, abortControllers, cleanupStreamBase, t]);
+  }, [refetchDiscussions, forgetDeletedDiscussion, t, toast]);
   const handleDiscUnarchive = useCallback(async (discId: string) => {
     await discussionsApi.update(discId, { archived: false });
     refetchDiscussions();
@@ -3497,21 +3508,16 @@ export function DiscussionsPage({
     }
   }, [refetchDiscussions]);
   const handleBulkDelete = useCallback(async (discIds: string[]) => {
-    for (const discId of discIds) {
-      try { abortControllers.current[discId]?.abort(); } catch { /* noop */ }
-      cleanupStreamBase(discId);
-    }
-    const results = await Promise.allSettled(
-      discIds.map(discId => discussionsApi.delete(discId)),
+    const refused = await deleteDiscussions(
+      discIds, discussionsApi.delete, forgetDeletedDiscussion, deletingDiscussionsRef.current,
     );
+    const kept = new Set(refused.map(refusal => refusal.id));
     setActiveDiscussionId(previous => (
-      previous && discIds.includes(previous) ? null : previous
+      previous && discIds.includes(previous) && !kept.has(previous) ? null : previous
     ));
     refetchDiscussions();
-    if (results.some(result => result.status === 'rejected')) {
-      throw new Error('bulk delete failed');
-    }
-  }, [abortControllers, cleanupStreamBase, refetchDiscussions]);
+    if (refused.length > 0) throw new DiscussionsDeleteRefused(refused);
+  }, [forgetDeletedDiscussion, refetchDiscussions]);
 
   const handleToggleGroup = useCallback((key: string) => {
     setCollapsedDiscGroups(prev => {
@@ -3716,7 +3722,7 @@ export function DiscussionsPage({
         },
         (text) => appendRememberedStreamChunk(discId, text),
         () => cleanupStream(discId),
-        (error) => {
+        (error) => onStreamError(discId, () => {
           console.error('Agent error:', error);
           const e = userError(error);
           if (e.includes('checked out') || e.includes('worktree')) {
@@ -3725,7 +3731,7 @@ export function DiscussionsPage({
             toast(e, 'error');
           }
           cleanupStream(discId);
-        },
+        }),
         controller.signal,
         undefined,
         onAgentLog,
@@ -3838,7 +3844,7 @@ export function DiscussionsPage({
         });
         refetchDiscussions();
       },
-      onError: (error) => {
+      onError: (error) => onStreamError(discId, () => {
         console.error('Orchestration error:', error);
         toast(userError(error), 'error');
         setSendingMap(prev => ({ ...prev, [discId]: false }));
@@ -3848,7 +3854,7 @@ export function DiscussionsPage({
           return s ? { ...prev, [discId]: { ...s, active: false } } : prev;
         });
         refetchDiscussions();
-      },
+      }),
     }, controller.signal);
   };
 
@@ -5628,7 +5634,7 @@ export function DiscussionsPage({
                   label: t('disc.panelRail.delete'),
                   icon: <Trash2 size={14} />,
                   danger: true,
-                  onSelect: () => { void deleteActiveDiscussion(activeDiscussion.id); },
+                  onSelect: () => { void handleDiscDelete(activeDiscussion.id); },
                 },
               ]}
               items={[

@@ -1006,6 +1006,7 @@ pub fn default_config() -> AppConfig {
             disk_launch_min_free_gib: crate::models::setup::DEFAULT_DISK_LAUNCH_MIN_FREE_GIB,
             disk_sweep_idle_hours: crate::models::setup::DEFAULT_DISK_SWEEP_IDLE_HOURS,
             disk_stalled_build_days: crate::models::setup::DEFAULT_DISK_STALLED_BUILD_DAYS,
+            regenerable_outputs: vec![],
             max_concurrent_agents: 5,
             agent_stall_timeout_min: 5,
             agent_global_timeout_min: crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,
@@ -1580,6 +1581,33 @@ mod tests {
         );
         let kept: crate::models::AppConfig = toml::from_str(&chosen).unwrap();
         assert_eq!(kept.server.run_payload_retention_days, 30);
+    }
+
+    /// KT-2084 — the built-in regenerable outputs are in code; the key only adds names and
+    /// paths from the worktree root (`vendor/bundle`, honoured by `core::worktree`'s tests).
+    #[test]
+    fn regenerable_outputs_add_nothing_until_chosen() {
+        let fresh = default_config();
+        assert!(fresh.server.regenerable_outputs.is_empty());
+
+        let toml = toml::to_string_pretty(&fresh).unwrap();
+        let legacy: String = toml
+            .lines()
+            .filter(|l| !l.starts_with("regenerable_outputs"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let existing: crate::models::AppConfig = toml::from_str(&legacy).unwrap();
+        assert!(existing.server.regenerable_outputs.is_empty());
+
+        let chosen = toml.replace(
+            "regenerable_outputs = []",
+            "regenerable_outputs = [\"generated\", \"vendor/bundle\"]",
+        );
+        let kept: crate::models::AppConfig = toml::from_str(&chosen).unwrap();
+        assert_eq!(
+            kept.server.regenerable_outputs,
+            ["generated", "vendor/bundle"]
+        );
     }
 
     #[test]

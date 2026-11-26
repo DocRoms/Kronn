@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 pub const MAX_DEPTH: usize = 64;
 
 #[cfg(unix)]
-pub use unix::{Dir, Identity};
+pub use unix::{Dir, EntryStat, Identity};
 
 #[cfg(not(unix))]
 pub use fallback::Dir;
@@ -35,6 +35,47 @@ pub use fallback::Dir;
 fn too_deep() -> io::Error {
     io::Error::other(format!(
         "deeper than {MAX_DEPTH} levels: refused, nothing below is followed"
+    ))
+}
+
+/// Test seam for a mount point (KT-2084): nothing is mounted in a test, so a folder whose
+/// name a test registered here is taken as one on another file system by every walk and
+/// removal. Shared by every thread (a route runs its file system work on a blocking thread);
+/// each test takes a name of its own.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod mount_probe {
+    use std::collections::HashSet;
+    use std::ffi::{OsStr, OsString};
+    use std::sync::Mutex;
+
+    static MOUNTED: Mutex<Option<HashSet<OsString>>> = Mutex::new(None);
+
+    fn with<R>(f: impl FnOnce(&mut HashSet<OsString>) -> R) -> R {
+        let mut guard = MOUNTED.lock().unwrap_or_else(|e| e.into_inner());
+        f(guard.get_or_insert_with(HashSet::new))
+    }
+
+    /// Every folder named `name` is on another file system until [`forget`].
+    pub fn pretend_mounted(name: &OsStr) {
+        with(|mounted| mounted.insert(name.to_os_string()));
+    }
+
+    /// Ends [`pretend_mounted`] of `name`.
+    pub fn forget(name: &OsStr) {
+        with(|mounted| mounted.remove(name));
+    }
+
+    pub(crate) fn pretends(name: &OsStr) -> bool {
+        with(|mounted| mounted.contains(name))
+    }
+}
+
+/// The refusal of a folder on another file system: kept, never entered (KT-2084).
+#[cfg(unix)]
+fn other_file_system_kept(path: &Path) -> io::Error {
+    io::Error::other(format!(
+        "{} is on another file system (a mount point): kept, nothing below it is touched",
+        path.display()
     ))
 }
 
@@ -86,6 +127,47 @@ mod unix {
                 ctime_nsec: stat.st_ctime_nsec as i64,
                 size: stat.st_size as u64,
             }
+        }
+    }
+
+    /// What one entry is, as `stat` says it without following a link.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EntryStat {
+        kind: libc::mode_t,
+        /// Its size in bytes.
+        pub len: u64,
+        /// Its last write.
+        pub modified: std::time::SystemTime,
+        /// How many names it has.
+        pub links: u64,
+    }
+
+    impl EntryStat {
+        // Field widths differ between unix targets.
+        #[allow(clippy::unnecessary_cast)]
+        fn of(stat: &libc::stat) -> Self {
+            let (secs, nanos) = (stat.st_mtime as i64, stat.st_mtime_nsec as i64);
+            let since =
+                std::time::Duration::new(secs.unsigned_abs(), nanos.clamp(0, 999_999_999) as u32);
+            let modified = if secs >= 0 {
+                std::time::UNIX_EPOCH + since
+            } else {
+                std::time::UNIX_EPOCH - since
+            };
+            Self {
+                kind: stat.st_mode & libc::S_IFMT,
+                len: stat.st_size as u64,
+                modified,
+                links: stat.st_nlink as u64,
+            }
+        }
+
+        pub fn is_dir(&self) -> bool {
+            self.kind == libc::S_IFDIR
+        }
+
+        pub fn is_symlink(&self) -> bool {
+            self.kind == libc::S_IFLNK
         }
     }
 
@@ -324,6 +406,12 @@ mod unix {
         /// The raw names of the entries, `.` and `..` left out. A read error
         /// is an error, never taken for the end of the listing.
         pub fn names(&self) -> io::Result<Vec<OsString>> {
+            self.names_up_to(usize::MAX)
+        }
+
+        /// [`Dir::names`], stopping once `max` names are read: a caller with a budget
+        /// never reads a huge directory to its end.
+        pub fn names_up_to(&self, max: usize) -> io::Result<Vec<OsString>> {
             let dup = check(unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) })?;
             let stream = unsafe { libc::fdopendir(dup) };
             if stream.is_null() {
@@ -334,6 +422,9 @@ mod unix {
             unsafe { libc::rewinddir(stream) };
             let mut names = Vec::new();
             let result = loop {
+                if names.len() >= max {
+                    break Ok(());
+                }
                 clear_errno();
                 let entry = unsafe { libc::readdir(stream) };
                 if entry.is_null() {
@@ -361,7 +452,10 @@ mod unix {
 
         /// Removes the entry `name`: a directory with everything below it,
         /// anything else (a link included) as one entry. Missing is fine.
-        /// An explicit stack, one fd per level, closed on the way up.
+        /// An explicit stack, one fd per level, closed on the way up. A folder on
+        /// another file system than this directory's (a mount point) is kept with
+        /// the folders above it, the rest removed, and the call ends with an error
+        /// naming it (KT-2084).
         pub fn remove_child(&self, name: impl AsRef<OsStr>) -> io::Result<()> {
             let name = name.as_ref();
             let top = match self.open_child(name) {
@@ -370,20 +464,36 @@ mod unix {
                 Err(error) if not_a_directory(&error) => return self.unlink(name, 0),
                 Err(error) => return Err(error),
             };
+            let device = self.device()?;
+            if Dir::other_file_system(&top, name, device)? {
+                return Err(other_file_system_kept(Path::new(name)));
+            }
             let pending = top.names()?;
             listed_hook(name);
-            let mut stack: Vec<(Dir, OsString, Vec<OsString>)> =
-                vec![(top, name.to_os_string(), pending)];
-            while let Some((dir, _, pending)) = stack.last_mut() {
+            // Each level: its folder, its name, what is left to remove, whether it keeps a
+            // mount point below it.
+            let mut stack: Vec<(Dir, OsString, Vec<OsString>, bool)> =
+                vec![(top, name.to_os_string(), pending, false)];
+            let mut kept: Option<PathBuf> = None;
+            while let Some((dir, _, pending, keeps)) = stack.last_mut() {
                 if let Some(entry) = pending.pop() {
                     match dir.open_child(&entry) {
+                        Ok(Some(sub)) if Dir::other_file_system(&sub, &entry, device)? => {
+                            *keeps = true;
+                            if kept.is_none() {
+                                let mut path: PathBuf =
+                                    stack.iter().map(|(_, name, _, _)| name).collect();
+                                path.push(&entry);
+                                kept = Some(path);
+                            }
+                        }
                         Ok(Some(sub)) => {
                             if stack.len() >= MAX_DEPTH {
                                 return Err(too_deep());
                             }
                             let below = sub.names()?;
                             listed_hook(&entry);
-                            stack.push((sub, entry, below));
+                            stack.push((sub, entry, below, false));
                         }
                         Ok(None) => {}
                         Err(error) if not_a_directory(&error) => dir.unlink(&entry, 0)?,
@@ -391,12 +501,21 @@ mod unix {
                     }
                     continue;
                 }
-                let (done, done_name, _) = stack.pop().expect("a last entry");
+                let (done, done_name, _, keeps) = stack.pop().expect("a last entry");
                 drop(done);
-                let parent = stack.last().map_or(self, |(dir, _, _)| dir);
+                if keeps {
+                    if let Some((_, _, _, parent_keeps)) = stack.last_mut() {
+                        *parent_keeps = true;
+                    }
+                    continue;
+                }
+                let parent = stack.last().map_or(self, |(dir, _, _, _)| dir);
                 parent.unlink(&done_name, libc::AT_REMOVEDIR)?;
             }
-            Ok(())
+            match kept {
+                Some(path) => Err(other_file_system_kept(&path)),
+                None => Ok(()),
+            }
         }
 
         /// `renameat` of `from/name` to `self/to`, on one file system only.
@@ -588,6 +707,38 @@ mod unix {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
                 Err(error) => Err(error),
             }
+        }
+
+        /// What the entry `name` is, never through a link (`fstatat(AT_SYMLINK_NOFOLLOW)`).
+        pub fn entry_stat(&self, name: &OsStr) -> io::Result<EntryStat> {
+            self.stat(name).map(|stat| EntryStat::of(&stat))
+        }
+
+        /// The file system (`st_dev`) this directory is on.
+        pub fn device(&self) -> io::Result<u64> {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            check(unsafe { libc::fstat(self.fd.as_raw_fd(), stat.as_mut_ptr()) })?;
+            #[allow(clippy::unnecessary_cast)]
+            Ok(unsafe { stat.assume_init() }.st_dev as u64)
+        }
+
+        /// Whether `child`, opened as the entry `name` of a walk or a removal over the file
+        /// system `device`, is on another one (KT-2084): a mount point, never entered, as
+        /// `rm --one-file-system` keeps it.
+        pub fn other_file_system(child: &Dir, name: &OsStr, device: u64) -> io::Result<bool> {
+            #[cfg(any(test, feature = "test-support"))]
+            if super::mount_probe::pretends(name) {
+                return Ok(true);
+            }
+            let _ = name;
+            Ok(child.device()? != device)
+        }
+
+        /// What this directory itself is (`fstat` of the held fd).
+        pub fn stat_self(&self) -> io::Result<EntryStat> {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            check(unsafe { libc::fstat(self.fd.as_raw_fd(), stat.as_mut_ptr()) })?;
+            Ok(EntryStat::of(&unsafe { stat.assume_init() }))
         }
 
         /// `fstatat(AT_SYMLINK_NOFOLLOW)` of `name`.
@@ -1110,5 +1261,41 @@ mod tests {
             path,
             base.path().join("own/key/run").canonicalize().unwrap()
         );
+    }
+
+    /// A folder on another file system (here one the mount probe names, nothing is mounted in
+    /// a test) is kept with the folders above it, the rest removed, and the removal says so.
+    #[test]
+    fn a_removal_keeps_a_folder_on_another_file_system() {
+        let base = tempfile::tempdir().unwrap();
+        let mounted = std::ffi::OsString::from(format!(
+            "mounted-{}",
+            base.path().file_name().unwrap().to_string_lossy()
+        ));
+        let tree = base.path().join("tree");
+        std::fs::create_dir_all(tree.join("a").join(&mounted)).unwrap();
+        std::fs::write(tree.join("a").join(&mounted).join("theirs"), "kept").unwrap();
+        std::fs::write(tree.join("a/mine"), "removed").unwrap();
+        std::fs::create_dir_all(tree.join("b")).unwrap();
+        std::fs::write(tree.join("b/mine"), "removed").unwrap();
+        super::mount_probe::pretend_mounted(&mounted);
+
+        let removed = Dir::open_under(base.path(), &[], false)
+            .unwrap()
+            .unwrap()
+            .remove_child("tree");
+
+        super::mount_probe::forget(&mounted);
+        let error = removed.unwrap_err().to_string();
+        assert!(
+            error.contains("another file system") && error.contains(&*mounted.to_string_lossy()),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("a").join(&mounted).join("theirs")).unwrap(),
+            "kept"
+        );
+        assert!(!tree.join("a/mine").exists());
+        assert!(!tree.join("b").exists());
     }
 }

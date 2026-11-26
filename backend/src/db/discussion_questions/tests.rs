@@ -2374,16 +2374,32 @@ fn a_briefing_card_asked_again_is_refused_with_the_reason() {
     );
     let answered = refusal_of(&conn, "m4");
     assert_eq!(answered.key.as_deref(), Some("quota-policy"));
-    assert!(
-        answered.reason.contains("briefing card")
-            && answered
-                .reason
-                .contains("answers through the set they already have")
-            && answered.reason.contains("do not start a new set")
-            && answered.reason.contains("do not repost it under any key")
-            && !answered.reason.contains("new key"),
-        "{}",
-        answered.reason
+    assert_eq!(
+        answered.reason,
+        "key `quota-policy` was answered in message m3; a briefing card is not asked again; \
+         do not repost it under any key"
+    );
+}
+
+/// KT-2084 — an answered briefing card is not asked again: the reason says it was answered,
+/// never that the human still answers through the set.
+#[test]
+fn an_answered_briefing_card_refusal_says_it_was_answered() {
+    let conn = database();
+    let key = "briefing-purpose.s1";
+    let briefing = serde_json::json!({"version":1,"key":key,
+        "question":"What is this project for?","options":[{"id":"not_provided","label":"Not provided"}],
+        "task_ref":"audit-briefing:p1:d:s1"});
+    insert(&conn, "m1", briefing.clone());
+    force_state(&conn, "question:m1:0", "answered");
+    insert(&conn, "m2", briefing);
+
+    assert_eq!(
+        refusal_of(&conn, "m2").reason,
+        format!(
+            "key `{key}` was answered in message m1; a briefing card is not asked again; do not \
+             repost it under any key"
+        )
     );
 }
 

@@ -1077,6 +1077,181 @@ pub fn executions_of_task_with_checkout(conn: &Connection, task_id: &str) -> Res
     Ok(ids)
 }
 
+/// One task execution a discussion is the room or the sub-discussion of (KT-2084).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscussionExecution {
+    pub execution_id: String,
+    /// `KT-<number>` of its task.
+    pub task_reference: String,
+    pub status: TaskExecutionStatus,
+    /// Its managed checkout, while one is recorded.
+    pub checkout: Option<String>,
+    /// `None` for a legacy row that never recorded it; `Err` holds a stored
+    /// value that cannot be read.
+    pub finished_at: Option<std::result::Result<DateTime<Utc>, String>>,
+}
+
+impl DiscussionExecution {
+    /// `<id> (KT-n, Status)`, how a refusal names it.
+    pub fn label(&self) -> String {
+        format!(
+            "{} ({}, {})",
+            self.execution_id,
+            self.task_reference,
+            self.status.as_str()
+        )
+    }
+}
+
+/// Every execution whose parent room or sub-discussion is `disc_id`: what
+/// deleting that discussion would cascade away or leave without its room.
+pub fn executions_of_discussion(
+    conn: &Connection,
+    disc_id: &str,
+) -> Result<Vec<DiscussionExecution>> {
+    let mut statement = conn.prepare(
+        "SELECT te.id, t.task_number, te.status, dw.canonical_path, te.finished_at
+           FROM task_executions te
+           JOIN planning_tasks t ON t.id = te.task_id
+           LEFT JOIN discussion_workspaces dw
+                  ON dw.task_execution_id = te.id AND dw.ownership = 'managed'
+          WHERE te.parent_discussion_id = ?1 OR te.sub_discussion_id = ?1
+          ORDER BY te.created_at, te.id",
+    )?;
+    let rows = statement
+        .query_map(params![disc_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(
+            |(execution_id, task_number, status, checkout, finished_at)| {
+                let status = TaskExecutionStatus::from_str(&status).map_err(|error| {
+                    anyhow::anyhow!("execution {execution_id} has an unreadable status: {error}")
+                })?;
+                Ok(DiscussionExecution {
+                    execution_id,
+                    task_reference: format!("KT-{task_number}"),
+                    status,
+                    checkout,
+                    finished_at: finished_at.map(|text| {
+                        DateTime::parse_from_rfc3339(&text)
+                            .map(|at| at.with_timezone(&Utc))
+                            .map_err(|_| text)
+                    }),
+                })
+            },
+        )
+        .collect()
+}
+
+/// Why `disc_id` cannot be deleted on this connection now (KT-2084): an execution
+/// of it is unfinished or still holds a checkout. Run in the deleting closure, so
+/// one launched since the first check is not cascaded away.
+pub fn discussion_delete_blocker(conn: &Connection, disc_id: &str) -> Result<Option<String>> {
+    let held: Vec<String> = executions_of_discussion(conn, disc_id)?
+        .iter()
+        .filter(|execution| !execution.status.is_terminal() || execution.checkout.is_some())
+        .map(DiscussionExecution::label)
+        .collect();
+    Ok((!held.is_empty()).then(|| {
+        format!(
+            "task execution(s) {} of this discussion are unfinished or still hold a checkout: cancel them first, then retry",
+            held.join(", ")
+        )
+    }))
+}
+
+/// Why something still works for the finished `execution_id` or may come back to its
+/// checkout (KT-2084): a live or paused session, a resume job, any holder of the path.
+pub fn finished_execution_activity(
+    conn: &Connection,
+    execution_id: &str,
+) -> Result<Option<String>> {
+    let (disc_id, checkout): (String, Option<String>) = conn
+        .query_row(
+            "SELECT disc_id, canonical_path FROM discussion_workspaces WHERE task_execution_id = ?1",
+            params![execution_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or_default();
+    if let Some(reason) = execution_activity_blocker(conn, execution_id, &disc_id)? {
+        return Ok(Some(reason));
+    }
+    // A paused session is away, not gone; the worker's own session counts even
+    // when no binding row names it.
+    let session: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT s.id, s.status FROM discussion_sessions s
+              WHERE s.status IN ('active', 'paused')
+                AND (s.id IN (SELECT cli_session_id FROM task_execution_cli_bindings
+                               WHERE task_execution_id = ?1)
+                     OR s.id = (SELECT worker_cli_session_id FROM task_executions
+                                 WHERE id = ?1))
+              ORDER BY s.id LIMIT 1",
+            params![execution_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((session, status)) = session {
+        return Ok(Some(format!(
+            "session {session} of execution {execution_id} is still {status}"
+        )));
+    }
+    let Some(checkout) = checkout else {
+        return Ok(None);
+    };
+    Ok(crate::db::discussion_workspaces::active_holder_of_checkout(
+        conn,
+        std::path::Path::new(&checkout),
+        Some(execution_id),
+        &[],
+    ))
+}
+
+/// The cancel-registry keys under which an agent run of `execution_id` may still
+/// be live: its dispatches and resume jobs, and its room's legacy stream.
+pub fn execution_cancel_keys(conn: &Connection, execution_id: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT dispatch_job_id FROM task_executions
+          WHERE id = ?1 AND dispatch_job_id IS NOT NULL
+         UNION SELECT d.id FROM agent_dispatch_jobs d
+           JOIN task_executions te ON d.discussion_id = te.sub_discussion_id
+          WHERE te.id = ?1
+         UNION SELECT 'agent-job:' || j.id FROM agent_resume_jobs j
+           JOIN task_executions te ON j.discussion_id = te.sub_discussion_id
+          WHERE te.id = ?1
+         UNION SELECT sub_discussion_id FROM task_executions
+          WHERE id = ?1 AND sub_discussion_id IS NOT NULL",
+    )?;
+    let keys = statement
+        .query_map(params![execution_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(keys)
+}
+
+/// Whether `path`, the worktree of `disc_id`, is a task execution's checkout
+/// rather than the discussion's own (KT-2084). A managed row with a pinned base
+/// is one even once its execution row is gone (only `upsert_managed` sets both).
+pub fn is_task_checkout(conn: &Connection, disc_id: &str, path: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_executions WHERE sub_discussion_id = ?1)
+             OR EXISTS(SELECT 1 FROM discussion_workspaces
+                        WHERE (task_execution_id IS NOT NULL
+                               OR (ownership = 'managed' AND base_sha IS NOT NULL))
+                          AND (disc_id = ?1 OR canonical_path = ?2 OR workspace_path = ?2))",
+        params![disc_id, path],
+        |row| row.get(0),
+    )?)
+}
+
 /// Audit one lane target reclaim against the execution that owned `canonical_path`.
 /// The same shape as [`record_artifact_reclaim`], under its own actions so a
 /// worktree's `target/` and its lane target are told apart. KT-1256.
