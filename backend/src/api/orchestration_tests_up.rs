@@ -29834,6 +29834,143 @@ async fn an_undelivered_worker_resumes_once_and_only_the_replay_is_consumed() {
     );
 }
 
+/// KT-1782 — a worker the owner stopped stays stopped across a restart: the
+/// boot keeps the decision with a human and queues no dispatch for it.
+#[tokio::test]
+async fn a_restart_keeps_a_stopped_worker_parked() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+    let execution = provision_single_task_execution(
+        &db,
+        ProvisionInput {
+            task_reference: task_ref,
+            parent_discussion_id: parent_id,
+            worker: native_worker(),
+            base_rev: Some("main".into()),
+            idempotency_key: Some("stopped-worker-restart".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let dispatch_id = execution.dispatch_job_id.clone().unwrap();
+    let child = execution.sub_discussion_id.clone().unwrap();
+    let (room, stopped) = (child.clone(), dispatch_id.clone());
+    db.with_conn(move |conn| {
+        assert!(crate::db::agent_dispatch::cancel_for_discussion_by_id(
+            conn, &room, &stopped
+        )?);
+        crate::db::orchestration::interrupt_undelivered_execution_for_dispatch(
+            conn,
+            &stopped,
+            "worker_stopped_without_delivery",
+            &backend_actor(),
+        )?
+        .context("the stop parks the execution")?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let report =
+        reconcile_at_boot_with_agents(&recovery_test_state(&db), &[AgentType::ClaudeCode]).await;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+    let after = exec_of(&db, &execution.id).await;
+    assert!(
+        matches!(
+            after.status,
+            TaskExecutionStatus::Interrupted | TaskExecutionStatus::Escalated
+        ),
+        "the restart must not put a stopped worker back to work: {:?}",
+        after.status
+    );
+    assert_eq!(
+        after.dispatch_job_id.as_deref(),
+        Some(dispatch_id.as_str()),
+        "no new dispatch owns the execution"
+    );
+    let recovery = recovery_of(&db, &execution.id).await;
+    assert!(
+        recovery
+            .recovery_reason
+            .starts_with("worker_stopped_without_delivery"),
+        "the decision stays the stop's: {}",
+        recovery.recovery_reason
+    );
+    let dispatches: i64 = db
+        .with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = ?1",
+                [child],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(dispatches, 1, "no boot may relaunch a stopped worker");
+}
+
+/// KT-1782 — a `Working` execution whose dispatch is terminal has no worker:
+/// the compact status says so instead of telling the principal to wait.
+#[tokio::test]
+async fn status_does_not_say_in_progress_when_the_workers_dispatch_has_ended() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+    let execution = provision_single_task_execution(
+        &db,
+        ProvisionInput {
+            task_reference: task_ref,
+            parent_discussion_id: parent_id,
+            worker: native_worker(),
+            base_rev: Some("main".into()),
+            idempotency_key: Some("status-ended-dispatch".into()),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(execution.status, TaskExecutionStatus::Working);
+    let dispatch_id = execution.dispatch_job_id.clone().unwrap();
+    let child = execution.sub_discussion_id.clone().unwrap();
+    let exec_id = execution.id.clone();
+    let (live, ended) = db
+        .with_conn(move |conn| {
+            let live = compact_next_action(&execution_detail(conn, &exec_id)?);
+            assert!(crate::db::agent_dispatch::cancel_for_discussion_by_id(
+                conn,
+                &child,
+                &dispatch_id
+            )?);
+            let ended = compact_next_action(&execution_detail(conn, &exec_id)?);
+            Ok((live, ended))
+        })
+        .await
+        .unwrap();
+
+    let live = live.expect("a next action while the dispatch is live");
+    assert_eq!(live.tool, Some("task_exec_status"));
+    assert!(live.reason.starts_with("in progress"), "{}", live.reason);
+
+    assert_eq!(
+        exec_of(&db, &execution.id).await.status,
+        TaskExecutionStatus::Working,
+        "the execution itself did not move"
+    );
+    let ended = ended.expect("a next action once the dispatch has ended");
+    assert_eq!(ended.tool, None, "{}", ended.reason);
+    assert!(
+        ended.reason.contains("ended without a delivery"),
+        "{}",
+        ended.reason
+    );
+    assert!(
+        ended.reason.contains("task_exec_reassign") && ended.reason.contains("task_exec_cancel"),
+        "{}",
+        ended.reason
+    );
+}
+
 async fn recovery_of(
     db: &std::sync::Arc<Database>,
     exec_id: &str,

@@ -2671,6 +2671,23 @@ pub fn get_execution_for_dispatch(
         .map(Option::flatten)
 }
 
+/// KT-1782 — the dispatch of the `Working` execution a room hosts: what a stop
+/// of that room, which names no dispatch, may have left without a worker.
+pub fn working_worker_dispatch_of_room(
+    conn: &Connection,
+    sub_discussion_id: &str,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT dispatch_job_id FROM task_executions \
+              WHERE sub_discussion_id = ?1 AND status = ?2 \
+                AND dispatch_job_id IS NOT NULL LIMIT 1",
+            params![sub_discussion_id, TaskExecutionStatus::Working.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 /// Record the model the worker's runtime reported serving. Only the
 /// execution's current dispatch may write it, so a stale run cannot relabel a
 /// reassigned worker. Returns whether it landed.
@@ -2906,10 +2923,12 @@ pub fn interrupt_undelivered_execution_for_dispatch(
 }
 
 /// Whether a recovery reason is the one [`interrupt_undelivered_execution_for_dispatch`]
-/// writes: the worker's turn ended and no delivery came out of it.
+/// writes: the worker's turn ended (by itself, or stopped) and no delivery came
+/// out of it.
 pub fn is_undelivered_worker_reason(reason: &str) -> bool {
     reason.starts_with("worker_completed_without_delivery")
         || reason.starts_with("worker_failed_without_delivery")
+        || reason.starts_with("worker_stopped_without_delivery")
 }
 
 /// KT-1540 — a message posted in the child room of an `Interrupted`,

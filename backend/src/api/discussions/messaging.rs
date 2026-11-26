@@ -1475,6 +1475,11 @@ pub async fn stop_agent(
             let active =
                 crate::db::agent_dispatch::find_active_for_discussion(&transaction, &cancel_id)?;
             let count = crate::db::agent_dispatch::cancel_for_discussion(&transaction, &cancel_id)?;
+            if count > 0 {
+                // KT-1782 — same commit as the cancel, and never a reason for the
+                // stop to fail: the stopped worker's execution is not left `Working`.
+                super::runtime::park_stopped_worker_of_room(&transaction, &cancel_id);
+            }
             let resume_job_ids =
                 crate::db::agent_jobs::cancel_for_discussion(&transaction, &cancel_id)?;
             // KT-1481 — the wakes still armed on running generations. Their
@@ -1617,6 +1622,15 @@ pub async fn stop_agent_dispatch(
                 &cancel_discussion_id,
                 &cancel_dispatch_id,
             )?;
+            if changed {
+                // KT-1782 — same commit as the cancel, and never a reason for the
+                // stop to fail: the stopped worker's execution is not left `Working`.
+                super::runtime::park_stopped_worker(
+                    &transaction,
+                    &cancel_dispatch_id,
+                    &cancel_discussion_id,
+                );
+            }
             let still_awaiting = crate::db::agent_dispatch::has_active_for_discussion(
                 &transaction,
                 &cancel_discussion_id,
@@ -4335,5 +4349,416 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    const STOP_PARENT: &str = "d-stop-parent";
+    const STOP_CHILD: &str = "d-stop-child";
+    const STOP_DISPATCH: &str = "j-stop-worker";
+
+    fn stop_test_actor() -> crate::models::PlanningActor {
+        crate::models::PlanningActor {
+            kind: crate::models::PlanningActorKind::Backend,
+            id: Some("orchestrator".into()),
+            session_id: None,
+            source_message_id: None,
+            token_declared: false,
+        }
+    }
+
+    /// KT-1782 — a task worker at work: a `Working` execution whose running
+    /// dispatch `STOP_DISPATCH` sits in its own room `STOP_CHILD`, under the
+    /// principal room `STOP_PARENT`. Returns the state and the execution id.
+    async fn task_worker_at_work() -> (AppState, String) {
+        let state = make_state_with_disc(STOP_PARENT).await;
+        let execution_id = state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES (?1, 'Worker room', ?2, ?2)",
+                    rusqlite::params![STOP_CHILD, now],
+                )?;
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, status, created_at, updated_at)
+                     VALUES ('t-stop', 9910, 'Stopped', 'todo', ?1, ?1)",
+                    [&now],
+                )?;
+                let actor = stop_test_actor();
+                let execution = crate::db::orchestration::launch_single_task(
+                    conn,
+                    &crate::models::LaunchSingleTaskInput::new("t-stop", STOP_PARENT),
+                    &actor,
+                )?
+                .execution;
+                for status in [
+                    crate::models::TaskExecutionStatus::Provisioning,
+                    crate::models::TaskExecutionStatus::Working,
+                ] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution.id,
+                        status,
+                        &actor,
+                        serde_json::json!({}),
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('u-stop', ?1, 'User', 'go', ?2, 1, ?2)",
+                    rusqlite::params![STOP_CHILD, now],
+                )?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: STOP_DISPATCH,
+                        discussion_id: STOP_CHILD,
+                        dedupe_key: "message:u-stop",
+                        agent_override: Some(&AgentType::Ollama),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, STOP_DISPATCH)?
+                    .expect("the worker dispatch must reach Running");
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution.id,
+                    STOP_DISPATCH,
+                )?;
+                crate::db::orchestration::set_execution_sub_discussion(
+                    conn,
+                    &execution.id,
+                    STOP_CHILD,
+                )?;
+                Ok(execution.id)
+            })
+            .await
+            .unwrap();
+        (state, execution_id)
+    }
+
+    async fn stopped_worker_notices(state: &AppState) -> i64 {
+        state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id LIKE 'orch-worker-stopped:%'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn dispatch_status(state: &AppState, dispatch_id: &'static str) -> String {
+        state
+            .db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT status FROM agent_dispatch_jobs WHERE id = ?1",
+                    [dispatch_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// What a stop leaves behind: the execution parked for one resume, and the
+    /// principal told about this exact dispatch in its own room.
+    async fn assert_parked_by_the_stop(state: &AppState, execution_id: &str) {
+        let execution_id = execution_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                    .expect("execution must remain queryable");
+                assert_eq!(
+                    execution.status,
+                    crate::models::TaskExecutionStatus::Interrupted
+                );
+                assert_eq!(
+                    execution.interrupted_from_status,
+                    Some(crate::models::TaskExecutionStatus::Working)
+                );
+                let recovery =
+                    crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                        .expect("a stopped worker is parked for a decision");
+                assert_eq!(
+                    recovery.recovery_action,
+                    crate::models::ExecutionRecoveryAction::ResumeWorker
+                );
+                assert!(recovery.pending);
+                assert_eq!(recovery.recovery_reason, "worker_stopped_without_delivery");
+                let notice_id = format!("orch-worker-stopped:{execution_id}:{STOP_DISPATCH}");
+                let (room, notice): (String, String) = conn.query_row(
+                    "SELECT discussion_id, content FROM messages WHERE id = ?1",
+                    [&notice_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(room, STOP_PARENT);
+                assert!(
+                    notice.contains("Worker arrêté sans livraison durable"),
+                    "{notice}"
+                );
+                let targets = crate::db::discussions::list_message_targets(conn, &notice_id)?;
+                assert_eq!(targets.len(), 1, "the notice is aimed at the principal");
+                assert_eq!(targets[0].kind, MessageTargetKind::DiscussionAgent);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// KT-1782 — the Stop of one response parks the worker's execution before
+    /// the handler answers: no clock and no restart is needed to free it.
+    #[tokio::test]
+    async fn stopping_a_task_worker_dispatch_interrupts_its_execution_in_the_same_request() {
+        let (state, execution_id) = task_worker_at_work().await;
+
+        let Json(reply) = stop_agent_dispatch(
+            State(state.clone()),
+            Path((STOP_CHILD.into(), STOP_DISPATCH.into())),
+        )
+        .await;
+
+        assert_eq!(reply.data.expect("stop answer")["cancelled"], true);
+        assert_eq!(dispatch_status(&state, STOP_DISPATCH).await, "Cancelled");
+        assert_parked_by_the_stop(&state, &execution_id).await;
+    }
+
+    /// KT-1782 — the room Stop names no dispatch: it parks the execution whose
+    /// worker it just stopped.
+    #[tokio::test]
+    async fn the_room_stop_interrupts_the_working_execution_of_that_room() {
+        let (state, execution_id) = task_worker_at_work().await;
+
+        let Json(reply) = stop_agent(State(state.clone()), Path(STOP_CHILD.to_string())).await;
+
+        assert_eq!(reply.data.expect("stop answer")["cancelled"], true);
+        assert_eq!(dispatch_status(&state, STOP_DISPATCH).await, "Cancelled");
+        assert_parked_by_the_stop(&state, &execution_id).await;
+    }
+
+    /// KT-1782 — the stop never fails on the parking: a refused notice undoes
+    /// the parking alone, the dispatch is cancelled and the handler answers.
+    #[tokio::test]
+    async fn a_parking_that_fails_never_fails_the_stop() {
+        for room_stop in [false, true] {
+            let (state, execution_id) = task_worker_at_work().await;
+            state
+                .db
+                .with_conn(|conn| {
+                    conn.execute_batch(
+                        "CREATE TRIGGER refuse_stopped_notice BEFORE INSERT ON messages
+                         WHEN NEW.id LIKE 'orch-worker-stopped:%'
+                         BEGIN SELECT RAISE(ABORT, 'notice refused'); END;",
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+
+            let Json(reply) = if room_stop {
+                stop_agent(State(state.clone()), Path(STOP_CHILD.to_string())).await
+            } else {
+                stop_agent_dispatch(
+                    State(state.clone()),
+                    Path((STOP_CHILD.into(), STOP_DISPATCH.into())),
+                )
+                .await
+            };
+
+            assert_eq!(
+                reply.data.expect("the stop must answer")["cancelled"],
+                true,
+                "room_stop={room_stop}"
+            );
+            assert_eq!(dispatch_status(&state, STOP_DISPATCH).await, "Cancelled");
+            assert_eq!(stopped_worker_notices(&state).await, 0);
+            state
+                .db
+                .with_conn(move |conn| {
+                    let execution =
+                        crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                            .expect("execution must remain queryable");
+                    assert_eq!(
+                        execution.status,
+                        crate::models::TaskExecutionStatus::Working,
+                        "a parking without its notice is undone whole (room_stop={room_stop})"
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    /// KT-1782 — a delivery that landed just before the stop is kept: the
+    /// dispatch is stopped, the review obligation is not undone.
+    #[tokio::test]
+    async fn a_delivery_raced_with_the_stop_stays_awaiting_review() {
+        let (state, execution_id) = task_worker_at_work().await;
+        let id = execution_id.clone();
+        let delivered = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::orchestration::transition_execution(
+                    conn,
+                    &id,
+                    crate::models::TaskExecutionStatus::AwaitingReview,
+                    &stop_test_actor(),
+                    serde_json::json!({}),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(delivered, "the fixture must reach AwaitingReview");
+
+        let Json(reply) = stop_agent_dispatch(
+            State(state.clone()),
+            Path((STOP_CHILD.into(), STOP_DISPATCH.into())),
+        )
+        .await;
+
+        assert_eq!(reply.data.expect("stop answer")["cancelled"], true);
+        assert_eq!(dispatch_status(&state, STOP_DISPATCH).await, "Cancelled");
+        let stopped_reason = state
+            .db
+            .with_conn(move |conn| {
+                let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                    .expect("execution must remain queryable");
+                assert_eq!(
+                    execution.status,
+                    crate::models::TaskExecutionStatus::AwaitingReview
+                );
+                Ok(
+                    crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                        .is_some_and(|recovery| {
+                            recovery
+                                .recovery_reason
+                                .starts_with("worker_stopped_without_delivery")
+                        }),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(!stopped_reason, "a delivered attempt is not parked");
+        assert_eq!(stopped_worker_notices(&state).await, 0);
+    }
+
+    /// KT-1782 — once stopped, the execution accepts another worker at once.
+    #[tokio::test]
+    async fn a_stopped_worker_is_reassigned_at_once() {
+        let (state, execution_id) = task_worker_at_work().await;
+        let _ = stop_agent_dispatch(
+            State(state.clone()),
+            Path((STOP_CHILD.into(), STOP_DISPATCH.into())),
+        )
+        .await;
+
+        let (before, reassigned, after) = state
+            .db
+            .with_conn(move |conn| {
+                let generation = |conn: &Connection| -> anyhow::Result<u32> {
+                    Ok(
+                        crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                            .map(|recovery| recovery.assignment_generation)
+                            .unwrap_or(0),
+                    )
+                };
+                let before = generation(conn)?;
+                let selection = crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::agent(AgentType::ClaudeCode)
+                        .with_tier(ModelTier::Reasoning),
+                    model: Some("claude-reasoning".into()),
+                    profile_id: Some("profile-reviewer".into()),
+                };
+                let reassigned =
+                    crate::db::orchestration::reassign_execution_worker_keeping_origin(
+                        conn,
+                        &execution_id,
+                        &selection,
+                        "the owner stopped the previous worker",
+                        &stop_test_actor(),
+                        false,
+                    )?;
+                let after = generation(conn)?;
+                Ok((before, reassigned, after))
+            })
+            .await
+            .expect("a stopped worker must be reassignable without waiting");
+
+        assert_eq!(after, before + 1, "the assignment generation advances");
+        assert_eq!(reassigned.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(
+            reassigned.dispatch_job_id.as_deref(),
+            None,
+            "the stopped dispatch no longer owns the execution"
+        );
+    }
+
+    /// KT-1782 — a `Working` execution whose dispatch FAILED is being handed to
+    /// a fallback (KT-1758): a room Stop that cancels another turn leaves it be.
+    #[tokio::test]
+    async fn a_stop_during_a_fallback_handover_leaves_the_execution_alone() {
+        let (state, execution_id) = task_worker_at_work().await;
+        state
+            .db
+            .with_conn(|conn| {
+                assert!(crate::db::agent_dispatch::mark_failed(
+                    conn,
+                    STOP_DISPATCH,
+                    "provider crashed"
+                )?);
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "j-stop-other-turn",
+                        discussion_id: STOP_CHILD,
+                        dedupe_key: "turn:stop-other",
+                        agent_override: Some(&AgentType::Ollama),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let Json(reply) = stop_agent(State(state.clone()), Path(STOP_CHILD.to_string())).await;
+
+        assert_eq!(reply.data.expect("stop answer")["cancelled"], true);
+        assert_eq!(
+            dispatch_status(&state, "j-stop-other-turn").await,
+            "Cancelled",
+            "the stop did cancel a turn of that room"
+        );
+        assert_eq!(dispatch_status(&state, STOP_DISPATCH).await, "Failed");
+        let execution = state
+            .db
+            .with_conn(move |conn| {
+                Ok(
+                    crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                        .expect("execution must remain queryable"),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            execution.status,
+            crate::models::TaskExecutionStatus::Working
+        );
+        assert_eq!(execution.dispatch_job_id.as_deref(), Some(STOP_DISPATCH));
+        assert_eq!(stopped_worker_notices(&state).await, 0);
     }
 }

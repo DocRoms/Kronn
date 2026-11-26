@@ -371,6 +371,82 @@ fn completed_native_dispatch_without_delivery_interrupts_the_working_execution()
     );
 }
 
+/// KT-1782 — a stopped worker is parked under the same rule as one that ended
+/// by itself: its consumed resume is armed again like theirs.
+#[test]
+fn a_stopped_worker_reason_is_an_undelivered_worker_reason() {
+    assert!(is_undelivered_worker_reason(
+        "worker_stopped_without_delivery"
+    ));
+    assert!(is_undelivered_worker_reason(
+        "worker_stopped_without_delivery: last task_exec_deliver was refused: no manifest"
+    ));
+    assert!(is_undelivered_worker_reason(
+        "worker_completed_without_delivery"
+    ));
+    assert!(is_undelivered_worker_reason(
+        "worker_failed_without_delivery"
+    ));
+    assert!(!is_undelivered_worker_reason("worker_stopped"));
+    assert!(!is_undelivered_worker_reason("quota_exhausted:Codex"));
+
+    let conn = setup();
+    let exec_id = launch_and_drive(
+        &conn,
+        "t-stopped",
+        1098,
+        &[
+            TaskExecutionStatus::Provisioning,
+            TaskExecutionStatus::Working,
+        ],
+    );
+    conn.execute(
+        "INSERT INTO messages
+         (id, discussion_id, role, content, timestamp, sort_order, received_at)
+         VALUES ('message-stopped', ?1, 'User', 'go', ?2, 1, ?2)",
+        params![DISC, chrono::Utc::now().to_rfc3339()],
+    )
+    .unwrap();
+    crate::db::agent_dispatch::enqueue_for_latest_user(
+        &conn,
+        crate::db::agent_dispatch::NewLatestUserDispatch {
+            id: "dispatch-stopped",
+            discussion_id: DISC,
+            dedupe_key: "message:message-stopped",
+            agent_override: None,
+            chain_prompt_ids: &[],
+            batch_item: None,
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+    attach_execution_dispatch(&conn, &exec_id, "dispatch-stopped").unwrap();
+    interrupt_undelivered_execution_for_dispatch(
+        &conn,
+        "dispatch-stopped",
+        "worker_stopped_without_delivery",
+        &backend_actor(),
+    )
+    .unwrap()
+    .expect("a stopped worker without a delivery must be checkpointed");
+    let parked = get_execution_recovery(&conn, &exec_id).unwrap().unwrap();
+    assert_eq!(parked.recovery_reason, "worker_stopped_without_delivery");
+    assert!(parked.pending);
+
+    clear_execution_recovery(&conn, &exec_id, "resume_worker").unwrap();
+    assert!(
+        rearm_consumed_recovery(&conn, &exec_id).unwrap(),
+        "the consumed resume of a stopped worker is armed again as is"
+    );
+    assert!(
+        get_execution_recovery(&conn, &exec_id)
+            .unwrap()
+            .unwrap()
+            .pending
+    );
+}
+
 #[test]
 fn a_follow_up_turn_in_a_worker_room_is_not_a_worker_launch() {
     // Why the worker-scope guard was wrong: it asked whether the ROOM hosts a

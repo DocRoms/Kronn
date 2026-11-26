@@ -94,24 +94,34 @@ fn refused_tool_calls_sentence(
     ))
 }
 
+/// How a worker's dispatch ended without a delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UndeliveredCause {
+    Completed,
+    Failed,
+    /// KT-1782 — cancelled before it ended: a Stop, or any other cancel.
+    Stopped,
+}
+
 /// The execution a terminal dispatch leaves without a delivery is parked as
-/// `Interrupted` and the principal is told once (`orch-worker-undelivered:<exec>`).
+/// `Interrupted` and the principal is told once (`orch-worker-undelivered:<exec>`,
+/// or `orch-worker-stopped:<exec>:<dispatch>` for a stop).
 /// A no-op when the dispatch belongs to no `Working` execution.
 ///
 /// KT-1758 — kept apart from the settlement so a link that takes the work over
 /// can hold it back: telling the principal "reassign or cancel" about an
 /// execution Kronn is itself reassigning is contradictory, and the notice id is
 /// per execution, so it would be spent before the replacement ever needed it.
-fn interrupt_undelivered_with_notice(
+pub(super) fn interrupt_undelivered_with_notice(
     transaction: &rusqlite::Connection,
     job_id: &str,
     discussion_id: &str,
-    failed: bool,
+    cause: UndeliveredCause,
 ) -> anyhow::Result<()> {
-    let interruption_reason = if failed {
-        "worker_failed_without_delivery"
-    } else {
-        "worker_completed_without_delivery"
+    let interruption_reason = match cause {
+        UndeliveredCause::Completed => "worker_completed_without_delivery",
+        UndeliveredCause::Failed => "worker_failed_without_delivery",
+        UndeliveredCause::Stopped => "worker_stopped_without_delivery",
     };
     let actor = crate::models::PlanningActor {
         kind: crate::models::PlanningActorKind::Backend,
@@ -136,18 +146,33 @@ fn interrupt_undelivered_with_notice(
             &interrupted.execution_id,
             parent.agent,
         )?;
-        let (title, instruction) = if failed {
-            (
+        let (title, ended, instruction) = match cause {
+            UndeliveredCause::Failed => (
                 "Worker échoué sans livraison durable",
+                "s'est terminé sans appel valide à",
                 "Examine l'erreur du dispatch dans la sous-discussion, puis réaffecte ou annule explicitement l'exécution.",
-            )
-        } else {
-            (
+            ),
+            UndeliveredCause::Completed => (
                 "Worker terminé sans livraison durable",
+                "s'est terminé sans appel valide à",
                 "Relis le bilan du worker dans la sous-discussion, puis reprends l'exécution une fois (`task_exec_resume`, le worktree est conservé), ou réaffecte / annule-la explicitement.",
-            )
+            ),
+            UndeliveredCause::Stopped => (
+                "Worker arrêté sans livraison durable",
+                "a été arrêté avant tout appel valide à",
+                "Reprends l'exécution une fois (`task_exec_resume`, le worktree est conservé), réaffecte-la (`task_exec_reassign`) ou annule-la (`task_exec_cancel`).",
+            ),
         };
-        let message_id = format!("orch-worker-undelivered:{}", interrupted.execution_id);
+        // A stop is told per dispatch: the execution's `orch-worker-undelivered`
+        // id may be spent already, and a resumed worker can be stopped again.
+        let message_id = match cause {
+            UndeliveredCause::Stopped => {
+                format!("orch-worker-stopped:{}:{job_id}", interrupted.execution_id)
+            }
+            UndeliveredCause::Completed | UndeliveredCause::Failed => {
+                format!("orch-worker-undelivered:{}", interrupted.execution_id)
+            }
+        };
         // KT-402 — the deterministic id exists so a resume can never
         // double-post; the insert has to tolerate its own replay for the
         // same reason. Measured: a stream timeout failed the dispatch, the
@@ -164,7 +189,7 @@ fn interrupt_undelivered_with_notice(
             let message = crate::api::orchestration::orchestrator_message(
                 message_id,
                 format!(
-                    "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{}` s'est terminé sans appel valide à `task_exec_deliver`. L'exécution `{}` est maintenant `Interrupted` au lieu de rester faussement `Working`.{refused}{refusal} {instruction}",
+                    "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{}` {ended} `task_exec_deliver`. L'exécution `{}` est maintenant `Interrupted` au lieu de rester faussement `Working`.{refused}{refusal} {instruction}",
                     interrupted.task_id,
                     interrupted.execution_id,
                     refusal = interrupted
@@ -189,6 +214,63 @@ fn interrupt_undelivered_with_notice(
     Ok(())
 }
 
+/// KT-1782 — the parking that goes with a Stop, inside the stop's transaction.
+/// The stop is the owner's action and commits whatever happens here: a failure
+/// undoes the parking alone and the end of the stream parks it then.
+pub(super) fn park_stopped_worker(conn: &rusqlite::Connection, job_id: &str, discussion_id: &str) {
+    let parked = conn
+        .execute_batch("SAVEPOINT park_stopped_worker")
+        .map_err(anyhow::Error::from)
+        .and_then(|()| {
+            let parked = interrupt_undelivered_with_notice(
+                conn,
+                job_id,
+                discussion_id,
+                UndeliveredCause::Stopped,
+            )
+            .and_then(|()| {
+                conn.execute_batch("RELEASE park_stopped_worker")
+                    .map_err(anyhow::Error::from)
+            });
+            if parked.is_err() {
+                let _ = conn
+                    .execute_batch("ROLLBACK TO park_stopped_worker; RELEASE park_stopped_worker");
+            }
+            parked
+        });
+    if let Err(error) = parked {
+        tracing::warn!(
+            dispatch_job_id = %job_id,
+            "parking the execution of a stopped worker failed, left to the end of its stream: {error:#}"
+        );
+    }
+}
+
+/// KT-1782 — the room Stop names no dispatch: parks the room's `Working`
+/// execution when its dispatch is a cancelled one. A `Failed` dispatch is being
+/// handed to a fallback (KT-1758) and is left alone.
+pub(super) fn park_stopped_worker_of_room(conn: &rusqlite::Connection, discussion_id: &str) {
+    let stopped = crate::db::orchestration::working_worker_dispatch_of_room(conn, discussion_id)
+        .and_then(|dispatch_id| {
+            let Some(dispatch_id) = dispatch_id else {
+                return Ok(None);
+            };
+            let cancelled =
+                crate::db::agent_dispatch::get(conn, &dispatch_id)?.is_some_and(|job| {
+                    job.status == crate::db::agent_dispatch::DispatchStatus::Cancelled
+                });
+            Ok(cancelled.then_some(dispatch_id))
+        });
+    match stopped {
+        Ok(Some(dispatch_id)) => park_stopped_worker(conn, &dispatch_id, discussion_id),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            discussion_id = %discussion_id,
+            "finding the worker a room stop left without a dispatch failed: {error:#}"
+        ),
+    }
+}
+
 /// KT-1758 — the interruption a settlement held back (see
 /// [`persist_dispatch_settlement_handing_over`]), once no link could take the
 /// work over: the execution is `Interrupted` and the principal is told.
@@ -204,7 +286,12 @@ pub fn interrupt_undelivered_after_failure(
 ) -> anyhow::Result<()> {
     let attempt = || -> anyhow::Result<()> {
         let transaction = conn.unchecked_transaction()?;
-        interrupt_undelivered_with_notice(&transaction, job_id, discussion_id, true)?;
+        interrupt_undelivered_with_notice(
+            &transaction,
+            job_id,
+            discussion_id,
+            UndeliveredCause::Failed,
+        )?;
         transaction.commit()?;
         Ok(())
     };
@@ -322,7 +409,12 @@ fn persist_dispatch_settlement_with(
         )?;
     }
     if changed && failure_kind != Some("quota_exhausted") && interrupt_undelivered {
-        interrupt_undelivered_with_notice(&transaction, job_id, discussion_id, error.is_some())?;
+        let cause = if error.is_some() {
+            UndeliveredCause::Failed
+        } else {
+            UndeliveredCause::Completed
+        };
+        interrupt_undelivered_with_notice(&transaction, job_id, discussion_id, cause)?;
     }
     let mut batch_run = None;
     if changed {
@@ -711,10 +803,7 @@ pub async fn stream_claimed_dispatch_job(
                 current.status == crate::db::agent_dispatch::DispatchStatus::Cancelled
             });
         if cancelled {
-            // stop_agent settles the Cancelled job and its parent batch in
-            // one transaction. The completion observer must only wake
-            // waiters; incrementing here would double-count the child.
-            state.agent_dispatch_notify.notify_waiters();
+            settle_cancelled_worker(&state, &job).await;
             return;
         }
         let reported_success = match outcome {
@@ -764,6 +853,41 @@ pub async fn stream_claimed_dispatch_job(
     });
     handoff_guard.disarm();
     Some(stream)
+}
+
+/// The end of a stream whose dispatch was cancelled. Whoever cancelled it
+/// settled the job and its parent batch already, so nothing is counted here
+/// (it would double-count the child); waiters are only woken.
+///
+/// KT-1782 — a cancel that did not come through a stop handler leaves its
+/// execution `Working` with no worker: it is parked here. After a stop, a
+/// reassignment or a cancel of the execution this finds nothing to park.
+async fn settle_cancelled_worker(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) {
+    let (job_id, discussion_id) = (job.id.clone(), job.discussion_id.clone());
+    let parked = state
+        .db
+        .with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            interrupt_undelivered_with_notice(
+                &transaction,
+                &job_id,
+                &discussion_id,
+                UndeliveredCause::Stopped,
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await;
+    if let Err(error) = parked {
+        tracing::warn!(
+            dispatch_job_id = %job.id,
+            "parking the execution of a cancelled worker dispatch failed: {error}"
+        );
+    }
+    state.agent_dispatch_notify.notify_waiters();
 }
 
 /// A launch the engine refused before anything ran (`PreflightFailed`).
@@ -2408,8 +2532,8 @@ pub fn render_chain_qp_prompt(
 mod chain_render_tests {
     use super::{
         dispatch_target_tier, ensure_failure_visible, persist_dispatch_settlement,
-        render_chain_qp_prompt, select_quota_alternative, unsuccessful_completion_diagnostic,
-        DispatchHandoffGuard,
+        render_chain_qp_prompt, select_quota_alternative, settle_cancelled_worker,
+        unsuccessful_completion_diagnostic, DispatchHandoffGuard,
     };
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -3206,6 +3330,144 @@ mod chain_render_tests {
             assert_eq!(
                 crate::db::discussions::list_message_targets(conn, &notice_id)?.len(),
                 1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-1782 — a cancel that went through no stop handler: the end of the
+    /// worker's stream parks its execution, and a second pass adds nothing.
+    #[tokio::test]
+    async fn a_cancelled_task_worker_dispatch_interrupts_its_execution_when_its_stream_ends() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let (execution_id, job) = db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                for (id, title) in [("d-cancel-parent", "Parent"), ("d-cancel-child", "Child")] {
+                    conn.execute(
+                        "INSERT INTO discussions (id, title, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?3)",
+                        rusqlite::params![id, title, now],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, status, created_at, updated_at)
+                     VALUES ('t-cancelled', 9903, 'Cancelled', 'todo', ?1, ?1)",
+                    [&now],
+                )?;
+                let actor = crate::models::PlanningActor {
+                    kind: crate::models::PlanningActorKind::Backend,
+                    id: Some("orchestrator".into()),
+                    session_id: None,
+                    source_message_id: None,
+                    token_declared: false,
+                };
+                let execution = crate::db::orchestration::launch_single_task(
+                    conn,
+                    &crate::models::LaunchSingleTaskInput::new("t-cancelled", "d-cancel-parent"),
+                    &actor,
+                )?
+                .execution;
+                for status in [
+                    crate::models::TaskExecutionStatus::Provisioning,
+                    crate::models::TaskExecutionStatus::Working,
+                ] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution.id,
+                        status,
+                        &actor,
+                        serde_json::json!({}),
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('u-cancelled', 'd-cancel-child', 'User', 'go', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "j-cancelled",
+                        discussion_id: "d-cancel-child",
+                        dedupe_key: "message:u-cancelled",
+                        agent_override: Some(&crate::models::AgentType::Ollama),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, "j-cancelled")?;
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution.id,
+                    "j-cancelled",
+                )?;
+                assert!(crate::db::agent_dispatch::cancel_for_discussion_by_id(
+                    conn,
+                    "d-cancel-child",
+                    "j-cancelled"
+                )?);
+                let job = crate::db::agent_dispatch::get(conn, "j-cancelled")?
+                    .expect("the cancelled dispatch stays on record");
+                Ok((execution.id, job))
+            })
+            .await
+            .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        settle_cancelled_worker(&state, &job).await;
+        settle_cancelled_worker(&state, &job).await;
+
+        db.with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            assert_eq!(
+                execution.status,
+                crate::models::TaskExecutionStatus::Interrupted
+            );
+            let recovery = crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                .expect("a stopped worker is parked for a decision");
+            assert_eq!(recovery.recovery_reason, "worker_stopped_without_delivery");
+            assert_eq!(
+                recovery.recovery_action,
+                crate::models::ExecutionRecoveryAction::ResumeWorker
+            );
+            assert!(recovery.pending);
+            let mut statement = conn.prepare(
+                "SELECT id, content FROM messages
+                 WHERE discussion_id = 'd-cancel-parent'
+                   AND id LIKE 'orch-worker-stopped:%'",
+            )?;
+            let notices = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(notices.len(), 1, "one notice for two passes: {notices:?}");
+            let (notice_id, notice) = &notices[0];
+            assert_eq!(
+                notice_id,
+                &format!("orch-worker-stopped:{execution_id}:j-cancelled")
+            );
+            assert!(
+                notice.contains("Worker arrêté sans livraison durable"),
+                "{notice}"
+            );
+            assert!(notice.contains("task_exec_resume"), "{notice}");
+            assert_eq!(
+                crate::db::discussions::list_message_targets(conn, notice_id)?.len(),
+                1,
+                "the notice is aimed at the principal"
             );
             Ok(())
         })
