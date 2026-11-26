@@ -519,6 +519,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // collected here; they start once the listener is bound.
     let orchestration_recovery = kronn::api::orchestration::reconcile_at_boot(&state).await;
     if orchestration_recovery.interrupted > 0
+        || orchestration_recovery.worker_sessions_stopped > 0
         || !orchestration_recovery.deferred_resumes.is_empty()
         || orchestration_recovery.orphan_workspaces_removed > 0
         || orchestration_recovery.orphan_lane_targets_removed > 0
@@ -526,6 +527,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     {
         tracing::warn!(
             interrupted = orchestration_recovery.interrupted,
+            worker_sessions_stopped = orchestration_recovery.worker_sessions_stopped,
             classified = orchestration_recovery.classified,
             resumed_or_parked = orchestration_recovery.resumed_or_parked,
             deferred = orchestration_recovery.deferred_resumes.len(),

@@ -9157,6 +9157,204 @@ async fn revalidating_stands_down_the_relaunched_native_worker() {
     );
 }
 
+/// KT-1986 — re-validating a sent-back delivery ends the turn of the worker
+/// the send-back relaunched before the integration takes the lane: its stream
+/// is signalled and its recorded session is settled.
+#[tokio::test]
+async fn revalidating_a_sent_back_delivery_ends_the_relaunched_workers_turn() {
+    let repo = init_repo();
+    let control = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (_parent, _child, exec_id, _head, _path) =
+        delivered_awaiting_review(&db, repo.path()).await;
+    let e = exec_id.clone();
+    let validations = vec![flaky_validation(control.path())];
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE task_executions SET worker_target_kind = 'agent', \
+                     worker_cli_session_id = NULL, worker_agent_type = 'Ollama' WHERE id = ?1",
+            [&e],
+        )?;
+        conn.execute(
+            "UPDATE orchestration_runs SET validation_json = ?2 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+            rusqlite::params![e, serde_json::to_string(&validations)?],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    decide_review(
+        &db,
+        &exec_id,
+        &review_approve(&db, &exec_id).await,
+        "ClaudeCode",
+        "sess-b",
+    )
+    .await
+    .unwrap();
+    let outcome = run_integration(&db, &exec_id).await.unwrap();
+    assert!(matches!(outcome, IntegrationOutcome::SentBack { .. }));
+    let dispatch = exec_of(&db, &exec_id)
+        .await
+        .dispatch_job_id
+        .expect("relaunch dispatch");
+    {
+        let (exec_id, dispatch) = (exec_id.clone(), dispatch.clone());
+        db.with_conn(move |conn| {
+            crate::db::worker_processes::record_launch(
+                conn,
+                &dispatch,
+                &exec_id,
+                crate::core::dispatch_reaper::instance_id(),
+            )
+        })
+        .await
+        .unwrap();
+    }
+    let state = recovery_test_state(&db);
+    // The relaunched worker's live stream: it leaves the registry once cancelled.
+    let token = tokio_util::sync::CancellationToken::new();
+    state
+        .cancel_registry
+        .lock()
+        .unwrap()
+        .insert(dispatch.clone(), token.clone());
+    let stream = {
+        let (registry, token, key) = (
+            state.cancel_registry.clone(),
+            token.clone(),
+            dispatch.clone(),
+        );
+        tokio::spawn(async move {
+            token.cancelled().await;
+            registry.lock().unwrap().remove(&key);
+        })
+    };
+
+    let Json(resumed) = resume_execution(State(state), Path(exec_id.clone())).await;
+
+    assert!(resumed.success, "revalidation failed: {:?}", resumed.error);
+    assert!(token.is_cancelled(), "the worker's stream is signalled");
+    stream.await.unwrap();
+    assert_eq!(
+        exec_of(&db, &exec_id).await.status,
+        TaskExecutionStatus::Done
+    );
+    let events = ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| event["dispatch_job_id"] == dispatch.as_str()),
+        "the stop of the relaunched session is journaled: {events:?}"
+    );
+    let row = {
+        let dispatch = dispatch.clone();
+        db.with_conn(move |conn| crate::db::worker_processes::get(conn, &dispatch))
+            .await
+            .unwrap()
+            .expect("recorded launch")
+    };
+    assert!(row.stopped_at.is_some(), "the session is settled: {row:?}");
+}
+
+/// KT-1986 — an execution can point at a dispatch of its parent room (a
+/// principal's own wake): re-validating ends the worker's turn only, so that
+/// turn of the principal is left alone.
+#[tokio::test]
+async fn revalidating_never_ends_a_turn_of_the_parent_room() {
+    let repo = init_repo();
+    let control = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let e = exec_id.clone();
+    let validations = vec![flaky_validation(control.path())];
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE task_executions SET worker_target_kind = 'agent', \
+                     worker_cli_session_id = NULL, worker_agent_type = 'Ollama' WHERE id = ?1",
+            [&e],
+        )?;
+        conn.execute(
+            "UPDATE orchestration_runs SET validation_json = ?2 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+            rusqlite::params![e, serde_json::to_string(&validations)?],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    decide_review(
+        &db,
+        &exec_id,
+        &review_approve(&db, &exec_id).await,
+        "ClaudeCode",
+        "sess-b",
+    )
+    .await
+    .unwrap();
+    let outcome = run_integration(&db, &exec_id).await.unwrap();
+    assert!(matches!(outcome, IntegrationOutcome::SentBack { .. }));
+    // The principal's wake: a dispatch of the parent room the execution points at.
+    let wake = ghost_dispatch("parent-wake");
+    {
+        let (parent, exec_id, wake) = (parent.clone(), exec_id.clone(), wake.clone());
+        db.with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u-parent-wake', ?1, 'User', 'look', ?2, 9000, ?2)",
+                rusqlite::params![parent, now],
+            )?;
+            crate::db::agent_dispatch::enqueue(
+                conn,
+                crate::db::agent_dispatch::NewAgentDispatchJob {
+                    id: &wake,
+                    discussion_id: &parent,
+                    trigger_message_id: "u-parent-wake",
+                    trigger_sort_order: 9000,
+                    dedupe_key: &wake,
+                    agent_override: Some(&AgentType::ClaudeCode),
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            crate::db::orchestration::attach_execution_dispatch(conn, &exec_id, &wake)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    let state = recovery_test_state(&db);
+    let token = tokio_util::sync::CancellationToken::new();
+    state
+        .cancel_registry
+        .lock()
+        .unwrap()
+        .insert(wake.clone(), token.clone());
+
+    let Json(resumed) = resume_execution(State(state), Path(exec_id.clone())).await;
+
+    assert!(resumed.success, "revalidation failed: {:?}", resumed.error);
+    assert!(
+        !token.is_cancelled(),
+        "a turn of the parent room is not the worker's"
+    );
+    assert_ne!(
+        dispatch_of(&db, wake.clone()).await.status,
+        crate::db::agent_dispatch::DispatchStatus::Cancelled
+    );
+    assert!(
+        ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION)
+            .await
+            .is_empty(),
+        "and nothing is looked for under its id"
+    );
+}
+
 /// DoD-3 guard — the approval covers the delivered work only. A worker that
 /// committed since the send-back has made a delivery nobody reviewed, so the
 /// principal's re-validation is refused and nothing moves.
@@ -18269,6 +18467,23 @@ fn the_wait_reason_names_what_holds_the_dispatch() {
         reason(&runtime)
     );
     assert!(reason(&runtime).contains("OpenCode ACP spawn failed: x"));
+
+    // KT-2021 — held beside a previous session: the runtime is not blamed.
+    let beside = WaitingFallbackDispatch {
+        last_error: Some(
+            "runtime_unavailable[3]: previous_worker_session_alive: dispatch j-old".into(),
+        ),
+        ..base.clone()
+    };
+    let said = reason(&beside);
+    assert!(
+        said.contains("previous session of this worker (dispatch `j-old`) is being stopped"),
+        "{said}"
+    );
+    assert!(said.contains("3/"), "{said}");
+    for absent in ["runtime could not start", "previous_worker_session_alive"] {
+        assert!(!said.contains(absent), "{absent:?} in {said}");
+    }
 
     let capped = WaitingFallbackDispatch {
         progress_detail: Some(format!("{TASK_WORKER_QUEUED_DETAIL_PREFIX}3/3")),
@@ -35750,4 +35965,1117 @@ async fn a_review_notice_to_a_pinned_cli_principal_is_posted_once() {
         vec![MessageTarget::cli(AgentType::ClaudeCode, 102)]
     );
     assert_eq!(room_active_dispatch_count(&db, &parent).await, 0);
+}
+
+// ─── KT-1986 / KT-2021 — worker sessions that outlive their dispatch ─────────
+
+/// A process group a test started. It is killed on drop unless the test saw
+/// it gone: a group that ended is never signalled, its id may be another's.
+#[cfg(unix)]
+struct GhostGroup {
+    child: std::process::Child,
+    gone: bool,
+}
+
+#[cfg(unix)]
+impl GhostGroup {
+    fn leading(mut command: Command) -> Self {
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        Self {
+            child: command.spawn().unwrap(),
+            gone: false,
+        }
+    }
+
+    /// A `sleep` leading its own group, as a worker's agent does.
+    fn sleeping() -> Self {
+        let mut command = Command::new("sleep");
+        command.arg("600");
+        Self::leading(command)
+    }
+
+    fn pgid(&self) -> i32 {
+        self.child.id() as i32
+    }
+
+    /// The recorded form of this group: its id and its leader's start stamp.
+    fn recorded(&self) -> (i64, Option<String>) {
+        let stamp = crate::core::agent_orphans::start_stamp(self.child.id());
+        assert!(
+            stamp.is_some(),
+            "the platform must be able to stamp a process"
+        );
+        (i64::from(self.child.id()), stamp)
+    }
+
+    fn leader_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Whether the leader ended and nothing is left in its group, within `bound`.
+    fn gone_within(&mut self, bound: Duration) -> bool {
+        let deadline = std::time::Instant::now() + bound;
+        loop {
+            let ended = matches!(self.child.try_wait(), Ok(Some(_)));
+            // SAFETY: signal 0 only checks that the group exists.
+            if ended && unsafe { libc::killpg(self.pgid(), 0) } != 0 {
+                self.gone = true;
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for GhostGroup {
+    fn drop(&mut self) {
+        if !self.gone {
+            // SAFETY: the group this test started, not yet seen gone.
+            unsafe { libc::killpg(self.pgid(), libc::SIGKILL) };
+        }
+        let _ = self.child.wait();
+    }
+}
+
+fn ghost_agent_gone(
+    _pgid: i64,
+    _marker: Option<&str>,
+) -> crate::core::agent_orphans::OrphanOutcome {
+    crate::core::agent_orphans::OrphanOutcome::Gone
+}
+
+fn ghost_reap_nothing(_tag: &str) -> crate::core::dispatch_reaper::ReapReport {
+    crate::core::dispatch_reaper::ReapReport::default()
+}
+
+fn ghost_reap_one_stopped(_tag: &str) -> crate::core::dispatch_reaper::ReapReport {
+    crate::core::dispatch_reaper::ReapReport {
+        signalled: 1,
+        ..Default::default()
+    }
+}
+
+fn ghost_reap_a_survivor(_tag: &str) -> crate::core::dispatch_reaper::ReapReport {
+    crate::core::dispatch_reaper::ReapReport {
+        signalled: 1,
+        survivors: vec![4242],
+        unverified: false,
+    }
+}
+
+/// A recorded worker launch of `exec_id` by `instance`, with its agent group
+/// when one is given.
+async fn ghost_launch(
+    db: &Database,
+    dispatch: &str,
+    exec_id: &str,
+    instance: &str,
+    agent: Option<(i64, Option<String>)>,
+) {
+    let (dispatch, exec_id, instance) = (
+        dispatch.to_string(),
+        exec_id.to_string(),
+        instance.to_string(),
+    );
+    db.with_conn(move |conn| {
+        crate::db::worker_processes::record_launch(conn, &dispatch, &exec_id, &instance)?;
+        if let Some((pgid, marker)) = agent {
+            crate::db::worker_processes::set_agent(conn, &dispatch, pgid, marker.as_deref())?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+async fn ghost_row(db: &Database, dispatch: &str) -> crate::db::worker_processes::WorkerProcessRow {
+    let dispatch = dispatch.to_string();
+    db.with_conn(move |conn| crate::db::worker_processes::get(conn, &dispatch))
+        .await
+        .unwrap()
+        .expect("the recorded launch")
+}
+
+/// The `changes` of the events of `action` journaled on `exec_id`, oldest first.
+async fn ghost_events(
+    db: &Database,
+    exec_id: &str,
+    action: &'static str,
+) -> Vec<serde_json::Value> {
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        Ok(crate::db::orchestration::list_execution_events(conn, &id)?
+            .into_iter()
+            .filter(|event| event.action == action)
+            .map(|event| event.changes)
+            .collect())
+    })
+    .await
+    .unwrap()
+}
+
+fn ghost_dispatch(label: &str) -> String {
+    format!("test-ghost-{label}-{}", uuid::Uuid::new_v4())
+}
+
+/// KT-1986 — a process a worker left under its dispatch tag is stopped when the
+/// dispatch ends, and the execution journal says how many were signalled.
+#[cfg(unix)] // a python process tagged under a POSIX shell, in a process group of its own
+#[tokio::test]
+async fn a_server_a_worker_left_is_stopped_and_journaled_when_its_dispatch_ends() {
+    use std::process::Stdio;
+    // Python, not a system binary: macOS shows no environment for those.
+    let Some(python) = ["python3", "python"].into_iter().find(|name| {
+        Command::new(name)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }) else {
+        eprintln!("skipped: no python to tag a process with");
+        return;
+    };
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let dispatch = ghost_dispatch("server");
+    ghost_launch(
+        &db,
+        &dispatch,
+        &exec_id,
+        crate::core::dispatch_reaper::instance_id(),
+        None,
+    )
+    .await;
+    // What a worker's shell tool leaves: a server in the background of a shell.
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", &format!("{python} -c \"$CODE\" & wait")])
+        .env(crate::core::dispatch_reaper::DISPATCH_ENV, &dispatch)
+        .env(
+            "CODE",
+            "import sys,time\nprint('up'); sys.stdout.flush()\ntime.sleep(300)\n",
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut server = GhostGroup::leading(command);
+    let mut line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(server.child.stdout.as_mut().unwrap()),
+        &mut line,
+    )
+    .unwrap();
+    assert_eq!(line.trim(), "up", "the server must be up before the stop");
+
+    let stop = stop_worker_dispatch_processes(&db, &dispatch).await;
+
+    assert!(stop.survivors().is_empty(), "{stop:?}");
+    assert!(
+        server.gone_within(Duration::from_secs(30)),
+        "nothing of the server's process group may be left: {stop:?}"
+    );
+    let events = ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["dispatch_job_id"], dispatch.as_str());
+    assert!(
+        events[0]["signalled"].as_u64().unwrap_or(0) >= 1,
+        "{events:?}"
+    );
+}
+
+/// KT-2021 — a dispatch its execution no longer points at (a reassignment) is
+/// still stopped and journaled: the recorded launch is the gate, not the pointer.
+#[tokio::test]
+async fn a_reassigned_workers_old_dispatch_is_still_reaped() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let (old, new) = (ghost_dispatch("old"), ghost_dispatch("new"));
+    ghost_launch(
+        &db,
+        &old,
+        &exec_id,
+        crate::core::dispatch_reaper::instance_id(),
+        None,
+    )
+    .await;
+    {
+        let (exec_id, new) = (exec_id.clone(), new.clone());
+        db.with_conn(move |conn| {
+            // The reassignment's own dispatch, which the execution now points at.
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+                 VALUES (?1, ?2, 'User', 'go', '2026-11-26T00:00:00Z', 9000)",
+                rusqlite::params![format!("m-{new}"), child],
+            )?;
+            conn.execute(
+                "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+                     trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, \
+                     available_at, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 9000, ?1, '[]', 'Running', '2026-11-26T00:00:00Z', \
+                     '2026-11-26T00:00:00Z', '2026-11-26T00:00:00Z')",
+                rusqlite::params![new, child, format!("m-{new}")],
+            )?;
+            crate::db::orchestration::attach_execution_dispatch(conn, &exec_id, &new)
+        })
+        .await
+        .unwrap();
+    }
+
+    let stop =
+        stop_worker_dispatch_processes_with(&db, &old, ghost_agent_gone, ghost_reap_one_stopped)
+            .await;
+
+    assert_eq!(
+        stop,
+        WorkerProcessStop::Stopped {
+            agent: "none",
+            report: ghost_reap_one_stopped(&old),
+        }
+    );
+    assert!(!stop.may_still_run());
+    assert!(ghost_row(&db, &old).await.stopped_at.is_some());
+    let events = ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["dispatch_job_id"], old.as_str());
+    assert_eq!(events[0]["agent"], "none");
+    assert_eq!(events[0]["signalled"], 1);
+    assert_eq!(events[0]["unverified"], false);
+    // A dispatch that launched no worker is not looked for at all.
+    let stranger = ghost_dispatch("stranger");
+    assert_eq!(
+        stop_worker_dispatch_processes_with(
+            &db,
+            &stranger,
+            ghost_agent_gone,
+            ghost_reap_one_stopped
+        )
+        .await,
+        WorkerProcessStop::NotAWorker
+    );
+    assert_eq!(
+        ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION)
+            .await
+            .len(),
+        1
+    );
+}
+
+/// KT-2021 — the agent a previous backend left for a dispatch is killed by the
+/// boot, its launch settled and the stop journaled on its execution.
+#[cfg(unix)] // kills a `sleep` process group through libc
+#[tokio::test]
+async fn a_cancelled_dispatch_has_no_live_agent_after_boot() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let mut agent = GhostGroup::sleeping();
+    let dispatch = ghost_dispatch("boot");
+    ghost_launch(
+        &db,
+        &dispatch,
+        &exec_id,
+        crate::core::dispatch_reaper::instance_id(),
+        Some(agent.recorded()),
+    )
+    .await;
+
+    let report =
+        reconcile_at_boot_with_agents(&recovery_test_state(&db), &[AgentType::ClaudeCode]).await;
+
+    assert!(
+        agent.gone_within(Duration::from_secs(30)),
+        "the agent the previous backend left must be gone: {:?}",
+        report.errors
+    );
+    let events = ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["dispatch_job_id"], dispatch.as_str());
+    assert_eq!(events[0]["agent"], "killed");
+    // The launch is settled unless this host hides its process table.
+    let verified = events[0]["unverified"] == false;
+    assert_eq!(
+        ghost_row(&db, &dispatch).await.stopped_at.is_some(),
+        verified,
+        "{events:?}"
+    );
+    assert_eq!(
+        report.worker_sessions_stopped,
+        usize::from(verified),
+        "{:?}",
+        report.errors
+    );
+}
+
+/// KT-2021 — a launch recorded by another backend instance (a bench, a lane on
+/// a copy of the database) is never signalled, by the boot or by a stop.
+#[cfg(unix)] // keeps a `sleep` process group alive and checks it through libc
+#[tokio::test]
+async fn another_instances_worker_session_is_never_signalled() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let mut agent = GhostGroup::sleeping();
+    let dispatch = ghost_dispatch("foreign");
+    ghost_launch(
+        &db,
+        &dispatch,
+        &exec_id,
+        "another-instance",
+        Some(agent.recorded()),
+    )
+    .await;
+
+    let report =
+        reconcile_at_boot_with_agents(&recovery_test_state(&db), &[AgentType::ClaudeCode]).await;
+    let stop = stop_worker_dispatch_processes(&db, &dispatch).await;
+
+    assert_eq!(stop, WorkerProcessStop::Foreign);
+    assert!(
+        !stop.may_still_run(),
+        "a foreign launch blocks nothing here"
+    );
+    assert_eq!(report.worker_sessions_stopped, 0);
+    assert!(
+        agent.leader_alive(),
+        "another instance's agent keeps running"
+    );
+    assert!(ghost_row(&db, &dispatch).await.stopped_at.is_none());
+    assert!(
+        ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION)
+            .await
+            .is_empty(),
+        "nothing was stopped, nothing is journaled"
+    );
+}
+
+/// KT-2021 — a recorded pid the system gave to another process is left alone:
+/// the stop reports `not_ours` and the process keeps running.
+#[cfg(unix)] // keeps a `sleep` process group alive and checks it through libc
+#[tokio::test]
+async fn a_reused_pid_is_not_killed_as_a_worker_session() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let mut other = GhostGroup::sleeping();
+    let dispatch = ghost_dispatch("reused");
+    ghost_launch(
+        &db,
+        &dispatch,
+        &exec_id,
+        crate::core::dispatch_reaper::instance_id(),
+        Some((
+            i64::from(other.child.id()),
+            Some("ps:another process".to_string()),
+        )),
+    )
+    .await;
+
+    let stop = stop_worker_dispatch_processes_with(
+        &db,
+        &dispatch,
+        kill_recorded_worker_group,
+        ghost_reap_nothing,
+    )
+    .await;
+
+    assert_eq!(
+        stop,
+        WorkerProcessStop::Stopped {
+            agent: "not_ours",
+            report: ghost_reap_nothing(&dispatch),
+        }
+    );
+    assert!(
+        other.leader_alive(),
+        "the process that reused the pid lives"
+    );
+    let events = ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["agent"], "not_ours");
+    assert!(ghost_row(&db, &dispatch).await.stopped_at.is_some());
+}
+
+/// KT-2021 — pid 0, pid 1 and the backend's own process group are refused
+/// before any stamp is read, whatever a row says.
+#[test]
+fn the_backends_own_group_is_never_a_worker_session() {
+    use crate::core::agent_orphans::OrphanOutcome;
+    assert!(is_backend_process_group(i64::from(std::process::id())));
+    #[cfg(unix)]
+    assert!(is_backend_process_group(i64::from(unsafe {
+        libc::getpgrp()
+    })));
+    assert!(!is_backend_process_group(0));
+    for refused in [-7, 0, 1] {
+        assert_eq!(
+            kill_recorded_worker_group(refused, Some("bsd:1.2")),
+            OrphanOutcome::NotOurs,
+            "group {refused}"
+        );
+    }
+}
+
+/// KT-1986 — an integrated execution keeps its checkout while a session of its
+/// worker may still run, the reason is recorded once, and the next pass
+/// removes it once nothing is left.
+#[tokio::test]
+async fn the_checkout_stays_while_a_worker_session_may_still_run() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let path = managed_worktree_path(&db, &exec_id).await;
+    let head = git_rev(Path::new(&path), "HEAD");
+    let execution = exec_of(&db, &exec_id).await;
+    let dispatch = ghost_dispatch("left");
+    ghost_launch(
+        &db,
+        &dispatch,
+        &exec_id,
+        crate::core::dispatch_reaper::instance_id(),
+        None,
+    )
+    .await;
+
+    for _ in 0..2 {
+        cleanup_integrated_execution_with(
+            &db,
+            &execution,
+            repo.path(),
+            &path,
+            &head,
+            ghost_agent_gone,
+            ghost_reap_a_survivor,
+        )
+        .await
+        .unwrap();
+        assert!(
+            Path::new(&path).exists(),
+            "the checkout stays while a worker session may still run"
+        );
+    }
+    let kept = ghost_events(&db, &exec_id, "worktree_release_kept").await;
+    assert_eq!(kept.len(), 1, "one reason for two passes: {kept:?}");
+    let reason = kept[0]["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains(&dispatch), "{reason}");
+    assert!(reason.contains("may still run"), "{reason}");
+    assert!(
+        managed_worktree_path(&db, &exec_id).await == path,
+        "the workspace row still leads to the checkout"
+    );
+    assert_eq!(
+        ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION)
+            .await
+            .len(),
+        1,
+        "the same unverified stop is journaled once"
+    );
+    assert!(ghost_row(&db, &dispatch).await.stopped_at.is_none());
+
+    cleanup_integrated_execution_with(
+        &db,
+        &execution,
+        repo.path(),
+        &path,
+        &head,
+        ghost_agent_gone,
+        ghost_reap_nothing,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !Path::new(&path).exists(),
+        "the checkout goes once the session is gone"
+    );
+    assert!(ghost_row(&db, &dispatch).await.stopped_at.is_some());
+}
+
+/// KT-1986 — approving a delivery cancels the worker dispatch that still runs,
+/// signals its stream, stops its processes and journals it; a second approval
+/// replay finds nothing left to end.
+#[tokio::test]
+async fn approving_a_delivery_ends_a_worker_turn_still_running() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (_parent, child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let dispatch = ghost_dispatch("turn");
+    {
+        let (child, exec_id, dispatch) = (child.clone(), exec_id.clone(), dispatch.clone());
+        db.with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u-ghost-turn', ?1, 'User', 'go', ?2, 9000, ?2)",
+                rusqlite::params![child, now],
+            )?;
+            crate::db::agent_dispatch::enqueue(
+                conn,
+                crate::db::agent_dispatch::NewAgentDispatchJob {
+                    id: &dispatch,
+                    discussion_id: &child,
+                    trigger_message_id: "u-ghost-turn",
+                    trigger_sort_order: 9000,
+                    dedupe_key: &dispatch,
+                    agent_override: Some(&AgentType::ClaudeCode),
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            crate::db::orchestration::attach_execution_dispatch(conn, &exec_id, &dispatch)?;
+            crate::db::worker_processes::record_launch(
+                conn,
+                &dispatch,
+                &exec_id,
+                crate::core::dispatch_reaper::instance_id(),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    let state = recovery_test_state(&db);
+    // The worker's live stream: it leaves the registry once it is cancelled.
+    let token = tokio_util::sync::CancellationToken::new();
+    state
+        .cancel_registry
+        .lock()
+        .unwrap()
+        .insert(dispatch.clone(), token.clone());
+    let stream = {
+        let (registry, token, key) = (
+            state.cancel_registry.clone(),
+            token.clone(),
+            dispatch.clone(),
+        );
+        tokio::spawn(async move {
+            token.cancelled().await;
+            registry.lock().unwrap().remove(&key);
+        })
+    };
+    let execution = exec_of(&db, &exec_id).await;
+
+    end_worker_turn_of_approved_execution(&state, &execution).await;
+
+    assert!(token.is_cancelled(), "the worker's stream is signalled");
+    stream.await.unwrap();
+    assert_eq!(
+        dispatch_of(&db, dispatch.clone()).await.status,
+        crate::db::agent_dispatch::DispatchStatus::Cancelled
+    );
+    assert_eq!(
+        exec_of(&db, &exec_id).await.status,
+        TaskExecutionStatus::AwaitingReview,
+        "ending the turn of a delivered worker parks nothing"
+    );
+    let events = ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["dispatch_job_id"], dispatch.as_str());
+
+    end_worker_turn_of_approved_execution(&state, &execution).await;
+
+    assert_eq!(
+        ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION)
+            .await
+            .len(),
+        1,
+        "a turn already ended is not stopped again"
+    );
+}
+
+/// KT-2021 — a platform that cannot look for a worker's processes claims
+/// nothing: the stop it reports neither stopped anything nor leaves anything
+/// running. Only a stop that ended something counts as one.
+#[test]
+fn a_stop_that_looked_at_nothing_claims_nothing() {
+    use crate::core::dispatch_reaper::ReapReport;
+    assert_eq!(worker_stop_without_looking(true), None);
+    let unsupported = worker_stop_without_looking(false).expect("a platform that cannot look");
+    assert_eq!(
+        unsupported,
+        WorkerProcessStop::Stopped {
+            agent: WORKER_STOP_UNSUPPORTED,
+            report: ReapReport::default(),
+        }
+    );
+    assert!(
+        !unsupported.may_still_run(),
+        "it blocks no launch or release"
+    );
+    assert!(!unsupported.stopped_something(), "and stopped nothing");
+    assert!(unsupported.survivors().is_empty());
+
+    let stopped =
+        |agent: &'static str, report: ReapReport| WorkerProcessStop::Stopped { agent, report };
+    assert!(stopped("killed", ReapReport::default()).stopped_something());
+    assert!(stopped("none", ghost_reap_one_stopped("tag")).stopped_something());
+    for found_nothing in ["gone", "not_ours", "none"] {
+        assert!(
+            !stopped(found_nothing, ReapReport::default()).stopped_something(),
+            "{found_nothing}"
+        );
+    }
+    assert!(!WorkerProcessStop::NotAWorker.stopped_something());
+    assert!(!WorkerProcessStop::Foreign.stopped_something());
+}
+
+/// How many times the stop of the test below looked for a process.
+static GHOST_LOOKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn ghost_kill_counted(
+    _pgid: i64,
+    _marker: Option<&str>,
+) -> crate::core::agent_orphans::OrphanOutcome {
+    GHOST_LOOKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    crate::core::agent_orphans::OrphanOutcome::Killed
+}
+
+fn ghost_reap_counted(tag: &str) -> crate::core::dispatch_reaper::ReapReport {
+    GHOST_LOOKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ghost_reap_one_stopped(tag)
+}
+
+/// KT-2021 — where processes cannot be looked for, a stop looks at nothing,
+/// settles the recorded launch so nothing waits on it, and the execution
+/// journal says once that the platform does not support it.
+#[tokio::test]
+async fn where_processes_cannot_be_looked_for_a_stop_settles_the_launch_and_says_so_once() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let dispatch = ghost_dispatch("unsupported");
+    ghost_launch(
+        &db,
+        &dispatch,
+        &exec_id,
+        crate::core::dispatch_reaper::instance_id(),
+        Some((4242, Some("bsd:1.2".to_string()))),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let stop = stop_worker_dispatch_processes_on(
+            &db,
+            &dispatch,
+            ghost_kill_counted,
+            ghost_reap_counted,
+            false,
+        )
+        .await;
+        assert_eq!(Some(stop), worker_stop_without_looking(false));
+    }
+
+    assert_eq!(
+        GHOST_LOOKS.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "neither the recorded group nor the tag is looked for"
+    );
+    assert!(
+        ghost_row(&db, &dispatch).await.stopped_at.is_some(),
+        "the launch is settled: nothing waits on what cannot be looked for"
+    );
+    let events = ghost_events(&db, &exec_id, WORKER_PROCESSES_STOPPED_ACTION).await;
+    assert_eq!(events.len(), 1, "said once per dispatch: {events:?}");
+    assert_eq!(events[0]["dispatch_job_id"], dispatch.as_str());
+    assert_eq!(events[0]["agent"], WORKER_STOP_UNSUPPORTED);
+    assert_eq!(events[0]["signalled"], 0);
+    assert_eq!(events[0]["unverified"], false);
+
+    // The same dispatch on a platform that can look is looked for.
+    let looked = stop_worker_dispatch_processes_on(
+        &db,
+        &dispatch,
+        ghost_kill_counted,
+        ghost_reap_counted,
+        true,
+    )
+    .await;
+    assert!(looked.stopped_something(), "{looked:?}");
+    assert_eq!(GHOST_LOOKS.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// KT-2021 — boot stops the sessions the previous backend left BEFORE it
+/// reconciles the executions: the stop is journaled ahead of the interruption.
+/// A leftover found already gone is settled, not counted as stopped.
+#[tokio::test]
+async fn boot_stops_leftover_sessions_before_it_reconciles_the_executions() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+    let dispatch = ghost_dispatch("order");
+    // No agent group and a tag nothing carries: the stop signals nothing.
+    ghost_launch(
+        &db,
+        &dispatch,
+        &exec_id,
+        crate::core::dispatch_reaper::instance_id(),
+        None,
+    )
+    .await;
+
+    let report =
+        reconcile_at_boot_with_agents(&recovery_test_state(&db), &[AgentType::ClaudeCode]).await;
+
+    let id = exec_id.clone();
+    let journal = db
+        .with_conn(move |conn| crate::db::orchestration::list_execution_events(conn, &id))
+        .await
+        .unwrap();
+    let stopped = journal
+        .iter()
+        .position(|event| event.action == WORKER_PROCESSES_STOPPED_ACTION)
+        .expect("the leftover session is stopped at boot");
+    let interrupted = journal
+        .iter()
+        .position(|event| event.to_status == Some(TaskExecutionStatus::Interrupted))
+        .expect("the in-flight execution is interrupted at boot");
+    assert!(
+        stopped < interrupted,
+        "the session is stopped before the execution is reconciled: {:?}",
+        journal
+            .iter()
+            .map(|event| event.action.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        journal[stopped].changes["dispatch_job_id"],
+        dispatch.as_str()
+    );
+    assert_eq!(
+        report.worker_sessions_stopped, 0,
+        "nothing was running: nothing is counted as stopped"
+    );
+}
+
+/// A native worker's delivery awaiting review while its turn still streams.
+struct GhostNativeTurn {
+    state: AppState,
+    exec_id: String,
+    parent: String,
+    child: String,
+    dispatch: String,
+    trigger: String,
+    /// The worker's live stream: it leaves the registry once it is cancelled.
+    token: tokio_util::sync::CancellationToken,
+}
+
+async fn ghost_native_delivery_with_a_live_turn(
+    db: &std::sync::Arc<Database>,
+    repo: &Path,
+) -> GhostNativeTurn {
+    let (task_ref, parent, _) = seed(db, repo).await;
+    let execution = provision_single_task_execution(
+        db,
+        ProvisionInput {
+            task_reference: task_ref,
+            parent_discussion_id: parent.clone(),
+            worker: native_worker(),
+            base_rev: Some("main".into()),
+            idempotency_key: Some("ghost-native-turn".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let child = execution.sub_discussion_id.clone().unwrap();
+    let dispatch = execution.dispatch_job_id.clone().unwrap();
+    let trigger = dispatch_of(db, dispatch.clone()).await.trigger_message_id;
+    let worktree = managed_worktree_path(db, &execution.id).await;
+    std::fs::write(Path::new(&worktree).join("ghost.txt"), "work\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-m", "worker change"]] {
+        assert!(git(Path::new(&worktree), &args).status.success());
+    }
+    let manifest = projected_manifest_for_execution(db, &execution.id).await;
+    let delivered = deliver_native_worker_manifest(
+        db,
+        &execution.id,
+        NativeExecutionCaller {
+            discussion_id: &child,
+            agent_type: &AgentType::ClaudeCode,
+            source_message_id: Some(&trigger),
+            alias: "Claude Code",
+            actor_session_id: Some("ghost-native-turn"),
+        },
+        &dispatch,
+        &manifest,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(delivered, DeliverOutcome::Delivered { .. }),
+        "the fixture delivery must land before the review: {delivered:?}"
+    );
+    ghost_launch(
+        db,
+        &dispatch,
+        &execution.id,
+        crate::core::dispatch_reaper::instance_id(),
+        None,
+    )
+    .await;
+    let state = recovery_test_state(db);
+    let token = tokio_util::sync::CancellationToken::new();
+    state
+        .cancel_registry
+        .lock()
+        .unwrap()
+        .insert(dispatch.clone(), token.clone());
+    {
+        let (registry, token, key) = (
+            state.cancel_registry.clone(),
+            token.clone(),
+            dispatch.clone(),
+        );
+        tokio::spawn(async move {
+            token.cancelled().await;
+            registry.lock().unwrap().remove(&key);
+        });
+    }
+    GhostNativeTurn {
+        state,
+        exec_id: execution.id,
+        parent,
+        child,
+        dispatch,
+        trigger,
+        token,
+    }
+}
+
+/// KT-1986 — a worker the run allows to review its own delivery approves from
+/// inside its own turn: that turn is the one that integrates, so the approval
+/// does not cancel it, and the delivery lands.
+#[tokio::test]
+async fn a_worker_approving_its_own_delivery_keeps_its_turn_and_integrates() {
+    use crate::agents::tools::ToolCall;
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let turn = ghost_native_delivery_with_a_live_turn(&db, repo.path()).await;
+    {
+        let exec_id = turn.exec_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET allow_self_review = 1 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                [&exec_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    let head = git_rev(
+        Path::new(&managed_worktree_path(&db, &turn.exec_id).await),
+        "HEAD",
+    );
+    // The worker's own run: its room, its trigger and its dispatch.
+    let worker = crate::api::agent_tools::KronnToolExecutor::arc(
+        turn.state.clone(),
+        Some(turn.child.clone()),
+        AgentType::ClaudeCode,
+        Some(turn.trigger.clone()),
+        Some(turn.dispatch.clone()),
+    );
+
+    let outcome = worker
+        .execute(&ToolCall {
+            id: "self-review".into(),
+            name: "task_exec_review".into(),
+            arguments: serde_json::json!({
+                "task_execution_id": turn.exec_id,
+                "decision": {
+                    "version": "1",
+                    "task_ref": "KT-319",
+                    "decision": "approve",
+                    "reviewed_head_sha": head,
+                },
+            }),
+        })
+        .await;
+
+    assert!(
+        outcome.ok,
+        "the self-review is applied: {:?}",
+        outcome.content
+    );
+    assert!(
+        !turn.token.is_cancelled(),
+        "the turn that integrates must not be cancelled by its own approval"
+    );
+    assert_ne!(
+        dispatch_of(&db, turn.dispatch.clone()).await.status,
+        crate::db::agent_dispatch::DispatchStatus::Cancelled,
+        "the worker's own dispatch is left to end by itself"
+    );
+    assert!(
+        ghost_events(&db, &turn.exec_id, WORKER_PROCESSES_STOPPED_ACTION)
+            .await
+            .is_empty(),
+        "nothing of the running turn is stopped"
+    );
+    assert_eq!(
+        exec_of(&db, &turn.exec_id).await.status,
+        TaskExecutionStatus::Done,
+        "the approved delivery is integrated"
+    );
+}
+
+/// KT-1986 — the approval a principal decides through its own tool ends the
+/// worker's turn that still runs, then integrates: the call site of the native
+/// tool, not only the function it calls.
+#[tokio::test]
+async fn a_principal_approving_through_its_tool_ends_the_workers_turn_then_integrates() {
+    use crate::agents::tools::ToolCall;
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let turn = ghost_native_delivery_with_a_live_turn(&db, repo.path()).await;
+    let decision: serde_json::Value =
+        serde_json::from_str(&review_approve(&db, &turn.exec_id).await).unwrap();
+    let principal = crate::api::agent_tools::KronnToolExecutor::arc(
+        turn.state.clone(),
+        Some(turn.parent.clone()),
+        AgentType::ClaudeCode,
+        None,
+        None,
+    );
+
+    let outcome = principal
+        .execute(&ToolCall {
+            id: "principal-review".into(),
+            name: "task_exec_review".into(),
+            arguments: serde_json::json!({
+                "task_execution_id": turn.exec_id,
+                "decision": decision,
+            }),
+        })
+        .await;
+
+    assert!(outcome.ok, "the approval is applied: {:?}", outcome.content);
+    assert!(
+        turn.token.is_cancelled(),
+        "the worker's stream is signalled"
+    );
+    assert_eq!(
+        dispatch_of(&db, turn.dispatch.clone()).await.status,
+        crate::db::agent_dispatch::DispatchStatus::Cancelled
+    );
+    let events = ghost_events(&db, &turn.exec_id, WORKER_PROCESSES_STOPPED_ACTION).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["dispatch_job_id"], turn.dispatch.as_str());
+    assert_eq!(
+        exec_of(&db, &turn.exec_id).await.status,
+        TaskExecutionStatus::Done
+    );
+}
+
+/// KT-2021 — a launch given up beside a previous session is not a failure of
+/// its agent: a fallback that has a next link keeps its worker, the execution
+/// is parked, and both rooms are told which session to stop and to resume.
+#[tokio::test]
+async fn a_launch_held_beside_a_previous_session_is_not_handed_to_the_next_link() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let was = economy_claude_executions(&db, repo.path(), 1)
+        .await
+        .remove(0);
+    let was = agent_fallback_runs::prelocalise(&db, &was.id).await;
+    let state = quota_test_state(&db);
+    let limits = default_dispatch_limits(&state).await;
+    let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
+    opt_into_fallback_among(&db, &was.id, &available).await;
+    let claude = was.dispatch_job_id.clone().unwrap();
+    assert!(run_then_refuse(&db, &limits, &claude, true).await);
+    assert_eq!(
+        refuse_through_the_fallback(
+            &state,
+            &db,
+            &was.id,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+            &available
+        )
+        .await,
+        Some(AgentType::Codex)
+    );
+    let on_codex = exec_of(&db, &was.id).await;
+    let held = on_codex.dispatch_job_id.clone().unwrap();
+    let reason = format!(
+        "{}: dispatch {claude}",
+        crate::api::discussions::runtime::PREVIOUS_WORKER_SESSION_ALIVE
+    );
+    let bound = crate::api::discussions::runtime::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
+
+    for attempt in 1..=bound {
+        let job = claim_when_due(&db, &held).await;
+        crate::api::discussions::runtime::defer_or_stop_runtime_unavailable_among(
+            &state,
+            &job,
+            &reason,
+            Some(available.to_vec()),
+        )
+        .await;
+        assert_eq!(
+            dispatch_of(&db, held.clone()).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Pending,
+            "try {attempt}: still retried"
+        );
+    }
+    let job = claim_when_due(&db, &held).await;
+    crate::api::discussions::runtime::defer_or_stop_runtime_unavailable_among(
+        &state,
+        &job,
+        &reason,
+        Some(available.to_vec()),
+    )
+    .await;
+
+    let ended = dispatch_of(&db, held.clone()).await;
+    assert_eq!(
+        ended.status,
+        crate::db::agent_dispatch::DispatchStatus::Failed,
+        "the bound ends the retries: {:?}",
+        ended.last_error
+    );
+    assert_eq!(ended.failure_kind.as_deref(), Some("launch_unavailable"));
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(
+        after.worker_agent_type.as_deref(),
+        Some("Codex"),
+        "another link would start beside the same session"
+    );
+    assert_eq!(after.dispatch_job_id.as_deref(), Some(held.as_str()));
+    assert_eq!(after.status, TaskExecutionStatus::Interrupted);
+    assert!(
+        room_message(
+            &db,
+            after.parent_discussion_id.clone(),
+            format!("worker-launch-fallback:{held}"),
+        )
+        .await
+        .is_none(),
+        "no automatic fallback is announced"
+    );
+    let child = after.sub_discussion_id.clone().expect("the worker room");
+    for (room, id) in [
+        (
+            after.parent_discussion_id.clone(),
+            format!("worker-launch-refused:{held}"),
+        ),
+        (child, format!("worker-launch-refused-child:{held}")),
+    ] {
+        let notice = room_message(&db, room, id.clone())
+            .await
+            .unwrap_or_else(|| panic!("{id} is posted"));
+        for said in [format!("`{claude}`"), "`task_exec_resume`".to_string()] {
+            assert!(notice.contains(&said), "{said} missing in {notice}");
+        }
+        assert!(!notice.contains("Ollama"), "{notice}");
+    }
 }

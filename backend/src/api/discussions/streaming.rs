@@ -233,6 +233,63 @@ async fn cli_task_worker_context(
     }))
 }
 
+/// KT-2021 — a worker launch is recorded before its agent is spawned, under
+/// this backend's instance. A failure to record never fails the launch.
+async fn record_task_worker_launch(state: &AppState, worker: &runner::TaskWorkerBridgeContext) {
+    let (dispatch, execution) = (worker.dispatch_job_id.clone(), worker.execution_id.clone());
+    let recorded = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::worker_processes::record_launch(
+                conn,
+                &dispatch,
+                &execution,
+                crate::core::dispatch_reaper::instance_id(),
+            )
+        })
+        .await;
+    if let Err(error) = recorded {
+        tracing::warn!(
+            dispatch_job_id = %worker.dispatch_job_id,
+            "task worker launch not recorded: {error}"
+        );
+    }
+}
+
+/// KT-2021 — the process group of a worker's spawned agent, with the start
+/// stamp of its leader: what a later stop compares before any signal.
+async fn record_task_worker_agent(
+    state: &AppState,
+    worker: &runner::TaskWorkerBridgeContext,
+    group: Option<u32>,
+) {
+    let Some(pid) = group else {
+        return;
+    };
+    let stamp = tokio::task::spawn_blocking(move || crate::core::agent_orphans::start_stamp(pid))
+        .await
+        .ok()
+        .flatten();
+    let dispatch = worker.dispatch_job_id.clone();
+    let recorded = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::worker_processes::set_agent(
+                conn,
+                &dispatch,
+                i64::from(pid),
+                stamp.as_deref(),
+            )
+        })
+        .await;
+    if let Err(error) = recorded {
+        tracing::warn!(
+            dispatch_job_id = %worker.dispatch_job_id,
+            "task worker agent group not recorded: {error}"
+        );
+    }
+}
+
 /// The room's own native agent for an ordinary CLI turn, so it can be the
 /// principal of `task_exec`. Derived from the running dispatch job only; a
 /// worker launch, an HTTP agent or an unverifiable job gets nothing.
@@ -547,6 +604,55 @@ mod native_http_tools_scope_tests {
                 .expect("a turn with no dispatch id was never a worker launch")
                 .is_none()
         );
+    }
+
+    /// KT-2021 — a CLI task worker's launch leaves a row for its dispatch under
+    /// this backend's instance, completed with the agent's process group and
+    /// start stamp once the agent is spawned.
+    #[tokio::test]
+    async fn a_task_worker_launch_records_its_dispatch_and_agent() {
+        let state = test_state();
+        let worker = crate::agents::runner::TaskWorkerBridgeContext {
+            execution_id: "exec-recorded".into(),
+            discussion_id: "d-worker".into(),
+            agent_type: "Codex".into(),
+            dispatch_job_id: "dispatch-recorded".into(),
+            source_message_id: "trigger-a".into(),
+        };
+        let row = |state: &AppState| {
+            let db = state.db.clone();
+            async move {
+                db.with_conn(|conn| crate::db::worker_processes::get(conn, "dispatch-recorded"))
+                    .await
+                    .expect("read the recorded launch")
+            }
+        };
+        assert!(row(&state).await.is_none(), "nothing before the launch");
+
+        super::record_task_worker_launch(&state, &worker).await;
+
+        let launched = row(&state).await.expect("the launch is recorded");
+        assert_eq!(launched.execution_id, "exec-recorded");
+        assert_eq!(
+            launched.instance_id,
+            crate::core::dispatch_reaper::instance_id()
+        );
+        assert_eq!(launched.agent_pgid, None, "no agent before the spawn");
+        assert_eq!(launched.stopped_at, None);
+
+        // This test's own process stands in for the agent: it is only read.
+        let own = std::process::id();
+        super::record_task_worker_agent(&state, &worker, Some(own)).await;
+
+        let spawned = row(&state).await.expect("the launch is recorded");
+        assert_eq!(spawned.agent_pgid, Some(i64::from(own)));
+        assert_eq!(
+            spawned.agent_started_marker,
+            crate::core::agent_orphans::start_stamp(own)
+        );
+        // A runtime that reports no process leaves the record as it is.
+        super::record_task_worker_agent(&state, &worker, None).await;
+        assert_eq!(row(&state).await, Some(spawned));
     }
 
     #[tokio::test]
@@ -3065,27 +3171,55 @@ pub(super) async fn make_agent_stream_inner(
     if let Some(woken_dispatch) = dispatch_job_id.clone() {
         let room = discussion_id.clone();
         let provider = crate::db::orchestration::agent_type_to_db(&agent_type);
-        match state
+        let adopting = woken_dispatch.clone();
+        let adopted = match state
             .db
             .with_conn(move |conn| {
                 crate::db::orchestration::adopt_woken_dispatch_for_interrupted_worker(
-                    conn,
-                    &room,
-                    &provider,
-                    &woken_dispatch,
+                    conn, &room, &provider, &adopting,
                 )
             })
             .await
         {
-            Ok(true) => tracing::info!(
-                discussion_id,
-                "Worker woken in its room resumed its interrupted execution"
-            ),
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                discussion_id,
-                "Could not resume the interrupted execution of a woken worker: {error}"
-            ),
+            Ok(true) => {
+                tracing::info!(
+                    discussion_id,
+                    "Worker woken in its room resumed its interrupted execution"
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(
+                    discussion_id,
+                    "Could not resume the interrupted execution of a woken worker: {error}"
+                );
+                false
+            }
+        };
+        // KT-2021 — the launch hold ran before this dispatch was the execution's:
+        // a previous session of the execution is looked for now.
+        let previous = if adopted {
+            super::runtime::previous_worker_session_alive(&state, &woken_dispatch, &discussion_id)
+                .await
+        } else {
+            None
+        };
+        if let Some(previous) = previous {
+            let reason = super::runtime::previous_session_alive_reason(&previous);
+            if let Some(sender) = completion_tx.take() {
+                let _ = sender.send(AgentExecutionOutcome::RuntimeUnavailable {
+                    reason: reason.clone(),
+                });
+            }
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(
+                    Event::default()
+                        .event("error")
+                        .data(serde_json::json!({"error":reason}).to_string()),
+                )
+            }));
+            return Sse::new(prepend_initial_event(stream, initial_event.take()));
         }
     }
     let native_http_tools = match native_http_tools_for_discussion(
@@ -4490,6 +4624,11 @@ pub(super) async fn make_agent_stream_inner(
                 }
             }
         }
+        // KT-2021 — before the spawn: a backend that dies from here on leaves
+        // a row its next boot reads.
+        if let Some(worker) = cli_task_worker_context.as_ref() {
+            record_task_worker_launch(&state, worker).await;
+        }
 
         if let Some(run_id) = dispatch_group_id.as_ref() {
             let _ = state
@@ -4642,6 +4781,13 @@ pub(super) async fn make_agent_stream_inner(
                 let _runtime_guard = dispatch_job_id.as_ref().map(|job_id| {
                     crate::AgentRuntimeGuard::insert(&state.agent_runtime_registry, job_id.clone())
                 });
+                if let Some(worker) = cli_task_worker_context.as_ref() {
+                    let group = process
+                        .pgid
+                        .and_then(|pgid| u32::try_from(pgid).ok())
+                        .or(process.child.id());
+                    record_task_worker_agent(&state, worker, group).await;
+                }
                 // A refused resume is only known once the runtime answered it.
                 let turn_continuity =
                     settle_turn_continuity(process.resume_fallback(), session_continuity);
