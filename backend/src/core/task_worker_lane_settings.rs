@@ -376,15 +376,32 @@ fn project_listing(path: &Path) -> Option<PathBuf> {
             .collect()
     };
     let rank = |project: &PathBuf, tree: &PathBuf| (tree.components().count(), tree == project);
+    let mut unreadable = false;
     let mut owners: Vec<((usize, bool), PathBuf, PathBuf)> = candidates
         .into_iter()
         .filter_map(|project| {
             let mut trees = vec![project.clone()];
-            trees.extend(
-                crate::core::worktree::registered_worktree_paths(&project)
-                    .iter()
-                    .map(|tree| key_of(tree)),
-            );
+            match crate::core::lane_git::registered_worktrees(&project) {
+                // A worktree outside the checkout is taken as git wrote it, never resolved;
+                // one inside it is resolved there only, and dropped when a link leads out
+                // (KT-2084).
+                Ok(listed) => trees.extend(listed.iter().filter_map(|tree| {
+                    if tree.admin.is_none() {
+                        // The main worktree: where the repository itself is.
+                        Some(key_of(&tree.path))
+                    } else if tree.inside_checkout {
+                        crate::core::lane_git::resolve_in_checkout(&project, &tree.path)
+                            .map(|(real, _)| real)
+                    } else {
+                        Some(tree.path.clone())
+                    }
+                })),
+                // A checkout whose registrations cannot be read (KT-2084): no owner is sure.
+                Err(_) if std::fs::symlink_metadata(project.join(".git")).is_ok() => {
+                    unreadable = true;
+                }
+                Err(_) => {}
+            }
             let tree = trees
                 .into_iter()
                 .filter(|tree| path.starts_with(tree))
@@ -392,6 +409,9 @@ fn project_listing(path: &Path) -> Option<PathBuf> {
             Some((rank(&project, &tree), project, tree))
         })
         .collect();
+    if unreadable {
+        return None;
+    }
     owners.sort_by_key(|(rank, _, _)| std::cmp::Reverse(*rank));
     let (best, project, tree) = owners.first()?.clone();
     if owners.get(1).is_some_and(|(next, _, _)| *next == best) {

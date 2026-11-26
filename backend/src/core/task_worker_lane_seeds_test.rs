@@ -215,6 +215,38 @@ fn an_unchanged_source_is_left_alone() {
     assert!(fx.worktree.join("public/images/worker-note.txt").exists());
 }
 
+/// KT-2084 — a delete judges an orphaned worker checkout's ignored files as work;
+/// Kronn's seeds are its own copies, never that.
+#[test]
+fn a_seed_is_no_work_for_a_delete() {
+    let fx = fixture();
+    seed_worktree(
+        &fx.main,
+        &fx.worktree,
+        &seeds(&["public/images"]),
+        &clone_tree,
+    );
+    assert!(fx.worktree.join("public/images/icon.svg").is_file());
+
+    assert_eq!(
+        crate::core::worktree::unsaved_work(&fx.main, &fx.worktree, "wt"),
+        Ok(None)
+    );
+
+    let exclude = fx.main.join(".git/info/exclude");
+    let mut patterns = std::fs::read_to_string(&exclude).unwrap_or_default();
+    patterns.push_str("\nnotes.local\n");
+    write(&exclude, &patterns);
+    write(&fx.worktree.join("notes.local"), "the worker's");
+    let work = crate::core::worktree::unsaved_work(&fx.main, &fx.worktree, "wt");
+    assert!(
+        work.as_ref().is_ok_and(|work| work
+            .as_ref()
+            .is_some_and(|w| w.contains("1 ignored file(s)") && w.contains("notes.local"))),
+        "{work:?}"
+    );
+}
+
 #[test]
 fn a_changed_source_refreshes_the_copy() {
     let fx = fixture();

@@ -398,7 +398,7 @@ pub fn clean_integrated_merge(repo: &Path) {
         if let Err(e) = crate::core::worktree::remove_discussion_worktree(
             repo,
             &worktree.to_string_lossy(),
-            true,
+            Some(docs_merge::MERGE_BRANCH),
         ) {
             tracing::warn!("Integrated template merge worktree not removed: {e}");
         }
@@ -408,10 +408,11 @@ pub fn clean_integrated_merge(repo: &Path) {
     let _ = git(repo, &["branch", "-d", docs_merge::MERGE_BRANCH]);
 }
 
+/// Read NUL-separated: a newline in a `gitdir` file never makes an entry of its own.
 fn existing_merge_worktree(repo: &Path) -> Option<PathBuf> {
-    let listing = git(repo, &["worktree", "list", "--porcelain"]).ok()?;
+    let listing = git(repo, &["worktree", "list", "--porcelain", "-z"]).ok()?;
     let mut current: Option<PathBuf> = None;
-    for line in listing.lines() {
+    for line in listing.split('\0') {
         if let Some(path) = line.strip_prefix("worktree ") {
             current = Some(PathBuf::from(path));
         } else if line == format!("branch refs/heads/{}", docs_merge::MERGE_BRANCH) {
@@ -690,7 +691,11 @@ pub fn discard_merge(repo: &Path) -> Result<(), String> {
     let Some(worktree) = existing_merge_worktree(repo) else {
         return Ok(());
     };
-    crate::core::worktree::remove_discussion_worktree(repo, &worktree.to_string_lossy(), true)
+    crate::core::worktree::remove_discussion_worktree(
+        repo,
+        &worktree.to_string_lossy(),
+        Some(docs_merge::MERGE_BRANCH),
+    )
 }
 
 async fn project_root(state: &AppState, id: String) -> Result<(PathBuf, String), String> {

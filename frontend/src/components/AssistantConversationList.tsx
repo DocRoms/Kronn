@@ -6,6 +6,7 @@ import { assistantConversations, discussions as discussionsApi } from '../lib/ap
 import { AGENT_LABELS } from '../lib/constants';
 import { formatResourceDate } from '../lib/formatResourceDate';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { deleteDiscussions } from '../lib/discussionDelete';
 import type { AssistantConversation, AssistantKind } from '../types/generated';
 import {
   ASSISTANT_CONVERSATIONS_CHANGED,
@@ -38,6 +39,7 @@ export function AssistantConversationList({ filter, activeDiscussionId, onResume
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<AssistantConversation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const filterKey = JSON.stringify(filter);
 
   const refresh = useCallback(() => {
@@ -60,14 +62,24 @@ export function AssistantConversationList({ filter, activeDiscussionId, onResume
     void onResume(conversation);
   });
 
+  // KT-2084 — the shared delete path: the server's refusal word for word, a kept
+  // worktree said, and a conversation already gone counted as deleted.
   const remove = useAsyncGuard(async (conversation: AssistantConversation) => {
     if (!window.confirm(t('aiHelper.conversations.deleteConfirm'))) return;
-    try {
-      await discussionsApi.delete(conversation.discussion_id);
-      notifyAssistantConversationsChanged();
-    } catch (e) {
-      setError(String(e));
+    setError(null);
+    setNote(null);
+    let keptWorktree: string | undefined;
+    const [refusal] = await deleteDiscussions(
+      [conversation.discussion_id],
+      discussionsApi.delete,
+      (_id, kept) => { keptWorktree = kept; },
+    );
+    if (refusal) {
+      setError(t('disc.deleteRefused', refusal.reason));
+      return;
     }
+    if (keptWorktree) setNote(t('disc.deleteWorktreeKept', keptWorktree));
+    notifyAssistantConversationsChanged();
   });
 
   const count = rows?.length ?? 0;
@@ -88,6 +100,7 @@ export function AssistantConversationList({ filter, activeDiscussionId, onResume
         <div className="ai-conv-panel" role="dialog" aria-label={t('aiHelper.conversations.panelTitle')}>
           <div className="ai-conv-panel-title">{t('aiHelper.conversations.panelTitle')}</div>
           {error && <div className="ai-conv-error" role="alert">{error}</div>}
+          {note && <div className="ai-conv-note" role="status">{note}</div>}
           {rows === null && <Loader2 size={12} className="spin" />}
           {rows !== null && rows.length === 0 && (
             <div className="ai-conv-empty">{t('aiHelper.conversations.empty')}</div>

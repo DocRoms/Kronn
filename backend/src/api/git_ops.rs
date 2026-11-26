@@ -6,6 +6,48 @@ use crate::models::*;
 use std::path::Path;
 
 const PROJECT_GIT_GRAPH_LIMIT: usize = 80;
+
+/// How long `git commit` may run: its hooks (a test suite, a formatter) are the project's.
+const COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// How long `git push` may run: the network, the remote's own hooks, the project's `pre-push`
+/// hook and an LFS upload. Also the bound of the forge CLI that opens the pull request.
+const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Every git of the panel and its actions within a time bound, its process group killed past
+/// it (KT-2084): a FIFO in a checkout (a `.gitignore`, a `HEAD`) makes git wait forever, and
+/// each such call would hold a thread of the blocking pool the database also uses.
+trait BoundedGit {
+    /// `output()` within git's judgement bound.
+    fn bounded_output(&mut self) -> std::io::Result<std::process::Output>;
+    /// `output()` within `timeout`.
+    fn bounded_output_within(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<std::process::Output>;
+}
+
+impl BoundedGit for std::process::Command {
+    fn bounded_output(&mut self) -> std::io::Result<std::process::Output> {
+        self.bounded_output_within(crate::core::lane_git::snapshot::judge_timeout())
+    }
+
+    fn bounded_output_within(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<std::process::Output> {
+        match crate::core::cmd::run_bounded_output(self, &[], timeout)? {
+            crate::core::cmd::BoundedOutput::Exited(output) => Ok(output),
+            // Said as Kronn's own bound: neither git nor the remote gave up.
+            crate::core::cmd::BoundedOutput::TimedOut => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "it did not finish within Kronn's own {} s timeout, so Kronn stopped it",
+                    timeout.as_secs_f32()
+                ),
+            )),
+        }
+    }
+}
 pub const GIT_COMMIT_PAGE_DEFAULT: u32 = 40;
 pub const GIT_COMMIT_PAGE_MAX: u32 = 100;
 
@@ -77,9 +119,9 @@ fn run_git_commit_page(
 ) -> Result<(Vec<GitCommitSummary>, u32, bool), String> {
     let (offset, limit) = normalized_commit_page(offset, limit);
     let count = crate::core::lane_git::git_or_refuse(repo_path)
-        .args(["rev-list", "--count", range, "--"])
+        .args(["rev-list", "--count", "--end-of-options", range, "--"])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to count git commits: {error}"))?;
     if !count.status.success() {
         return Err(String::from_utf8_lossy(&count.stderr).trim().to_string());
@@ -100,11 +142,12 @@ fn run_git_commit_page(
             "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s",
             skip.as_str(),
             max_count.as_str(),
+            "--end-of-options",
             range,
             "--",
         ])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to run git log: {error}"))?;
     if !log.status.success() {
         return Err(String::from_utf8_lossy(&log.stderr).trim().to_string());
@@ -125,9 +168,9 @@ pub fn run_git_range_page(
 ) -> Result<(Vec<GitFileStatus>, Vec<GitCommitSummary>, u32, bool), String> {
     let range = format!("{base_sha}..{head_sha}");
     let diff = crate::core::lane_git::git_or_refuse(repo_path)
-        .args(["diff", "--name-status", &range, "--"])
+        .args(["diff", "--name-status", "--end-of-options", &range, "--"])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to run git diff: {error}"))?;
     if !diff.status.success() {
         return Err(String::from_utf8_lossy(&diff.stderr).trim().to_string());
@@ -150,9 +193,9 @@ pub fn run_git_diff_range(
 ) -> Result<GitDiffResponse, String> {
     let range = format!("{base_sha}..{head_sha}");
     let output = crate::core::lane_git::git_or_refuse(repo_path)
-        .args(["diff", &range, "--", file_path])
+        .args(["diff", "--end-of-options", &range, "--", file_path])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to run git diff: {error}"))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
@@ -225,7 +268,7 @@ fn run_git_status_impl(
         let output = crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
-            .output()
+            .bounded_output()
             .map_err(|e| format!("Failed to run git: {}", e))?;
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     };
@@ -234,7 +277,7 @@ fn run_git_status_impl(
         match crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
-            .output()
+            .bounded_output()
         {
             Ok(o) => (
                 String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -442,7 +485,7 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<std::process::Output, Stri
     crate::core::lane_git::git_or_refuse(repo_path)
         .args(args)
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to run git: {error}"))
 }
 
@@ -688,7 +731,7 @@ fn git_remote_web_url(repo_path: &Path) -> Option<String> {
     let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -705,7 +748,7 @@ pub fn resolve_default_branch(repo_path: &Path) -> String {
         crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
-            .output()
+            .bounded_output()
             .map(|o| o.status.success())
             .unwrap_or(false)
     };
@@ -734,7 +777,7 @@ pub fn run_git_diff_committed(
         crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
-            .output()
+            .bounded_output()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default()
     };
@@ -761,7 +804,7 @@ pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse
         crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
-            .output()
+            .bounded_output()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default()
     };
@@ -876,7 +919,7 @@ pub fn run_git_blame(repo_path: &Path, file_path: &str) -> Result<GitBlameRespon
     let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["blame", "--line-porcelain", "--", file_path])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to run git blame: {error}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -923,7 +966,7 @@ pub fn run_git_commit_detail(
     let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["show", "--no-patch", &format!("--format={format}"), sha])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to run git show: {error}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -950,7 +993,7 @@ pub fn run_git_commit_detail(
             sha,
         ])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map(|out| {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -968,7 +1011,7 @@ pub fn run_git_commit_detail(
             "--format=%(refname:short)",
         ])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map(|out| {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -1014,7 +1057,7 @@ pub fn run_git_commit_patch(
     let header = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["show", "--no-patch", "--format=%H%x1f%h%x1f%s", sha])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to run git show: {error}"))?;
     if !header.status.success() {
         return Err(format!(
@@ -1033,7 +1076,7 @@ pub fn run_git_commit_patch(
     let is_root = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["rev-list", "--parents", "-n", "1", sha])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map(|out| {
             String::from_utf8_lossy(&out.stdout)
                 .split_whitespace()
@@ -1054,7 +1097,7 @@ pub fn run_git_commit_patch(
             sha,
         ])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map_err(|error| format!("Failed to run git show: {error}"))?;
     if !patch_out.status.success() {
         return Err(format!(
@@ -1091,7 +1134,7 @@ pub fn run_git_commit_patch(
             sha,
         ])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map(|out| {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -1145,7 +1188,7 @@ fn stage_explicit_paths(
             }
             let add_output = git_in(repo_path, worker)?
                 .args(["add", "--", clean_file])
-                .output()
+                .bounded_output()
                 .map_err(|e| format!("Failed to run git add: {}", e))?;
             if add_output.status.success() {
                 added += 1;
@@ -1159,7 +1202,7 @@ fn stage_explicit_paths(
         } else {
             let rm_output = git_in(repo_path, worker)?
                 .args(["rm", "--cached", "--ignore-unmatch", "--", clean_file])
-                .output();
+                .bounded_output();
             if rm_output.map(|o| o.status.success()).unwrap_or(false) {
                 added += 1;
             }
@@ -1181,7 +1224,7 @@ fn stage_gitlink_by_sha(
     let wanted = clean_file.trim_end_matches('/');
     let listed = git_in(repo_path, true)?
         .args(["ls-files", "--stage", "-z", "--", wanted])
-        .output()
+        .bounded_output()
         .map_err(|e| format!("Failed to run git ls-files: {e}"))?;
     let is_gitlink = listed.stdout.split(|byte| *byte == 0).any(|entry| {
         let entry = String::from_utf8_lossy(entry);
@@ -1198,7 +1241,7 @@ fn stage_gitlink_by_sha(
     // The submodule's own lane: vetted, pinned, and refused when it is not one.
     let head = crate::core::lane_git::git(file_abs)?
         .args(["rev-parse", "--verify", "HEAD^{commit}"])
-        .output()
+        .bounded_output()
         .map_err(|e| format!("Failed to read the submodule HEAD: {e}"))?;
     let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
     if !head.status.success() || sha.len() < 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -1213,7 +1256,7 @@ fn stage_gitlink_by_sha(
             "--cacheinfo",
             &format!("160000,{sha},{wanted}"),
         ])
-        .output()
+        .bounded_output()
         .map_err(|e| format!("Failed to run git update-index: {e}"))?;
     if update.status.success() {
         Ok(true)
@@ -1265,7 +1308,7 @@ fn refuse_new_embedded_repository(
     let known = git_in(repo_path, true)?
         .args(["ls-files", "--stage", "--"])
         .arg(relative)
-        .output()
+        .bounded_output()
         .map(|output| String::from_utf8_lossy(&output.stdout).starts_with("160000 "))
         .unwrap_or(false);
     if known {
@@ -1337,7 +1380,7 @@ fn run_commit_command(
             })?;
     }
     let commit_output = commit_command
-        .output()
+        .bounded_output_within(COMMIT_TIMEOUT)
         .map_err(|e| format!("Failed to run git commit: {}", e))?;
     drop(child_lock);
 
@@ -1348,7 +1391,7 @@ fn run_commit_command(
 
     let hash_output = git_in(repo_path, hooks.is_some())?
         .args(["rev-parse", "--short", "HEAD"])
-        .output()
+        .bounded_output()
         .map_err(|e| format!("Failed to get commit hash: {}", e))?;
 
     Ok(String::from_utf8_lossy(&hash_output.stdout)
@@ -1467,7 +1510,7 @@ pub fn merge_in_progress(repo_path: &Path) -> bool {
     crate::core::lane_git::git(repo_path)
         .and_then(|mut git| {
             git.args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
-                .output()
+                .bounded_output()
                 .map_err(|error| error.to_string())
         })
         .map(|o| o.status.success())
@@ -1487,7 +1530,7 @@ fn git_path_list(repo_path: &Path, args: &[&str]) -> Result<Vec<String>, String>
             .args(rest);
     }
     let output = git
-        .output()
+        .bounded_output()
         .map_err(|e| format!("Failed to run git {}: {}", args.join(" "), e))?;
     if !output.status.success() {
         return Err(format!(
@@ -1509,7 +1552,7 @@ fn git_path_list(repo_path: &Path, args: &[&str]) -> Result<Vec<String>, String>
 fn paths_changed_by_merged_side(repo_path: &Path) -> Result<Vec<String>, String> {
     let output = crate::core::lane_git::git(repo_path)?
         .args(["merge-base", "--all", "HEAD", "MERGE_HEAD"])
-        .output()
+        .bounded_output()
         .map_err(|e| format!("Failed to run git merge-base: {}", e))?;
     let mut bases = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -1687,7 +1730,7 @@ pub fn run_git_merge_commit_for_worker(
 
     let has_second_parent = git_in(repo_path, true)?
         .args(["rev-parse", "-q", "--verify", "HEAD^2"])
-        .output()
+        .bounded_output()
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !has_second_parent {
@@ -1714,6 +1757,12 @@ pub fn github_https_url(remote_url: &str) -> Option<String> {
             host_and_path.strip_prefix("github.com/")
         })?;
     (!path.is_empty()).then(|| format!("https://github.com/{path}"))
+}
+
+/// What pushes the local branch `branch` to the branch of the same name, both named in full
+/// (KT-2084): a short name is a refspec git resolves itself, and may reach another ref.
+fn branch_refspec(branch: &str) -> String {
+    format!("refs/heads/{branch}:refs/heads/{branch}")
 }
 
 /// The authenticated `git push`: the token never appears in an argument or
@@ -1744,8 +1793,9 @@ pub fn authenticated_push_command(
         "push",
         "--no-verify",
         "-u",
+        "--end-of-options",
         https_url,
-        branch,
+        &branch_refspec(branch),
     ])
     .env("GIT_CONFIG_COUNT", "1")
     .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
@@ -1766,7 +1816,7 @@ pub fn run_git_push(
     let branch_output = crate::core::lane_git::git(repo_path)?
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["branch", "--show-current"])
-        .output()
+        .bounded_output()
         .map_err(|e| format!("Failed to get branch: {}", e))?;
 
     let branch = String::from_utf8_lossy(&branch_output.stdout)
@@ -1775,6 +1825,8 @@ pub fn run_git_push(
     if branch.is_empty() {
         return Err("Cannot determine current branch (detached HEAD?)".to_string());
     }
+    // Read from the checkout: a name git would take as an option is never pushed (KT-2084).
+    crate::core::lane_git::check_branch_name(&branch)?;
 
     let token = github_env
         .iter()
@@ -1785,7 +1837,7 @@ pub fn run_git_push(
             let remote_url = crate::core::lane_git::git(repo_path)?
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .args(["remote", "get-url", "origin"])
-                .output()
+                .bounded_output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_default();
             github_https_url(&remote_url).map(|url| (url, token))
@@ -1798,20 +1850,30 @@ pub fn run_git_push(
         None => {
             // The user's own credentials (SSH agent, credential helper).
             let mut cmd = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?;
-            cmd.args(["push", "-u", "origin", &branch]);
+            cmd.args([
+                "push",
+                "-u",
+                "--end-of-options",
+                "origin",
+                &branch_refspec(&branch),
+            ]);
             cmd
         }
     };
     // Never let git block the thread on an interactive prompt (SSH passphrase,
-    // username/password): this runs on a blocking thread with no timeout, so a
-    // prompt would hang it forever. Fail fast instead. The low-speed envs abort
+    // username/password): this runs on a blocking thread, so a prompt would hold
+    // it until the push's time bound. Fail fast instead. The low-speed envs abort
     // an HTTPS push stalled under 1 KB/s for 60s (dead network / dead proxy).
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
         .env("GIT_HTTP_LOW_SPEED_TIME", "60");
-    let push_output = cmd
-        .output()
-        .map_err(|e| format!("Failed to run git push: {}", e))?;
+    let push_output = cmd.bounded_output_within(push_timeout()).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::TimedOut {
+            format!("git push was stopped: {e}. A push that needs longer runs from a terminal.")
+        } else {
+            format!("Failed to run git push: {e}")
+        }
+    })?;
 
     if push_output.status.success() {
         let stdout = String::from_utf8_lossy(&push_output.stdout);
@@ -2024,6 +2086,53 @@ pub fn exec_argv(repo_path: &Path, cmd: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
+/// `git` typed in the panel's terminal for a managed worktree (KT-2084): the pinned, hardened
+/// command of every other panel call, so nothing the worktree's `.git` or configuration names
+/// is run. `None` for any other program and anywhere else (the owner's checkout, a declared
+/// workspace outside `.kronn/worktrees`); `Err` for a managed worktree Kronn refuses.
+fn managed_worktree_git(
+    repo_path: &Path,
+    argv: &[String],
+) -> Result<Option<std::process::Command>, String> {
+    let Some(("git", args)) = argv
+        .split_first()
+        .map(|(program, args)| (program.as_str(), args))
+    else {
+        return Ok(None);
+    };
+    let lane = crate::core::lane_git::LaneGit::resolve(repo_path)?;
+    if !lane.is_pinned() {
+        return Ok(None);
+    }
+    let mut command = lane.command();
+    if let Some((subcommand, rest)) = args.split_first() {
+        command
+            .arg(subcommand)
+            .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(crate::core::lane_git::ignore_submodules(
+                repo_path, subcommand,
+            ))
+            .args(rest);
+    }
+    Ok(Some(command))
+}
+
+/// The process `run_exec` starts for `argv` when it is not [`managed_worktree_git`].
+fn plain_exec_command(
+    repo_path: &Path,
+    argv: &[String],
+    github_env: &[(String, String)],
+) -> std::process::Command {
+    let mut command = sync_cmd(&argv[0], crate::core::child_env::ChildRoute::ProjectExec);
+    command.args(&argv[1..]).current_dir(repo_path);
+    crate::core::child_env::isolate_with_github(
+        &mut command,
+        crate::core::child_env::ChildRoute::ProjectExec,
+        github_env,
+    );
+    command
+}
+
 /// The exact process `run_exec` starts: argv without a shell, a built
 /// environment, the project as working directory.
 /// `github_env` is the project's GitHub variables when it is connected (D2).
@@ -2033,14 +2142,10 @@ pub fn exec_command(
     github_env: &[(String, String)],
 ) -> Result<std::process::Command, String> {
     let argv = exec_argv(repo_path, cmd)?;
-    let mut command = sync_cmd(&argv[0], crate::core::child_env::ChildRoute::ProjectExec);
-    command.args(&argv[1..]).current_dir(repo_path);
-    crate::core::child_env::isolate_with_github(
-        &mut command,
-        crate::core::child_env::ChildRoute::ProjectExec,
-        github_env,
-    );
-    Ok(command)
+    Ok(match managed_worktree_git(repo_path, &argv)? {
+        Some(git) => git,
+        None => plain_exec_command(repo_path, &argv, github_env),
+    })
 }
 
 /// Execute an allow-listed command in the given directory, without a shell
@@ -2051,9 +2156,20 @@ pub fn run_exec(
     cmd: &str,
     github_env: &[(String, String)],
 ) -> Result<ExecResponse, String> {
-    let output = exec_command(repo_path, cmd, github_env)?
-        .output()
-        .map_err(|e| format!("Failed to execute: {}", e))?;
+    let argv = exec_argv(repo_path, cmd)?;
+    // Both within git's time bound, the process group killed past it (KT-2084): a FIFO in the
+    // checkout makes `cat` or `grep` wait for ever, holding the request and its permit.
+    let output = match managed_worktree_git(repo_path, &argv)? {
+        Some(mut git) => git.bounded_output(),
+        None => plain_exec_command(repo_path, &argv, github_env).bounded_output(),
+    }
+    .map_err(|e| {
+        if e.kind() == std::io::ErrorKind::TimedOut {
+            format!("The command was stopped: {e}")
+        } else {
+            format!("Failed to execute: {e}")
+        }
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2080,7 +2196,7 @@ pub fn detect_provider(repo_path: &Path) -> &'static str {
     let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
-        .output();
+        .bounded_output();
     let url = match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_lowercase(),
         _ => return "unknown",
@@ -2121,6 +2237,38 @@ pub fn host_cli_command(
     command
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static PUSH_TIMEOUT_FOR_TESTS: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Shortens, on this thread, the bound of a push and of the forge CLI: a test of one that
+/// never ends.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_push_timeout_for_tests(timeout: Option<std::time::Duration>) {
+    PUSH_TIMEOUT_FOR_TESTS.with(|bound| bound.set(timeout));
+}
+
+/// How long a push, then `gh pr create` / `glab mr create`, may run (KT-2084): past it the
+/// process group is killed, so neither holds a blocking thread for ever.
+pub fn push_timeout() -> std::time::Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(bound) = PUSH_TIMEOUT_FOR_TESTS.with(std::cell::Cell::get) {
+        return bound;
+    }
+    PUSH_TIMEOUT
+}
+
+/// Why `program` (`gh`, `glab`) gave no result: stopped at Kronn's bound, or never started.
+fn forge_error(program: &str, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        format!("{program} was stopped: {error}")
+    } else {
+        format!("Failed to run {program}: {error} (is {program} installed?)")
+    }
+}
+
 /// Create a pull/merge request via gh (GitHub) or glab (GitLab) CLI.
 /// Automatically pushes the current branch first if it has no upstream.
 /// `github_env` is the project's GitHub variables (`env_for_launch`).
@@ -2131,11 +2279,14 @@ pub fn run_create_pr(
     base: &str,
     github_env: &[(String, String)],
 ) -> Result<String, String> {
+    // The base reaches `gh` / `glab` as an option's value: only a name git takes as a branch
+    // (KT-2084). The head is the current branch, which they read through the pinned git.
+    crate::core::lane_git::check_branch_name(base)?;
     // Ensure the branch is pushed before creating the PR
     let has_upstream = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
         .current_dir(repo_path)
-        .output()
+        .bounded_output()
         .map(|o| o.status.success())
         .unwrap_or(false);
 
@@ -2168,8 +2319,8 @@ pub fn run_create_pr(
             }
             host_cli_command("glab", repo_path, github_env)
                 .args(&args)
-                .output()
-                .map_err(|e| format!("Failed to run glab: {} (is glab installed?)", e))?
+                .bounded_output_within(push_timeout())
+                .map_err(|e| forge_error("glab", &e))?
         }
         _ => {
             // Default to GitHub
@@ -2182,8 +2333,8 @@ pub fn run_create_pr(
             }
             host_cli_command("gh", repo_path, github_env)
                 .args(&args)
-                .output()
-                .map_err(|e| format!("Failed to run gh: {} (is gh installed?)", e))?
+                .bounded_output_within(push_timeout())
+                .map_err(|e| forge_error("gh", &e))?
         }
     };
 
@@ -2285,6 +2436,9 @@ pub fn check_pr_url(
     branch: &str,
     github_env: &[(String, String)],
 ) -> Option<String> {
+    // The branch is read from the checkout: a name `gh` or `glab` would take as an option is
+    // never looked up (KT-2084).
+    crate::core::lane_git::check_branch_name(branch).ok()?;
     let command = pr_lookup_command(repo_path, branch, github_env);
     let output = output_within(command, PR_URL_LOOKUP_LIMIT)?;
     if output.status.success() {
@@ -2321,7 +2475,11 @@ fn pr_lookup_command(
     }
 }
 
-/// Read the PR/MR template from the project, if one exists.
+/// Most bytes of a PR template Kronn reads: a forge takes far less in a description.
+const PR_TEMPLATE_CAP: u64 = 256 * 1024;
+
+/// Read the PR/MR template from the project, if one exists: a regular file inside
+/// `repo_path`, under [`PR_TEMPLATE_CAP`], never through a link or from a FIFO (KT-2084).
 pub fn read_pr_template(repo_path: &Path) -> Option<String> {
     let candidates = [
         // GitHub
@@ -2336,13 +2494,29 @@ pub fn read_pr_template(repo_path: &Path) -> Option<String> {
     ];
     for candidate in &candidates {
         let path = repo_path.join(candidate);
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        let read = crate::core::fs_guard::guarded_read_head(repo_path, &path, PR_TEMPLATE_CAP + 1);
+        let Ok(Some(bytes)) = read else { continue };
+        if bytes.len() as u64 > PR_TEMPLATE_CAP {
+            continue;
+        }
+        if let Ok(content) = String::from_utf8(bytes) {
             if !content.trim().is_empty() {
                 return Some(content);
             }
         }
     }
     None
+}
+
+/// The branch checked out in `repo_path`, read within git's time bound (KT-2084); empty when
+/// detached or when git gave none.
+pub fn current_branch_name(repo_path: &Path) -> String {
+    crate::core::lane_git::git_or_refuse(repo_path)
+        .args(["branch", "--show-current"])
+        .current_dir(repo_path)
+        .bounded_output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Default Kronn PR template when no project template exists.

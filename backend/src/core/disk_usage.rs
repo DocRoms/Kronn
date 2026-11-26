@@ -401,50 +401,49 @@ impl MeasureBudget {
     }
 }
 
-/// Sum the file sizes under `root`, never following a symlink, stopping when
-/// the budget is spent. Top-level names in `skip` are not entered (the caller
-/// measures them as an entry of their own).
+/// Sum the file sizes under `root`, stopping when the budget is spent (checked at every
+/// entry). Top-level names in `skip` are not entered (the caller measures them as an entry
+/// of their own). Rooted (KT-2084): every folder is listed through its own handle, so a
+/// symlink, or a folder swapped for one mid-walk, is never followed. A folder it cannot read
+/// is left out and the walk goes on; that, or a walk that stops short on its budget, is
+/// `partial`.
 pub fn measure_bounded(root: &Path, skip: &[&str], budget: MeasureBudget) -> Measured {
+    use crate::core::fs_guard::{guarded_walk_skipping_unreadable, Visit, WalkBounds, WalkEnd};
     let mut measured = Measured::default();
     // Unique bytes are only reported when the file system answered for every
     // file: one it could not answer for would make the sum a lie.
     let mut unique = Some(0u64);
-    let mut visited = 0usize;
-    let mut stack = vec![(root.to_path_buf(), true)];
-    while let Some((dir, top_level)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            visited += 1;
-            // The clock is read every few hundred entries, not at every one.
-            if visited > budget.max_entries
-                || (visited.is_multiple_of(256) && Instant::now() > budget.deadline)
-            {
-                measured.partial = true;
-                measured.unique_bytes = unique;
-                return measured;
-            }
-            if top_level && skip.iter().any(|name| entry.file_name() == *name) {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-            if meta.is_dir() {
-                stack.push((entry.path(), false));
-            } else {
-                measured.bytes += meta.len();
-                unique = match (unique, private_size(&entry.path())) {
-                    (Some(total), Some(private)) => Some(total + private),
-                    _ => None,
-                };
-            }
+    let bounds = WalkBounds {
+        max_entries: budget.max_entries,
+        deadline: budget.deadline,
+        max_depth: crate::core::rooted_fd::MAX_DEPTH,
+    };
+    // Opened from its parent: a measured folder that is a link is never followed (KT-2084).
+    let parent = root.parent().unwrap_or(root);
+    let walked = guarded_walk_skipping_unreadable(parent, root, bounds, &mut |entry| {
+        if entry.depth == 0 {
+            return Visit::Enter;
         }
-    }
+        let skipped = entry.depth == 1
+            && entry
+                .path
+                .file_name()
+                .is_some_and(|name| skip.iter().any(|skip| name == *skip));
+        if skipped || entry.is_symlink {
+            return Visit::Skip;
+        }
+        if entry.is_dir {
+            return Visit::Enter;
+        }
+        measured.bytes += entry.len;
+        // The private size is still asked by path (a residual of the rooted walk).
+        unique = match (unique, private_size(entry.path)) {
+            (Some(total), Some(private)) => Some(total + private),
+            _ => None,
+        };
+        Visit::Skip
+    });
+    measured.partial = !matches!(walked, Ok((WalkEnd::Done, 0)));
     measured.unique_bytes = unique;
     measured
 }

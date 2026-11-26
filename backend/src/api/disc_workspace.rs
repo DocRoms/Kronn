@@ -102,11 +102,13 @@ fn required_identity(
 }
 
 fn git_value(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    // `cwd` may be a Kronn-managed worktree a worker writes: pinned there.
-    let output = crate::core::lane_git::git_keeping_owner_hooks(cwd)?
-        .args(args)
-        .output()
-        .map_err(|error| format!("git is unavailable: {error}"))?;
+    // `cwd` may be a Kronn-managed worktree a worker writes: pinned there, and bounded in time.
+    let mut command = crate::core::lane_git::git_keeping_owner_hooks(cwd)?;
+    command.args(args);
+    let output = crate::core::lane_git::snapshot::bounded_output(
+        command,
+        args.first().copied().unwrap_or_default(),
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if stderr.is_empty() {
@@ -149,12 +151,25 @@ fn local_repo_roots(project: &Project) -> Vec<PathBuf> {
     roots
 }
 
+/// Read from the registrations' files, no git run: one Kronn cannot read refuses (KT-2084).
+/// A path outside the checkout is taken as its registration spells it, never resolved: git
+/// writes it resolved, and Kronn does not look outside the checkout. One inside it is resolved
+/// there only: a link that leads out of the checkout is not followed, and names no worktree.
 fn registered_worktrees(repo_root: &Path) -> Result<Vec<PathBuf>, String> {
-    let output = git_value(repo_root, &["worktree", "list", "--porcelain"])?;
-    Ok(output
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .filter_map(|path| PathBuf::from(path).canonicalize().ok())
+    Ok(crate::core::lane_git::registered_worktrees(repo_root)?
+        .into_iter()
+        .filter(|entry| entry.readable)
+        .filter_map(|entry| {
+            if entry.admin.is_none() {
+                // The main worktree: where the repository itself is, not what a file says.
+                entry.path.canonicalize().ok()
+            } else if entry.inside_checkout {
+                crate::core::lane_git::resolve_in_checkout(repo_root, &entry.path)
+                    .and_then(|(real, present)| present.then_some(real))
+            } else {
+                crate::core::lane_git::plainly_spelled(&entry.path).then_some(entry.path)
+            }
+        })
         .collect())
 }
 
@@ -210,8 +225,14 @@ fn validate_workspace(
         return Err("detached HEAD worktrees cannot be declared".into());
     }
     let head_sha = git_value(&top_level, &["rev-parse", "HEAD"])?;
-    let git_status = crate::api::git_ops::run_git_status(&top_level)?;
-    let dirty_count = git_status.files.len();
+    // Within git's time bound (KT-2084); a managed worktree is judged from Kronn's copy of its
+    // git state, as a removal judges it.
+    let dirty_count = if crate::core::lane_git::managed_worktree_repo(&top_level).is_some() {
+        let judged = crate::core::lane_git::snapshot::Snapshot::of_worktree(&top_level)?;
+        crate::core::worktree::judged_dirty_files(&judged)?.len()
+    } else {
+        crate::api::git_ops::run_git_status(&top_level)?.files.len()
+    };
     let blockers = if dirty_count == 0 {
         Vec::new()
     } else {
@@ -742,5 +763,122 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("does not belong"));
+    }
+
+    /// KT-2084 — a FIFO at another worktree's `locked`: the declaration answers at once and is
+    /// refused, never taken for "not registered".
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn a_fifo_in_another_registration_keeps_the_validation_bounded() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        let (temp, repo, worktree) = repository_with_worktree();
+        let other = temp.path().join("other");
+        git(
+            &repo,
+            &["worktree", "add", "-b", "other", other.to_str().unwrap()],
+        );
+        let pipe = repo.join(".git/worktrees/other/locked");
+        let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(validate_workspace(
+                "p1",
+                vec![repo],
+                worktree.to_str().unwrap(),
+            ));
+        });
+
+        let outcome = received.recv_timeout(std::time::Duration::from_secs(20));
+
+        // Held read-write the FIFO lets every pending open through, removed no later open
+        // waits on it, closed every reader reads an end of file: a blocked git stops.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&pipe);
+        let _ = std::fs::remove_file(&pipe);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(held);
+        let outcome = outcome.expect("the validation did not return");
+        assert!(
+            outcome
+                .as_ref()
+                .is_err_and(|error| error.contains("locked")),
+            "{:?}",
+            outcome.map(|validated| validated.branch)
+        );
+    }
+
+    /// KT-2084 — a FIFO named `.gitignore` in the worktree: the declaration answers within the
+    /// git time bound, with an error that names it.
+    #[cfg(unix)] // FIFO made with libc::mkfifo
+    #[test]
+    fn a_fifo_gitignore_keeps_the_declaration_within_its_bound() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        let (_temp, repo, worktree) = repository_with_worktree();
+        let pipe = worktree.join(".gitignore");
+        let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            crate::core::lane_git::snapshot::set_timeout_for_tests(Some(
+                std::time::Duration::from_secs(2),
+            ));
+            let _ = sent.send(validate_workspace(
+                "p1",
+                vec![repo],
+                worktree.to_str().unwrap(),
+            ));
+        });
+
+        let outcome = received.recv_timeout(std::time::Duration::from_secs(30));
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&pipe);
+        let _ = std::fs::remove_file(&pipe);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(held);
+        let outcome = outcome.expect("the declaration did not return within its bound");
+        assert!(
+            outcome
+                .as_ref()
+                .is_err_and(|error| error.contains("timeout")),
+            "{:?}",
+            outcome.map(|validated| validated.branch)
+        );
+    }
+
+    /// KT-2084 — a registration naming a folder of the checkout through a link that leads out
+    /// of it names no worktree: the folder the link reaches is never listed. A link that stays
+    /// inside the checkout is resolved there.
+    #[cfg(unix)] // symlink made through std::os::unix
+    #[test]
+    fn a_registered_path_through_a_link_out_of_the_checkout_is_not_listed() {
+        let (temp, repo, _worktree) = repository_with_worktree();
+        let repo = repo.canonicalize().unwrap();
+        let outside = temp.path().canonicalize().unwrap().join("outside");
+        std::fs::create_dir_all(outside.join("x")).unwrap();
+        std::fs::create_dir_all(repo.join("real/y")).unwrap();
+        std::fs::create_dir_all(repo.join("lanes")).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("lanes/out")).unwrap();
+        std::os::unix::fs::symlink(repo.join("real"), repo.join("lanes/in")).unwrap();
+        let gitdir = repo.join(".git/worktrees/worktree/gitdir");
+
+        std::fs::write(&gitdir, format!("{}/lanes/out/x/.git\n", repo.display())).unwrap();
+        let through_out = registered_worktrees(&repo).unwrap();
+        std::fs::write(&gitdir, format!("{}/lanes/in/y/.git\n", repo.display())).unwrap();
+        let through_in = registered_worktrees(&repo).unwrap();
+
+        assert!(!through_out.contains(&outside.join("x")), "{through_out:?}");
+        assert!(through_in.contains(&repo.join("real/y")), "{through_in:?}");
     }
 }

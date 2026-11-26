@@ -24,7 +24,6 @@
 //! gets an outcome saying what happened, and an unseedable worktree just
 //! starts without it.
 
-use std::collections::BTreeMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,7 +45,8 @@ pub const COPY_FALLBACK_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 /// A seed tree with more entries than this is not a generated-assets directory.
 const MAX_SEED_ENTRIES: u64 = 400_000;
 /// Remembered inside the worktree's git directory.
-const MARKER_FILE: &str = "kronn-lane-seeds.json";
+// A discussion delete reads it too, to tell Kronn's seeds from a worker's files.
+const MARKER_FILE: &str = crate::core::worktree::LANE_SEEDS_MARKER_FILE;
 
 // ─── Declaring ────────────────────────────────────────────────────────────
 
@@ -773,12 +773,8 @@ fn sweep_transients(worktree: &Path) {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct SeedMarker {
-    /// Source fingerprint of each seed Kronn put in this worktree.
-    #[serde(default)]
-    seeds: BTreeMap<String, String>,
-}
+/// One definition of the marker's shape: the delete judges seeds from it too.
+use crate::core::worktree::LaneSeedsMarker as SeedMarker;
 
 /// `root` is the registered checkout `git_dir` lies under (KT-1595): a refused
 /// read (a link) is an empty marker, which only means "seed again".

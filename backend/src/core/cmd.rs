@@ -645,37 +645,50 @@ pub fn run_bounded(
     input: &[u8],
     timeout: std::time::Duration,
 ) -> Option<Vec<u8>> {
+    match run_bounded_output(cmd, input, timeout) {
+        Ok(BoundedOutput::Exited(output)) if output.status.success() => Some(output.stdout),
+        _ => None,
+    }
+}
+
+/// What [`run_bounded_output`] came to.
+#[derive(Debug)]
+pub enum BoundedOutput {
+    /// The command exited in time: its status, stdout and stderr.
+    Exited(std::process::Output),
+    /// It was still running at the deadline: its process group was killed.
+    TimedOut,
+}
+
+/// [`run_bounded`] that keeps the exit status and stderr, and says a timeout apart from a
+/// failure. `Err`: the command could not be started.
+pub fn run_bounded_output(
+    cmd: &mut std::process::Command,
+    input: &[u8],
+    timeout: std::time::Duration,
+) -> std::io::Result<BoundedOutput> {
     use std::io::{Read, Write};
     use std::process::Stdio;
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    let mut child = cmd.spawn().ok()?;
-    let kill = |child: &mut std::process::Child| {
-        #[cfg(unix)]
-        if let Ok(pid) = i32::try_from(child.id()) {
-            // SAFETY: plain kill(2) on the group this child leads.
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    };
-    let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        kill(&mut child);
-        return None;
+        .stderr(Stdio::piped());
+    own_process_group(cmd);
+    let mut child = cmd.spawn()?;
+    let (Some(mut stdin), Some(mut stdout), Some(mut stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        kill_process_group(&mut child);
+        return Ok(BoundedOutput::TimedOut);
     };
     let payload = input.to_vec();
     let writer = std::thread::spawn(move || stdin.write_all(&payload));
     let reader = std::thread::spawn(move || {
         let mut out = Vec::new();
         stdout.read_to_end(&mut out).map(|_| out)
+    });
+    let errors = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stderr.read_to_end(&mut out).map(|_| out)
     });
     let deadline = std::time::Instant::now() + timeout;
     // A quick git call answers in a few milliseconds: the pause grows from 1 ms.
@@ -690,22 +703,108 @@ pub fn run_bounded(
             _ => {
                 // The threads are left to end with the killed group's pipes:
                 // a joined reader could wait on an escaped grandchild.
-                kill(&mut child);
-                return None;
+                kill_process_group(&mut child);
+                return Ok(BoundedOutput::TimedOut);
             }
         }
     };
-    // A grandchild that kept stdout open must not hold the caller either.
-    while !reader.is_finished() {
+    // A grandchild that kept a pipe open must not hold the caller either.
+    while !(reader.is_finished() && errors.is_finished()) {
         if std::time::Instant::now() >= deadline {
-            kill(&mut child);
-            return None;
+            kill_process_group(&mut child);
+            return Ok(BoundedOutput::TimedOut);
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     drop(writer);
-    let output = reader.join().ok()?.ok()?;
-    status.success().then_some(output)
+    let joined = |handle: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
+        handle
+            .join()
+            .map_err(|_| std::io::Error::other("a pipe reader panicked"))?
+    };
+    let stdout = joined(reader)?;
+    let stderr = joined(errors)?;
+    Ok(BoundedOutput::Exited(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }))
+}
+
+/// Starts `cmd` as the leader of a process group of its own, so that a filter or hook it
+/// starts is killed with it.
+pub fn own_process_group(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
+}
+
+/// Kills the process group `child` leads (see [`own_process_group`]) and reaps it.
+pub fn kill_process_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: plain kill(2) on the group this child leads.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// A deadline on a child whose output the caller streams itself: once `timeout` has
+/// passed, the process group the child leads (started with [`own_process_group`]) is
+/// killed. Dropping it first disarms it.
+pub struct Deadline {
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    watcher: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Deadline {
+    pub fn arm(child: &std::process::Child, timeout: std::time::Duration) -> Self {
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let pid = child.id();
+        let flag = fired.clone();
+        let watcher = std::thread::spawn(move || {
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(timeout) {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                #[cfg(unix)]
+                if let Ok(pid) = i32::try_from(pid) {
+                    // SAFETY: plain kill(2) on the group the child leads.
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                }
+                #[cfg(not(unix))]
+                let _ = pid;
+            }
+        });
+        Self {
+            fired,
+            stop: Some(stop),
+            watcher: Some(watcher),
+        }
+    }
+
+    /// Whether the deadline passed and the child was killed.
+    pub fn fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
+        }
+    }
 }
 
 /// [`git_cmd`] for tokio.

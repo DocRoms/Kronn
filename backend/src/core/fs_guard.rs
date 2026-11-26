@@ -293,14 +293,361 @@ pub mod swap_probe {
     }
 }
 
+/// What a [`guarded_walk`] does with the entry it was shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visit {
+    /// List it, when it is a folder.
+    Enter,
+    /// Leave it unlisted.
+    Skip,
+    /// End the walk here.
+    Stop,
+}
+
+/// One entry a [`guarded_walk`] met, as `lstat` sees it: a link is a link, never its target.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkEntry<'a> {
+    pub path: &'a Path,
+    /// 0 for the walked folder itself, 1 for its entries, and so on.
+    pub depth: usize,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub len: u64,
+    pub modified: std::time::SystemTime,
+}
+
+/// What a [`guarded_walk`] may spend, checked at every entry.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkBounds {
+    pub max_entries: usize,
+    pub deadline: std::time::Instant,
+    pub max_depth: usize,
+}
+
+impl WalkBounds {
+    /// At most `max_entries` entries within `time`, [`crate::core::rooted_fd::MAX_DEPTH`]
+    /// folders deep.
+    pub fn within(max_entries: usize, time: std::time::Duration) -> Self {
+        Self {
+            max_entries,
+            deadline: std::time::Instant::now() + time,
+            max_depth: crate::core::rooted_fd::MAX_DEPTH,
+        }
+    }
+}
+
+/// How a [`guarded_walk`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkEnd {
+    /// Every entry asked for was shown.
+    Done,
+    /// The visitor said [`Visit::Stop`].
+    Stopped,
+    OverEntries,
+    OverTime,
+    OverDepth,
+    /// Every entry was shown but the folders on another file system (mount points), which
+    /// were not entered (KT-2084).
+    OtherFileSystem,
+}
+
+impl WalkEnd {
+    /// Why the walk stopped short of what it was asked, when a bound stopped it.
+    pub fn bound(self) -> Option<&'static str> {
+        match self {
+            WalkEnd::OverEntries => Some("too many entries"),
+            WalkEnd::OverTime => Some("out of time"),
+            WalkEnd::OverDepth => Some("too deep"),
+            WalkEnd::OtherFileSystem => Some("a folder on another file system"),
+            WalkEnd::Done | WalkEnd::Stopped => None,
+        }
+    }
+}
+
+struct Walker<'v> {
+    bounds: WalkBounds,
+    seen: usize,
+    visit: &'v mut dyn FnMut(&WalkEntry<'_>) -> Visit,
+    /// A folder below the walked one that cannot be opened or listed, or an entry that
+    /// cannot be stated, is left out instead of ending the walk; counted in `skipped`.
+    skip_unreadable: bool,
+    skipped: usize,
+    /// Folders on another file system than the walked one, never entered (KT-2084).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    other_file_systems: usize,
+}
+
+impl Walker<'_> {
+    /// Whether `error`, met below the walked folder, is left out (and counted).
+    fn skips(&mut self, error: &std::io::Error) -> bool {
+        if self.skip_unreadable && error.kind() != std::io::ErrorKind::NotFound {
+            self.skipped += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Counts one more entry; the bound it crossed, if any.
+    fn spend(&mut self) -> Option<WalkEnd> {
+        self.seen += 1;
+        if self.seen > self.bounds.max_entries {
+            Some(WalkEnd::OverEntries)
+        } else if std::time::Instant::now() > self.bounds.deadline {
+            Some(WalkEnd::OverTime)
+        } else {
+            None
+        }
+    }
+}
+
+/// Shows `visit` the folder `dir` (depth 0) then, depth first, every entry below it that
+/// a [`Visit::Enter`] opened, within `bounds`. A missing `dir` is an empty walk.
+///
+/// Unix: every folder is opened `O_NOFOLLOW | O_DIRECTORY` against its parent's fd and
+/// listed through that fd, so a folder swapped for a link mid-walk is never followed (its
+/// open is refused, an error) and an entry is stated without following it. Elsewhere the
+/// walk goes by path with `symlink_metadata` (the residual risk of the module header).
+pub fn guarded_walk(
+    root: &Path,
+    dir: &Path,
+    bounds: WalkBounds,
+    visit: &mut dyn FnMut(&WalkEntry<'_>) -> Visit,
+) -> std::io::Result<WalkEnd> {
+    let mut walker = Walker {
+        bounds,
+        seen: 0,
+        visit,
+        skip_unreadable: false,
+        skipped: 0,
+        other_file_systems: 0,
+    };
+    walk_imp::walk(root, dir, &mut walker)
+}
+
+/// [`guarded_walk`] that leaves out what it cannot read below `dir` (a folder it cannot open
+/// or list, an entry it cannot state) and goes on, as a measure needs: the second value is how
+/// many it left out. `dir` itself must be readable.
+pub fn guarded_walk_skipping_unreadable(
+    root: &Path,
+    dir: &Path,
+    bounds: WalkBounds,
+    visit: &mut dyn FnMut(&WalkEntry<'_>) -> Visit,
+) -> std::io::Result<(WalkEnd, usize)> {
+    let mut walker = Walker {
+        bounds,
+        seen: 0,
+        visit,
+        skip_unreadable: true,
+        skipped: 0,
+        other_file_systems: 0,
+    };
+    let end = walk_imp::walk(root, dir, &mut walker)?;
+    Ok((end, walker.skipped))
+}
+
+#[cfg(unix)]
+mod walk_imp {
+    use super::{refusal, Visit, WalkEnd, WalkEntry, Walker};
+    use crate::core::rooted_fd::{Dir, EntryStat};
+    use std::io;
+    use std::path::Path;
+
+    fn entry<'a>(path: &'a Path, depth: usize, stat: &EntryStat) -> WalkEntry<'a> {
+        WalkEntry {
+            path,
+            depth,
+            is_dir: stat.is_dir(),
+            is_symlink: stat.is_symlink(),
+            len: stat.len,
+            modified: stat.modified,
+        }
+    }
+
+    pub(super) fn walk(root: &Path, dir: &Path, walker: &mut Walker<'_>) -> io::Result<WalkEnd> {
+        let rel = dir.strip_prefix(root).map_err(|_| {
+            refusal(format!(
+                "{} escapes the root {}",
+                dir.display(),
+                root.display()
+            ))
+        })?;
+        let Some(held) = Dir::open_path(root, rel, false)? else {
+            return Ok(WalkEnd::Done);
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        super::swap_probe::after_walk(Some(dir));
+        match (walker.visit)(&entry(dir, 0, &held.stat_self()?)) {
+            Visit::Stop => return Ok(WalkEnd::Stopped),
+            Visit::Skip => return Ok(WalkEnd::Done),
+            Visit::Enter => {}
+        }
+        // The walked folder's file system: a folder on another is not entered (KT-2084).
+        let device = held.device()?;
+        Ok(match list(walker, &held, dir, 1, device)? {
+            Some(end) => end,
+            None if walker.other_file_systems > 0 => WalkEnd::OtherFileSystem,
+            None => WalkEnd::Done,
+        })
+    }
+
+    /// Shows the entries of the held folder `here`, at `depth`; `Some` once the walk ends.
+    fn list(
+        walker: &mut Walker<'_>,
+        held: &Dir,
+        here: &Path,
+        depth: usize,
+        device: u64,
+    ) -> io::Result<Option<WalkEnd>> {
+        if depth > walker.bounds.max_depth {
+            return Ok(Some(WalkEnd::OverDepth));
+        }
+        let room = walker
+            .bounds
+            .max_entries
+            .saturating_sub(walker.seen)
+            .saturating_add(1);
+        let names = match held.names_up_to(room) {
+            Ok(names) => names,
+            Err(error) if depth > 1 && walker.skips(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        for name in names {
+            if let Some(end) = walker.spend() {
+                return Ok(Some(end));
+            }
+            let stat = match held.entry_stat(&name) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if walker.skips(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            let path = here.join(&name);
+            match (walker.visit)(&entry(&path, depth, &stat)) {
+                Visit::Stop => return Ok(Some(WalkEnd::Stopped)),
+                Visit::Enter if stat.is_dir() => {}
+                Visit::Enter | Visit::Skip => continue,
+            }
+            // A link swapped in since the stat is refused here (ELOOP), never followed.
+            let child = match held.open_child(&name) {
+                Ok(Some(child)) => child,
+                Ok(None) => continue,
+                Err(error) if walker.skips(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            if Dir::other_file_system(&child, &name, device)? {
+                walker.other_file_systems += 1;
+                continue;
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            super::swap_probe::after_walk(Some(&path));
+            if let Some(end) = list(walker, &child, &path, depth + 1, device)? {
+                return Ok(Some(end));
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+use imp as walk_imp;
+
+#[cfg(windows)]
+mod walk_imp {
+    use super::{assert_contained_no_symlink, refusal, Visit, WalkEnd, WalkEntry, Walker};
+    use std::io;
+    use std::path::Path;
+
+    fn entry<'a>(
+        path: &'a Path,
+        depth: usize,
+        meta: &std::fs::Metadata,
+    ) -> io::Result<WalkEntry<'a>> {
+        Ok(WalkEntry {
+            path,
+            depth,
+            is_dir: meta.is_dir(),
+            is_symlink: meta.file_type().is_symlink(),
+            len: meta.len(),
+            modified: meta.modified()?,
+        })
+    }
+
+    pub(super) fn walk(root: &Path, dir: &Path, walker: &mut Walker<'_>) -> io::Result<WalkEnd> {
+        assert_contained_no_symlink(root, dir).map_err(refusal)?;
+        let meta = match std::fs::symlink_metadata(dir) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(WalkEnd::Done),
+            Err(error) => return Err(error),
+        };
+        if !meta.is_dir() {
+            return Err(refusal(format!("{} is not a folder", dir.display())));
+        }
+        match (walker.visit)(&entry(dir, 0, &meta)?) {
+            Visit::Stop => return Ok(WalkEnd::Stopped),
+            Visit::Skip => return Ok(WalkEnd::Done),
+            Visit::Enter => {}
+        }
+        Ok(list(walker, dir, 1)?.unwrap_or(WalkEnd::Done))
+    }
+
+    fn list(walker: &mut Walker<'_>, here: &Path, depth: usize) -> io::Result<Option<WalkEnd>> {
+        if depth > walker.bounds.max_depth {
+            return Ok(Some(WalkEnd::OverDepth));
+        }
+        let entries = match std::fs::read_dir(here) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if depth > 1 && walker.skips(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        for listed in entries {
+            let listed = match listed {
+                Ok(listed) => listed,
+                Err(error) if walker.skips(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            if let Some(end) = walker.spend() {
+                return Ok(Some(end));
+            }
+            let path = listed.path();
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if walker.skips(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            match (walker.visit)(&entry(&path, depth, &meta)?) {
+                Visit::Stop => return Ok(Some(WalkEnd::Stopped)),
+                Visit::Enter if meta.is_dir() => {}
+                Visit::Enter | Visit::Skip => continue,
+            }
+            if let Some(end) = list(walker, &path, depth + 1)? {
+                return Ok(Some(end));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// [`guarded_read_head`] of a file with one name only: a hard link may name a file kept
+/// outside `root`, so a file with more names is refused. Off unix the count is not read
+/// (the residual risk of the module header).
+pub fn guarded_read_head_one_name(
+    root: &Path,
+    path: &Path,
+    max: u64,
+) -> std::io::Result<Option<Vec<u8>>> {
+    imp::guarded_read_head_checked(root, path, max, true)
+}
+
 #[cfg(unix)]
 pub use imp::guarded_set_mode;
 pub use imp::{
     guarded_copy_new, guarded_create_dir_all, guarded_create_new_dir, guarded_list,
-    guarded_move_new, guarded_read, guarded_read_head, guarded_remove_dir, guarded_remove_file,
-    guarded_remove_file_if_ours, guarded_remove_tree, guarded_rename, guarded_replace,
-    guarded_replace_if_unchanged_keeping_mode, guarded_replace_like, guarded_write_new,
-    guarded_write_new_identified, FileId,
+    guarded_move_new, guarded_read, guarded_read_head, guarded_remove_dir, guarded_remove_entry,
+    guarded_remove_file, guarded_remove_file_if_ours, guarded_remove_tree, guarded_rename,
+    guarded_replace, guarded_replace_if_unchanged_keeping_mode, guarded_replace_like,
+    guarded_write_new, guarded_write_new_identified, FileId,
 };
 
 #[cfg(unix)]
@@ -904,12 +1251,30 @@ mod imp {
     /// [`guarded_read`] of at most the first `max` bytes: a sniff never reads a
     /// huge or sparse file whole.
     pub fn guarded_read_head(root: &Path, path: &Path, max: u64) -> io::Result<Option<Vec<u8>>> {
+        guarded_read_head_checked(root, path, max, false)
+    }
+
+    /// [`guarded_read_head`], refusing a file with more than one name when `one_name`.
+    pub(super) fn guarded_read_head_checked(
+        root: &Path,
+        path: &Path,
+        max: u64,
+        one_name: bool,
+    ) -> io::Result<Option<Vec<u8>>> {
+        use std::os::unix::fs::MetadataExt;
         let Some((parent, name)) = parent_of(root, path, false).map_err(refused)? else {
             return Ok(None);
         };
         let Some(file) = parent.open_regular(name)? else {
             return Ok(None);
         };
+        let links = file.metadata()?.nlink();
+        if one_name && links > 1 {
+            return Err(refused(format!(
+                "{} has {links} names (a hard link): refused, it may be a file elsewhere",
+                path.display()
+            )));
+        }
         let mut bytes = Vec::new();
         file.take(max).read_to_end(&mut bytes)?;
         Ok(Some(bytes))
@@ -928,6 +1293,16 @@ mod imp {
     /// never followed. Missing is fine.
     pub fn guarded_remove_tree(root: &Path, path: &Path) -> io::Result<()> {
         match parent_of(root, path, false).map_err(refused)? {
+            Some((parent, name)) => parent.remove_child(name),
+            None => Ok(()),
+        }
+    }
+
+    /// Removes the entry at `path`, which may itself be a link: a link or a file is
+    /// unlinked, a folder goes with everything below it, never followed. Only the
+    /// folders above it must hold no link. Missing is fine.
+    pub fn guarded_remove_entry(root: &Path, path: &Path) -> io::Result<()> {
+        match parent_of_entry(root, path, false).map_err(refused)? {
             Some((parent, name)) => parent.remove_child(name),
             None => Ok(()),
         }
@@ -1054,6 +1429,21 @@ mod imp {
     pub fn guarded_read_head(_: &Path, _: &Path, _: u64) -> io::Result<Option<Vec<u8>>> {
         refused_io()
     }
+    pub(super) fn guarded_read_head_checked(
+        _: &Path,
+        _: &Path,
+        _: u64,
+        _: bool,
+    ) -> io::Result<Option<Vec<u8>>> {
+        refused_io()
+    }
+    pub(super) fn walk(
+        _: &Path,
+        _: &Path,
+        _: &mut super::Walker<'_>,
+    ) -> io::Result<super::WalkEnd> {
+        refused_io()
+    }
     pub fn guarded_list(_: &Path, _: &Path) -> io::Result<Option<Vec<std::ffi::OsString>>> {
         refused_io()
     }
@@ -1081,6 +1471,9 @@ mod imp {
         refused_io()
     }
     pub fn guarded_remove_tree(_: &Path, _: &Path) -> io::Result<()> {
+        refused_io()
+    }
+    pub fn guarded_remove_entry(_: &Path, _: &Path) -> io::Result<()> {
         refused_io()
     }
     pub fn guarded_rename(_: &Path, _: &Path, _: &Path) -> Result<(), String> {
@@ -1253,6 +1646,17 @@ mod imp {
     }
 
     pub fn guarded_read_head(root: &Path, path: &Path, max: u64) -> io::Result<Option<Vec<u8>>> {
+        guarded_read_head_checked(root, path, max, false)
+    }
+
+    /// The name count is not read here (std has no stable API for it): `one_name` is the
+    /// residual risk of the module header.
+    pub(super) fn guarded_read_head_checked(
+        root: &Path,
+        path: &Path,
+        max: u64,
+        _one_name: bool,
+    ) -> io::Result<Option<Vec<u8>>> {
         use std::io::Read;
         assert_contained_no_symlink(root, path).map_err(refused)?;
         let file = match std::fs::File::open(path) {
@@ -1354,6 +1758,22 @@ mod imp {
     pub fn guarded_remove_tree(root: &Path, path: &Path) -> io::Result<()> {
         assert_contained_no_symlink(root, path).map_err(refused)?;
         match std::fs::remove_dir_all(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+
+    pub fn guarded_remove_entry(root: &Path, path: &Path) -> io::Result<()> {
+        assert_contained_no_symlink(root, path.parent().unwrap_or(root)).map_err(refused)?;
+        let removed = match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))
+            }
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
+            Ok(_) => std::fs::remove_file(path),
+            Err(e) => Err(e),
+        };
+        match removed {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             other => other,
         }
@@ -2520,5 +2940,45 @@ mod tests {
         assert!(guarded_move_new(&proj, &link, &proj.join("docs/moved.md")).is_err());
         assert!(std::fs::symlink_metadata(&link).is_ok());
         assert!(!proj.join("docs/moved.md").exists());
+    }
+
+    /// A walk does not enter a folder on another file system (one the mount probe names:
+    /// nothing is mounted in a test), and says it skipped one.
+    #[cfg(unix)] // the mount probe is unix-only: the walk compares st_dev read through libc
+    #[test]
+    fn a_walk_skips_a_folder_on_another_file_system() {
+        let base = tempfile::tempdir().unwrap();
+        let mounted = std::ffi::OsString::from(format!(
+            "mounted-{}",
+            base.path().file_name().unwrap().to_string_lossy()
+        ));
+        let tree = base.path().join("tree");
+        std::fs::create_dir_all(tree.join(&mounted)).unwrap();
+        std::fs::write(tree.join(&mounted).join("theirs"), "x").unwrap();
+        std::fs::write(tree.join("mine"), "x").unwrap();
+        crate::core::rooted_fd::mount_probe::pretend_mounted(&mounted);
+        let mut seen = Vec::new();
+
+        let end = guarded_walk(
+            base.path(),
+            &tree,
+            WalkBounds::within(1_000, std::time::Duration::from_secs(30)),
+            &mut |entry| {
+                seen.push(entry.path.to_path_buf());
+                Visit::Enter
+            },
+        );
+
+        crate::core::rooted_fd::mount_probe::forget(&mounted);
+        assert_eq!(end.unwrap(), WalkEnd::OtherFileSystem);
+        assert!(seen.contains(&tree.join("mine")));
+        assert!(
+            !seen.contains(&tree.join(&mounted).join("theirs")),
+            "{seen:?}"
+        );
+        assert_eq!(
+            WalkEnd::OtherFileSystem.bound(),
+            Some("a folder on another file system")
+        );
     }
 }

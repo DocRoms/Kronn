@@ -529,7 +529,6 @@ async fn docs_location_set_refuses_with_docs_busy_and_records_no_override() {
 async fn template_merge_discard_refuses_with_docs_busy_and_keeps_the_merge_worktree() {
     let state = state();
     let root = tempfile::tempdir().unwrap();
-    let merge = tempfile::tempdir().unwrap();
     seed_project(&state, root.path()).await;
     let git = |dir: &std::path::Path, args: &[&str]| {
         let result = crate::core::cmd::git_cmd()
@@ -549,18 +548,17 @@ async fn template_merge_discard_refuses_with_docs_busy_and_keeps_the_merge_workt
     std::fs::write(root.path().join("docs/AGENTS.md"), "# Project\n").unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-q", "-m", "baseline"]);
-    let worktree = merge.path().join("template-merge");
-    git(
+    // Made as the merge makes it, under the project's `.kronn/worktrees`: the only place
+    // Kronn removes a worktree from (KT-2084).
+    let made = crate::core::worktree::create_discussion_worktree(
         root.path(),
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            crate::core::docs_merge::MERGE_BRANCH,
-            &worktree.to_string_lossy(),
-        ],
-    );
+        "p1",
+        crate::core::docs_merge::MERGE_SLUG,
+        "HEAD",
+    )
+    .unwrap();
+    assert_eq!(made.branch, crate::core::docs_merge::MERGE_BRANCH);
+    let worktree = std::path::PathBuf::from(&made.path);
     std::fs::write(worktree.join("docs/pending.md"), "# Pending merge work\n").unwrap();
     let branch_exists = || {
         crate::core::cmd::git_cmd()

@@ -1210,8 +1210,20 @@ pub async fn execute_run_with_notify_policy(
     result
 }
 
-/// What a run tells its reader when its end kept a checkout holding work.
+/// What a run tells its reader when its end kept a checkout holding work, or stopped
+/// removing it part way.
 pub fn kept_checkout_note(kept: &super::workspace::KeptCheckout) -> String {
+    if kept.partly_removed() {
+        let left = kept.reason[crate::core::worktree::PARTLY_REMOVED.len()..]
+            .trim_start_matches(':')
+            .trim();
+        return format!(
+            "Worktree `{}` was only partly removed: {left}. Kronn does not finish a removal \
+             that stopped part way: delete what is left of the folder by hand, then run `git \
+             worktree prune` in the project if git still lists it.",
+            kept.path.display(),
+        );
+    }
     format!(
         "Worktree `{}` kept with its branch: {}. Commit, push or discard what it holds (unlock it if git says it is locked), or remove it yourself (`git worktree remove --force`); Kronn removes it at a later start once it is clean.",
         kept.path.display(),

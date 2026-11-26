@@ -961,6 +961,15 @@ pub struct ServerConfig {
     /// per-entry delete, never by a sweep). Its worktree and branch stay.
     #[serde(default = "default_disk_stalled_build_days")]
     pub disk_stalled_build_days: u64,
+    /// KT-2084 — added to `core::worktree::REGENERABLE_OUTPUTS`, server-wide: what never blocks
+    /// a discussion delete when ignored. A name or glob (`*.gen.ts`) matches an ignored
+    /// entry's own name; an entry holding `/` names a path from the worktree root and what is
+    /// below it, so a project's own output is named by path (`backend/bindings`), never by a
+    /// generic name that may hold hand-written files elsewhere. Empty by default; no settings
+    /// screen.
+    #[serde(default)]
+    #[ts(skip)]
+    pub regenerable_outputs: Vec<String>,
     /// Maximum concurrent agent processes (default: 5)
     #[serde(default = "default_max_agents")]
     pub max_concurrent_agents: usize,

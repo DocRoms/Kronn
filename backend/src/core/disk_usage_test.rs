@@ -211,3 +211,59 @@ fn without_a_way_to_tell_the_unique_size_is_unknown_not_guessed() {
     assert_eq!(measured.unique_bytes, None);
     assert_eq!(measured.real_or_apparent(), 100);
 }
+
+/// KT-2084 — a folder swapped for a link to an outside folder while the measure walks it:
+/// the outside bytes are never counted.
+#[cfg(unix)] // the swap probe puts a symlink in place of a folder (std::os::unix)
+#[test]
+fn a_folder_swapped_for_a_link_mid_measure_is_never_followed() {
+    use crate::core::fs_guard::swap_probe;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("deep")).unwrap();
+    fs::write(root.join("deep/small"), vec![0u8; 10]).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("huge"), vec![0u8; 50_000]).unwrap();
+    swap_probe::arm(&root.join("deep"), outside.path());
+
+    let measured = measure_bounded(
+        root,
+        &[],
+        MeasureBudget::within(1_000, Duration::from_secs(5)),
+    );
+
+    assert!(swap_probe::fired(), "the folder must be swapped mid-walk");
+    assert!(measured.bytes < 50_000, "{}", measured.bytes);
+}
+
+/// KT-2084 — a folder the measure cannot open is left out and the walk goes on: everything
+/// else is still counted, and the figure is a floor.
+#[cfg(unix)] // locks a folder with chmod 000 through unix mode bits
+#[test]
+fn a_folder_the_measure_cannot_open_is_skipped_and_the_rest_counted() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let locked = root.join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::write(locked.join("hidden"), vec![0u8; 7]).unwrap();
+    for n in 0..200 {
+        fs::write(root.join(format!("f{n}")), vec![0u8; 10]).unwrap();
+    }
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&locked).is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: this user reads a folder of mode 000");
+        return;
+    }
+
+    let measured = measure_bounded(
+        root,
+        &[],
+        MeasureBudget::within(1_000, Duration::from_secs(5)),
+    );
+
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(measured.bytes, 2_000, "{measured:?}");
+    assert!(measured.partial, "{measured:?}");
+}
