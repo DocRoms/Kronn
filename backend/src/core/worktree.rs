@@ -8531,6 +8531,103 @@ mod tests {
         (repo, checkout)
     }
 
+    /// KT-2084 — a submodule on a file system without executable bits (`core.filemode =
+    /// false`, as git writes it on Windows): a mode git itself does not compare there is no
+    /// work, a changed content still is. Where git compares modes, a changed mode keeps the
+    /// worktree.
+    #[cfg(unix)] // sets a POSIX executable bit
+    #[test]
+    fn a_submodule_without_file_modes_is_judged_as_git_reads_it() {
+        use std::os::unix::fs::PermissionsExt;
+        for (name, filemode_off, edited, clean) in [
+            ("sub-no-filemode", true, false, true),
+            ("sub-no-filemode-edited", true, true, false),
+            ("sub-filemode", false, false, false),
+        ] {
+            let (repo, checkout) = discussion_worktree_with_submodule(name);
+            let sub = checkout.join("sub");
+            if filemode_off {
+                git(&sub, &["config", "core.filemode", "false"]);
+            }
+            if edited {
+                fs::write(sub.join("lib.txt"), "shared, then edited").unwrap();
+            }
+            fs::set_permissions(sub.join("lib.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+
+            let removed = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+            if clean {
+                assert!(removed.is_ok(), "{name}: {removed:?}");
+                assert!(!checkout.exists());
+            } else {
+                assert!(
+                    removed
+                        .as_ref()
+                        .is_err_and(|error| error.contains("lib.txt")),
+                    "{name}: {removed:?}"
+                );
+                assert!(checkout.exists());
+            }
+        }
+    }
+
+    /// KT-2084 — a submodule where links are checked out as files (`core.symlinks = false`,
+    /// as git writes it on Windows): a file holding its link's target is the checkout git
+    /// made, not work; any other content in it is. Where git checks links out as links, the
+    /// same file keeps the worktree.
+    #[cfg(unix)] // commits a symlink
+    #[test]
+    fn a_submodule_without_links_is_judged_as_git_reads_it() {
+        for (name, symlinks_off, content, clean) in [
+            ("sub-no-links", true, "lib.txt", true),
+            ("sub-no-links-edited", true, "mine", false),
+            ("sub-links", false, "lib.txt", false),
+        ] {
+            let (repo, upstream) = make_test_repo_with_submodule(name);
+            let up = upstream.path();
+            std::os::unix::fs::symlink("lib.txt", up.join("link")).unwrap();
+            git(up, &["add", "link"]);
+            git(up, &["commit", "-qm", "a link"]);
+            let pinned = head_sha(up);
+            let source = repo.path().join("sub");
+            git(&source, &["fetch", "-q", "origin"]);
+            git(&source, &["checkout", "-q", &pinned]);
+            git(repo.path(), &["commit", "-qam", "pin the link"]);
+            let info = create_discussion_worktree(repo.path(), "proj", name, "main").unwrap();
+            let checkout = PathBuf::from(&info.path);
+            git(
+                &checkout,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "update",
+                    "--init",
+                    "-q",
+                ],
+            );
+            let sub = checkout.join("sub");
+            if symlinks_off {
+                git(&sub, &["config", "core.symlinks", "false"]);
+            }
+            fs::remove_file(sub.join("link")).unwrap();
+            fs::write(sub.join("link"), content).unwrap();
+
+            let removed = remove_deleted(repo.path(), &checkout.to_string_lossy());
+
+            if clean {
+                assert!(removed.is_ok(), "{name}: {removed:?}");
+                assert!(!checkout.exists());
+            } else {
+                assert!(
+                    removed.as_ref().is_err_and(|error| error.contains("link")),
+                    "{name}: {removed:?}"
+                );
+                assert!(checkout.exists());
+            }
+        }
+    }
+
     fn git_dir_of(dir: &Path) -> PathBuf {
         let output = std::process::Command::new("git")
             .args(["rev-parse", "--absolute-git-dir"])
@@ -8882,6 +8979,7 @@ mod tests {
     }
 
     /// KT-2084 — a name is read whole, whatever it holds.
+    #[cfg(unix)] // a file name holding `>` or `"` cannot exist on Windows
     #[test]
     fn a_name_holding_an_arrow_or_a_quote_is_read_whole() {
         let repo = make_test_repo("disc-arrow-name");
@@ -13866,7 +13964,9 @@ mod tests {
         );
         git(repo.path(), &["commit", "-qm", "add submodule"]);
         let info = create_discussion_worktree(repo.path(), "proj", name, "main").unwrap();
-        let checkout = PathBuf::from(&info.path).canonicalize().unwrap();
+        // As Kronn recorded it: a delete is given that spelling (a canonical Windows path
+        // carries a `\\?\` prefix no record has).
+        let checkout = PathBuf::from(&info.path);
         git(
             &checkout,
             &[
@@ -14579,8 +14679,12 @@ mod tests {
         let lane_a = crate::core::lane_git::without_verbatim_prefix(
             Path::new(&a.path).canonicalize().unwrap(),
         );
-        let stale = owner.join(".git/worktrees/proj--a/gitdir");
-        let line = format!("{}/.git", lane_a.display());
+        let stale = owner
+            .join(".git")
+            .join("worktrees")
+            .join("proj--a")
+            .join("gitdir");
+        let line = lane_a.join(".git").display().to_string();
         let step = format!(
             "replace the content of the file\n    {}\nwith this single line:\n    {line}\n",
             stale.display()
@@ -14632,15 +14736,18 @@ mod tests {
 
         let refused = reattach_worktree(repo.path(), "proj", "c", "kronn/c").unwrap_err();
 
-        // A path no shell reads goes into the command, in single quotes.
-        let removal = format!(
-            "worktree remove '{}'`",
-            own.canonicalize().unwrap().display()
-        );
-        assert!(
-            refused.contains(&admin.display().to_string()) && refused.contains(&removal),
-            "{refused}"
-        );
+        assert!(refused.contains(&admin.display().to_string()), "{refused}");
+        if cfg!(unix) {
+            // A path no shell reads goes into the command, in single quotes.
+            let removal = format!(
+                "worktree remove '{}'`",
+                own.canonicalize().unwrap().display()
+            );
+            assert!(refused.contains(&removal), "{refused}");
+        } else {
+            // A Windows path is never quoted for a shell: it is shown as data.
+            assert!(!refused.contains("worktree remove"), "{refused}");
+        }
         assert!(!refused.contains("worktree prune"), "{refused}");
         assert!(own.join("README.md").exists());
 
@@ -14652,10 +14759,12 @@ mod tests {
         )
         .unwrap();
         let refused = reattach_worktree(repo.path(), "proj", "c", "kronn/c").unwrap_err();
-        assert!(
-            refused.contains(&format!("\n    {}\n", odd.display())),
-            "{refused}"
-        );
+        if cfg!(unix) {
+            assert!(
+                refused.contains(&format!("\n    {}\n", odd.display())),
+                "{refused}"
+            );
+        }
         assert!(
             !refused.contains("git -C") && !refused.contains("worktree remove"),
             "{refused}"

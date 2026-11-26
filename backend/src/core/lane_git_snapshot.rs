@@ -12,8 +12,9 @@
 //!   plain keys;
 //! - a submodule repository: its `HEAD`, `index`, `packed-refs`, `shallow` and loose refs
 //!   (`refs/stash` included: its older entries live in its reflog, not copied, and are kept
-//!   whenever it is), a configuration Kronn writes (format version and object format,
-//!   nothing else), and its objects read through `objects/info/alternates`;
+//!   whenever it is), a configuration Kronn writes (format version, object format, and
+//!   `core.filemode` / `core.symlinks` when the original turns them off; nothing else), and
+//!   its objects read through `objects/info/alternates`;
 //! - either one's shared index, when its index is split (`core.splitIndex`).
 //!
 //! Every file is read as a regular file under a cap, never through a link, never from a
@@ -379,7 +380,7 @@ impl Snapshot {
             "the configuration",
         )?;
         let mut snapshot = Self::empty(work_tree.map(Path::to_path_buf), canonical(git_dir))?;
-        let (version, format) = match config {
+        let kept = match config {
             Some(bytes) => {
                 snapshot.put("config.read", &bytes)?;
                 let read = snapshot.dir.join("config.read");
@@ -387,14 +388,9 @@ impl Snapshot {
                 let _ = std::fs::remove_file(&read);
                 found?
             }
-            None => ("0".to_string(), None),
+            None => KeptConfig::default(),
         };
-        let mut written =
-            format!("[core]\n\trepositoryformatversion = {version}\n\tbare = false\n");
-        if let Some(format) = format {
-            written.push_str(&format!("[extensions]\n\tobjectFormat = {format}\n"));
-        }
-        snapshot.put("config", written.as_bytes())?;
+        snapshot.put("config", kept.written().as_bytes())?;
         if !snapshot.copy_in(git_dir, "HEAD", HEAD_CAP, "the HEAD")? {
             return Err(format!(
                 "{NESTED_PREFIX}: {} has no HEAD: Kronn does not judge it",
@@ -828,14 +824,58 @@ fn worktree_config_refused(work_dir: &Path, why: &str) -> String {
     )
 }
 
-/// The format version and object format the copy of a submodule's configuration `read`
-/// declares (`0` or `1`; `sha1` or `sha256`). Any other value, or any other extension, is not
-/// judged; a reftable one is named as such for `shown` (KT-2101).
-fn repository_format(
-    read: &Path,
-    git_dir: &Path,
-    shown: &Path,
-) -> Result<(String, Option<String>), String> {
+/// What Kronn's copy of a submodule's configuration keeps of the original.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct KeptConfig {
+    /// `1` when declared; `0` otherwise.
+    version_one: bool,
+    object_format: Option<String>,
+    /// `core.filemode` as the repository declares it. Git writes `false` where the file
+    /// system holds no executable bit (Windows, a FAT volume): without it the copy reads
+    /// every executable file of a clean checkout as modified. A declared `true` is kept
+    /// too: it outranks a `false` of the user's own configuration, which the copy reads.
+    filemode: Option<bool>,
+    /// `core.symlinks` as the repository declares it: `false` where links are checked out
+    /// as files.
+    symlinks: Option<bool>,
+}
+
+impl KeptConfig {
+    /// The configuration of the copy: these keys and nothing else. None names a program or
+    /// a path.
+    fn written(&self) -> String {
+        let version = if self.version_one { "1" } else { "0" };
+        let mut written =
+            format!("[core]\n\trepositoryformatversion = {version}\n\tbare = false\n");
+        for (key, declared) in [("filemode", self.filemode), ("symlinks", self.symlinks)] {
+            match declared {
+                Some(true) => written.push_str(&format!("\t{key} = true\n")),
+                Some(false) => written.push_str(&format!("\t{key} = false\n")),
+                None => {}
+            }
+        }
+        if let Some(format) = &self.object_format {
+            written.push_str(&format!("[extensions]\n\tobjectFormat = {format}\n"));
+        }
+        written
+    }
+}
+
+/// The spellings of false git itself writes or documents. Git reads a few more as false (an
+/// empty value, `00`): those stay on, the side that keeps a worktree. A key with no value at
+/// all is true for git and is listed with an empty value here, so `""` must never be added.
+fn is_git_false(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "false" | "no" | "off" | "0"
+    )
+}
+
+/// What the copy of a submodule's configuration `read` keeps: the format version and object
+/// format it declares (`0` or `1`; `sha1` or `sha256`), and the two file-system switches when
+/// they are off. Any other format value, or any other extension, is not judged; a reftable one
+/// is named as such for `shown` (KT-2101).
+fn repository_format(read: &Path, git_dir: &Path, shown: &Path) -> Result<KeptConfig, String> {
     let refuse = |why: String| {
         format!(
             "{NESTED_PREFIX}: the configuration of {} {why}: Kronn does not judge it",
@@ -860,8 +900,7 @@ fn repository_format(
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    let mut version = "0".to_string();
-    let mut format = None;
+    let mut kept = KeptConfig::default();
     for entry in output
         .stdout
         .split(|byte| *byte == 0)
@@ -871,8 +910,11 @@ fn repository_format(
         let (key, value) = entry.split_once('\n').unwrap_or((&entry, ""));
         match key {
             "core.repositoryformatversion" if matches!(value, "0" | "1") => {
-                version = value.to_string();
+                kept.version_one = value == "1";
             }
+            // The last value wins, as git reads them.
+            "core.filemode" => kept.filemode = Some(!is_git_false(value)),
+            "core.symlinks" => kept.symlinks = Some(!is_git_false(value)),
             "core.repositoryformatversion" => {
                 return Err(refuse(format!("declares format version {value:?}")))
             }
@@ -881,7 +923,7 @@ fn repository_format(
                 if !matches!(value.as_str(), "sha1" | "sha256") {
                     return Err(refuse(format!("declares object format {value:?}")));
                 }
-                format = Some(value);
+                kept.object_format = Some(value);
             }
             "extensions.refstorage" if value.eq_ignore_ascii_case("reftable") => {
                 return Err(reftable_refusal(shown));
@@ -899,5 +941,53 @@ fn repository_format(
             _ => {}
         }
     }
-    Ok((version, format))
+    Ok(kept)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kept_of(config: &str) -> KeptConfig {
+        let dir = tempfile::tempdir().unwrap();
+        let read = dir.path().join("config.read");
+        std::fs::write(&read, config).unwrap();
+        repository_format(&read, dir.path(), dir.path()).unwrap()
+    }
+
+    /// The copy keeps the two file-system switches as the repository declares them, and
+    /// nothing a worker could have added beside them.
+    #[test]
+    fn the_copy_of_a_submodule_configuration_keeps_only_the_file_system_switches() {
+        let kept = kept_of(
+            "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tsymlinks = false\n\
+             \tignorecase = true\n\tfsmonitor = /tmp/run\n[filter \"x\"]\n\tclean = /tmp/run\n",
+        );
+        assert_eq!(
+            kept.written(),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfilemode = false\n\
+             \tsymlinks = false\n"
+        );
+        // The last value wins, as git reads them; a declared `true` is written, since it
+        // outranks what the user's own configuration says.
+        let on = kept_of("[core]\n\tfilemode = false\n\tfilemode = true\n\tsymlinks = true\n");
+        assert_eq!(
+            on.written(),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfilemode = true\n\
+             \tsymlinks = true\n"
+        );
+        // Each switch alone, in any case git accepts; a key without a value is true.
+        for (config, switches) in [
+            ("[CORE]\n\tfileMode = False\n", "\tfilemode = false\n"),
+            ("[core]\n\tsymlinks = off\n", "\tsymlinks = false\n"),
+            ("[core]\n\tfilemode\n", "\tfilemode = true\n"),
+            ("[core]\n\tbare = false\n", ""),
+        ] {
+            assert_eq!(
+                kept_of(config).written(),
+                format!("[core]\n\trepositoryformatversion = 0\n\tbare = false\n{switches}"),
+                "{config}"
+            );
+        }
+    }
 }

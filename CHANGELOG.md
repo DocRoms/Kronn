@@ -134,7 +134,9 @@ Release notes for 0.9.3 and earlier are available in the
   Kronn no longer runs `git worktree prune`. Two registrations that name the
   same worktree are refused with both names and the one-file step that repairs
   it. Walks and removals stay on one file system: a folder mounted inside a
-  worktree is kept and reported as a partial removal.
+  worktree is kept and reported as a partial removal. A submodule on a file
+  system without executable bits or links (Windows) is judged as git reads it
+  there, so a clean worktree holding one is released.
 - Git panel: every git call of the panel and its actions stops at a time bound
   and says the bound is Kronn's own (KT-2084): 30 minutes for a commit, 60 for
   a push or a pull request creation. A push names its branch as a full ref on
