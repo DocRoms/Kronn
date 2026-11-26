@@ -188,6 +188,9 @@ pub fn exec_short(id: &str) -> &str {
 #[derive(Debug, Default, Serialize)]
 pub struct OrchestrationBootReport {
     pub interrupted: usize,
+    /// Worker sessions the previous backend left, stopped before the
+    /// classification reads the lanes (KT-2021).
+    pub worker_sessions_stopped: usize,
     pub classified: usize,
     pub resumed_or_parked: usize,
     /// Classified executions whose resume can run Git, validations or a
@@ -330,6 +333,9 @@ pub async fn reconcile_at_boot_with_agents(
         Ok(_) => {}
         Err(e) => tracing::warn!("Abandoned-session reap failed: {}", e),
     }
+    // KT-2021 — before the classification: it reads the lanes' Git state, which
+    // a session the previous backend left may still be writing.
+    stop_leftover_worker_sessions(state, &mut report).await;
     let moved = match state
         .db
         .with_conn(crate::db::orchestration::reconcile_stale_task_executions)
@@ -739,22 +745,576 @@ pub async fn return_quota_escalations_past_reset(state: &AppState) -> Vec<String
     returned
 }
 
-/// Stop the processes a task worker's dispatch left behind (KT-1266). Only a
-/// dispatch that is a worker's launch has any; an ordinary turn costs one read.
-pub async fn reap_task_worker_processes(state: &AppState, dispatch_job_id: &str) {
-    let lookup = dispatch_job_id.to_string();
-    let is_worker = state
-        .db
-        .with_read_conn(move |conn| {
-            crate::db::orchestration::get_execution_for_dispatch(conn, &lookup)
-        })
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    if is_worker {
-        crate::core::dispatch_reaper::reap_dispatch_async(dispatch_job_id).await;
+/// The journal action of [`stop_worker_dispatch_processes`].
+pub const WORKER_PROCESSES_STOPPED_ACTION: &str = "worker_processes_stopped";
+
+/// What stopping the processes of one worker dispatch found (KT-1986, KT-2021).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerProcessStop {
+    /// The dispatch launched no task worker: nothing was looked for.
+    NotAWorker,
+    /// Recorded by another backend instance: nothing was touched.
+    Foreign,
+    /// The recorded agent group and the processes tagged with the dispatch were
+    /// looked for. `agent`: `killed`, `gone`, `not_ours`, `none` when no
+    /// agent group was recorded, or `unsupported` when the platform cannot look.
+    Stopped {
+        agent: &'static str,
+        report: crate::core::dispatch_reaper::ReapReport,
+    },
+}
+
+impl WorkerProcessStop {
+    /// Something of the session may still be alive, or could not be looked for.
+    pub fn may_still_run(&self) -> bool {
+        matches!(self, Self::Stopped { report, .. } if report.may_still_run())
     }
+
+    /// The processes still alive after SIGKILL.
+    pub fn survivors(&self) -> &[u32] {
+        match self {
+            Self::Stopped { report, .. } => &report.survivors,
+            Self::NotAWorker | Self::Foreign => &[],
+        }
+    }
+
+    /// The stop ended something: the recorded agent group, or a tagged process.
+    pub fn stopped_something(&self) -> bool {
+        match self {
+            Self::Stopped { agent, report } => *agent == "killed" || report.signalled > 0,
+            Self::NotAWorker | Self::Foreign => false,
+        }
+    }
+}
+
+/// Whether this platform can look for a worker's processes: the process group
+/// and the dispatch tag are read on unix only.
+pub const WORKER_PROCESSES_CAN_BE_LOOKED_FOR: bool = cfg!(unix);
+
+/// The journaled `agent` of a stop on a platform that cannot look.
+pub const WORKER_STOP_UNSUPPORTED: &str = "unsupported";
+
+/// What a stop reports where it cannot look: nothing was stopped, and nothing
+/// is claimed to run or to be gone. `None` where it can look.
+pub fn worker_stop_without_looking(can_look: bool) -> Option<WorkerProcessStop> {
+    (!can_look).then(|| WorkerProcessStop::Stopped {
+        agent: WORKER_STOP_UNSUPPORTED,
+        report: crate::core::dispatch_reaper::ReapReport::default(),
+    })
+}
+
+/// Whether `pgid` is the backend's own pid or process group: never a worker's.
+pub fn is_backend_process_group(pgid: i64) -> bool {
+    if pgid == i64::from(std::process::id()) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: getpgrp only reads this process's own group id.
+        if pgid == i64::from(unsafe { libc::getpgrp() }) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Kill the recorded agent group of a worker launch, only when its leader's
+/// start stamp still matches. Pid 0, pid 1 and the backend's own group are
+/// refused before anything is read.
+pub fn kill_recorded_worker_group(
+    pgid: i64,
+    marker: Option<&str>,
+) -> crate::core::agent_orphans::OrphanOutcome {
+    if pgid <= 1 || is_backend_process_group(pgid) {
+        return crate::core::agent_orphans::OrphanOutcome::NotOurs;
+    }
+    crate::core::agent_orphans::kill_recorded_group(
+        pgid,
+        marker,
+        crate::core::agent_orphans::start_stamp,
+    )
+}
+
+/// Stop what a task worker's dispatch left running (KT-1266, KT-1986, KT-2021):
+/// its recorded agent group, then every process tagged with the dispatch. The
+/// outcome is journaled on the execution. An ordinary turn costs one read.
+pub async fn stop_worker_dispatch_processes(
+    db: &Database,
+    dispatch_job_id: &str,
+) -> WorkerProcessStop {
+    stop_worker_dispatch_processes_with(
+        db,
+        dispatch_job_id,
+        kill_recorded_worker_group,
+        crate::core::dispatch_reaper::reap_dispatch,
+    )
+    .await
+}
+
+/// [`stop_worker_dispatch_processes`] with the kill of the recorded group and
+/// the reap of the tagged processes injected, so a test signals nothing.
+pub async fn stop_worker_dispatch_processes_with<K, R>(
+    db: &Database,
+    dispatch_job_id: &str,
+    kill: K,
+    reap: R,
+) -> WorkerProcessStop
+where
+    K: Fn(i64, Option<&str>) -> crate::core::agent_orphans::OrphanOutcome + Send + 'static,
+    R: Fn(&str) -> crate::core::dispatch_reaper::ReapReport + Send + 'static,
+{
+    stop_worker_dispatch_processes_on(
+        db,
+        dispatch_job_id,
+        kill,
+        reap,
+        WORKER_PROCESSES_CAN_BE_LOOKED_FOR,
+    )
+    .await
+}
+
+/// [`stop_worker_dispatch_processes_with`] with the platform's ability to look
+/// given, so the path of a platform that cannot is tested on one that can.
+pub async fn stop_worker_dispatch_processes_on<K, R>(
+    db: &Database,
+    dispatch_job_id: &str,
+    kill: K,
+    reap: R,
+    can_look: bool,
+) -> WorkerProcessStop
+where
+    K: Fn(i64, Option<&str>) -> crate::core::agent_orphans::OrphanOutcome + Send + 'static,
+    R: Fn(&str) -> crate::core::dispatch_reaper::ReapReport + Send + 'static,
+{
+    use crate::core::agent_orphans::OrphanOutcome;
+    use crate::core::dispatch_reaper::ReapReport;
+
+    // A step that did not complete says nothing about what runs.
+    let unverified = || ReapReport {
+        unverified: true,
+        ..Default::default()
+    };
+    let lookup = dispatch_job_id.to_string();
+    let recorded = db
+        .with_read_conn(move |conn| {
+            let row = crate::db::worker_processes::get(conn, &lookup)?;
+            let execution_id = match row.as_ref() {
+                Some(row) => Some(row.execution_id.clone()),
+                // A dispatch launched before launches were recorded: the tag
+                // alone, and only while its execution still points at it.
+                None => crate::db::orchestration::get_execution_for_dispatch(conn, &lookup)?
+                    .map(|execution| execution.id),
+            };
+            Ok((row, execution_id))
+        })
+        .await;
+    let (row, execution_id) = match recorded {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            tracing::warn!(dispatch_job_id, "worker launch record unreadable: {error}");
+            return WorkerProcessStop::Stopped {
+                agent: "none",
+                report: unverified(),
+            };
+        }
+    };
+    let Some(execution_id) = execution_id else {
+        return WorkerProcessStop::NotAWorker;
+    };
+    if row
+        .as_ref()
+        .is_some_and(|row| row.instance_id != crate::core::dispatch_reaper::instance_id())
+    {
+        return WorkerProcessStop::Foreign;
+    }
+    let recorded_launch = row.is_some();
+    if let Some(stop) = worker_stop_without_looking(can_look) {
+        // Nothing waits on a session nobody can look for: the launch is
+        // settled, and the journal says once that nothing was looked at.
+        record_worker_process_stop(
+            db,
+            dispatch_job_id,
+            execution_id,
+            recorded_launch,
+            WORKER_STOP_UNSUPPORTED,
+            &ReapReport::default(),
+            true,
+        )
+        .await;
+        return stop;
+    }
+    let agent_group = row.and_then(|row| Some((row.agent_pgid?, row.agent_started_marker)));
+    let mut kill_completed = true;
+    let agent = match agent_group {
+        None => "none",
+        Some((pgid, marker)) => {
+            match tokio::task::spawn_blocking(move || kill(pgid, marker.as_deref())).await {
+                Ok(OrphanOutcome::Killed) => "killed",
+                Ok(OrphanOutcome::Gone) => "gone",
+                Ok(OrphanOutcome::NotOurs) => "not_ours",
+                Err(error) => {
+                    tracing::warn!(
+                        dispatch_job_id,
+                        "the stop of a worker's agent ended early: {error}"
+                    );
+                    kill_completed = false;
+                    "not_ours"
+                }
+            }
+        }
+    };
+    let tag = dispatch_job_id.to_string();
+    let mut report = tokio::task::spawn_blocking(move || reap(&tag))
+        .await
+        .unwrap_or_else(|_| unverified());
+    report.unverified |= !kill_completed;
+    if agent == "killed" || report.signalled > 0 {
+        tracing::info!(
+            dispatch_job_id,
+            agent,
+            signalled = report.signalled,
+            survivors = report.survivors.len(),
+            "stopped the processes a worker left after its dispatch"
+        );
+    }
+    if report.may_still_run() {
+        tracing::warn!(
+            dispatch_job_id,
+            survivors = ?report.survivors,
+            unverified = report.unverified,
+            "processes of a worker dispatch may still run"
+        );
+    }
+
+    record_worker_process_stop(
+        db,
+        dispatch_job_id,
+        execution_id,
+        recorded_launch,
+        agent,
+        &report,
+        false,
+    )
+    .await;
+    WorkerProcessStop::Stopped { agent, report }
+}
+
+/// Settle the recorded launch when nothing of it may still run, and journal
+/// the stop on its execution. `once`: an outcome already journaled is not
+/// journaled again.
+async fn record_worker_process_stop(
+    db: &Database,
+    dispatch_job_id: &str,
+    execution_id: String,
+    recorded_launch: bool,
+    agent: &'static str,
+    report: &crate::core::dispatch_reaper::ReapReport,
+    once: bool,
+) {
+    let settled = !report.may_still_run();
+    // An unrecorded launch keeps its silent reap unless it stopped something.
+    let journaled = recorded_launch || report.signalled > 0;
+    let changes = serde_json::json!({
+        "dispatch_job_id": dispatch_job_id,
+        "agent": agent,
+        "signalled": report.signalled,
+        "survivors": report.survivors,
+        "unverified": report.unverified,
+    });
+    let dispatch = dispatch_job_id.to_string();
+    let written = db
+        .with_conn(move |conn| {
+            if recorded_launch && settled {
+                crate::db::worker_processes::mark_stopped(conn, &dispatch)?;
+            }
+            if !journaled
+                || crate::db::orchestration::get_task_execution(conn, &execution_id)?.is_none()
+            {
+                return Ok(());
+            }
+            // A session that stays unverifiable is stopped again by every
+            // sweep: the same outcome is journaled once.
+            if !settled || once {
+                let already: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM task_execution_events
+                      WHERE task_execution_id = ?1 AND action = ?2 AND changes_json = ?3)",
+                    rusqlite::params![
+                        execution_id,
+                        WORKER_PROCESSES_STOPPED_ACTION,
+                        serde_json::to_string(&changes)?
+                    ],
+                    |row| row.get(0),
+                )?;
+                if already {
+                    return Ok(());
+                }
+            }
+            crate::db::orchestration::record_execution_event(
+                conn,
+                &execution_id,
+                WORKER_PROCESSES_STOPPED_ACTION,
+                None,
+                None,
+                &backend_actor(),
+                changes,
+            )
+        })
+        .await;
+    if let Err(error) = written {
+        tracing::warn!(dispatch_job_id, "worker process stop not recorded: {error}");
+    }
+}
+
+/// The unsettled worker sessions of this instance among `rows`, each with
+/// whether its dispatch is still pending or running.
+fn sessions_with_activity(
+    conn: &rusqlite::Connection,
+    rows: Vec<crate::db::worker_processes::WorkerProcessRow>,
+) -> Result<Vec<(crate::db::worker_processes::WorkerProcessRow, bool)>> {
+    let instance = crate::core::dispatch_reaper::instance_id();
+    rows.into_iter()
+        .filter(|row| row.instance_id == instance)
+        .map(|row| {
+            let active =
+                crate::db::agent_dispatch::get(conn, &row.dispatch_job_id)?.is_some_and(|job| {
+                    matches!(
+                        job.status,
+                        crate::db::agent_dispatch::DispatchStatus::Pending
+                            | crate::db::agent_dispatch::DispatchStatus::Running
+                    )
+                });
+            Ok((row, active))
+        })
+        .collect()
+}
+
+/// Why `sessions` keep a checkout: one still has a pending or running dispatch,
+/// or a stop could not prove it gone. `None` once every one is stopped. The
+/// reason names the dispatch only, so a sweep records it once.
+async fn sessions_blocking_release<K, R>(
+    db: &Database,
+    sessions: Result<Vec<(crate::db::worker_processes::WorkerProcessRow, bool)>>,
+    kill: K,
+    reap: R,
+) -> Option<String>
+where
+    K: Fn(i64, Option<&str>) -> crate::core::agent_orphans::OrphanOutcome + Clone + Send + 'static,
+    R: Fn(&str) -> crate::core::dispatch_reaper::ReapReport + Clone + Send + 'static,
+{
+    let sessions = match sessions {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            return Some(format!(
+                "the worker sessions of this checkout cannot be read ({error}) — keeping it"
+            ))
+        }
+    };
+    for (row, active) in sessions {
+        let dispatch = row.dispatch_job_id.as_str();
+        // A session whose dispatch still runs is ended by its own stream, or
+        // by the approval of its delivery: never from a release.
+        if active {
+            return Some(format!(
+                "worker dispatch {dispatch} is still pending or running — keeping the checkout"
+            ));
+        }
+        let stop =
+            stop_worker_dispatch_processes_with(db, dispatch, kill.clone(), reap.clone()).await;
+        if stop.may_still_run() {
+            return Some(format!(
+                "a worker session of dispatch {dispatch} may still run — keeping the checkout"
+            ));
+        }
+    }
+    None
+}
+
+/// KT-1986 — why the managed checkout of `exec_id` must stay: a worker session
+/// recorded for it may still run. Every session whose dispatch ended is stopped
+/// first; `None` when nothing of them is left.
+pub async fn worker_sessions_blocking_release(db: &Database, exec_id: &str) -> Option<String> {
+    worker_sessions_blocking_release_with(
+        db,
+        exec_id,
+        kill_recorded_worker_group,
+        crate::core::dispatch_reaper::reap_dispatch,
+    )
+    .await
+}
+
+/// [`worker_sessions_blocking_release`] with the stop injected.
+pub async fn worker_sessions_blocking_release_with<K, R>(
+    db: &Database,
+    exec_id: &str,
+    kill: K,
+    reap: R,
+) -> Option<String>
+where
+    K: Fn(i64, Option<&str>) -> crate::core::agent_orphans::OrphanOutcome + Clone + Send + 'static,
+    R: Fn(&str) -> crate::core::dispatch_reaper::ReapReport + Clone + Send + 'static,
+{
+    let id = exec_id.to_string();
+    let sessions = db
+        .with_conn(move |conn| {
+            let rows = crate::db::worker_processes::unsettled_for_execution(conn, &id)?;
+            sessions_with_activity(conn, rows)
+        })
+        .await;
+    sessions_blocking_release(db, sessions, kill, reap).await
+}
+
+/// [`worker_sessions_blocking_release`] for a checkout that lost its execution:
+/// the sessions are those whose dispatch ran in its room.
+async fn orphan_worker_sessions_blocking_release(db: &Database, disc_id: &str) -> Option<String> {
+    let id = disc_id.to_string();
+    let sessions = db
+        .with_conn(move |conn| {
+            let rows = crate::db::worker_processes::unsettled_for_discussion(conn, &id)?;
+            sessions_with_activity(conn, rows)
+        })
+        .await;
+    sessions_blocking_release(
+        db,
+        sessions,
+        kill_recorded_worker_group,
+        crate::core::dispatch_reaper::reap_dispatch,
+    )
+    .await
+}
+
+/// KT-2021 — boot: the worker sessions the previous backend of this instance
+/// left are stopped. No stream exists yet in a fresh process, so every
+/// unsettled launch of this instance is a leftover.
+async fn stop_leftover_worker_sessions(state: &AppState, report: &mut OrchestrationBootReport) {
+    let leftovers = state
+        .db
+        .with_conn(|conn| {
+            crate::db::worker_processes::unsettled_for_instance(
+                conn,
+                crate::core::dispatch_reaper::instance_id(),
+            )
+        })
+        .await;
+    let leftovers = match leftovers {
+        Ok(leftovers) => leftovers,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("leftover worker session scan: {error}"));
+            return;
+        }
+    };
+    for row in leftovers {
+        // A dispatch with a live stream is this process's own run.
+        let live = state
+            .cancel_registry
+            .lock()
+            .ok()
+            .is_some_and(|registry| registry.contains_key(&row.dispatch_job_id));
+        if live {
+            continue;
+        }
+        let stop = stop_worker_dispatch_processes(&state.db, &row.dispatch_job_id).await;
+        if stop.may_still_run() {
+            report.errors.push(format!(
+                "worker session of dispatch {} (execution {}) may still run after the restart: survivors {:?}",
+                row.dispatch_job_id,
+                row.execution_id,
+                stop.survivors()
+            ));
+        } else if stop.stopped_something() {
+            // A session found already gone, or one nobody could look for, is
+            // settled but was not stopped.
+            report.worker_sessions_stopped += 1;
+        }
+    }
+}
+
+/// KT-1986 — approving a delivery ends its worker's turn: the lane now belongs
+/// to the integration. A dispatch that already ended is left to its own stream.
+pub async fn end_worker_turn_of_approved_execution(state: &AppState, execution: &TaskExecution) {
+    let (Some(dispatch_id), Some(room)) = (
+        execution.dispatch_job_id.clone(),
+        execution.sub_discussion_id.clone(),
+    ) else {
+        return;
+    };
+    let cancel_id = dispatch_id.clone();
+    let cancelled = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::agent_dispatch::cancel_for_discussion_by_id(conn, &room, &cancel_id)
+        })
+        .await;
+    match cancelled {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(
+                execution_id = %execution.id,
+                "the worker dispatch of an approved delivery could not be cancelled: {error}"
+            );
+            return;
+        }
+    }
+    end_cancelled_worker_turn(state, &execution.id, &dispatch_id).await;
+}
+
+/// End the turn of a worker dispatch already cancelled in the database: its
+/// stream is signalled and waited for, then its processes are stopped.
+async fn end_cancelled_worker_turn(state: &AppState, execution_id: &str, dispatch_id: &str) {
+    let token = state
+        .cancel_registry
+        .lock()
+        .ok()
+        .and_then(|registry| registry.get(dispatch_id).cloned());
+    if let Some(token) = token {
+        token.cancel();
+        let waited = [dispatch_id.to_string()];
+        wait_for_cancelled_dispatches_to_settle(
+            &state.cancel_registry,
+            &waited,
+            CANCELLATION_TERMINATION_TIMEOUT,
+        )
+        .await;
+    }
+    let stop = stop_worker_dispatch_processes(&state.db, dispatch_id).await;
+    tracing::info!(
+        execution_id,
+        dispatch_job_id = dispatch_id,
+        may_still_run = stop.may_still_run(),
+        "worker turn ended: the integration takes the lane"
+    );
+}
+
+/// [`end_worker_turn_of_approved_execution`] for a review outcome: only an
+/// approval ends the turn. `caller_dispatch`: the dispatch the reviewer runs
+/// under. A worker allowed to review its own delivery is that dispatch: its
+/// turn is the one that integrates, and is left to end by itself.
+pub async fn end_worker_turn_of_approved_review(
+    state: &AppState,
+    outcome: &ReviewOutcome,
+    caller_dispatch: Option<&str>,
+) {
+    if let ReviewOutcome::Reviewed {
+        verdict: ReviewVerdict::Approve,
+        execution,
+    } = outcome
+    {
+        if approval_comes_from_the_worker_turn(execution, caller_dispatch) {
+            return;
+        }
+        end_worker_turn_of_approved_execution(state, execution).await;
+    }
+}
+
+/// Whether the approval was decided from inside the execution's own worker
+/// dispatch (a self-review the run allows).
+pub fn approval_comes_from_the_worker_turn(
+    execution: &TaskExecution,
+    caller_dispatch: Option<&str>,
+) -> bool {
+    caller_dispatch.is_some() && execution.dispatch_job_id.as_deref() == caller_dispatch
 }
 
 /// KT-1758 — how much of a refusal the rooms quote. The native ACP refusal is
@@ -778,6 +1338,16 @@ pub fn fallback_dispatch_waiting_message_id(dispatch_id: &str) -> String {
     format!("fallback-dispatch-waiting:{dispatch_id}")
 }
 
+/// KT-2021 — the deferral reason of a worker launch held because a previous
+/// session of its execution is still alive. Followed by `: dispatch <id>`.
+pub const PREVIOUS_WORKER_SESSION_ALIVE: &str = "previous_worker_session_alive";
+
+/// The dispatch a hold reason names, when `reason` is one.
+pub fn previous_session_of_hold(reason: &str) -> Option<&str> {
+    let rest = reason.strip_prefix(PREVIOUS_WORKER_SESSION_ALIVE)?;
+    Some(rest.strip_prefix(": dispatch ").unwrap_or(rest).trim())
+}
+
 /// KT-1758 — why a fallback dispatch is not running, from what the queue holds
 /// against it, most specific first. Never a guess: when nothing explains the
 /// wait, it says so, which is itself the finding.
@@ -792,6 +1362,18 @@ pub fn fallback_dispatch_wait_reason(
     if let Some((deferrals, detail)) =
         crate::db::agent_dispatch::parse_runtime_unavailable(last_error)
     {
+        let bound = RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
+        // KT-2021 — held beside a previous session: the runtime is not the cause.
+        if let Some(previous) = previous_session_of_hold(detail.trim()) {
+            return match lang {
+                RoomLang::Fr => format!(
+                    "une session précédente de ce worker (dispatch `{previous}`) est en cours d'arrêt ; Kronn réessaie toutes les 30 s ({deferrals}/{bound} essais) puis s'arrête"
+                ),
+                RoomLang::En => format!(
+                    "a previous session of this worker (dispatch `{previous}`) is being stopped; Kronn retries every 30 s ({deferrals}/{bound} tries), then stops"
+                ),
+            };
+        }
         // The reason as the runtime gave it: it is what an operator needs, and
         // the longest of them (the native ACP refusal) is about 230 characters.
         let detail: String = detail
@@ -799,7 +1381,6 @@ pub fn fallback_dispatch_wait_reason(
             .chars()
             .take(LAUNCH_REFUSAL_DETAIL_CHARS)
             .collect();
-        let bound = RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
         return match lang {
             RoomLang::Fr => format!(
                 "le runtime `{provider}` n'a pas pu démarrer ({detail}) ; Kronn réessaie toutes les 30 s ({deferrals}/{bound} essais) puis s'arrête"
@@ -1150,7 +1731,7 @@ pub fn start_resilience_watchdog(state: AppState) {
                 }
                 // KT-1266 — the run is gone (a restarted backend, a lost
                 // stream): what the worker started under it is not.
-                reap_task_worker_processes(&state, &job.id).await;
+                stop_worker_dispatch_processes(&state.db, &job.id).await;
                 let job_id = job.id.clone();
                 let transition = state
                     .db
@@ -5067,9 +5648,47 @@ pub async fn cleanup_integrated_execution(
     child_path: &str,
     integrated_sha: &str,
 ) -> Result<(), ProvisionError> {
+    cleanup_integrated_execution_with(
+        db,
+        execution,
+        repo_path,
+        child_path,
+        integrated_sha,
+        kill_recorded_worker_group,
+        crate::core::dispatch_reaper::reap_dispatch,
+    )
+    .await
+}
+
+/// [`cleanup_integrated_execution`] with the stop of the worker sessions injected.
+pub async fn cleanup_integrated_execution_with<K, R>(
+    db: &Database,
+    execution: &TaskExecution,
+    repo_path: &std::path::Path,
+    child_path: &str,
+    integrated_sha: &str,
+    kill: K,
+    reap: R,
+) -> Result<(), ProvisionError>
+where
+    K: Fn(i64, Option<&str>) -> crate::core::agent_orphans::OrphanOutcome + Clone + Send + 'static,
+    R: Fn(&str) -> crate::core::dispatch_reaper::ReapReport + Clone + Send + 'static,
+{
     let Some(branch) = execution.child_branch.as_deref() else {
         return Ok(());
     };
+    // KT-1986 — the checkout stays while a worker session may still run in it;
+    // the finished-execution sweep retries.
+    if let Some(reason) = worker_sessions_blocking_release_with(db, &execution.id, kill, reap).await
+    {
+        tracing::warn!(
+            execution_id = %execution.id,
+            worktree = %child_path,
+            "integrated worktree kept: {reason}"
+        );
+        record_release_kept(db, &execution.id, &reason).await;
+        return Ok(());
+    }
     match worktree::remove_integrated_task_worktree(repo_path, child_path, branch, integrated_sha) {
         Ok(()) => {
             // KT-1256 — the lane target lives outside the worktree and is named
@@ -5388,12 +6007,18 @@ where
     else {
         return Ok(CleanCheckoutReclaim::NotApplicable);
     };
-    let (candidate, removal) = tokio::task::spawn_blocking(move || {
-        let removal = remove(&candidate);
-        (candidate, removal)
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("worktree release failed: {error}"))?;
+    // KT-1986 — under the claim: a worker session that may still run keeps the
+    // checkout, reported as any other refusal.
+    let (candidate, removal) = match worker_sessions_blocking_release(db, &candidate.exec_id).await
+    {
+        Some(reason) => (candidate, Err(reason)),
+        None => tokio::task::spawn_blocking(move || {
+            let removal = remove(&candidate);
+            (candidate, removal)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("worktree release failed: {error}"))?,
+    };
     // The claim is released when `candidate` drops, after the outcome is recorded.
     db.with_conn(move |conn| settle_finished_checkout(conn, &candidate, removal))
         .await
@@ -5869,6 +6494,12 @@ async fn release_claimed_finished_checkout(
         record_release_kept(db, exec_id, &reason).await;
         return Err(reason);
     }
+    // KT-1986 — the durable liveness above knows sessions and leases, not the
+    // processes a worker's dispatch left.
+    if let Some(reason) = worker_sessions_blocking_release(db, exec_id).await {
+        record_release_kept(db, exec_id, &reason).await;
+        return Err(reason);
+    }
     match release_terminal_checkout(
         db,
         exec_id,
@@ -6254,7 +6885,15 @@ pub async fn release_orphaned_checkout(
     let checkout = scanner::resolve_host_path(&path);
     let checkout_path = checkout.to_string_lossy().to_string();
     let had_checkout = checkout.exists();
-    let removed = if !had_checkout {
+    // KT-1986 — its execution is gone, its worker sessions may not be.
+    let session_alive = if had_checkout {
+        orphan_worker_sessions_blocking_release(db, &orphan.disc_id).await
+    } else {
+        None
+    };
+    let removed = if let Some(reason) = session_alive {
+        Err(reason)
+    } else if !had_checkout {
         Ok(None)
     } else {
         let (repo, checkout_path, branch) =
@@ -10678,7 +11317,10 @@ fn enqueue_approved_integration(state: &AppState, outcome: ReviewOutcome) -> Rev
     };
     let db = state.db.clone();
     let execution_id = execution.id.clone();
+    let (state, approved) = (state.clone(), execution.clone());
     tokio::spawn(async move {
+        // KT-1986 — the worker's turn ends before the integration takes the lane.
+        end_worker_turn_of_approved_execution(&state, &approved).await;
         match run_integration(&db, &execution_id).await {
             Ok(IntegrationOutcome::Refused { reason }) => {
                 tracing::warn!(execution_id, %reason, "protected integration was refused after approval")
@@ -15438,9 +16080,10 @@ async fn restorable_rework(
 /// or left changes has made a delivery nobody reviewed, which the approval does not
 /// cover, so the re-validation is refused instead of integrating it.
 async fn revalidate_sent_back_execution(
-    db: &Database,
+    state: &AppState,
     exec_id: &str,
 ) -> Result<IntegrationOutcome, ProvisionError> {
+    let db = &state.db;
     let internal = |error: String| ProvisionError::Internal(error);
     let (approval, workspace) = {
         let id = exec_id.to_string();
@@ -15503,6 +16146,30 @@ async fn revalidate_sent_back_execution(
                 "the execution moved while its approval was being restored".into(),
             ))
         }
+    }
+    // KT-1986 — the reopening stood the relaunched worker down in the database
+    // only: its turn ends before the integration takes the lane.
+    let id = exec_id.to_string();
+    let relaunched = db
+        .with_read_conn(move |conn| {
+            let Some(execution) = crate::db::orchestration::get_task_execution(conn, &id)? else {
+                return Ok(None);
+            };
+            let (Some(dispatch), Some(room)) =
+                (execution.dispatch_job_id, execution.sub_discussion_id)
+            else {
+                return Ok(None);
+            };
+            // Only the worker's own dispatch: an execution can point at a
+            // dispatch of another room, whose turn is not the worker's.
+            Ok(crate::db::agent_dispatch::get(conn, &dispatch)?
+                .filter(|job| job.discussion_id == room)
+                .map(|job| job.id))
+        })
+        .await
+        .map_err(|error| internal(error.to_string()))?;
+    if let Some(dispatch_id) = relaunched {
+        end_cancelled_worker_turn(state, exec_id, &dispatch_id).await;
     }
     run_integration(db, exec_id).await
 }
@@ -15668,7 +16335,7 @@ pub async fn resume_claimed_execution(
     // same candidate, without a new delivery (KT-862). Any other worker-owned state
     // falls through to the ordinary refusals below.
     if matches!(restorable_rework(&state.db, &exec_id).await, Ok(Some(_))) {
-        let outcome = match revalidate_sent_back_execution(&state.db, &exec_id).await {
+        let outcome = match revalidate_sent_back_execution(&state, &exec_id).await {
             Ok(IntegrationOutcome::Refused { reason }) => {
                 return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, reason));
             }
@@ -15961,9 +16628,23 @@ pub async fn settle_cancelled_workspace(
         // Preserve cancel) is left to the finished-execution sweep (KT-1397),
         // which proves the execution terminal and idle before it saves the diff.
         // Its ignored files are copied into the execution's evidence first (KT-2084).
-        let released = terminal_evidence_dir(exec_id).and_then(|evidence| {
-            worktree::remove_cancelled_task_worktree(&repo, &checkout, &workspace.branch, &evidence)
-        });
+        // KT-1986 — and never while a session of its worker may still run: the
+        // cancelled sessions are stopped first, the sweep retries a kept one.
+        let session_alive = worker_sessions_blocking_release(db, exec_id).await;
+        if let Some(reason) = session_alive.as_deref() {
+            record_release_kept(db, exec_id, reason).await;
+        }
+        let released = match session_alive {
+            Some(reason) => Err(reason),
+            None => terminal_evidence_dir(exec_id).and_then(|evidence| {
+                worktree::remove_cancelled_task_worktree(
+                    &repo,
+                    &checkout,
+                    &workspace.branch,
+                    &evidence,
+                )
+            }),
+        };
         match released {
             Ok(released) => {
                 survives = false;

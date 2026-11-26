@@ -3103,23 +3103,33 @@ impl KronnToolExecutor {
                 )
                 .await
                 {
-                    Ok(outcome) => match crate::api::orchestration::continue_approved_review(
-                        &self.state.db,
-                        outcome,
-                    )
-                    .await
-                    {
-                        Ok(outcome) => {
-                            let response =
-                                crate::api::orchestration::review_outcome_to_response(outcome);
-                            unwrap_api(call, response.success, response.data, response.error)
+                    Ok(outcome) => {
+                        // KT-1986 — an approval ends the worker's turn first,
+                        // unless that turn is this one (an allowed self-review).
+                        crate::api::orchestration::end_worker_turn_of_approved_review(
+                            &self.state,
+                            &outcome,
+                            self.source_dispatch_job_id.as_deref(),
+                        )
+                        .await;
+                        match crate::api::orchestration::continue_approved_review(
+                            &self.state.db,
+                            outcome,
+                        )
+                        .await
+                        {
+                            Ok(outcome) => {
+                                let response =
+                                    crate::api::orchestration::review_outcome_to_response(outcome);
+                                unwrap_api(call, response.success, response.data, response.error)
+                            }
+                            Err(error) => {
+                                let (_, message) =
+                                    crate::api::orchestration::provision_error_parts(&error);
+                                fail(call, message)
+                            }
                         }
-                        Err(error) => {
-                            let (_, message) =
-                                crate::api::orchestration::provision_error_parts(&error);
-                            fail(call, message)
-                        }
-                    },
+                    }
                     Err(error) => {
                         let (_, message) = crate::api::orchestration::provision_error_parts(&error);
                         fail(call, message)

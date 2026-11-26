@@ -13,9 +13,8 @@ get SIGTERM, then SIGKILL, and the table is re-read for what was started
 meanwhile. Only the ended dispatch's id is matched.
 [src: file: backend/src/core/dispatch_reaper.rs:29-30#DISPATCH_ENV]
 [src: file: backend/src/core/child_env.rs:980-992#DISPATCH_ENV]
-[src: file: backend/src/api/orchestration.rs:802-804#reap_task_worker_processes]
-[src: file: backend/src/api/orchestration.rs:802-804#reap_task_worker_processes]
-[src: file: backend/src/api/orchestration.rs:800-816#reap_task_worker_processes]
+[src: file: backend/src/api/orchestration.rs:814-828#stop_worker_dispatch_processes]
+[src: file: backend/src/api/orchestration.rs:830-836#stop_worker_dispatch_processes_with]
 [src: file: backend/src/core/dispatch_reaper.rs:644-699#reap_dispatch]
 
 What is taken, and what is not:
@@ -56,8 +55,28 @@ What is taken, and what is not:
   when it is the backend's child or descends from a run process.
   [src: file: backend/src/core/dispatch_reaper.rs:309-338#hidden_kin]
 [src: file: backend/src/core/dispatch_reaper_test.rs:195-199#start_python_under_shell]
-- Nothing sweeps at boot: a lane's own backend (started by a worker, with its
-  own scratch database) would otherwise kill every worker of the host.
+- Boot stops only the worker sessions its own instance recorded (KT-2021).
+  Each CLI worker launch leaves a row in `task_worker_processes`: dispatch,
+  execution, instance id, then the agent's process group and start stamp. At
+  boot, before the lanes are classified, every unsettled row of this instance
+  is stopped: the recorded group is killed only when its start stamp still
+  matches (pid 0, pid 1 and the backend's own group are refused), then the
+  dispatch tag is reaped. A row of another instance (a lane's own backend with
+  its scratch database, a bench on a copy of the database) is never signalled,
+  so such a backend cannot kill the workers of the host.
+- The same stop runs when a dispatch ends, when the watchdog finds its run
+  gone, before a worker is started beside a previous session of its execution
+  (the launch is deferred with `previous_worker_session_alive` while one may
+  still run), and when a delivery is approved. Each stop is journaled on the
+  execution as `worker_processes_stopped`.
+- Off unix nothing can be looked for (no process group, no dispatch tag): a
+  stop kills and reaps nothing, settles the recorded launch so no launch or
+  release waits on it, journals `agent: "unsupported"` once per dispatch, and
+  is not counted as a stopped session.
+- A checkout is not removed while a recorded session of its worker may still
+  run: the release is kept with the reason (`worktree_release_kept`) and the
+  next sweep retries (KT-1986).
+- An HTTP task worker has no recorded launch: only the tag reap covers it.
 - A daemon that also calls `setsid` *and* clears its environment cannot be told
   from a foreign one; it is left running.
 

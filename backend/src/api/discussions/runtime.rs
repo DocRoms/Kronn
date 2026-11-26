@@ -204,7 +204,22 @@ pub(super) fn interrupt_undelivered_with_notice(
                     kept = stop.kept(true),
                 ),
                 _ => {
+                    // KT-2021 — given up beside a previous session: another
+                    // worker would start beside the same one.
+                    let beside_a_previous_session =
+                        crate::db::agent_dispatch::get(transaction, job_id)?
+                            .and_then(|job| job.last_error)
+                            .is_some_and(|error| error.contains(PREVIOUS_WORKER_SESSION_ALIVE));
                     let (title, ended, instruction) = match cause {
+                        UndeliveredCause::Failed | UndeliveredCause::TimedOut
+                            if beside_a_previous_session =>
+                        {
+                            (
+                                "Worker non démarré, sans livraison durable",
+                                "n'a pas démarré et n'a donc fait aucun appel à",
+                                "Une session précédente de ce worker n'a pas pu être arrêtée : l'avis « Worker non démarré » de cette discussion dit laquelle. Arrêtez ses processus, puis reprenez l'exécution (`task_exec_resume`) ; la réaffecter ne change rien.",
+                            )
+                        }
                         UndeliveredCause::Failed | UndeliveredCause::TimedOut => (
                             "Worker échoué sans livraison durable",
                             "s'est terminé sans appel valide à",
@@ -754,6 +769,16 @@ pub async fn stream_claimed_dispatch_job(
         handoff_guard.disarm();
         return None;
     }
+    match hold_worker_launch_beside_a_previous_session(&state, &job).await {
+        None => {}
+        Some(true) => {
+            handoff_guard.disarm();
+            return None;
+        }
+        // The hold could not be written: the armed guard hands the claim back
+        // to the queue. Never a launch beside the session just found alive.
+        Some(false) => return None,
+    }
     // KT-1518 — an agent on cooldown is skipped: the turn starts on its fallback.
     let job = super::agent_fallback_start::start_on_fallback(&state, job).await;
 
@@ -817,7 +842,7 @@ pub async fn stream_claimed_dispatch_job(
         state.db.assistant_guard().end_turn(&job.id);
         // KT-1266 — whatever a task worker started (a backend, a Vite) ends
         // with its dispatch, however the dispatch ended.
-        reap_task_worker_processes(&state, &job.id).await;
+        crate::api::orchestration::stop_worker_dispatch_processes(&state.db, &job.id).await;
         let status_id = job.id.clone();
         let cancelled = state
             .db
@@ -936,8 +961,6 @@ pub async fn settle_preflight_failure(
     fail_dispatch_job(state, job, diagnostic).await;
     ensure_failure_visible(state, job, diagnostic).await;
 }
-
-pub use crate::api::orchestration::reap_task_worker_processes;
 
 pub(super) fn dispatch_target_tier(
     targets: &[crate::models::MessageTarget],
@@ -1992,6 +2015,153 @@ async fn hold_validation_during_audit(
     }
 }
 
+pub use crate::api::orchestration::{previous_session_of_hold, PREVIOUS_WORKER_SESSION_ALIVE};
+
+/// KT-2021 — a worker never starts beside a previous session of its execution
+/// (a resume at boot, `task_exec_resume`, a reassignment, a fallback, a watchdog
+/// requeue). A previous launch still streaming is cancelled; one without a
+/// stream is stopped here. While either may still run the launch is deferred,
+/// then given up with the reason in both rooms (KT-1758).
+///
+/// `None`: nothing holds the launch. `Some(written)`: a previous session may
+/// still run, and whether the deferral (or the give-up) was written.
+async fn hold_worker_launch_beside_a_previous_session(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) -> Option<bool> {
+    hold_worker_launch_beside_a_previous_session_with(
+        state,
+        job,
+        crate::api::orchestration::kill_recorded_worker_group,
+        crate::core::dispatch_reaper::reap_dispatch,
+    )
+    .await
+}
+
+/// [`hold_worker_launch_beside_a_previous_session`] with the stop injected.
+async fn hold_worker_launch_beside_a_previous_session_with<K, R>(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    kill: K,
+    reap: R,
+) -> Option<bool>
+where
+    K: Fn(i64, Option<&str>) -> crate::core::agent_orphans::OrphanOutcome + Clone + Send + 'static,
+    R: Fn(&str) -> crate::core::dispatch_reaper::ReapReport + Clone + Send + 'static,
+{
+    let dispatch =
+        previous_worker_session_alive_with(state, &job.id, &job.discussion_id, kill, reap).await?;
+    Some(
+        defer_or_stop_runtime_unavailable(state, job, &previous_session_alive_reason(&dispatch))
+            .await,
+    )
+}
+
+/// The reason of a launch held beside the session of `dispatch`. It names no
+/// pid: identical reasons are what the deferral counts.
+pub(super) fn previous_session_alive_reason(dispatch: &str) -> String {
+    format!("{PREVIOUS_WORKER_SESSION_ALIVE}: dispatch {dispatch}")
+}
+
+/// KT-2021 — the dispatch of a previous session that may still run beside the
+/// worker `dispatch_job_id` is about to launch in `room`. Each one is ended
+/// first: a live stream is cancelled, anything else is stopped.
+pub(super) async fn previous_worker_session_alive(
+    state: &AppState,
+    dispatch_job_id: &str,
+    room: &str,
+) -> Option<String> {
+    previous_worker_session_alive_with(
+        state,
+        dispatch_job_id,
+        room,
+        crate::api::orchestration::kill_recorded_worker_group,
+        crate::core::dispatch_reaper::reap_dispatch,
+    )
+    .await
+}
+
+/// [`previous_worker_session_alive`] with the stop injected.
+async fn previous_worker_session_alive_with<K, R>(
+    state: &AppState,
+    dispatch_job_id: &str,
+    room: &str,
+    kill: K,
+    reap: R,
+) -> Option<String>
+where
+    K: Fn(i64, Option<&str>) -> crate::core::agent_orphans::OrphanOutcome + Clone + Send + 'static,
+    R: Fn(&str) -> crate::core::dispatch_reaper::ReapReport + Clone + Send + 'static,
+{
+    let (lookup, worker_room) = (dispatch_job_id.to_string(), room.to_string());
+    let previous = state
+        .db
+        .with_read_conn(move |conn| {
+            let Some(execution) =
+                crate::db::orchestration::get_execution_for_dispatch(conn, &lookup)?
+            else {
+                return Ok(Vec::new());
+            };
+            // Only the worker's own launch: an execution can point at a dispatch
+            // of another room, which starts no worker and must cancel none.
+            if execution.sub_discussion_id.as_deref() != Some(worker_room.as_str()) {
+                return Ok(Vec::new());
+            }
+            let instance = crate::core::dispatch_reaper::instance_id();
+            Ok(
+                crate::db::worker_processes::unsettled_for_execution(conn, &execution.id)?
+                    .into_iter()
+                    .filter(|row| row.instance_id == instance)
+                    .map(|row| row.dispatch_job_id)
+                    .collect::<Vec<String>>(),
+            )
+        })
+        .await;
+    let previous = match previous {
+        Ok(previous) => previous,
+        Err(error) => {
+            tracing::warn!(
+                dispatch_job_id,
+                "previous worker sessions unreadable: {error}"
+            );
+            return None;
+        }
+    };
+    let mut alive: Option<String> = None;
+    for dispatch in previous {
+        // A token under the launching dispatch's own id is an earlier run of it
+        // closing, and the key its new run registers under: never cancelled here.
+        let streaming = if dispatch == dispatch_job_id {
+            None
+        } else {
+            state
+                .cancel_registry
+                .lock()
+                .ok()
+                .and_then(|registry| registry.get(&dispatch).cloned())
+        };
+        let may_still_run = match streaming {
+            // Its own stream ends on the cancel, then stops what it started.
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => crate::api::orchestration::stop_worker_dispatch_processes_with(
+                &state.db,
+                &dispatch,
+                kill.clone(),
+                reap.clone(),
+            )
+            .await
+            .may_still_run(),
+        };
+        if may_still_run && alive.is_none() {
+            alive = Some(dispatch);
+        }
+    }
+    alive
+}
+
 /// KT-1758 — a task-worker refusal that waiting cannot change: the launch path
 /// refuses the agent as this kind of worker (a native ACP agent carries neither
 /// the delivery context nor the permission scope).
@@ -2118,6 +2288,84 @@ fn compatible_workers_hint(agent: &str, french: bool) -> String {
     .join(", ")
 }
 
+/// KT-2021 — the pids the latest stop of `previous` left alive, read from the
+/// execution's journal: the counted reason never carries them.
+async fn previous_session_survivors(
+    state: &AppState,
+    execution_id: &str,
+    previous: &str,
+) -> Vec<u64> {
+    let (execution_id, previous) = (execution_id.to_string(), previous.to_string());
+    let survivors = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(
+                crate::db::orchestration::list_execution_events(conn, &execution_id)?
+                    .into_iter()
+                    .rev()
+                    .find(|event| {
+                        event.action == crate::api::orchestration::WORKER_PROCESSES_STOPPED_ACTION
+                            && event.changes["dispatch_job_id"].as_str() == Some(previous.as_str())
+                    })
+                    .and_then(|event| event.changes["survivors"].as_array().cloned())
+                    .map(|pids| {
+                        pids.iter()
+                            .filter_map(serde_json::Value::as_u64)
+                            .collect::<Vec<u64>>()
+                    })
+                    .unwrap_or_default(),
+            )
+        })
+        .await;
+    survivors.unwrap_or_else(|error| {
+        tracing::warn!("the survivors of a previous worker session are unreadable: {error}");
+        Vec::new()
+    })
+}
+
+/// KT-2021 — what both rooms are told (French, English) when a launch is given
+/// up beside a previous session: which one, what is left of it, what to do.
+fn previous_session_alive_notice(
+    dispatch: &str,
+    execution: &str,
+    previous: &str,
+    agent: &str,
+    tries: Option<u32>,
+    survivors: &[u64],
+) -> (String, String) {
+    let (fr_tries, en_tries) = match tries {
+        Some(tries) => (
+            format!(" après {tries} essais"),
+            format!(" after {tries} tries"),
+        ),
+        None => (String::new(), String::new()),
+    };
+    let (fr_left, en_left) = if survivors.is_empty() {
+        (
+            "Aucun identifiant de processus n'a été relevé pour cette session.".to_string(),
+            "No process id was recorded for this session.".to_string(),
+        )
+    } else {
+        let pids = survivors
+            .iter()
+            .map(|pid| format!("`{pid}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        (
+            format!("Processus encore en vie : {pids}."),
+            format!("Processes still alive: {pids}."),
+        )
+    };
+    (
+        format!(
+            "**Worker non démarré — une session précédente tourne encore**\n\nLe dispatch `{dispatch}` de l'exécution `{execution}` n'a pas démarré : une session précédente de ce worker, celle du dispatch `{previous}`, n'a pas pu être arrêtée{fr_tries}. {fr_left}\n\nL'agent `{agent}` n'est pas en cause : Kronn n'a confié l'exécution à aucun autre worker, et la réaffecter ne change rien. Arrêtez les processus de cette session, puis reprenez l'exécution avec `task_exec_resume`."
+        ),
+        format!(
+            "**Worker not started — a previous session is still running**\n\nDispatch `{dispatch}` of execution `{execution}` did not start: a previous session of this worker, the one of dispatch `{previous}`, could not be stopped{en_tries}. {en_left}\n\nThe agent `{agent}` is not the cause: Kronn handed the execution to no other worker, and reassigning it changes nothing. Stop the processes of this session, then resume the execution with `task_exec_resume`."
+        ),
+    )
+}
+
 /// `fallback_only`: leave an execution that no fallback moved to the caller.
 async fn settle_worker_launch_refusal(
     state: &AppState,
@@ -2150,7 +2398,10 @@ async fn settle_worker_launch_refusal(
     // A fallback worker has links to move on to: the execution is not parked and
     // the principal is not told to reassign it until none of them takes it. A
     // worker that is not one has nowhere to go: it is settled as any failure.
-    let hands_over = worker.is_fallback;
+    // KT-2021 — nor has a launch held beside a previous session: the agent is
+    // not the cause, and another one would start beside the same session.
+    let previous_session = previous_session_of_hold(reason).map(str::to_string);
+    let hands_over = worker.is_fallback && previous_session.is_none();
     let settled = state
         .db
         .with_conn(move |conn| {
@@ -2207,7 +2458,7 @@ async fn settle_worker_launch_refusal(
     // KT-2000 — the chain's own reason when it took nothing (« … it has no
     // shell … »): the stop notice carries it.
     let mut chain_stop: Option<String> = None;
-    if worker.is_fallback {
+    if hands_over {
         let available = match available {
             Some(available) => available,
             None => crate::api::orchestration::available_agent_types_for_state(state).await,
@@ -2316,7 +2567,16 @@ async fn settle_worker_launch_refusal(
                 ),
                 None => (String::new(), String::new()),
             };
-            let (fr, en) = if refused {
+            let (fr, en) = if let Some(previous) = previous_session.as_deref() {
+                let survivors = previous_session_survivors(state, execution, previous).await;
+                let tries = match stop {
+                    LaunchStop::Unavailable { times } => Some(times),
+                    LaunchStop::Refused => None,
+                };
+                previous_session_alive_notice(
+                    dispatch, execution, previous, agent, tries, &survivors,
+                )
+            } else if refused {
                 (
                     format!(
                         "**Worker non démarré — `{agent}` refusé au lancement**\n\nLe dispatch `{dispatch}` de l'exécution `{execution}` n'a pas pu démarrer sur `{agent}` : {detail}{fr_chain}\n\nCette cause ne change pas en attendant et aucun lien de repli utilisable ne reste : Kronn n'a pas relancé le dispatch et ne le fera pas seul. Réaffecte l'exécution à un worker compatible ({hint}) ou annule-la.",
@@ -2425,12 +2685,15 @@ async fn post_room_notice(state: &AppState, room: String, id: String, fr: String
 /// [`RUNTIME_UNAVAILABLE_MAX_DEFERRALS`] times in a row ends the retries and
 /// says why, in both rooms, with the reason as the runtime gave it. A dispatch
 /// that is not a task worker's keeps the durable deferral it always had.
+///
+/// `false` when neither the deferral nor the stop could be written: the
+/// dispatch is still claimed.
 pub async fn defer_or_stop_runtime_unavailable(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     reason: &str,
-) {
-    defer_or_stop_runtime_unavailable_among(state, job, reason, None).await;
+) -> bool {
+    defer_or_stop_runtime_unavailable_among(state, job, reason, None).await
 }
 
 /// [`defer_or_stop_runtime_unavailable`] with the installed agents given, so the
@@ -2440,7 +2703,7 @@ pub async fn defer_or_stop_runtime_unavailable_among(
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     reason: &str,
     available: Option<Vec<crate::models::AgentType>>,
-) {
+) -> bool {
     let lookup = job.id.clone();
     let context = state
         .db
@@ -2460,8 +2723,7 @@ pub async fn defer_or_stop_runtime_unavailable_among(
         }
     };
     let Some(worker) = worker else {
-        defer_runtime_unavailable(state, job, reason, 1).await;
-        return;
+        return defer_runtime_unavailable(state, job, reason, 1).await;
     };
     if worker.is_fallback
         && is_missing_binary(reason)
@@ -2475,7 +2737,7 @@ pub async fn defer_or_stop_runtime_unavailable_among(
         )
         .await
     {
-        return;
+        return true;
     }
     let deferrals = previous
         .as_deref()
@@ -2488,21 +2750,22 @@ pub async fn defer_or_stop_runtime_unavailable_among(
         // time. Said as that, and never as a reason to go to the failing agent.
         let stop = LaunchStop::Unavailable { times: deferrals };
         if settle_worker_launch_refusal(state, job, reason, available, false, stop).await {
-            return;
+            return true;
         }
     }
-    defer_runtime_unavailable(state, job, reason, deferrals).await;
+    defer_runtime_unavailable(state, job, reason, deferrals).await
 }
 
+/// `false` when the deferral could not be written.
 async fn defer_runtime_unavailable(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     reason: &str,
     deferrals: u32,
-) {
+) -> bool {
     let job_id = job.id.clone();
     let persisted_reason = crate::db::agent_dispatch::runtime_unavailable_marker(deferrals, reason);
-    match state
+    let written = match state
         .db
         .with_conn(move |conn| {
             crate::db::agent_dispatch::defer_runtime_unavailable(
@@ -2514,20 +2777,28 @@ async fn defer_runtime_unavailable(
         })
         .await
     {
-        Ok(true) => tracing::warn!(
-            "Deferred dispatch {} for {}s because its runtime is unavailable: {}",
-            job.id,
-            RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS,
-            reason
-        ),
-        Ok(false) => {}
-        Err(error) => tracing::error!(
-            "Unable to defer dispatch {} after unavailable runtime: {}",
-            job.id,
-            error
-        ),
-    }
+        Ok(true) => {
+            tracing::warn!(
+                "Deferred dispatch {} for {}s because its runtime is unavailable: {}",
+                job.id,
+                RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS,
+                reason
+            );
+            true
+        }
+        // No longer running (cancelled meanwhile): nothing is left to start.
+        Ok(false) => true,
+        Err(error) => {
+            tracing::error!(
+                "Unable to defer dispatch {} after unavailable runtime: {}",
+                job.id,
+                error
+            );
+            false
+        }
+    };
     state.agent_dispatch_notify.notify_waiters();
+    written
 }
 
 async fn settle_cancelled_dispatch(
@@ -3549,6 +3820,13 @@ mod chain_render_tests {
                        WHERE discussion_id = 'd-limit-child'), ?2)",
             rusqlite::params![format!("u-{job}"), now],
         )?;
+        // The room's own counter follows, so a notice posted later gets a free order.
+        conn.execute(
+            "UPDATE discussions SET next_message_seq =
+                 (SELECT MAX(sort_order) + 1 FROM messages WHERE discussion_id = 'd-limit-child')
+             WHERE id = 'd-limit-child'",
+            [],
+        )?;
         crate::db::agent_dispatch::enqueue_for_latest_user(
             conn,
             crate::db::agent_dispatch::NewLatestUserDispatch {
@@ -3870,6 +4148,722 @@ mod chain_render_tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A `sleep` leading its own process group, as a worker's agent does. It
+    /// is killed on drop unless the test saw it gone: a group that ended is
+    /// never signalled, its id may be another's.
+    #[cfg(unix)]
+    struct SleepingGroup {
+        child: std::process::Child,
+        gone: bool,
+    }
+
+    #[cfg(unix)]
+    impl SleepingGroup {
+        fn start() -> Self {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("600");
+            std::os::unix::process::CommandExt::process_group(&mut command, 0);
+            Self {
+                child: command.spawn().unwrap(),
+                gone: false,
+            }
+        }
+
+        /// The recorded form of this group: its id and its leader's start stamp.
+        fn recorded(&self) -> (i64, Option<String>) {
+            let stamp = crate::core::agent_orphans::start_stamp(self.child.id());
+            assert!(
+                stamp.is_some(),
+                "the platform must be able to stamp a process"
+            );
+            (i64::from(self.child.id()), stamp)
+        }
+
+        /// Whether the leader ended and nothing is left in its group, within `bound`.
+        fn gone_within(&mut self, bound: std::time::Duration) -> bool {
+            let deadline = std::time::Instant::now() + bound;
+            loop {
+                let ended = matches!(self.child.try_wait(), Ok(Some(_)));
+                // SAFETY: signal 0 only checks that the group exists.
+                if ended && unsafe { libc::killpg(self.child.id() as i32, 0) } != 0 {
+                    self.gone = true;
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SleepingGroup {
+        fn drop(&mut self) {
+            if !self.gone {
+                // SAFETY: the group this test started, not yet seen gone.
+                unsafe { libc::killpg(self.child.id() as i32, libc::SIGKILL) };
+            }
+            let _ = self.child.wait();
+        }
+    }
+
+    fn previous_session_agent_gone(
+        _pgid: i64,
+        _marker: Option<&str>,
+    ) -> crate::core::agent_orphans::OrphanOutcome {
+        crate::core::agent_orphans::OrphanOutcome::Gone
+    }
+
+    fn previous_session_reap_nothing(_tag: &str) -> crate::core::dispatch_reaper::ReapReport {
+        crate::core::dispatch_reaper::ReapReport::default()
+    }
+
+    fn previous_session_reap_a_survivor(_tag: &str) -> crate::core::dispatch_reaper::ReapReport {
+        crate::core::dispatch_reaper::ReapReport {
+            signalled: 1,
+            survivors: vec![4242],
+            unverified: false,
+        }
+    }
+
+    /// A `Working` execution resumed on the claimed dispatch `j-ghost-new`,
+    /// after its dispatch `j-ghost-old` was cancelled. The old one is a
+    /// recorded worker launch of this instance, with `agent` as its group.
+    fn resumed_beside_a_recorded_session(
+        conn: &rusqlite::Connection,
+        agent: Option<(i64, Option<String>)>,
+    ) -> anyhow::Result<(String, crate::db::agent_dispatch::AgentDispatchJob)> {
+        let execution_id = working_execution(conn, "j-ghost-old")?;
+        crate::db::orchestration::set_execution_sub_discussion(
+            conn,
+            &execution_id,
+            "d-limit-child",
+        )?;
+        anyhow::ensure!(
+            crate::db::agent_dispatch::cancel_for_discussion_by_id(
+                conn,
+                "d-limit-child",
+                "j-ghost-old"
+            )?,
+            "the previous dispatch is cancelled"
+        );
+        attach_claimed_dispatch(conn, &execution_id, "j-ghost-new")?;
+        crate::db::worker_processes::record_launch(
+            conn,
+            "j-ghost-old",
+            &execution_id,
+            crate::core::dispatch_reaper::instance_id(),
+        )?;
+        if let Some((pgid, marker)) = agent {
+            crate::db::worker_processes::set_agent(conn, "j-ghost-old", pgid, marker.as_deref())?;
+        }
+        let job = crate::db::agent_dispatch::get(conn, "j-ghost-new")?
+            .ok_or_else(|| anyhow::anyhow!("the resumed dispatch is on record"))?;
+        anyhow::ensure!(
+            job.status == crate::db::agent_dispatch::DispatchStatus::Running,
+            "the resumed dispatch is claimed"
+        );
+        Ok((execution_id, job))
+    }
+
+    /// The `changes` of the worker-process stops journaled on `execution_id`.
+    fn worker_stop_events(
+        conn: &rusqlite::Connection,
+        execution_id: &str,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        Ok(
+            crate::db::orchestration::list_execution_events(conn, execution_id)?
+                .into_iter()
+                .filter(|event| {
+                    event.action == crate::api::orchestration::WORKER_PROCESSES_STOPPED_ACTION
+                })
+                .map(|event| event.changes)
+                .collect(),
+        )
+    }
+
+    /// KT-2021 — a previous session of the execution still alive when its
+    /// worker is resumed is killed first: the launch is not held.
+    #[cfg(unix)] // kills a `sleep` process group through libc
+    #[tokio::test]
+    async fn a_previous_session_still_running_is_stopped_before_the_worker_is_resumed() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let mut previous = SleepingGroup::start();
+        let recorded = previous.recorded();
+        let (execution_id, job) = db
+            .with_conn(move |conn| resumed_beside_a_recorded_session(conn, Some(recorded)))
+            .await
+            .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        let held = super::hold_worker_launch_beside_a_previous_session_with(
+            &state,
+            &job,
+            crate::api::orchestration::kill_recorded_worker_group,
+            previous_session_reap_nothing,
+        )
+        .await
+        .is_some();
+
+        assert!(!held, "nothing is left of the previous session");
+        assert!(
+            previous.gone_within(std::time::Duration::from_secs(30)),
+            "the previous session's agent must be gone before the worker starts"
+        );
+        db.with_conn(move |conn| {
+            let old = crate::db::worker_processes::get(conn, "j-ghost-old")?
+                .expect("the recorded launch");
+            assert!(old.stopped_at.is_some(), "the previous launch is settled");
+            let resumed = crate::db::agent_dispatch::get(conn, "j-ghost-new")?.unwrap();
+            assert_eq!(
+                resumed.status,
+                crate::db::agent_dispatch::DispatchStatus::Running,
+                "the resumed dispatch goes on to its launch"
+            );
+            let events = worker_stop_events(conn, &execution_id)?;
+            assert_eq!(events.len(), 1, "{events:?}");
+            assert_eq!(events[0]["dispatch_job_id"], "j-ghost-old");
+            assert_eq!(events[0]["agent"], "killed");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2021 — a previous session that cannot be stopped holds the launch:
+    /// the dispatch is deferred with the stable reason, and once the deferrals
+    /// run out the execution is parked and both rooms are told why.
+    #[tokio::test]
+    async fn a_previous_session_that_cannot_be_stopped_holds_the_launch_and_says_why() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let (execution_id, mut job) = db
+            .with_conn(|conn| resumed_beside_a_recorded_session(conn, None))
+            .await
+            .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let reason = format!(
+            "{}: dispatch j-ghost-old",
+            super::PREVIOUS_WORKER_SESSION_ALIVE
+        );
+        let bound = super::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
+
+        for attempt in 1..=bound {
+            let held = super::hold_worker_launch_beside_a_previous_session_with(
+                &state,
+                &job,
+                previous_session_agent_gone,
+                previous_session_reap_a_survivor,
+            )
+            .await
+            .is_some();
+            assert!(held, "try {attempt}: the launch is held");
+            let expected = crate::db::agent_dispatch::runtime_unavailable_marker(attempt, &reason);
+            job = db
+                .with_conn(move |conn| {
+                    let deferred = crate::db::agent_dispatch::get(conn, "j-ghost-new")?.unwrap();
+                    assert_eq!(
+                        deferred.status,
+                        crate::db::agent_dispatch::DispatchStatus::Pending,
+                        "still retried"
+                    );
+                    assert_eq!(deferred.last_error.as_deref(), Some(expected.as_str()));
+                    // The next scanner pass: the deferred dispatch is due again.
+                    conn.execute(
+                        "UPDATE agent_dispatch_jobs SET available_at = ?1 WHERE id = 'j-ghost-new'",
+                        [chrono::Utc::now().to_rfc3339()],
+                    )?;
+                    crate::db::agent_dispatch::claim(conn, "j-ghost-new")?
+                        .ok_or_else(|| anyhow::anyhow!("the deferred dispatch is claimable"))
+                })
+                .await
+                .unwrap();
+        }
+        let held = super::hold_worker_launch_beside_a_previous_session_with(
+            &state,
+            &job,
+            previous_session_agent_gone,
+            previous_session_reap_a_survivor,
+        )
+        .await
+        .is_some();
+        assert!(held, "the launch that is given up is not started either");
+
+        db.with_conn(move |conn| {
+            let ended = crate::db::agent_dispatch::get(conn, "j-ghost-new")?.unwrap();
+            assert_eq!(
+                ended.status,
+                crate::db::agent_dispatch::DispatchStatus::Failed,
+                "the bound ends the retries"
+            );
+            let error = ended.last_error.clone().unwrap_or_default();
+            assert!(error.contains(&reason), "{error}");
+            assert_eq!(ended.failure_kind.as_deref(), Some("launch_unavailable"));
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            assert_eq!(
+                execution.status,
+                crate::models::TaskExecutionStatus::Interrupted
+            );
+            for (room, notice_id) in [
+                ("d-limit-parent", "worker-launch-refused:j-ghost-new"),
+                ("d-limit-child", "worker-launch-refused-child:j-ghost-new"),
+            ] {
+                let notice: String = conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1 AND discussion_id = ?2",
+                    rusqlite::params![notice_id, room],
+                    |row| row.get(0),
+                )?;
+                // Which session, what is left of it, and the remedy that works.
+                for said in ["`j-ghost-old`", "`4242`", "`task_exec_resume`"] {
+                    assert!(notice.contains(said), "{room}: {said} missing in {notice}");
+                }
+                for absent in [
+                    "Réaffecte l'exécution",
+                    "Reassign the execution",
+                    super::PREVIOUS_WORKER_SESSION_ALIVE,
+                ] {
+                    assert!(!notice.contains(absent), "{room}: {absent:?} in {notice}");
+                }
+            }
+            // The notice that wakes the principal does not send it to a reassignment.
+            let woken = parent_notices(conn, "orch-worker-undelivered:")?;
+            assert_eq!(woken.len(), 1, "{woken:?}");
+            assert!(woken[0].1.contains("`task_exec_resume`"), "{}", woken[0].1);
+            assert!(
+                !woken[0].1.contains("réaffecte ou annule"),
+                "{}",
+                woken[0].1
+            );
+            let old = crate::db::worker_processes::get(conn, "j-ghost-old")?
+                .expect("the recorded launch");
+            assert!(old.stopped_at.is_none(), "a survivor leaves it unsettled");
+            let events = worker_stop_events(conn, &execution_id)?;
+            assert_eq!(
+                events.len(),
+                1,
+                "the same stop is journaled once: {events:?}"
+            );
+            assert_eq!(events[0]["survivors"], serde_json::json!([4242]));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A claimed dispatch `job` of `room` for `agent`, triggered by a user turn
+    /// of its own.
+    fn claimed_dispatch_in(
+        conn: &rusqlite::Connection,
+        room: &str,
+        job: &str,
+        agent: &crate::models::AgentType,
+    ) -> anyhow::Result<crate::db::agent_dispatch::AgentDispatchJob> {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO messages
+             (id, discussion_id, role, content, timestamp, sort_order, received_at)
+             VALUES (?1, ?2, 'User', 'go', ?3,
+                     (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM messages
+                       WHERE discussion_id = ?2), ?3)",
+            rusqlite::params![format!("u-{job}"), room, now],
+        )?;
+        conn.execute(
+            "UPDATE discussions SET next_message_seq =
+                 (SELECT MAX(sort_order) + 1 FROM messages WHERE discussion_id = ?1)
+             WHERE id = ?1",
+            [room],
+        )?;
+        crate::db::agent_dispatch::enqueue_for_latest_user(
+            conn,
+            crate::db::agent_dispatch::NewLatestUserDispatch {
+                id: job,
+                discussion_id: room,
+                dedupe_key: &format!("message:u-{job}"),
+                agent_override: Some(agent),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )?;
+        crate::db::agent_dispatch::claim(conn, job)?
+            .ok_or_else(|| anyhow::anyhow!("dispatch {job} is claimable"))
+    }
+
+    /// A live stream of `dispatch`: its cancel token, registered as a run's is.
+    fn live_stream(state: &crate::AppState, dispatch: &str) -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        state
+            .cancel_registry
+            .lock()
+            .unwrap()
+            .insert(dispatch.to_string(), token.clone());
+        token
+    }
+
+    /// KT-2021 — the hold acts only for a worker launch. An execution can point
+    /// at a dispatch of its parent room: that dispatch starts no worker, so it
+    /// is not held and the worker's live stream is not cancelled.
+    #[tokio::test]
+    async fn a_dispatch_of_the_parent_room_holds_nothing_and_cancels_no_worker() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let (execution_id, job) = db
+            .with_conn(|conn| {
+                let execution_id = working_execution(conn, "j-ghost-worker")?;
+                crate::db::orchestration::set_execution_sub_discussion(
+                    conn,
+                    &execution_id,
+                    "d-limit-child",
+                )?;
+                crate::db::worker_processes::record_launch(
+                    conn,
+                    "j-ghost-worker",
+                    &execution_id,
+                    crate::core::dispatch_reaper::instance_id(),
+                )?;
+                // A turn of the parent room the execution now points at.
+                let job = claimed_dispatch_in(
+                    conn,
+                    "d-limit-parent",
+                    "j-ghost-parent",
+                    &crate::models::AgentType::Ollama,
+                )?;
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution_id,
+                    "j-ghost-parent",
+                )?;
+                Ok((execution_id, job))
+            })
+            .await
+            .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let worker_stream = live_stream(&state, "j-ghost-worker");
+
+        let held = super::hold_worker_launch_beside_a_previous_session_with(
+            &state,
+            &job,
+            previous_session_agent_gone,
+            previous_session_reap_a_survivor,
+        )
+        .await
+        .is_some();
+
+        assert!(!held, "a turn of the parent room is not a worker launch");
+        assert!(
+            !worker_stream.is_cancelled(),
+            "the worker that is running must not be cancelled by a turn of the parent room"
+        );
+        db.with_conn(move |conn| {
+            let parent_turn = crate::db::agent_dispatch::get(conn, "j-ghost-parent")?.unwrap();
+            assert_eq!(
+                parent_turn.status,
+                crate::db::agent_dispatch::DispatchStatus::Running,
+                "the turn of the parent room goes on"
+            );
+            assert_eq!(parent_turn.last_error, None);
+            let worker = crate::db::worker_processes::get(conn, "j-ghost-worker")?
+                .expect("the recorded launch");
+            assert!(worker.stopped_at.is_none(), "the worker was not stopped");
+            assert!(worker_stop_events(conn, &execution_id)?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2021 — a dispatch launched again (a watchdog requeue, a retry) is held
+    /// while the session of its own previous run may still be alive, and is
+    /// launched, its record settled, once nothing is left. A token under its
+    /// own id is never cancelled: its new run registers under that key.
+    #[tokio::test]
+    async fn a_requeued_dispatch_is_held_beside_its_own_previous_session() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let (execution_id, job) = db
+            .with_conn(|conn| {
+                let execution_id = working_execution(conn, "j-ghost-own")?;
+                crate::db::orchestration::set_execution_sub_discussion(
+                    conn,
+                    &execution_id,
+                    "d-limit-child",
+                )?;
+                // What the previous run of this very dispatch recorded.
+                crate::db::worker_processes::record_launch(
+                    conn,
+                    "j-ghost-own",
+                    &execution_id,
+                    crate::core::dispatch_reaper::instance_id(),
+                )?;
+                let job = crate::db::agent_dispatch::get(conn, "j-ghost-own")?
+                    .ok_or_else(|| anyhow::anyhow!("the requeued dispatch is on record"))?;
+                Ok((execution_id, job))
+            })
+            .await
+            .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let own_key = live_stream(&state, "j-ghost-own");
+
+        let held = super::hold_worker_launch_beside_a_previous_session_with(
+            &state,
+            &job,
+            previous_session_agent_gone,
+            previous_session_reap_a_survivor,
+        )
+        .await
+        .is_some();
+
+        assert!(held, "a survivor of its own previous run holds the launch");
+        assert!(
+            !own_key.is_cancelled(),
+            "a token under the dispatch's own id is never cancelled"
+        );
+        let reason = super::previous_session_alive_reason("j-ghost-own");
+        let expected = crate::db::agent_dispatch::runtime_unavailable_marker(1, &reason);
+        let job = db
+            .with_conn(move |conn| {
+                let deferred = crate::db::agent_dispatch::get(conn, "j-ghost-own")?.unwrap();
+                assert_eq!(
+                    deferred.status,
+                    crate::db::agent_dispatch::DispatchStatus::Pending,
+                    "held, to be retried"
+                );
+                assert_eq!(deferred.last_error.as_deref(), Some(expected.as_str()));
+                let own = crate::db::worker_processes::get(conn, "j-ghost-own")?
+                    .expect("the recorded launch");
+                assert!(own.stopped_at.is_none(), "a survivor leaves it unsettled");
+                // The next scanner pass: the deferred dispatch is due again.
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs SET available_at = ?1 WHERE id = 'j-ghost-own'",
+                    [chrono::Utc::now().to_rfc3339()],
+                )?;
+                crate::db::agent_dispatch::claim(conn, "j-ghost-own")?
+                    .ok_or_else(|| anyhow::anyhow!("the deferred dispatch is claimable"))
+            })
+            .await
+            .unwrap();
+
+        let held = super::hold_worker_launch_beside_a_previous_session_with(
+            &state,
+            &job,
+            previous_session_agent_gone,
+            previous_session_reap_nothing,
+        )
+        .await
+        .is_some();
+
+        assert!(!held, "nothing is left of the previous run");
+        assert!(!own_key.is_cancelled());
+        db.with_conn(move |conn| {
+            let launched = crate::db::agent_dispatch::get(conn, "j-ghost-own")?.unwrap();
+            assert_eq!(
+                launched.status,
+                crate::db::agent_dispatch::DispatchStatus::Running,
+                "the dispatch goes on to its launch"
+            );
+            let own = crate::db::worker_processes::get(conn, "j-ghost-own")?
+                .expect("the recorded launch");
+            assert!(own.stopped_at.is_some(), "the previous run is settled");
+            let events = worker_stop_events(conn, &execution_id)?;
+            assert_eq!(events.len(), 2, "{events:?}");
+            assert_eq!(events[0]["survivors"], serde_json::json!([4242]));
+            assert_eq!(events[1]["survivors"], serde_json::json!([]));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2021 — a worker woken in its room adopts its interrupted execution
+    /// after the launch hold ran. While a previous session of that execution is
+    /// still alive the turn is not started beside it: it ends as unavailable
+    /// with the hold's own reason, which the dispatcher retries and counts.
+    #[tokio::test]
+    async fn a_woken_worker_is_not_started_beside_a_previous_session_of_its_execution() {
+        use crate::api::discussions::streaming::AgentExecutionOutcome;
+        use axum::response::IntoResponse;
+        // No working directory can be prepared for this id: a turn that is not
+        // held stops at that preflight, before any agent is started.
+        const CHILD: &str = "invalid/woken-child";
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let execution_id = db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                for (id, title) in [("d-woken-parent", "Parent"), (CHILD, "Child")] {
+                    conn.execute(
+                        "INSERT INTO discussions
+                         (id, title, agent, language, created_at, updated_at, awaiting_agent)
+                         VALUES (?1, ?2, 'Codex', 'en', ?3, ?3, 1)",
+                        rusqlite::params![id, title, now],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, status, created_at, updated_at)
+                     VALUES ('t-woken', 9905, 'Woken', 'todo', ?1, ?1)",
+                    [&now],
+                )?;
+                let mut launch =
+                    crate::models::LaunchSingleTaskInput::new("t-woken", "d-woken-parent");
+                launch.worker_target_kind = Some(crate::models::MessageTargetKind::Agent);
+                launch.worker_agent_type = Some("Codex".into());
+                let execution =
+                    crate::db::orchestration::launch_single_task(conn, &launch, &backend_actor())?
+                        .execution;
+                for status in [
+                    crate::models::TaskExecutionStatus::Provisioning,
+                    crate::models::TaskExecutionStatus::Working,
+                ] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution.id,
+                        status,
+                        &backend_actor(),
+                        serde_json::json!({}),
+                    )?;
+                }
+                crate::db::orchestration::set_execution_sub_discussion(conn, &execution.id, CHILD)?;
+                claimed_dispatch_in(conn, CHILD, "j-woken-old", &crate::models::AgentType::Codex)?;
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution.id,
+                    "j-woken-old",
+                )?;
+                crate::db::worker_processes::record_launch(
+                    conn,
+                    "j-woken-old",
+                    &execution.id,
+                    crate::core::dispatch_reaper::instance_id(),
+                )?;
+                // Its turn ended without a delivery: the execution is parked
+                // for a resume, which waking the worker in its room is.
+                let settled = persist_dispatch_settlement(
+                    conn,
+                    "j-woken-old",
+                    CHILD,
+                    None,
+                    crate::db::workflows::BatchChildOutcome::Failed,
+                    Some("the agent ended without a delivery"),
+                    None,
+                )?;
+                anyhow::ensure!(settled.changed, "the previous dispatch settles");
+                claimed_dispatch_in(conn, CHILD, "j-woken-new", &crate::models::AgentType::Codex)?;
+                Ok(execution.id)
+            })
+            .await
+            .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        // The previous session still streams: nothing has to be signalled here.
+        let previous_stream = live_stream(&state, "j-woken-old");
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response = crate::api::discussions::streaming::make_agent_stream_inner(
+            state.clone(),
+            CHILD.into(),
+            None,
+            None,
+            Some("j-woken-new".into()),
+            None,
+            Some(tx),
+        )
+        .await
+        .into_response();
+        let _ = axum::body::to_bytes(response.into_body(), 64 * 1024).await;
+
+        assert_eq!(
+            rx.await.unwrap(),
+            AgentExecutionOutcome::RuntimeUnavailable {
+                reason: super::previous_session_alive_reason("j-woken-old"),
+            },
+            "the woken turn must not start beside the previous session"
+        );
+        assert!(
+            previous_stream.is_cancelled(),
+            "the previous session is told to end"
+        );
+        db.with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            assert_eq!(
+                execution.status,
+                crate::models::TaskExecutionStatus::Working,
+                "the woken dispatch adopted the execution"
+            );
+            assert_eq!(execution.dispatch_job_id.as_deref(), Some("j-woken-new"));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2021 — the notice of a launch given up beside a previous session
+    /// names that session, what is left of it and the remedy, in both
+    /// languages, and never tells anyone to reassign.
+    #[test]
+    fn the_previous_session_notice_says_which_session_and_what_to_do() {
+        let (fr, en) = super::previous_session_alive_notice(
+            "j-new",
+            "exec-1",
+            "j-old",
+            "Codex",
+            Some(11),
+            &[4242, 4243],
+        );
+        for notice in [&fr, &en] {
+            for said in [
+                "`j-new`",
+                "`exec-1`",
+                "`j-old`",
+                "`4242`, `4243`",
+                "`task_exec_resume`",
+                "11",
+            ] {
+                assert!(notice.contains(said), "{said} missing in {notice}");
+            }
+        }
+        assert!(fr.contains("Arrêtez les processus"), "{fr}");
+        assert!(fr.contains("reprenez l'exécution"), "{fr}");
+        assert!(fr.contains("la réaffecter ne change rien"), "{fr}");
+        assert!(en.contains("Stop the processes"), "{en}");
+        assert!(en.contains("reassigning it changes nothing"), "{en}");
+
+        // A session that could not be looked at left no pid to name.
+        let (fr, en) =
+            super::previous_session_alive_notice("j-new", "exec-1", "j-old", "Codex", None, &[]);
+        assert!(fr.contains("Aucun identifiant de processus"), "{fr}");
+        assert!(en.contains("No process id was recorded"), "{en}");
+        assert!(!fr.contains("essais") && !en.contains("tries"));
+
+        assert_eq!(
+            super::previous_session_of_hold(&super::previous_session_alive_reason("j-old")),
+            Some("j-old")
+        );
+        assert_eq!(
+            super::previous_session_of_hold("Binary 'codex' not found"),
+            None
+        );
     }
 
     /// KT-860 — a run the catalogue preflight refuses keeps the refused model

@@ -899,6 +899,12 @@ async fn advance(
                 if let Some(stop) = past_deadline(world, deadline) {
                     return Ok(Progress::Stopped(stop));
                 }
+                // KT-1986 — the stop may have come before the worker's turn was ended.
+                crate::api::orchestration::end_worker_turn_of_approved_execution(
+                    delegation.state,
+                    execution,
+                )
+                .await;
                 if let IntegrationOutcome::Refused { reason } =
                     integrate(db, setup, &execution.id).await?
                 {
@@ -1218,6 +1224,13 @@ async fn review(
                     if let Some(stop) = past_deadline(world, deadline) {
                         return Ok(Some(stop));
                     }
+                    // KT-1986 — the worker's turn ends before the integration
+                    // takes the lane.
+                    crate::api::orchestration::end_worker_turn_of_approved_execution(
+                        delegation.state,
+                        execution,
+                    )
+                    .await;
                     if let IntegrationOutcome::Refused { reason } =
                         integrate(db, setup, &execution.id).await?
                     {

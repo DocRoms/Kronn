@@ -1381,3 +1381,40 @@ fn a_subtask_is_settled_only_closed_or_awaiting_the_merge_of_the_steps_target() 
     assert!(!subtask_settled(InProgress, None, "feature"));
     assert!(!subtask_settled(Todo, Some("feature"), "feature"));
 }
+
+/// KT-1986 — the step's approval ends the worker's turn before the integration
+/// takes the lane: no worker dispatch is left to run behind a delivery that
+/// landed.
+#[tokio::test]
+async fn an_approved_subtask_ends_its_workers_turn_before_the_integration() {
+    let fixture = fixture(1, &[]).await;
+    let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
+    let report = delegate(&fixture, &config(1, 3), &world, None).await;
+
+    assert_eq!(report.signal, DelegationSignal::Ok, "{}", report.summary);
+    assert_eq!(report.subtasks[0].status, "Done");
+    let db = &fixture.state.db;
+    let owner = report.discussion_id.clone().unwrap();
+    assert_eq!(
+        count(
+            db,
+            "SELECT COUNT(*) FROM agent_dispatch_jobs
+             WHERE discussion_id <> ?1 AND status = 'Cancelled'",
+            &owner
+        )
+        .await,
+        1,
+        "the approval ends the worker's dispatch"
+    );
+    assert_eq!(
+        count(
+            db,
+            "SELECT COUNT(*) FROM agent_dispatch_jobs
+             WHERE discussion_id <> ?1 AND status IN ('Pending', 'Running')",
+            &owner
+        )
+        .await,
+        0,
+        "no worker turn is left to run in the integrated lane"
+    );
+}

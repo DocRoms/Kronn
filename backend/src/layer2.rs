@@ -94,6 +94,7 @@ pub mod db {
     pub mod step_shadow_merges;
     pub mod step_shadows;
     pub mod worker_offers;
+    pub mod worker_processes;
 }
 pub use kronn_l1::debug_without_secrets;
 pub use kronn_l1::delivery;

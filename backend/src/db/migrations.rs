@@ -1108,6 +1108,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "303_step_shadow_main_rows_restart",
         include_str!("sql/303_step_shadow_main_rows_restart.sql"),
     ),
+    (
+        "304_task_worker_processes",
+        include_str!("sql/304_task_worker_processes.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
