@@ -497,7 +497,11 @@ pass (a frequent schedule adds no fire during the repeated hour).
   first (KT-2084): each is judged again right before, from Kronn's private
   copy of its git state (no git runs in the worktree or its submodules), then
   its checkout is removed through no link, with the one registration naming
-  it exactly. Whenever that judgement finds something (work written after the
+  it exactly. The copy of a submodule carries a configuration Kronn writes:
+  of the submodule's own, only `core.filemode` and `core.symlinks` as it
+  declares them, so a submodule on a file system without executable bits or
+  links (Windows) is judged as git reads it there, and a mode-only change
+  git does not show in that repository is not counted as work. Whenever that judgement finds something (work written after the
   inspection, a lock) the set is kept and the run says why. A removal that
   stops part way is left to finish by hand: the run says what is left and that
   `git worktree prune` clears the registration.
