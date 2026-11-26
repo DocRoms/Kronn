@@ -9172,11 +9172,21 @@ async fn deliver_authorized_worker_manifest_inner(
     if let Err(detail) = validate_manifest_claims(&task.definition_of_done, None, &manifest) {
         return Ok(DeliverOutcome::InvalidManifest(detail));
     }
-    let git_validation = match git_facts.as_ref() {
-        Some(facts) => validate_delivery_git_facts(facts, &manifest).await,
-        None => validate_delivery_git_state(db, &exec, &manifest).await,
+    let git_facts = match git_facts {
+        Some(facts) => facts,
+        None => match delivery_git_facts(db, &exec).await {
+            Ok(facts) => facts,
+            Err(detail) => return Ok(DeliverOutcome::InvalidManifest(detail)),
+        },
     };
-    if let Err(detail) = git_validation {
+    if let Err(detail) = validate_delivery_git_facts(&git_facts, &manifest).await {
+        return Ok(DeliverOutcome::InvalidManifest(detail));
+    }
+    // KT-1992 — a hand-back with nothing in it is not a delivery to review. Only
+    // a worker run by a dispatch is parked when its turn ends.
+    if let Some(detail) =
+        empty_delivery_refusal(&git_facts, &manifest, exec.dispatch_job_id.is_some())
+    {
         return Ok(DeliverOutcome::InvalidManifest(detail));
     }
     let child = exec.sub_discussion_id.clone().unwrap_or_default();
@@ -9450,19 +9460,41 @@ fn normalize_native_worker_manifest(
     Ok((manifest, normalized))
 }
 
-/// Validate that the manifest describes a durable Git state, rather than a
+/// KT-1992 — no commit past the base and no DoD item met is a hand-back, not work to
+/// review. The worker's words come first: the principal reads 160 characters of it.
+/// The text is read by the worker and, in the room notice, by the principal.
+fn empty_delivery_refusal(
+    facts: &DeliveryGitFacts,
+    manifest: &DeliveryManifestV1,
+    parked_at_turn_end: bool,
+) -> Option<String> {
+    if facts.head_sha != facts.base_sha || manifest.dod_status.iter().any(|status| status.met) {
+        return None;
+    }
+    let next = if parked_at_turn_end {
+        "it ends its turn with one paragraph saying what blocks it or what it found, then Kronn \
+         parks the execution and tells the principal, who can resume or reassign it."
+    } else {
+        "it tells the principal what blocks it or what it found: no dispatch ends with its turn, \
+         so Kronn does not park this execution, and the principal has to reassign or cancel it."
+    };
+    // Redacted whole, before the cut: the text is stored and shown in the principal's room.
+    let reason = crate::core::redact::redact_stored_text(&manifest.summary);
+    Some(format!(
+        "nothing to review: «{}» (the worker's reason). HEAD is still the execution's base `{}` \
+         and none of the {} Definition of Done items is met: recorded as a hand-back, not a \
+         delivery. The worker must not call `task_exec_deliver` again before it has committed \
+         work or met a DoD item; {next}",
+        clip_chars(&reason, 200),
+        short_sha(&facts.base_sha),
+        manifest.dod_status.len(),
+    ))
+}
+
+/// The durable Git state a manifest is checked against, rather than a
 /// plausible story about edits that only exist in the worker process or its
 /// dirty worktree. This runs after worker authorization, so its detailed
 /// refusals do not become an execution/workspace oracle.
-async fn validate_delivery_git_state(
-    db: &Database,
-    exec: &TaskExecution,
-    manifest: &DeliveryManifestV1,
-) -> Result<(), String> {
-    let facts = delivery_git_facts(db, exec).await?;
-    validate_delivery_git_facts(&facts, manifest).await
-}
-
 async fn delivery_git_facts(
     db: &Database,
     exec: &TaskExecution,
@@ -13310,6 +13342,28 @@ pub fn worker_brief_markdown_in(
              livré.\n"
         }
     };
+    // KT-1992 — an empty manifest is refused. Only a worker Kronn launched is
+    // parked when its turn ends; a joined CLI session has to say so itself.
+    let empty_delivery_rule = match (fr, native_delivery_projection) {
+        (false, true) => {
+            " If you cannot do the task, do not deliver: a manifest with no commit and no DoD \
+             item met is refused. End your turn with one paragraph saying what blocks you; Kronn \
+             parks the execution and tells the principal."
+        }
+        (false, false) => {
+            " If you cannot do the task, do not deliver: a manifest with no commit and no DoD \
+             item met is refused. Tell the principal what blocks you instead."
+        }
+        (true, true) => {
+            " Si tu ne peux pas faire la tâche, ne livre pas : un manifeste sans commit et sans \
+             aucun item de DoD atteint est refusé. Termine ton tour par un paragraphe qui dit ce \
+             qui te bloque ; Kronn met l'exécution en attente et prévient le principal."
+        }
+        (true, false) => {
+            " Si tu ne peux pas faire la tâche, ne livre pas : un manifeste sans commit et sans \
+             aucun item de DoD atteint est refusé. Dis plutôt au principal ce qui te bloque."
+        }
+    };
     let target_integration = if !can_run_shell {
         String::new()
     } else if !fr && mediated_host_commit {
@@ -13433,7 +13487,7 @@ pub fn worker_brief_markdown_in(
              {commit_boundary}\n\
              When the DoD is satisfied, submit a **DeliveryManifest v1** through the \
              `task_exec_deliver` tool (the body is validated; a non-conforming manifest is \
-             refused, not silently accepted).\n\
+             refused, not silently accepted).{empty_delivery_rule}\n\
              {delivery_format}\n\
              Only report \"ready for review\" AFTER that submission: it is what wakes the \
              principal agent for the review.\n\n\
@@ -13475,7 +13529,7 @@ pub fn worker_brief_markdown_in(
          {commit_boundary}\n\
          Quand la DoD est satisfaite, soumets un **DeliveryManifest v1** via \
          l'outil `task_exec_deliver` (le corps est validé ; un manifeste non \
-         conforme est refusé, pas silencieusement accepté).\n\
+         conforme est refusé, pas silencieusement accepté).{empty_delivery_rule}\n\
          {delivery_format}\n\
          Ne signale « prêt à la revue » qu'APRÈS cette soumission : c'est elle \
          qui réveille l'agent principal pour la revue.\n\n\

@@ -494,21 +494,23 @@ async fn a_rate_limited_or_unauthenticated_worker_continues_on_the_fallback_too(
 
 /// KT-1758 — the outage chain takes the worker over from `Working`: the
 /// principal is not told to « reassign or cancel » an execution Kronn is
-/// reassigning, and the per-execution notice is not spent by it — it still
-/// fires, once, if the replacement later ends without a delivery.
+/// reassigning. The replacement that later ends without a delivery posts its
+/// own notice (KT-2108: one per dispatch).
 #[tokio::test]
 async fn an_outage_move_neither_parks_the_worker_nor_spends_the_undelivered_notice() {
     let (_repo, db, was, job) = the_prelocalised_economy_worker().await;
     // KT-1749: a task worker's chain only offers links the launch accepts (no
     // native ACP agent, no Codex), so the take-over is exercised on an HTTP one.
     let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
-    let undelivered = format!("orch-worker-undelivered:{}", was.id);
-    let notice = |db: std::sync::Arc<Database>, parent: String, id: String| async move {
+    let undelivered = format!("orch-worker-undelivered:{}:", was.id);
+    // The notices of this execution: one per dispatch that ended undelivered.
+    let notices = |db: std::sync::Arc<Database>, parent: String, prefix: String| async move {
         messages_of(&db, &parent)
             .await
             .into_iter()
-            .find(|message| message.id == id)
-            .map(|message| message.content)
+            .filter(|message| message.id.starts_with(&prefix))
+            .map(|message| (message.id, message.content))
+            .collect::<Vec<_>>()
     };
 
     assert!(
@@ -529,13 +531,13 @@ async fn an_outage_move_neither_parks_the_worker_nor_spends_the_undelivered_noti
         "taken over, never parked"
     );
     assert!(
-        notice(
+        notices(
             db.clone(),
             was.parent_discussion_id.clone(),
             undelivered.clone()
         )
         .await
-        .is_none(),
+        .is_empty(),
         "no « reassign or cancel » before an automatic move"
     );
     assert!(fallback_notice(&db, &was, &job.id).await.is_some());
@@ -564,12 +566,14 @@ async fn an_outage_move_neither_parks_the_worker_nor_spends_the_undelivered_noti
         exec_of(&db, &was.id).await.status,
         TaskExecutionStatus::Interrupted
     );
-    assert!(
-        notice(db.clone(), was.parent_discussion_id.clone(), undelivered)
-            .await
-            .is_some_and(|content| content.contains("réaffecte ou annule")),
-        "the notice was kept for the replacement's own end"
+    let posted = notices(db.clone(), was.parent_discussion_id.clone(), undelivered).await;
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert_eq!(
+        posted[0].0,
+        format!("orch-worker-undelivered:{}:{replacement}", was.id),
+        "the notice is the replacement's own"
     );
+    assert!(posted[0].1.contains("réaffecte ou annule"), "{posted:?}");
 }
 
 /// KT-1758 — the quota return took the execution while the outage chain was
@@ -639,11 +643,11 @@ async fn an_outage_hand_over_beaten_by_the_quota_return_moves_nothing_and_parks_
             .is_none(),
         "the chain's origin is not written for a move that did not happen"
     );
-    let undelivered = format!("orch-worker-undelivered:{}", was.id);
+    let undelivered = format!("orch-worker-undelivered:{}:", was.id);
     assert!(messages_of(&db, &was.parent_discussion_id)
         .await
         .iter()
-        .all(|message| message.id != undelivered));
+        .all(|message| !message.id.starts_with(&undelivered)));
 }
 
 #[tokio::test]

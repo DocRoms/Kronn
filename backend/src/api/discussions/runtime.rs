@@ -107,15 +107,14 @@ pub(super) enum UndeliveredCause {
 }
 
 /// The execution a terminal dispatch leaves without a delivery is parked as
-/// `Interrupted` and the principal is told once (`orch-worker-undelivered:<exec>`,
-/// or `orch-worker-stopped:<exec>:<dispatch>` for a stop and
-/// `orch-worker-timed-out:<exec>:<dispatch>` for a run stopped at its time limit).
+/// `Interrupted` and the principal is told once per dispatch
+/// (`orch-worker-undelivered:<exec>:<dispatch>`, `orch-worker-stopped:…` for a
+/// stop, `orch-worker-timed-out:…` for a run stopped at its time limit).
 /// A no-op when the dispatch belongs to no `Working` execution.
 ///
 /// KT-1758 — kept apart from the settlement so a link that takes the work over
 /// can hold it back: telling the principal "reassign or cancel" about an
-/// execution Kronn is itself reassigning is contradictory, and the notice id is
-/// per execution, so it would be spent before the replacement ever needed it.
+/// execution Kronn is itself reassigning is contradictory.
 pub(super) fn interrupt_undelivered_with_notice(
     transaction: &rusqlite::Connection,
     job_id: &str,
@@ -170,22 +169,14 @@ pub(super) fn interrupt_undelivered_with_notice(
             &interrupted.execution_id,
             parent.agent,
         )?;
-        // A stop is told per dispatch: the execution's `orch-worker-undelivered`
-        // id may be spent already, and a resumed worker can be stopped again.
-        let message_id = match cause {
-            UndeliveredCause::Stopped => {
-                format!("orch-worker-stopped:{}:{job_id}", interrupted.execution_id)
-            }
-            UndeliveredCause::TimedOut => {
-                format!(
-                    "orch-worker-timed-out:{}:{job_id}",
-                    interrupted.execution_id
-                )
-            }
-            UndeliveredCause::Completed | UndeliveredCause::Failed => {
-                format!("orch-worker-undelivered:{}", interrupted.execution_id)
-            }
+        // KT-2108 — every cause is told per dispatch: a resumed or reassigned
+        // worker can end without delivering again, and the principal must be woken.
+        let notice_kind = match cause {
+            UndeliveredCause::Stopped => "orch-worker-stopped",
+            UndeliveredCause::TimedOut => "orch-worker-timed-out",
+            UndeliveredCause::Completed | UndeliveredCause::Failed => "orch-worker-undelivered",
         };
+        let message_id = format!("{notice_kind}:{}:{job_id}", interrupted.execution_id);
         // KT-402 — the deterministic id exists so a resume can never
         // double-post; the insert has to tolerate its own replay for the
         // same reason. Measured: a stream timeout failed the dispatch, the
@@ -3255,7 +3246,7 @@ mod chain_render_tests {
                 execution.status,
                 crate::models::TaskExecutionStatus::Interrupted
             );
-            let notice_id = format!("orch-worker-undelivered:{execution_id}");
+            let notice_id = format!("orch-worker-undelivered:{execution_id}:j-undelivered");
             let notice: String = conn.query_row(
                 "SELECT content FROM messages WHERE id = ?1 AND discussion_id = 'd-parent'",
                 [&notice_id],
@@ -3376,7 +3367,7 @@ mod chain_render_tests {
             let recovery = crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
                 .expect("failure must leave an explicit human recovery");
             assert_eq!(recovery.recovery_reason, "worker_failed_without_delivery");
-            let notice_id = format!("orch-worker-undelivered:{execution_id}");
+            let notice_id = format!("orch-worker-undelivered:{execution_id}:j-failed-undelivered");
             let notice: String = conn.query_row(
                 "SELECT content FROM messages WHERE id = ?1 AND discussion_id = 'd-fail-parent'",
                 [&notice_id],
@@ -3755,9 +3746,9 @@ mod chain_render_tests {
             assert_eq!(recovery.recovery_reason, "worker_failed_without_delivery");
             let notices = parent_notices(conn, "orch-worker-")?;
             assert_eq!(notices.len(), 1, "{notices:?}");
-            assert!(
-                notices[0].0.starts_with("orch-worker-undelivered:"),
-                "{notices:?}"
+            assert_eq!(
+                notices[0].0,
+                format!("orch-worker-undelivered:{execution_id}:j-failed")
             );
             assert!(
                 notices[0]
@@ -3792,6 +3783,76 @@ mod chain_render_tests {
                     format!("orch-worker-timed-out:{execution_id}:j-limit-2"),
                 ]
             );
+            for (notice_id, _) in &notices {
+                assert_eq!(
+                    crate::db::discussions::list_message_targets(conn, notice_id)?.len(),
+                    1,
+                    "each notice is aimed at the principal"
+                );
+            }
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            assert_eq!(
+                execution.status,
+                crate::models::TaskExecutionStatus::Interrupted
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2108 — each dispatch of one execution that ends without delivering
+    /// posts its own notice, so the second failure wakes the principal too.
+    #[tokio::test]
+    async fn a_second_dispatch_that_ends_without_delivery_gets_its_own_notice() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let execution_id = working_execution(conn, "j-first")?;
+            let settle = |job: &str, error: Option<&str>| {
+                persist_dispatch_settlement(
+                    conn,
+                    job,
+                    "d-limit-child",
+                    None,
+                    if error.is_some() {
+                        crate::db::workflows::BatchChildOutcome::Failed
+                    } else {
+                        crate::db::workflows::BatchChildOutcome::Success
+                    },
+                    error,
+                    None,
+                )
+            };
+            // The first run ends its turn without delivering; the resumed one fails.
+            assert!(settle("j-first", None)?.changed);
+            resume_on(conn, &execution_id, "j-second")?;
+            assert!(settle("j-second", Some("provider crashed"))?.changed);
+            // A replayed settlement of the same dispatch adds nothing (KT-402).
+            assert!(!settle("j-second", Some("provider crashed"))?.changed);
+
+            let notices = parent_notices(conn, "orch-worker-undelivered:")?;
+            let ids: Vec<&str> = notices.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(
+                ids,
+                [
+                    format!("orch-worker-undelivered:{execution_id}:j-first"),
+                    format!("orch-worker-undelivered:{execution_id}:j-second"),
+                ]
+            );
+            assert!(
+                notices[0]
+                    .1
+                    .contains("Worker terminé sans livraison durable"),
+                "{notices:?}"
+            );
+            assert!(
+                notices[1]
+                    .1
+                    .contains("Worker échoué sans livraison durable"),
+                "{notices:?}"
+            );
+            assert!(notices[1].1.contains("`j-second`"), "{notices:?}");
             for (notice_id, _) in &notices {
                 assert_eq!(
                     crate::db::discussions::list_message_targets(conn, notice_id)?.len(),
@@ -4161,6 +4222,154 @@ mod refused_tool_call_notice_tests {
         assert!(reasons.is_empty(), "{reasons:?}");
     }
 
+    fn backend_actor() -> crate::models::PlanningActor {
+        crate::models::PlanningActor {
+            kind: crate::models::PlanningActorKind::Backend,
+            id: Some("orchestrator".into()),
+            session_id: None,
+            source_message_id: None,
+            token_declared: false,
+        }
+    }
+
+    /// A `Working` execution of a new task, in rooms `d-parent` / `d-child`,
+    /// whose worker ran the claimed dispatch `job` and answered `reply`.
+    fn working_worker(
+        conn: &rusqlite::Connection,
+        task_id: &str,
+        job: &str,
+        reply: &str,
+    ) -> anyhow::Result<String> {
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, title) in [("d-parent", "Parent"), ("d-child", "Child")] {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?3)",
+                rusqlite::params![id, title, now],
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO planning_tasks
+             (id, task_number, title, status, created_at, updated_at)
+             VALUES (?1, 9902, 'Refused', 'todo', ?2, ?2)",
+            rusqlite::params![task_id, now],
+        )?;
+        let actor = backend_actor();
+        let execution = crate::db::orchestration::launch_single_task(
+            conn,
+            &crate::models::LaunchSingleTaskInput::new(task_id, "d-parent"),
+            &actor,
+        )?
+        .execution;
+        for status in [
+            crate::models::TaskExecutionStatus::Provisioning,
+            crate::models::TaskExecutionStatus::Working,
+        ] {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution.id,
+                status,
+                &actor,
+                serde_json::json!({}),
+            )?;
+        }
+        let asked = format!("u-{job}");
+        conn.execute(
+            "INSERT INTO messages
+             (id, discussion_id, role, content, timestamp, sort_order, received_at)
+             VALUES (?1, 'd-child', 'User', 'go', ?2, 1, ?2)",
+            rusqlite::params![asked, now],
+        )?;
+        conn.execute(
+            "INSERT INTO messages
+             (id, discussion_id, role, content, timestamp, sort_order, received_at)
+             VALUES (?1, 'd-child', 'Agent', ?2, ?3, 2, ?3)",
+            rusqlite::params![format!("a-{job}"), reply, now],
+        )?;
+        crate::db::agent_dispatch::enqueue_for_latest_user(
+            conn,
+            crate::db::agent_dispatch::NewLatestUserDispatch {
+                id: job,
+                discussion_id: "d-child",
+                dedupe_key: &format!("message:{asked}"),
+                agent_override: Some(&crate::models::AgentType::Ollama),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )?;
+        crate::db::agent_dispatch::claim(conn, job)?;
+        crate::db::orchestration::attach_execution_dispatch(conn, &execution.id, job)?;
+        Ok(execution.id)
+    }
+
+    /// KT-1992 — a worker whose empty hand-back was refused and that then ends
+    /// its turn is parked, and the principal reads the worker's reason in the room.
+    #[tokio::test]
+    async fn a_handed_back_worker_is_parked_with_its_reason_in_the_room() {
+        const HAND_BACK: &str = "nothing to review: «the build tools are missing here» (the worker's reason). HEAD is still the execution's base `c0af606630` and none of the 2 Definition of Done items is met: recorded as a hand-back, not a delivery. The worker must not call `task_exec_deliver` again before it has committed work or met a DoD item; it ends its turn with one paragraph saying what blocks it or what it found, then Kronn parks the execution and tells the principal, who can resume or reassign it.";
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let execution_id = db
+            .with_conn(|conn| {
+                let execution_id = working_worker(
+                    conn,
+                    "t-handed-back",
+                    "j-handed-back",
+                    "I cannot do this task here.",
+                )?;
+                crate::db::orchestration::record_delivery_refusal(
+                    conn,
+                    &execution_id,
+                    0,
+                    HAND_BACK,
+                    &backend_actor(),
+                )?;
+                Ok(execution_id)
+            })
+            .await
+            .unwrap();
+
+        let settled = db
+            .with_conn(|conn| {
+                persist_dispatch_settlement(
+                    conn,
+                    "j-handed-back",
+                    "d-child",
+                    None,
+                    crate::db::workflows::BatchChildOutcome::Success,
+                    None,
+                    None,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(settled.changed);
+
+        let (status, notice) = db
+            .with_conn(move |conn| {
+                let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                    .expect("execution must remain queryable");
+                let notice = conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1 AND discussion_id = 'd-parent'",
+                    [format!(
+                        "orch-worker-undelivered:{execution_id}:j-handed-back"
+                    )],
+                    |row| row.get::<_, String>(0),
+                )?;
+                Ok((execution.status, notice))
+            })
+            .await
+            .unwrap();
+        assert_eq!(status, crate::models::TaskExecutionStatus::Interrupted);
+        assert!(notice.contains("nothing to review"), "{notice}");
+        assert!(
+            notice.contains("«the build tools are missing here»"),
+            "{notice}"
+        );
+        assert!(notice.contains("task_exec_resume"), "{notice}");
+    }
+
     /// KT-1541 — through the real settlement: a worker that ends its turn on a
     /// refused edit without delivering leaves the principal a notice that names
     /// the refusal, not just "no delivery".
@@ -4169,77 +4378,12 @@ mod refused_tool_call_notice_tests {
         let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
         let execution_id = db
             .with_conn(|conn| {
-                let now = chrono::Utc::now().to_rfc3339();
-                for (id, title) in [("d-parent", "Parent"), ("d-child", "Child")] {
-                    conn.execute(
-                        "INSERT INTO discussions (id, title, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?3)",
-                        rusqlite::params![id, title, now],
-                    )?;
-                }
-                conn.execute(
-                    "INSERT INTO planning_tasks
-                     (id, task_number, title, status, created_at, updated_at)
-                     VALUES ('t-refused', 9902, 'Refused', 'todo', ?1, ?1)",
-                    [&now],
-                )?;
-                let actor = crate::models::PlanningActor {
-                    kind: crate::models::PlanningActorKind::Backend,
-                    id: Some("orchestrator".into()),
-                    session_id: None,
-                    source_message_id: None,
-                    token_declared: false,
-                };
-                let execution = crate::db::orchestration::launch_single_task(
+                working_worker(
                     conn,
-                    &crate::models::LaunchSingleTaskInput::new("t-refused", "d-parent"),
-                    &actor,
-                )?
-                .execution;
-                for status in [
-                    crate::models::TaskExecutionStatus::Provisioning,
-                    crate::models::TaskExecutionStatus::Working,
-                ] {
-                    crate::db::orchestration::transition_execution(
-                        conn,
-                        &execution.id,
-                        status,
-                        &actor,
-                        serde_json::json!({}),
-                    )?;
-                }
-                conn.execute(
-                    "INSERT INTO messages
-                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
-                     VALUES ('u-refused', 'd-child', 'User', 'go', ?1, 1, ?1)",
-                    [&now],
-                )?;
-                conn.execute(
-                    "INSERT INTO messages
-                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
-                     VALUES ('a-refused', 'd-child', 'Agent', ?2, ?1, 2, ?1)",
-                    rusqlite::params![now, format!("Editing.\n> ⚠ Tool call refused: {REFUSAL}\n")],
-                )?;
-                crate::db::agent_dispatch::enqueue_for_latest_user(
-                    conn,
-                    crate::db::agent_dispatch::NewLatestUserDispatch {
-                        id: "j-refused",
-                        discussion_id: "d-child",
-                        dedupe_key: "message:u-refused",
-                        agent_override: Some(&crate::models::AgentType::Ollama),
-                        chain_prompt_ids: &[],
-                        batch_item: None,
-                        group_id: None,
-                        group_concurrency_limit: None,
-                    },
-                )?;
-                crate::db::agent_dispatch::claim(conn, "j-refused")?;
-                crate::db::orchestration::attach_execution_dispatch(
-                    conn,
-                    &execution.id,
+                    "t-refused",
                     "j-refused",
-                )?;
-                Ok(execution.id)
+                    &format!("Editing.\n> ⚠ Tool call refused: {REFUSAL}\n"),
+                )
             })
             .await
             .unwrap();
@@ -4264,7 +4408,7 @@ mod refused_tool_call_notice_tests {
             .with_conn(move |conn| {
                 Ok(conn.query_row(
                     "SELECT content FROM messages WHERE id = ?1 AND discussion_id = 'd-parent'",
-                    [format!("orch-worker-undelivered:{execution_id}")],
+                    [format!("orch-worker-undelivered:{execution_id}:j-refused")],
                     |row| row.get::<_, String>(0),
                 )?)
             })
