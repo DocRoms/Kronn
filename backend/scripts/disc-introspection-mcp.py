@@ -52,7 +52,7 @@ import uuid
 
 MAX_DISC_APPEND_ATTACHMENTS = 8
 MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
-BRIDGE_TOOL_SURFACE_VERSION = "0.3.11"
+BRIDGE_TOOL_SURFACE_VERSION = "0.3.13"
 
 
 class BridgeStaleError(RuntimeError):
@@ -337,12 +337,12 @@ TOOLS = [
     {
         "name": "plan_get",
         "description": (
-            "Return the compact structured Discussion plan (French UI: "
-            "'Plan de discussion') for a discussion: primary objective, "
-            "active tasks, later tasks and progress. Defaults to the current "
-            "discussion. Call this FIRST when the user asks to read or update "
-            "the discussion plan; that phrase means Kronn's shared task plan, "
-            "not a prose/Markdown summary."
+            "Return the compact Discussion plan (French UI: 'Plan de "
+            "discussion'): primary objective, progress, most urgent task rows "
+            "within a byte budget, counts of rows left out and their task_list "
+            "call. Call this FIRST when the user asks to read or update the "
+            "discussion plan; that phrase means Kronn's shared task plan, not "
+            "a prose/Markdown summary."
         ),
         "inputSchema": {
             "type": "object",
@@ -386,13 +386,16 @@ TOOLS = [
     {
         "name": "task_get",
         "description": (
-            "Return one FULL planning task including description, Definition "
-            "of Done, links, blockers/backlinks and attributed event history. "
-            "Accepts the copyable KT-142 reference or the UUID."
+            "Read one task (KT-142 or UUID): description, DoD, links, "
+            "blockers/backlinks, latest events; full_events: true returns the "
+            "whole history."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"task_id": {"type": "string"}},
+            "properties": {
+                "task_id": {"type": "string"},
+                "full_events": {"type": "boolean"},
+            },
             "required": ["task_id"],
         },
     },
@@ -955,7 +958,7 @@ TOOLS = [
                     "type": "string",
                     "enum": ["generic", "scoped"],
                     "description": (
-                        "Required contract sentinel. Use scoped with worker_scope, or "
+                        "Required sentinel: scoped with worker_scope, "
                         "generic only when no mechanical scope is intended."
                     ),
                 },
@@ -963,6 +966,7 @@ TOOLS = [
                     "type": "object",
                     "description": "Required when the intent is scoped.",
                 },
+                "base_rev": {"type": "string", "description": "Branch you will launch with."},
                 "validations": {
                     "type": "array",
                     "items": {"type": "object"},
@@ -994,13 +998,13 @@ TOOLS = [
                 },
                 "worker_scope": {
                     "type": "object",
-                    "description": "Scope accepted by preflight.",
+                    "description": "As preflighted.",
                 },
-                "base_rev": {"type": "string", "description": "Target branch, default main."},
-                "idempotency_key": {"type": "string", "description": "Stable retry key."},
+                "base_rev": {"type": "string", "description": "Integration branch."},
+                "idempotency_key": {"type": "string"},
                 "validations": {
                     "type": "array",
-                    "description": "Principal-owned gates; exact item shape is in tool_manual.",
+                    "description": "Principal-owned gates; item shape in tool_manual.",
                     "items": {"type": "object"},
                 },
                 "max_review_rounds": {"type": ["integer", "string"]},
@@ -4833,7 +4837,20 @@ def _planning_discussion_id(args):
 
 def call_plan_get(args):
     discussion_id = urllib.parse.quote(_planning_discussion_id(args), safe="")
-    return _unwrap(_http("GET", f"/api/discussions/{discussion_id}/plan"))
+    # KT-2110 — the full plan is the UI's: 197 KB for a room of 151 tasks. The
+    # compact view is bounded and says what it left out.
+    return _unwrap(_http("GET", f"/api/discussions/{discussion_id}/plan?view=compact"))
+
+
+# Results sent as one line of JSON. The backend bounds these answers in bytes;
+# indenting them would spend a third of that bound on whitespace.
+_COMPACT_RESULT_TOOLS = frozenset({"plan_get"})
+
+
+def _render_tool_result(name, data):
+    if name in _COMPACT_RESULT_TOOLS:
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
 def call_task_list(args):
@@ -4855,7 +4872,11 @@ def call_task_get(args):
     if not task_id:
         raise RuntimeError("task_get: task_id is required")
     encoded = urllib.parse.quote(task_id, safe="")
-    return _unwrap(_http("GET", f"/api/planning/tasks/{encoded}"))
+    # KT-1984 — each past edit repeats the description it replaced: the default
+    # read lists who changed which fields, the bodies come on request.
+    if args.get("full_events") is True:
+        return _unwrap(_http("GET", f"/api/planning/tasks/{encoded}"))
+    return _unwrap(_http("GET", f"/api/planning/tasks/{encoded}?view=compact"))
 
 
 def call_proposal_list(args):
@@ -6244,8 +6265,9 @@ def call_task_exec_prepare(args):
     }
     if worker_scope is not None:
         body["worker_scope"] = worker_scope
-    if args.get("validations") is not None:
-        body["validations"] = args["validations"]
+    for optional in ("base_rev", "validations"):
+        if args.get(optional) is not None:
+            body[optional] = args[optional]
     _forward_review_rounds(args, body)
     return _task_exec_request("/api/orchestration/tool/prepare", body)
 
@@ -10319,6 +10341,18 @@ TOOL_MANUALS = {
         "the current schema; omitting it fails closed with a reconnect diagnostic instead of "
         "silently launching a generic worker. Only `launchable:true` permits a matching launch; "
         "never create the child by hand or alter the worker, intent or scope without preflighting again. "
+        "Prepare answers the verdict (`launchable`, `reasons`, `warnings`, "
+        "`default_max_review_rounds`, `active_execution`) and a task header (`reference`, `title`, "
+        "`status`, each DoD `id`, `sentence`, `completed`); the description and history are in "
+        "`task_get`.\n\n"
+        "**Integration target.** Pass the `base_rev` you will launch with, or leave it out to "
+        "check the room's declared integration branch (its campaign target). A branch checked "
+        "out in the owner's working checkout, or in a worktree Kronn does not own, makes the "
+        "answer `launchable: false` with reason `integration_target_owner_checkout` or "
+        "`integration_target_foreign_worktree`: integration writes into the checkout that holds "
+        "the branch. With no `base_rev` and no declared branch the answer carries an "
+        "`integration_target_undeclared` warning, and "
+        "task_exec_launch refuses: it never defaults to `main`.\n\n"
         "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
         "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
         "if the launch response is lost.\n\n"
@@ -12424,7 +12458,7 @@ def _handle(req):
                 "id": rid,
                 "result": {"content": [{
                     "type": "text",
-                    "text": json.dumps(data, ensure_ascii=False, indent=2),
+                    "text": _render_tool_result(name, data),
                 }]},
             }, preempted)
         except BridgeStaleError as e:

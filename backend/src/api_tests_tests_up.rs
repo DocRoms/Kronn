@@ -7124,8 +7124,13 @@ async fn http_agent_planning_tools_create_idempotently_in_the_current_discussion
 
     let plan = exec.execute(&call("plan_get", serde_json::json!({}))).await;
     assert!(plan.ok, "plan_get after create failed: {:?}", plan.content);
-    assert_eq!(plan.content["active"].as_array().map(Vec::len), Some(1));
-    assert_eq!(plan.content["active"][0]["task"]["id"], task_id);
+    // KT-2110: compact rows, by reference; the receipt of the create names it.
+    assert_eq!(plan.content["tasks"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        plan.content["tasks"][0]["reference"],
+        created.content["reference"]
+    );
+    assert_eq!(plan.content["complete"], true);
 
     let listed = exec
         .execute(&call(
@@ -7141,8 +7146,21 @@ async fn http_agent_planning_tools_create_idempotently_in_the_current_discussion
     assert_eq!(listed.content["items"].as_array().map(Vec::len), Some(1));
     assert_eq!(listed.content["items"][0]["id"], task_id);
 
-    let detail = exec
+    // KT-1984: the default read names the actor; the session and the source
+    // message are part of the full history.
+    let brief = exec
         .execute(&call("task_get", serde_json::json!({"task_id": task_id})))
+        .await;
+    assert!(brief.ok, "task_get failed: {:?}", brief.content);
+    assert_eq!(brief.content["events"][0]["actor_kind"], "agent");
+    assert_eq!(brief.content["events"][0]["actor_id"], "Ollama");
+    assert!(brief.content["events"][0].get("changes").is_none());
+
+    let detail = exec
+        .execute(&call(
+            "task_get",
+            serde_json::json!({"task_id": task_id, "full_events": true}),
+        ))
         .await;
     assert!(detail.ok, "task_get failed: {:?}", detail.content);
     assert_eq!(detail.content["events"][0]["actor_kind"], "agent");

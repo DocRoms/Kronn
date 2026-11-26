@@ -6198,6 +6198,103 @@ async fn planning_task_create_list_and_get_round_trip() {
     assert_eq!(detail["data"]["events"][0]["action"], "created");
 }
 
+/// KT-1984 — the task route keeps its full shape for the Planning page (event
+/// bodies included); only `?view=compact` answers the history without bodies.
+#[tokio::test]
+async fn planning_task_route_drops_event_bodies_only_in_the_compact_view() {
+    let app = test_app();
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/planning/tasks",
+        serde_json::json!({"title": "Route shape", "description": "first"}),
+    )
+    .await;
+    let task_id = created["data"]["id"].as_str().unwrap().to_string();
+    let uri = format!("/api/planning/tasks/{task_id}");
+    let (_, patched) = patch_json(
+        app.clone(),
+        &uri,
+        serde_json::json!({"description": "second"}),
+    )
+    .await;
+    assert_eq!(patched["success"], true, "{patched}");
+
+    let (_, full) = get_json(app.clone(), &uri).await;
+    let updated = full["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["action"] == "updated")
+        .expect("the edit is in the history");
+    assert_eq!(updated["changes"]["description"], "second");
+    assert!(full["data"].get("events_omitted").is_none());
+    assert!(full["data"].get("omitted").is_none());
+
+    let (_, compact) = get_json(app.clone(), &format!("{uri}?view=compact")).await;
+    assert_eq!(compact["success"], true, "{compact}");
+    assert_eq!(compact["data"]["description"], "second");
+    let updated = compact["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["action"] == "updated")
+        .expect("the edit is in the history");
+    assert!(updated.get("changes").is_none());
+    assert_eq!(updated["changed"], serde_json::json!(["description"]));
+    assert_eq!(compact["data"]["events_omitted"], 0);
+
+    let (_, missing) = get_json(app, "/api/planning/tasks/KT-999999?view=compact").await;
+    assert_eq!(missing["success"], false, "{missing}");
+    assert_eq!(missing["error_code"], "not_found");
+}
+
+/// KT-2110 — the plan route keeps its full relations for the UI's panel (task
+/// id, dates, placement, position); only `?view=compact` answers compact rows.
+#[tokio::test]
+async fn discussion_plan_route_keeps_its_full_shape_unless_the_compact_view_is_asked() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('plan-shape', 'Plan shape', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/planning/tasks",
+        serde_json::json!({"title": "Shown both ways", "discussion_id": "plan-shape"}),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+
+    let (_, full) = get_json(app.clone(), "/api/discussions/plan-shape/plan").await;
+    let relation = &full["data"]["active"][0];
+    assert_eq!(relation["task"]["id"], created["data"]["id"]);
+    assert_eq!(relation["placement"], "active");
+    assert!(relation["position"].is_number());
+    assert!(relation["task"]["created_at"].is_string());
+    assert!(relation["task"]["discussion_ids"].is_array());
+    assert!(full["data"]["later"].is_array());
+    assert!(full["data"].get("tasks").is_none());
+
+    let (_, compact) = get_json(app, "/api/discussions/plan-shape/plan?view=compact").await;
+    assert_eq!(compact["success"], true, "{compact}");
+    let row = &compact["data"]["tasks"][0];
+    assert_eq!(row["reference"], created["data"]["reference"]);
+    assert_eq!(row["title"], "Shown both ways");
+    assert!(row.get("id").is_none() && row.get("created_at").is_none());
+    assert!(compact["data"].get("active").is_none());
+    assert_eq!(compact["data"]["complete"], true);
+}
+
 #[tokio::test]
 async fn planning_task_create_can_target_a_discussion_without_orphans() {
     let state = test_state();

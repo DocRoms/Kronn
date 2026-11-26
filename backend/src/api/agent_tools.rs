@@ -1017,7 +1017,7 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "plan_get",
-                "description": "Read this discussion's compact shared plan: primary objective, active/later tasks and progress. Call before creating or changing tracked work.",
+                "description": "Read this discussion's compact shared plan: primary objective, task rows by urgency within a byte budget, progress, and for rows left out their counts and the task_list call. Call before creating or changing tracked work.",
                 "parameters": { "type": "object", "properties": {}, "required": [] },
             },
         }),
@@ -1046,10 +1046,13 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "task_get",
-                "description": "Read one full Planning task by KT reference or UUID, including DoD, blockers and history.",
+                "description": "Read one Planning task by KT reference or UUID: description, DoD, blockers and its latest events without bodies (full_events: true returns the whole history).",
                 "parameters": {
                     "type": "object",
-                    "properties": { "task_id": { "type": "string" } },
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "full_events": { "type": "boolean" }
+                    },
                     "required": ["task_id"]
                 },
             },
@@ -2426,7 +2429,15 @@ impl ToolExecutor for KronnToolExecutor {
                     Path(disc_id),
                 )
                 .await;
-                unwrap_api(call, res.success, res.data, res.error)
+                // KT-2110 — every agent reads the plan first: compact rows, bounded.
+                unwrap_api(
+                    call,
+                    res.success,
+                    res.data
+                        .as_ref()
+                        .map(crate::api::planning::plan_compact_view),
+                    res.error,
+                )
             }
             "task_list" => {
                 let mut query =
@@ -2467,7 +2478,16 @@ impl ToolExecutor for KronnToolExecutor {
                         ));
                     }
                 }
-                unwrap_api(call, res.success, res.data, res.error)
+                // KT-1984 — past edits repeat the description: bodies on request only.
+                if flag_arg(call, "full_events").unwrap_or(false) {
+                    return unwrap_api(call, res.success, res.data, res.error);
+                }
+                unwrap_api(
+                    call,
+                    res.success,
+                    res.data.as_ref().map(crate::api::planning::task_compact_view),
+                    res.error,
+                )
             }
             "task_create" => {
                 let Some(discussion_id) = self.discussion_id(call) else {
@@ -2835,11 +2855,13 @@ impl KronnToolExecutor {
                     })
                     .await
                 {
+                    // KT-1984 — the same brief the bridge's route answers.
                     Ok(preparation) => ok(
                         call,
-                        serde_json::to_value(preparation).unwrap_or_else(
-                            |error| json!({"serialization_error": error.to_string()}),
-                        ),
+                        serde_json::to_value(crate::models::TaskExecutionPreparationBrief::from(
+                            preparation,
+                        ))
+                        .unwrap_or_else(|error| json!({"serialization_error": error.to_string()})),
                     ),
                     Err(error) => fail(call, error.to_string()),
                 }
@@ -4638,7 +4660,10 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
             "Preflight only: nothing is created. Pass the task, the typed `worker` copied from \
              agent_list, `worker_scope_intent` (`generic`, or `scoped` with a `worker_scope`), and \
              optionally the `validations` you will launch with. Only `launchable: true` permits a \
-             matching task_exec_launch.\n\n\
+             matching task_exec_launch. The answer is the verdict (`launchable`, `reasons`, \
+             `warnings`, `default_max_review_rounds`, `active_execution`) and a task header \
+             (`reference`, `title`, `status`, each DoD `id`, `sentence`, `completed`); the \
+             description and history are in `task_get`.\n\n\
              **Integration target** — pass the `base_rev` you will launch with, or leave it out \
              to check the room's declared integration branch (its campaign target). A branch \
              checked out in the owner's working checkout, or in a worktree Kronn does not own, \
@@ -6830,6 +6855,361 @@ mod tests {
             "Generate an image or a video. The rest of the description explains the envelope.",
         );
         assert_eq!(summary, "Generate an image or a video.");
+    }
+
+    /// A room `room` in project `p` whose plan holds one task per
+    /// `(title, status)`, in that order; returns the tasks' references.
+    async fn planning_room(tasks: Vec<(String, &'static str)>) -> (AppState, Vec<String>) {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let references = db
+            .with_conn(move |conn| {
+                conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p','p','p','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z')", [])?;
+                conn.execute("INSERT INTO discussions (id,title,project_id,created_at,updated_at) VALUES ('room','room','p','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z')", [])?;
+                let mut references = Vec::new();
+                for (title, status) in tasks {
+                    let request: CreatePlanningTaskRequest = serde_json::from_value(json!({
+                        "title": title,
+                        "status": status,
+                        "description": "Initial description.",
+                        "project_ids": ["p"],
+                        "discussion_id": "room",
+                    }))?;
+                    let task = crate::db::planning::create_task(conn, &request)?;
+                    references.push(task.summary.reference);
+                }
+                Ok(references)
+            })
+            .await
+            .unwrap();
+        let state = crate::AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        (state, references)
+    }
+
+    fn room_agent(state: &AppState) -> std::sync::Arc<dyn ToolExecutor> {
+        KronnToolExecutor::arc(
+            state.clone(),
+            Some("room".into()),
+            AgentType::Ollama,
+            None,
+            None,
+        )
+    }
+
+    async fn tool(executor: &dyn ToolExecutor, name: &str, arguments: Value) -> ToolOutcome {
+        executor
+            .execute(&ToolCall {
+                id: name.into(),
+                name: name.into(),
+                arguments,
+            })
+            .await
+    }
+
+    async fn edit_task(state: &AppState, reference: &str, fields: Value) {
+        let reference = reference.to_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                let request: UpdatePlanningTaskRequest = serde_json::from_value(fields)?;
+                crate::db::planning::update_task(conn, &reference, &request)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// KT-1984 — `task_get` names the fields each past edit changed without
+    /// their bodies; `full_events: true` returns the bodies.
+    #[tokio::test]
+    async fn task_get_names_the_changed_fields_and_returns_bodies_only_when_asked() {
+        let (state, references) = planning_room(vec![("Edited task".to_string(), "todo")]).await;
+        let reference = references[0].as_str();
+        edit_task(
+            &state,
+            reference,
+            json!({"description": "BODY-MARKER second description", "priority": "high"}),
+        )
+        .await;
+        let agent = room_agent(&state);
+
+        let brief = tool(agent.as_ref(), "task_get", json!({"task_id": reference})).await;
+        assert!(brief.ok, "{}", brief.content);
+        assert_eq!(
+            brief.content["description"],
+            "BODY-MARKER second description"
+        );
+        assert_eq!(
+            brief.content.to_string().matches("BODY-MARKER").count(),
+            1,
+            "the description comes once, not again inside the history"
+        );
+        let events = brief.content["events"].as_array().unwrap();
+        assert!(events.iter().all(|event| event.get("changes").is_none()));
+        let updated = events
+            .iter()
+            .find(|event| event["action"] == "updated")
+            .expect("the edit is listed");
+        assert_eq!(updated["changed"], json!(["description", "priority"]));
+        assert!(updated["id"].is_string() && updated["created_at"].is_string());
+        assert!(updated.get("actor_kind").is_some());
+        assert_eq!(brief.content["events_omitted"], json!(0));
+        assert!(brief.content["omitted"]
+            .as_str()
+            .unwrap()
+            .contains("full_events: true"));
+
+        let full = tool(
+            agent.as_ref(),
+            "task_get",
+            json!({"task_id": reference, "full_events": true}),
+        )
+        .await;
+        assert!(full.ok, "{}", full.content);
+        let updated = full.content["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["action"] == "updated")
+            .expect("the edit is listed");
+        assert_eq!(
+            updated["changes"]["description"],
+            "BODY-MARKER second description"
+        );
+        assert!(full.content.get("omitted").is_none());
+    }
+
+    /// KT-1984 — a task with more events than the cap lists the latest ones
+    /// and states how many older ones it left out.
+    #[tokio::test]
+    async fn task_get_caps_the_history_and_states_the_count_left_out() {
+        let cap = crate::api::planning::TASK_EVENTS_BRIEF_CAP;
+        let (state, references) = planning_room(vec![("Often edited".to_string(), "todo")]).await;
+        let reference = references[0].as_str();
+        for round in 0..cap + 5 {
+            edit_task(
+                &state,
+                reference,
+                json!({"title": format!("Often edited {round}")}),
+            )
+            .await;
+        }
+        let agent = room_agent(&state);
+
+        let full = tool(
+            agent.as_ref(),
+            "task_get",
+            json!({"task_id": reference, "full_events": true}),
+        )
+        .await;
+        let history = full.content["events"].as_array().unwrap();
+        assert!(history.len() > cap, "{} events", history.len());
+
+        let brief = tool(agent.as_ref(), "task_get", json!({"task_id": reference})).await;
+        let events = brief.content["events"].as_array().unwrap();
+        assert_eq!(events.len(), cap);
+        assert_eq!(events[0]["id"], history[0]["id"], "newest first");
+        let left_out = history.len() - cap;
+        assert_eq!(brief.content["events_omitted"], json!(left_out));
+        assert!(brief.content["omitted"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("the {left_out} oldest events")));
+    }
+
+    /// KT-2110 — a room of 200 linked tasks answers within the byte budget:
+    /// every task in progress is there, what was left out is counted per
+    /// status and the `task_list` call that lists it is given.
+    #[tokio::test]
+    async fn plan_get_bounds_a_200_task_room_and_says_what_it_left_out() {
+        let tasks: Vec<(String, &'static str)> = (0..200)
+            .map(|index| {
+                let status = match index % 20 {
+                    0 => "in_progress",
+                    1..=11 => "todo",
+                    12..=15 => "idea",
+                    _ => "done",
+                };
+                let title =
+                    format!("Task {index:03} of a large room, titled the way people title work");
+                (title, status)
+            })
+            .collect();
+        let (state, references) = planning_room(tasks.clone()).await;
+        let agent = room_agent(&state);
+
+        let plan = tool(agent.as_ref(), "plan_get", json!({})).await;
+        assert!(plan.ok, "{}", plan.content);
+        let bytes = plan.content.to_string().len();
+        assert!(
+            bytes <= crate::api::planning::PLAN_COMPACT_MAX_BYTES,
+            "{bytes} B"
+        );
+        let rows = plan.content["tasks"].as_array().unwrap();
+        let shown: Vec<&str> = rows
+            .iter()
+            .map(|row| row["reference"].as_str().unwrap())
+            .collect();
+        for (reference, (_, status)) in references.iter().zip(&tasks) {
+            if *status == "in_progress" {
+                assert!(
+                    shown.contains(&reference.as_str()),
+                    "{reference} is in progress and missing"
+                );
+            }
+        }
+        // Work under way comes before what can be picked up.
+        let last_in_progress = rows
+            .iter()
+            .rposition(|row| row["status"] == "in_progress")
+            .unwrap();
+        let first_todo = rows.iter().position(|row| row["status"] == "todo").unwrap();
+        assert!(last_in_progress < first_todo);
+        assert!(rows.iter().all(|row| row.get("id").is_none()));
+
+        let left_out = 200 - rows.len();
+        assert!(left_out > 0, "200 rows cannot fit the budget");
+        assert_eq!(plan.content["complete"], false);
+        assert_eq!(plan.content["total"], json!(200));
+        assert_eq!(plan.content["shown"], json!(rows.len()));
+        let omitted = &plan.content["omitted"];
+        assert_eq!(omitted["count"], json!(left_out));
+        let by_status = omitted["by_status"].as_object().unwrap();
+        assert_eq!(
+            by_status.values().filter_map(Value::as_u64).sum::<u64>(),
+            left_out as u64
+        );
+        assert!(by_status.get("in_progress").is_none());
+        assert_eq!(by_status["idea"], json!(40));
+        assert_eq!(by_status["done"], json!(40));
+        let list_with = omitted["list_with"].as_str().unwrap();
+        assert!(
+            list_with.starts_with("task_list({discussion_id: \"room\", status: "),
+            "{list_with}"
+        );
+        assert!(list_with.contains("cursor"), "{list_with}");
+    }
+
+    /// KT-2110 — a task under way is shown even when its link to the room is
+    /// placed "later": the status says more than the placement.
+    #[tokio::test]
+    async fn plan_get_shows_a_task_under_way_that_is_placed_later() {
+        let mut tasks: Vec<(String, &'static str)> = (0..199)
+            .map(|index| {
+                let title =
+                    format!("Task {index:03} of a large room, titled the way people title work");
+                (title, "todo")
+            })
+            .collect();
+        tasks.push(("Started, then placed later".to_string(), "in_progress"));
+        let (state, references) = planning_room(tasks).await;
+        let started = references.last().unwrap().clone();
+        state
+            .db
+            .with_conn(|conn| {
+                let moved = conn.execute(
+                    "UPDATE planning_task_discussions SET placement = 'later'
+                     WHERE task_id = (SELECT id FROM planning_tasks WHERE status = 'in_progress')",
+                    [],
+                )?;
+                assert_eq!(moved, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let agent = room_agent(&state);
+
+        let plan = tool(agent.as_ref(), "plan_get", json!({})).await;
+        assert!(plan.ok, "{}", plan.content);
+        assert_eq!(plan.content["complete"], false);
+        let rows = plan.content["tasks"].as_array().unwrap();
+        assert!(
+            rows.iter().any(|row| row["reference"] == json!(started)),
+            "{started} is in progress and missing"
+        );
+        assert!(plan.content["omitted"]["by_status"]
+            .get("in_progress")
+            .is_none());
+    }
+
+    /// KT-2110 — a small room is returned complete, in the same compact rows:
+    /// by reference, with no UUID, date, rank, project or discussion ids.
+    #[tokio::test]
+    async fn plan_get_returns_a_small_room_complete_in_compact_rows() {
+        let (state, references) = planning_room(vec![
+            ("Objective".to_string(), "todo"),
+            ("Under way".to_string(), "in_progress"),
+            ("Waits for the objective".to_string(), "todo"),
+            ("An idea".to_string(), "idea"),
+            ("Finished".to_string(), "done"),
+        ])
+        .await;
+        {
+            let (objective, waiting) = (references[0].clone(), references[2].clone());
+            state
+                .db
+                .with_conn(move |conn| {
+                    let primary: LinkPlanningDiscussionRequest = serde_json::from_value(
+                        json!({"discussion_id": "room", "is_primary": true}),
+                    )?;
+                    crate::db::planning::link_discussion(conn, &objective, &primary)?;
+                    let blocker: AddPlanningBlockerRequest =
+                        serde_json::from_value(json!({"blocker_task_id": objective}))?;
+                    crate::db::planning::add_blocker(conn, &waiting, &blocker)?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let agent = room_agent(&state);
+
+        let plan = tool(agent.as_ref(), "plan_get", json!({})).await;
+        assert!(plan.ok, "{}", plan.content);
+        assert_eq!(plan.content["complete"], true);
+        assert!(plan.content.get("omitted").is_none());
+        assert_eq!(plan.content["primary_objective"], references[0].as_str());
+        let rows = plan.content["tasks"].as_array().unwrap();
+        // The objective, work under way, what waits, the idea, finished work.
+        let order: Vec<&str> = rows
+            .iter()
+            .map(|row| row["reference"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            order,
+            references.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0]["is_primary"], true);
+        assert_eq!(rows[0]["actionable"], true);
+        assert!(rows[1].get("is_primary").is_none());
+        assert!(rows[1].get("blocker_count").is_none());
+        assert_eq!(rows[2]["actionable"], false);
+        assert_eq!(rows[2]["blocker_count"], json!(1));
+        assert_eq!(rows[2]["blockers"], json!([references[0]]));
+        for row in rows {
+            let row = row.as_object().unwrap();
+            for kept in ["reference", "title", "status", "priority", "actionable"] {
+                assert!(row.contains_key(kept), "`{kept}` is missing: {row:?}");
+            }
+            for dropped in [
+                "id",
+                "task",
+                "rank",
+                "position",
+                "created_at",
+                "updated_at",
+                "project_ids",
+                "discussion_ids",
+                "tags",
+                "parent_title",
+            ] {
+                assert!(!row.contains_key(dropped), "`{dropped}` is in a row");
+            }
+        }
     }
 }
 

@@ -355,12 +355,20 @@ owning public object is the addressable boundary.
 
 ## Planning context discipline
 
-- Call `plan_get` to understand the current discussion objective and ordered
-  active/later plan; do not reread the transcript for task state.
+- Call `plan_get` to understand the current discussion objective and plan; do
+  not reread the transcript for task state. It answers one compact row per
+  task (reference, title, status, priority, `actionable`, blockers), the
+  objective first, then work in progress, actionable, blocked, ideas, later
+  and done, within 12 000 bytes of compact JSON. When rows do not fit,
+  `complete` is false and `omitted` gives their count per status and the
+  `task_list` call that lists them. The UI's plan panel reads the same route
+  without `view=compact` and keeps the full relations.
 - Use `task_list` for compact discovery and filtering. It deliberately omits
   descriptions, DoD bodies, links and event logs.
 - Call `task_get` only after selecting one task; it accepts both `KT-142`
-  references and UUIDs.
+  references and UUIDs. It lists the task's latest events without their
+  `changes` bodies (an edit names its fields in `changed`, older events are
+  counted in `events_omitted`); `full_events: true` returns the whole history.
 - Use `task_changes(discussion_id, since)` for delta refreshes. Planning data
   is not injected into every prompt.
 - Keep the plan honest when tracked work starts or materially changes (status,
@@ -528,7 +536,9 @@ text. A subdirectory is reached with the tool's own option:
 for a command that could never run; `task_exec_launch` refuses it the same way
 before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
-`tool_manual({tool: "task_exec_prepare"})`.
+`tool_manual({tool: "task_exec_prepare"})`. The preflight answers the verdict
+and a task header (reference, title, status, DoD items); the description and
+the history stay in `task_get`.
 `[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:329-376#check_command_line]`
 `[src: file: backend/src/api/orchestration.rs:13312-13322#validations_refusal]`
 

@@ -1,13 +1,15 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::IntoResponse,
     Json,
 };
 
 use crate::models::{
     AddPlanningBlockerRequest, ApiErrorCode, ApiResponse, AssignPlanningTaskRequest,
-    CreatePlanningTaskRequest, DiscussionPlan, LinkPlanningDiscussionRequest, PlanningTaskChange,
-    PlanningTaskDetail, PlanningTaskListQuery, PlanningTaskListResponse,
+    CreatePlanningTaskRequest, DiscussionPlan, LinkPlanningDiscussionRequest,
+    PlanningDiscussionRelation, PlanningPlacement, PlanningTaskChange, PlanningTaskDetail,
+    PlanningTaskListQuery, PlanningTaskListResponse, PlanningTaskStatus,
     RemovePlanningBlockerRequest, UnassignPlanningTaskRequest, UnlinkPlanningDiscussionRequest,
     UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
 };
@@ -83,6 +85,98 @@ pub async fn get_task(
         )),
         Err(error) => planning_error(error),
     }
+}
+
+/// `?view=compact` asks for the projection an agent reads. The UI sends no
+/// `view` and keeps the full typed answer, byte for byte.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct PlanningViewQuery {
+    #[serde(default)]
+    pub view: Option<String>,
+}
+
+impl PlanningViewQuery {
+    fn is_compact(&self) -> bool {
+        self.view.as_deref() == Some("compact")
+    }
+}
+
+/// The same response around another projection of its data.
+fn with_data<T: serde::Serialize, U: serde::Serialize>(
+    response: ApiResponse<T>,
+    project: impl FnOnce(&T) -> U,
+) -> ApiResponse<U> {
+    ApiResponse {
+        success: response.success,
+        data: response.data.as_ref().map(project),
+        error: response.error,
+        error_code: response.error_code,
+        notice: response.notice,
+        readiness: response.readiness,
+    }
+}
+
+/// `GET /api/planning/tasks/{id}`: the full task, or with `?view=compact` the
+/// one `task_get` answers by default (KT-1984).
+pub async fn read_task(
+    state: State<AppState>,
+    path: Path<String>,
+    Query(query): Query<PlanningViewQuery>,
+) -> axum::response::Response {
+    let Json(response) = get_task(state, path).await;
+    if query.is_compact() {
+        Json(with_data(response, task_compact_view)).into_response()
+    } else {
+        Json(response).into_response()
+    }
+}
+
+/// Events `task_get` lists by default, newest first: the current round of
+/// work, not a history that grows with every edit.
+pub const TASK_EVENTS_BRIEF_CAP: usize = 10;
+
+/// KT-1984 — a task as an agent reads it: everything but the bodies of its
+/// history. An `updated` event carries the whole previous description, so the
+/// answer grew with each edit; the event keeps who, when and which fields.
+pub fn task_compact_view(task: &PlanningTaskDetail) -> serde_json::Value {
+    let mut view = match serde_json::to_value(task) {
+        Ok(view) => view,
+        Err(error) => return serde_json::json!({ "serialization_error": error.to_string() }),
+    };
+    let events: Vec<serde_json::Value> = task
+        .events
+        .iter()
+        .take(TASK_EVENTS_BRIEF_CAP)
+        .map(|event| {
+            let mut brief = serde_json::json!({
+                "id": event.id,
+                "action": event.action,
+                "actor_kind": event.actor_kind,
+                "actor_id": event.actor_id,
+                "created_at": event.created_at,
+            });
+            if event.action == "updated" {
+                if let Some(fields) = event.changes.as_object() {
+                    brief["changed"] = fields.keys().cloned().collect();
+                }
+            }
+            brief
+        })
+        .collect();
+    let older = task.events.len() - events.len();
+    view["events"] = serde_json::Value::Array(events);
+    view["events_omitted"] = serde_json::json!(older);
+    // Named explicitly: silence about a dropped field reads as "there was none".
+    view["omitted"] = serde_json::json!(if older == 0 {
+        "the `changes` body of each event — task_get with full_events: true returns them"
+            .to_string()
+    } else {
+        format!(
+            "the `changes` body of each event and the {older} oldest events — task_get with \
+             full_events: true returns the whole history"
+        )
+    });
+    view
 }
 
 pub async fn update_task(
@@ -320,6 +414,173 @@ pub async fn get_discussion_plan(
         Ok(plan) => Json(ApiResponse::ok(plan)),
         Err(error) => planning_error(error),
     }
+}
+
+/// `GET /api/discussions/{id}/plan`: the full plan, or with `?view=compact`
+/// the one `plan_get` answers (KT-2110).
+pub async fn read_discussion_plan(
+    state: State<AppState>,
+    path: Path<String>,
+    Query(query): Query<PlanningViewQuery>,
+) -> axum::response::Response {
+    let Json(response) = get_discussion_plan(state, path).await;
+    if query.is_compact() {
+        Json(with_data(response, plan_compact_view)).into_response()
+    } else {
+        Json(response).into_response()
+    }
+}
+
+/// What `plan_get` may weigh, in bytes of compact JSON: about 3 000 tokens.
+/// Every agent reads the plan before acting, a small local model included.
+pub const PLAN_COMPACT_MAX_BYTES: usize = 12_000;
+
+/// Blockers a row names by reference; beyond, the count alone.
+const PLAN_ROW_BLOCKER_REFS: usize = 3;
+
+/// KT-2110 — the plan as an agent reads it: one compact row per task, the
+/// most urgent first, within [`PLAN_COMPACT_MAX_BYTES`]. A room of 151 tasks
+/// answered 197 KB; what does not fit is counted and `task_list` lists it.
+pub fn plan_compact_view(plan: &DiscussionPlan) -> serde_json::Value {
+    plan_compact_view_within(plan, PLAN_COMPACT_MAX_BYTES)
+}
+
+fn plan_compact_view_within(plan: &DiscussionPlan, max_bytes: usize) -> serde_json::Value {
+    let mut relations: Vec<&PlanningDiscussionRelation> =
+        plan.active.iter().chain(plan.later.iter()).collect();
+    // Stable: the plan's own order is kept inside each rank.
+    relations.sort_by_key(|relation| plan_row_rank(relation));
+    let mut rows: Vec<serde_json::Value> = relations.iter().copied().map(plan_row).collect();
+
+    let whole = plan_envelope(plan, rows.clone(), &[]);
+    if whole.to_string().len() <= max_bytes {
+        return whole;
+    }
+    // The envelope at its widest (every count at full width), so the rows
+    // added below can only bring the answer under the budget, never over it.
+    let mut widest = plan_envelope(plan, Vec::new(), &relations);
+    widest["shown"] = relations.len().into();
+    let mut used = widest.to_string().len();
+    let mut shown = 0;
+    for row in &rows {
+        // One more byte for the comma that separates two rows.
+        let size = row.to_string().len() + 1;
+        if used + size > max_bytes {
+            break;
+        }
+        used += size;
+        shown += 1;
+    }
+    rows.truncate(shown);
+    plan_envelope(plan, rows, &relations[shown..])
+}
+
+/// What an agent must see first: the objective, work under way, what can be
+/// picked up, what waits, ideas; then later and finished work.
+fn plan_row_rank(relation: &PlanningDiscussionRelation) -> u8 {
+    let task = &relation.task;
+    if relation.is_primary {
+        return 0;
+    }
+    match task.status {
+        PlanningTaskStatus::Done => return 7,
+        // Before the placement: a started task placed "later" is still under way.
+        PlanningTaskStatus::InProgress => return 1,
+        _ => {}
+    }
+    if relation.placement == PlanningPlacement::Later {
+        return 6;
+    }
+    match task.status {
+        _ if relation.actionable => 2,
+        PlanningTaskStatus::Blocked => 3,
+        _ if task.blocker_count > 0 => 3,
+        PlanningTaskStatus::Idea => 4,
+        _ => 5,
+    }
+}
+
+/// One task of the plan, by its reference: every write tool accepts it, so
+/// the row carries no UUID, date, rank, project, discussion or tag.
+fn plan_row(relation: &PlanningDiscussionRelation) -> serde_json::Value {
+    let task = &relation.task;
+    let mut row = serde_json::json!({
+        "reference": task.reference,
+        "title": task.title,
+        "status": task.status,
+        "priority": task.priority,
+        "actionable": relation.actionable,
+    });
+    if relation.is_primary {
+        row["is_primary"] = true.into();
+    }
+    if relation.placement == PlanningPlacement::Later {
+        row["placement"] = "later".into();
+    }
+    if task.blocker_count > 0 {
+        row["blocker_count"] = task.blocker_count.into();
+        let blockers = &relation.active_blockers;
+        if !blockers.is_empty() && blockers.len() <= PLAN_ROW_BLOCKER_REFS {
+            row["blockers"] = blockers
+                .iter()
+                .map(|blocker| blocker.reference.clone())
+                .collect();
+        }
+    }
+    if !task.assignees.is_empty() {
+        row["assignees"] = task
+            .assignees
+            .iter()
+            .map(|assignee| serde_json::json!(assignee.agent_type))
+            .collect();
+    }
+    if let Some(merge) = &task.awaiting_merge {
+        row["awaiting_merge"] = merge.branch.clone().into();
+    }
+    if !task.live_checks.is_empty() {
+        row["live_checks"] = task.live_checks.len().into();
+    }
+    row
+}
+
+/// The answer around its rows. A plan that leaves rows out says so: how many
+/// per status, and the call that lists them.
+fn plan_envelope(
+    plan: &DiscussionPlan,
+    shown: Vec<serde_json::Value>,
+    left_out: &[&PlanningDiscussionRelation],
+) -> serde_json::Value {
+    let mut view = serde_json::json!({
+        "discussion_id": plan.discussion_id,
+        "primary_objective": plan.primary_objective.as_ref().map(|task| task.reference.as_str()),
+        "stats": plan.stats,
+        "total_active": plan.total_active,
+        "completed_active": plan.completed_active,
+        "row_defaults": "a row omits is_primary when false, placement when active, \
+                         blocker_count when 0, assignees when none",
+        "total": shown.len() + left_out.len(),
+        "shown": shown.len(),
+        "complete": left_out.is_empty(),
+        "tasks": shown,
+    });
+    if !left_out.is_empty() {
+        let mut by_status = serde_json::Map::new();
+        for relation in left_out {
+            let count = by_status
+                .entry(relation.task.status.as_str())
+                .or_insert(serde_json::Value::from(0u64));
+            *count = serde_json::Value::from(count.as_u64().unwrap_or(0) + 1);
+        }
+        view["omitted"] = serde_json::json!({
+            "count": left_out.len(),
+            "by_status": by_status,
+            "list_with": format!(
+                "task_list({{discussion_id: \"{}\", status: \"<status>\", cursor: <next_cursor>}})",
+                plan.discussion_id
+            ),
+        });
+    }
+    view
 }
 
 #[derive(serde::Deserialize, Default)]

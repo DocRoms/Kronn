@@ -185,7 +185,16 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1843: `workflow_update` and `workflow_create_draft` declare `refs`, paid for
 # by their `variables`, `actions` and `workspace_config` descriptions: ceiling
 # lowered by 4 B (84_221 -> 84_217), not raised.
-CATALOGUE_MAX_BYTES = 84_217
+# KT-1984: `task_get` takes `full_events` (the default read lists its latest
+# events without their bodies), paid for inside its own description: ceiling
+# lowered by 7 B (84_217 -> 84_210), not raised.
+# KT-2110: `plan_get` says its rows are bounded and that it counts what it
+# left out, paid for by dropping the sentence its `discussion_id` schema
+# already carries: net zero, ceiling unchanged.
+# KT-2112: `task_exec_prepare` takes `base_rev` and `task_exec_launch` no longer
+# promises a default branch, paid for by tightening four argument descriptions
+# of the two tools: ceiling lowered by 4 B (84_210 -> 84_206), not raised.
+CATALOGUE_MAX_BYTES = 84_206
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
