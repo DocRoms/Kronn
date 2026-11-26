@@ -1,0 +1,159 @@
+────────────
+ Nextest run ID b0e7428b-c1b7-4cad-8ebf-676f38b1ab16 with nextest profile: default
+    Starting 11 tests across 7 binaries (15711 tests skipped)
+        FAIL [   0.037s] ( 1/11) kronn-l2 db::orchestration::tests::a_stopped_worker_reason_is_an_undelivered_worker_reason
+  stdout ───
+
+    running 1 test
+    test db::orchestration::tests::a_stopped_worker_reason_is_an_undelivered_worker_reason ... FAILED
+
+    failures:
+
+    failures:
+        db::orchestration::tests::a_stopped_worker_reason_is_an_undelivered_worker_reason
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2143 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'db::orchestration::tests::a_stopped_worker_reason_is_an_undelivered_worker_reason' (239580424) panicked at crates/l2/../../src/db/orchestration_tests.rs:378:5:
+    assertion failed: is_undelivered_worker_reason("worker_stopped_without_delivery")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.243s] ( 2/11) kronn-l3 api::discussions::messaging::tests::a_stop_during_a_fallback_handover_leaves_the_execution_alone
+        PASS [   0.242s] ( 3/11) kronn-l3 api::discussions::messaging::tests::a_delivery_raced_with_the_stop_stays_awaiting_review
+        PASS [   0.247s] ( 4/11) kronn-l3 api::discussions::messaging::tests::a_stopped_worker_is_reassigned_at_once
+        FAIL [   0.291s] ( 5/11) kronn-l3 api::discussions::messaging::tests::the_room_stop_interrupts_the_working_execution_of_that_room
+  stdout ───
+
+    running 1 test
+    test api::discussions::messaging::tests::the_room_stop_interrupts_the_working_execution_of_that_room ... FAILED
+
+    failures:
+
+    failures:
+        api::discussions::messaging::tests::the_room_stop_interrupts_the_working_execution_of_that_room
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2926 filtered out; finished in 0.27s
+
+  stderr ───
+
+    thread 'tokio-rt-worker' (239580523) panicked at crates/l3/../../src/api/discussions/messaging.rs:4482:17:
+    assertion `left == right` failed
+      left: Working
+     right: Interrupted
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'api::discussions::messaging::tests::the_room_stop_interrupts_the_working_execution_of_that_room' (239580417) panicked at crates/l3/../../src/api/discussions/messaging.rs:4516:14:
+    called `Result::unwrap()` on an `Err` value: DB closure panicked: assertion `left == right` failed
+      left: Working
+     right: Interrupted
+
+        FAIL [   0.293s] ( 6/11) kronn-l3 api::discussions::runtime::chain_render_tests::a_cancelled_task_worker_dispatch_interrupts_its_execution_when_its_stream_ends
+  stdout ───
+
+    running 1 test
+    test api::discussions::runtime::chain_render_tests::a_cancelled_task_worker_dispatch_interrupts_its_execution_when_its_stream_ends ... FAILED
+
+    failures:
+
+    failures:
+        api::discussions::runtime::chain_render_tests::a_cancelled_task_worker_dispatch_interrupts_its_execution_when_its_stream_ends
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2926 filtered out; finished in 0.27s
+
+  stderr ───
+
+    thread 'tokio-rt-worker' (239580522) panicked at crates/l3/../../src/api/discussions/runtime.rs:3435:13:
+    assertion `left == right` failed
+      left: Working
+     right: Interrupted
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'api::discussions::runtime::chain_render_tests::a_cancelled_task_worker_dispatch_interrupts_its_execution_when_its_stream_ends' (239580423) panicked at crates/l3/../../src/api/discussions/runtime.rs:3474:10:
+    called `Result::unwrap()` on an `Err` value: DB closure panicked: assertion `left == right` failed
+      left: Working
+     right: Interrupted
+
+        FAIL [   0.296s] ( 7/11) kronn-l3 api::discussions::messaging::tests::stopping_a_task_worker_dispatch_interrupts_its_execution_in_the_same_request
+  stdout ───
+
+    running 1 test
+    test api::discussions::messaging::tests::stopping_a_task_worker_dispatch_interrupts_its_execution_in_the_same_request ... FAILED
+
+    failures:
+
+    failures:
+        api::discussions::messaging::tests::stopping_a_task_worker_dispatch_interrupts_its_execution_in_the_same_request
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2926 filtered out; finished in 0.28s
+
+  stderr ───
+
+    thread 'tokio-rt-worker' (239580528) panicked at crates/l3/../../src/api/discussions/messaging.rs:4482:17:
+    assertion `left == right` failed
+      left: Working
+     right: Interrupted
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'api::discussions::messaging::tests::stopping_a_task_worker_dispatch_interrupts_its_execution_in_the_same_request' (239580418) panicked at crates/l3/../../src/api/discussions/messaging.rs:4516:14:
+    called `Result::unwrap()` on an `Err` value: DB closure panicked: assertion `left == right` failed
+      left: Working
+     right: Interrupted
+
+        FAIL [   0.313s] ( 8/11) kronn::it api_tests::stop_route_parks_the_task_worker_execution
+  stdout ───
+
+    running 1 test
+    test api_tests::stop_route_parks_the_task_worker_execution ... FAILED
+
+    failures:
+
+    failures:
+        api_tests::stop_route_parks_the_task_worker_execution
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1231 filtered out; finished in 0.29s
+
+  stderr ───
+
+    thread 'tokio-rt-worker' (239580529) panicked at tests/api_tests.rs:11493:13:
+    assertion `left == right` failed
+      left: Working
+     right: Interrupted
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'api_tests::stop_route_parks_the_task_worker_execution' (239580443) panicked at tests/api_tests.rs:11510:10:
+    called `Result::unwrap()` on an `Err` value: DB closure panicked: assertion `left == right` failed
+      left: Working
+     right: Interrupted
+
+        PASS [   0.489s] ( 9/11) kronn-l3 api::discussions::messaging::tests::a_parking_that_fails_never_fails_the_stop
+        PASS [   1.075s] (10/11) kronn uptests::api__orchestration__tests::tests::status_does_not_say_in_progress_when_the_workers_dispatch_has_ended
+        FAIL [   1.150s] (11/11) kronn uptests::api__orchestration__tests::tests::a_restart_keeps_a_stopped_worker_parked
+  stdout ───
+
+    running 1 test
+    test uptests::api__orchestration__tests::tests::a_restart_keeps_a_stopped_worker_parked ... FAILED
+
+    failures:
+
+    failures:
+        uptests::api__orchestration__tests::tests::a_restart_keeps_a_stopped_worker_parked
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2812 filtered out; finished in 1.13s
+
+  stderr ───
+
+    thread 'uptests::api__orchestration__tests::tests::a_restart_keeps_a_stopped_worker_parked' (239580428) panicked at src/uptests/../api/orchestration_tests_up.rs:29878:5:
+    the restart must not put a stopped worker back to work: Working
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   1.155s] 11 tests run: 5 passed, 6 failed, 15711 skipped
+        FAIL [   0.037s] ( 1/11) kronn-l2 db::orchestration::tests::a_stopped_worker_reason_is_an_undelivered_worker_reason
+        FAIL [   0.291s] ( 5/11) kronn-l3 api::discussions::messaging::tests::the_room_stop_interrupts_the_working_execution_of_that_room
+        FAIL [   0.293s] ( 6/11) kronn-l3 api::discussions::runtime::chain_render_tests::a_cancelled_task_worker_dispatch_interrupts_its_execution_when_its_stream_ends
+        FAIL [   0.296s] ( 7/11) kronn-l3 api::discussions::messaging::tests::stopping_a_task_worker_dispatch_interrupts_its_execution_in_the_same_request
+        FAIL [   0.313s] ( 8/11) kronn::it api_tests::stop_route_parks_the_task_worker_execution
+        FAIL [   1.150s] (11/11) kronn uptests::api__orchestration__tests::tests::a_restart_keeps_a_stopped_worker_parked
+error: test run failed

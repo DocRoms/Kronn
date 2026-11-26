@@ -47,16 +47,6 @@ fn validate_common(reason: &str, dedupe_key: &str) -> Result<()> {
     Ok(())
 }
 
-fn summariser_for(command: &str, args: &[String]) -> Summariser {
-    match command {
-        "cargo" if args.iter().any(|arg| arg == "clippy") => Summariser::Clippy,
-        "cargo" => Summariser::CargoTest,
-        "tsc" => Summariser::Tsc,
-        "vitest" => Summariser::Vitest,
-        _ => Summariser::Generic,
-    }
-}
-
 async fn validate_task_link(
     state: &AppState,
     caller: &NativeAgentJobCaller<'_>,
@@ -217,7 +207,7 @@ pub async fn start_background_job(
         cwd: workspace_root.to_path_buf(),
         timeout_secs: Some(u64::from(quick.timeout_secs)),
         stdin: None,
-        summariser: summariser_for(&quick.command, &argv),
+        summariser: Summariser::for_command(&quick.command, &argv),
     };
     quick_exec::validate(&spec, &[workspace_root.to_path_buf()])
         .map_err(|error| anyhow::anyhow!("Quick Exec refused: {error}"))?;

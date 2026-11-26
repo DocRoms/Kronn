@@ -11500,7 +11500,7 @@ path: string,
  */
 code?: string | null, };
 
-export type Summariser = "cargo_test" | "clippy" | "tsc" | "vitest" | "generic" | "collected";
+export type Summariser = "cargo_test" | "cargo_nextest" | "clippy" | "tsc" | "vitest" | "generic" | "collected";
 
 export type SummarizeRequest = {
 /**
