@@ -44,7 +44,6 @@ pub mod api {
 pub mod core {
     pub use kronn_l0::core::*;
     pub mod api_access;
-    pub mod argv_roles;
     pub mod artifacts_reach;
     pub mod audit_baseline;
     pub mod audit_detectors;
@@ -65,7 +64,6 @@ pub mod core {
     pub mod docs_sidecar;
     pub mod git_guard;
     pub mod home_credentials;
-    pub mod inline_code;
     pub mod legacy_docs;
     pub mod mcp_scanner;
     pub mod model_catalog;
