@@ -1,6 +1,94 @@
 {
+  "src/components/AgentQuestionForm.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    }
+  },
+  "src/components/AiDocViewer.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 2
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 2
+    }
+  },
+  "src/components/ArtifactImportDialog.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
   "src/components/AssistantConversationList.tsx": {
     "no-restricted-properties": {
+      "count": 1
+    }
+  },
+  "src/components/AuditRecapPanel.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/BriefingForm.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    }
+  },
+  "src/components/ChatHeader.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    }
+  },
+  "src/components/ChatInput.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 4
+    }
+  },
+  "src/components/CollectionFavoritesHeader.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/CollectionRowActions.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/CollectionSidebarFooter.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/CustomApiAiHelper.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    }
+  },
+  "src/components/DetailHeaderShell.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/DetectRepositoriesDialog.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/DiscInviteButton.tsx": {
+    "ui-guards/no-adhoc-dialog": {
       "count": 1
     }
   },
@@ -9,9 +97,90 @@
       "count": 1
     }
   },
+  "src/components/DiscussionPlanPanel.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    }
+  },
+  "src/components/DiscussionSettingsPanel.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    }
+  },
   "src/components/DiscussionSidebar.tsx": {
     "no-restricted-globals": {
       "count": 4
+    },
+    "ui-guards/control-has-name": {
+      "count": 2
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 3
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 3
+    }
+  },
+  "src/components/DocDataExport.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 2
+    }
+  },
+  "src/components/DocPreview.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 4
+    }
+  },
+  "src/components/DocReconfirm.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/ErrorBoundary.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 2
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 8
+    }
+  },
+  "src/components/ExportNotCarriedDialog.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/GitPanel.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 5
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 4
+    }
+  },
+  "src/components/GlobalSearchPanel.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    }
+  },
+  "src/components/HostSyncChip.tsx": {
+    "ui-guards/no-off-scale-style": {
+      "count": 2
+    }
+  },
+  "src/components/HostSyncPreview.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 2
+    }
+  },
+  "src/components/LearningsModal.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
     }
   },
   "src/components/LivePageDatasetControls.tsx": {
@@ -24,24 +193,229 @@
       "count": 1
     }
   },
+  "src/components/MermaidDiagram.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/MessageAttachments.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/MessageBubble.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 7
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 17
+    }
+  },
+  "src/components/NewDiscussionForm.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 3
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 2
+    }
+  },
+  "src/components/PlanningProposalReview.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    }
+  },
+  "src/components/PluginPortabilityModal.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/ProfileTooltip.tsx": {
+    "ui-guards/no-off-scale-style": {
+      "count": 1
+    }
+  },
   "src/components/ProjectCard.tsx": {
     "no-restricted-properties": {
       "count": 2
+    },
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 12
+    }
+  },
+  "src/components/ProjectDockerPanel.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/ProjectDocsLocationSetting.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
     }
   },
   "src/components/ProjectLinkedRepos.tsx": {
     "no-restricted-properties": {
       "count": 1
+    },
+    "ui-guards/control-has-name": {
+      "count": 3
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 2
     }
   },
   "src/components/ProjectList.tsx": {
     "no-restricted-globals": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 2
+    }
+  },
+  "src/components/ProjectSkills.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 7
+    }
+  },
+  "src/components/RecoveryRestorePanel.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 2
+    }
+  },
+  "src/components/RepositoryResourceModal.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/RevalidateAudit.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/SkillHistoryDrawer.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/SourceCodeViewer.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 4
+    }
+  },
+  "src/components/StrongConfirmDialog.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/SubAuditModal.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 11
+    }
+  },
+  "src/components/SwipeableDiscItem.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    }
+  },
+  "src/components/TaskLaunchDialog.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/TechDebtReview.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 2
+    }
+  },
+  "src/components/TerminalPanel.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    }
+  },
+  "src/components/TestModeModal.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/ToolCallsGroup.tsx": {
+    "ui-guards/no-off-scale-style": {
+      "count": 6
+    }
+  },
+  "src/components/TrustLevel.tsx": {
+    "ui-guards/no-adhoc-dialog": {
       "count": 1
     }
   },
   "src/components/UserContextEditor.tsx": {
     "no-restricted-globals": {
       "count": 1
+    }
+  },
+  "src/components/VideoSequenceEditor.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/plugins/AddPluginModal.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 4
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 2
+    }
+  },
+  "src/components/plugins/CustomApiForm.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 15
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 2
+    }
+  },
+  "src/components/plugins/PluginDetailPanel.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 3
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 2
+    }
+  },
+  "src/components/plugins/PluginScopeEditor.tsx": {
+    "ui-guards/no-off-scale-style": {
+      "count": 4
     }
   },
   "src/components/plugins/useMcpPageState.ts": {
@@ -54,9 +428,55 @@
       "count": 1
     }
   },
+  "src/components/project/ProjectGithubRow.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 2
+    }
+  },
+  "src/components/settings/AgentFullAccessSwitch.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
   "src/components/settings/AgentsSection.tsx": {
     "no-restricted-globals": {
       "count": 4
+    },
+    "ui-guards/control-has-name": {
+      "count": 2
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 9
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 3
+    }
+  },
+  "src/components/settings/AntiHallucSection.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 1
+    }
+  },
+  "src/components/settings/CompressionSection.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 2
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 2
+    }
+  },
+  "src/components/settings/ContinualLearningSection.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
     }
   },
   "src/components/settings/DbUsageChart.tsx": {
@@ -64,29 +484,133 @@
       "count": 1
     }
   },
+  "src/components/settings/DebugSection.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
   "src/components/settings/DiskSection.tsx": {
     "no-restricted-properties": {
       "count": 2
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
     }
   },
   "src/components/settings/ExternalApiSection.tsx": {
     "no-restricted-globals": {
       "count": 2
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/settings/HostDiscoverySection.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 44
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 19
+    }
+  },
+  "src/components/settings/IdentitySection.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/settings/ModelCatalogSection.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    }
+  },
+  "src/components/settings/OllamaCard.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
     }
   },
   "src/components/settings/ProfilesSection.tsx": {
     "no-restricted-globals": {
       "count": 1
+    },
+    "ui-guards/control-has-name": {
+      "count": 8
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 4
     }
   },
   "src/components/settings/PublicationCredentialsSection.tsx": {
     "no-restricted-properties": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
       "count": 1
     }
   },
   "src/components/settings/RecoverySection.tsx": {
     "no-restricted-properties": {
       "count": 1
+    },
+    "ui-guards/control-has-name": {
+      "count": 3
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/settings/TrustProofSection.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    }
+  },
+  "src/components/settings/UsageSection.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/settings/WorkersSection.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/settings/WorktreesSection.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    }
+  },
+  "src/components/setup/FolderPicker.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/tour/TourOverlay.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/workflows/ApiCallAiHelper.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    }
+  },
+  "src/components/workflows/ApiCallStepCard.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 9
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 7
     }
   },
   "src/components/workflows/AutoDisabledReview.tsx": {
@@ -94,44 +618,211 @@
       "count": 2
     }
   },
+  "src/components/workflows/DecideStepForm.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 1
+    }
+  },
+  "src/components/workflows/ExecutionLimitsCard.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 3
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 10
+    }
+  },
+  "src/components/workflows/QuickApiForm.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 6
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 3
+    }
+  },
+  "src/components/workflows/QuickExecForm.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 3
+    }
+  },
+  "src/components/workflows/QuickPromptForm.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 7
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 3
+    }
+  },
   "src/components/workflows/RunDetail.tsx": {
     "no-restricted-globals": {
       "count": 2
+    },
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 8
     }
   },
   "src/components/workflows/WorkflowDetail.tsx": {
     "no-restricted-globals": {
+      "count": 1
+    },
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 5
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 7
+    }
+  },
+  "src/components/workflows/WorkflowRefsCard.tsx": {
+    "ui-guards/no-literal-ui-string": {
       "count": 1
     }
   },
   "src/components/workflows/WorkflowWizard.tsx": {
     "no-restricted-globals": {
       "count": 2
+    },
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 54
+    }
+  },
+  "src/hooks/ToastItem.tsx": {
+    "ui-guards/no-literal-ui-string": {
+      "count": 4
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 7
+    }
+  },
+  "src/pages/ApiCallLogsPage.tsx": {
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/pages/Dashboard.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 3
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 2
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 1
+    }
+  },
+  "src/pages/DesignSystemPage.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
     }
   },
   "src/pages/DiscussionsPage.tsx": {
     "no-restricted-globals": {
       "count": 4
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 6
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 4
+    }
+  },
+  "src/pages/McpPage.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
     }
   },
   "src/pages/PagesPage.tsx": {
     "no-restricted-properties": {
       "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 4
     }
   },
   "src/pages/PlanningPage.tsx": {
     "no-restricted-globals": {
+      "count": 1
+    },
+    "ui-guards/control-has-name": {
+      "count": 11
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
       "count": 1
     }
   },
   "src/pages/SettingsPage.tsx": {
     "no-restricted-globals": {
       "count": 5
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 6
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 2
+    }
+  },
+  "src/pages/SetupWizard.tsx": {
+    "ui-guards/control-has-name": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 3
+    }
+  },
+  "src/pages/StandaloneDiscussionMosaic.tsx": {
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
     }
   },
   "src/pages/WorkflowsPage.tsx": {
     "no-restricted-globals": {
       "count": 5
+    },
+    "ui-guards/control-has-name": {
+      "count": 6
+    },
+    "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-foreign-page-stylesheet": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
+      "count": 2
+    },
+    "ui-guards/no-off-scale-style": {
+      "count": 6
     }
   }
 }

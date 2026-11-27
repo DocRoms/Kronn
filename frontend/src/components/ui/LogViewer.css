@@ -1,0 +1,175 @@
+/* KT-2004 — LogViewer. Tokens only, no theme named. The scroll area reads on
+   the code surface in the mono font; a tinted line keeps a written marker,
+   so the colour never says it alone. */
+
+.ui-log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  min-width: 0;
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-primary);
+}
+
+.ui-log[data-max-height="fill"] {
+  height: 100%;
+  min-height: 0;
+}
+
+.ui-log-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kr-space-2);
+}
+
+.ui-log-note {
+  min-width: 0;
+  color: var(--kr-text-secondary);
+}
+
+.ui-log-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  margin-inline-start: auto;
+}
+
+.ui-log-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ui-log[data-max-height="fill"] .ui-log-frame { flex: 1 1 auto; }
+
+.ui-log-scroll {
+  overflow: auto;
+  min-width: 0;
+  padding: var(--kr-space-2) 0;
+  font-family: var(--kr-font-mono);
+  line-height: 1.5;
+  color: var(--kr-code-text);
+  background-color: var(--kr-code-surface);
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-radius-control);
+}
+
+.ui-log-scroll:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.ui-log[data-max-height="sm"] .ui-log-scroll { max-height: calc(var(--kr-space-8) * 5); }
+.ui-log[data-max-height="md"] .ui-log-scroll { max-height: calc(var(--kr-space-8) * 10); }
+.ui-log[data-max-height="lg"] .ui-log-scroll { max-height: calc(var(--kr-space-8) * 16); }
+.ui-log[data-max-height="fill"] .ui-log-scroll { flex: 1 1 auto; min-height: 0; }
+
+/* ── Lines ────────────────────────────────────────────────────────────── */
+.ui-log-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--kr-space-2);
+  padding: 0 var(--kr-space-3);
+  border-inline-start: 2px solid transparent;
+}
+
+/* One line per line: the lines are as wide as the longest, so a tint runs
+   under the whole text when the area scrolls sideways. */
+.ui-log[data-wrap="false"] .ui-log-line {
+  width: max-content;
+  min-width: 100%;
+}
+
+.ui-log-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ui-log[data-wrap="false"] .ui-log-text {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.ui-log-number {
+  flex: none;
+  min-width: calc(var(--ui-log-digits, 2) * 1ch);
+  text-align: end;
+  color: var(--kr-text-muted);
+  user-select: none;
+}
+
+.ui-log-time {
+  flex: none;
+  min-width: 8ch;
+  color: var(--kr-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-log-marker {
+  flex: none;
+  padding: 0 var(--kr-space-1);
+  font-weight: var(--kr-weight-semibold);
+  text-transform: uppercase;
+  color: var(--kr-text-primary);
+  border: 1px solid currentColor;
+  border-radius: var(--kr-radius-control);
+}
+
+.ui-log-line[data-tone="danger"] {
+  background-color: rgba(var(--kr-danger-rgb), 0.1);
+  border-inline-start-color: var(--kr-status-danger);
+}
+
+.ui-log-line[data-tone="danger"] .ui-log-marker { border-color: var(--kr-status-danger); }
+
+.ui-log-line[data-tone="warning"] {
+  background-color: rgba(var(--kr-warning-rgb), 0.12);
+  border-inline-start-color: var(--kr-status-warning);
+}
+
+.ui-log-line[data-tone="warning"] .ui-log-marker { border-color: var(--kr-status-warning); }
+
+.ui-log-empty {
+  margin: 0;
+  padding: var(--kr-space-2) var(--kr-space-3);
+  color: var(--kr-text-secondary);
+}
+
+/* ── Streaming cursor ─────────────────────────────────────────────────── */
+.ui-log-cursor {
+  display: inline-block;
+  width: 1ch;
+  height: 1em;
+  margin-inline-start: var(--kr-space-1);
+  vertical-align: text-bottom;
+  background-color: var(--kr-code-text);
+  animation: ui-log-blink calc(var(--kr-duration-slow) * 4) steps(1) infinite;
+}
+
+@keyframes ui-log-blink {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-log-cursor { animation: none; }
+}
+
+/* ── Jump to the end ──────────────────────────────────────────────────── */
+.ui-log-jump {
+  position: absolute;
+  inset-inline-end: var(--kr-space-3);
+  bottom: var(--kr-space-2);
+  z-index: var(--kr-z-sticky);
+  box-shadow: var(--kr-shadow-md);
+}
+
+@media (pointer: coarse) {
+  .ui-log-jump {
+    min-height: var(--kr-control-h-touch);
+  }
+}

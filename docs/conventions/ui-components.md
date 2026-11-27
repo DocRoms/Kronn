@@ -7,7 +7,10 @@ components (`Field`, `Select`, `Switch`, `FormFooter`); lot 5 migrates the
 forms to them. KT-1883 adds the feedback components (`Notice`,
 `EmptyState`, `LoadingState` with its `Skeleton`). KT-1884 adds the six
 header kinds (`ListHeader`, `DetailHeader`, `TabHeader`, `SectionHeader`,
-`DrawerHeader`, `CardHeader`), see [header-kinds.md](header-kinds.md). Pairs with
+`DrawerHeader`, `CardHeader`), see [header-kinds.md](header-kinds.md). KT-1886
+adds the dense-data components (`CopyButton`, `Table`, `KeyValueList`,
+`StatTile` / `StatGrid`, `ProgressBar`); lots 2-5 migrate the existing tables,
+lists, tiles, bars and copy actions to them. Pairs with
 [design-tokens.md](design-tokens.md) and [ui-text.md](ui-text.md).
 
 ## Where they live
@@ -15,7 +18,7 @@ header kinds (`ListHeader`, `DetailHeader`, `TabHeader`, `SectionHeader`,
 One folder, one file per component, with its stylesheet and its test next to
 it (`Button.tsx`, `Button.css`, `Button.test.tsx`). `stylesheets.test.ts`
 fails if a component lacks one of the three.
-`[src: file: frontend/src/components/ui/stylesheets.test.ts:182]`
+`[src: file: frontend/src/components/ui/stylesheets.test.ts:183]`
 
 | Component | Use | Keyboard |
 |---|---|---|
@@ -36,6 +39,11 @@ fails if a component lacks one of the three.
 | `Notice` | A message inside the page it concerns (see [feedback-channels.md](feedback-channels.md)): `tone` info / warning / danger / success, optional `title`, one `action` (`{ label, onClick }`), `onDismiss` adds a cross named "Dismiss". Tone on the icon, the inline-start border and the tint; text in `--kr-text-primary`. `role="alert"` for danger only, `status` otherwise. | native |
 | `EmptyState` | `kind` firstUse (its `action`, the primary button, is required), noResult (`onClear`, required, "Clear the filters" unless `clearLabel`), nothingSelected (no action); `title`, `description`, `icon`. The type refuses a case without its way out. | native |
 | `LoadingState` | `size` sm (a ring beside the text, inline) / md (the mark over its sentence, a panel; default) / lg (a whole page); `fullscreen` (the window, lg), `phase`, `onRetry`. md and lg keep the cold-start screen of `index.html` instead of drawing a second one, unless `holdsBootScreen={false}` (a loader shown as content); the hold follows the current props, so a loader that turns sm or stops holding releases that screen and draws itself. Same file: `Skeleton`, `kind` list (`rows`) / detail, one named status (not marked busy, so its label is read), shapes hidden from assistive technology. | — |
+| `CopyButton` | `text` or `getText` (read at the click), required `label`; `form` icon (an `IconButton`) / text (a `Button`). A copy shows a check for 1.5 s and says "Copied" in a polite live region; a refused clipboard turns danger and says "Copy failed". | native |
+| `Table` | Required `caption` (`hideCaption`); `columns` (`header`, `align`, `numeric`, `sortable`, `truncate` ellipsis / wrap, `rowHeader`); controlled `sort` / `onSortChange`; `stickyHeader`, `maxHeight` sm / md / lg, `density` compact / normal, `rowTone`, `hover`, `selection`, `actions`, `onRowOpen`, `empty`, `loading`, `footer`, `narrow` scroll / cards. | sort and open buttons, checkboxes; the bounded area is a Tab stop |
+| `KeyValueList` | A `dl`; `items` (`label`, `value`, `mono`, `copyable`, `copyText`, `truncate`), `layout` grid / inline. | the copy buttons |
+| `StatTile`, `StatGrid` | `label`, `value` (null: "—" and `unknownReason`), `unit`, `icon`, `hint`, `delta` (`text`, `direction`, `tone`), `loading`, `onClick` (a button) with `selected` (`aria-pressed`), `size` md / lg. `StatGrid` (`label` names the group) wraps its tiles by its own width. | native, when a button |
+| `ProgressBar` | Required `label` (`hideLabel`); `value`, `max`, `valueText`; no value is indeterminate; `tone` accent / success / warning / danger / info; `size` sm / md. Stacked: `segments` (`id`, `label`, `value`, `tone`), `max`, `legend`. | — |
 | `ListHeader`, `DetailHeader`, `TabHeader`, `SectionHeader`, `DrawerHeader`, `CardHeader` | One header per kind, one heading each at a fixed level (h1; h2 for detail, drawer, card; h3 for tab, section), slots `leading` / `title` / `meta` / `status` / `description` / `actions`, `compact`; `DrawerHeader` adds `onClose` + `closeLabel` (the last control), `titleId` names a drawer or a card. Which goes where: [header-kinds.md](header-kinds.md). | native |
 
 `Menu` and `Tooltip` render into `document.body` at a fixed position
@@ -165,7 +173,7 @@ Escape closes one layer, the innermost first
   demos), passes `holdsBootScreen={false}`: mounted for good, md and lg would
   otherwise hold the cold-start screen and leave Settings behind it when it
   is the first page opened
-  `[src: file: frontend/src/components/settings/DesignSystemComponents.tsx:485]`.
+  `[src: file: frontend/src/components/settings/DesignSystemComponents.tsx:499]`.
 - **Variants** live in `feedbackKinds.ts` (`NOTICE_TONES`,
   `EMPTY_STATE_KINDS`, `LOADING_SIZES`, `SKELETON_KINDS`), so the component
   files export components only (fast refresh).
@@ -183,6 +191,159 @@ Escape closes one layer, the innermost first
   one with a long title, to show it ellipsize). A demo renders its real
   heading, so the gallery's own `h3` after an `h1` or `h2` demo is the one
   `heading-order` jump its axe test allows.
+
+## Dense-data components (KT-1886, KT-2004)
+
+- **Narrow by the container, not the window.** `Table` and `KeyValueList`
+  are size containers (`container-type: inline-size`) and take their narrow
+  form under a width of their own: `@container ui-table (width < 40rem)`
+  (40rem is `--kr-bp-sm`), `@container ui-kv (width < 24rem)`. A table in a
+  side panel turns into cards on a wide screen too; no `@media` width query.
+  A container query cannot read a custom property, so the threshold is
+  written in rem, the one length besides a 1 or 2 px line.
+  `[src: file: frontend/src/components/ui/Table.css:249]`
+  `[src: file: frontend/src/components/ui/KeyValueList.css:91]`
+  `StatGrid` needs no query: `repeat(auto-fill, minmax(min(100%, …), 1fr))`
+  wraps its tiles by its own width, never a fixed column count.
+- **A table's narrow forms.** `narrow="scroll"` (default) keeps the columns
+  and scrolls sideways in the wrapper that is always there. `narrow="cards"`
+  makes each row a card in which every value follows its column header (a
+  label hidden from assistive technology, which already has the header row);
+  the header row is visually hidden and shows again when a control in it (a
+  sort button, the select-all) takes the focus. Engines differ on whether a
+  table keeps its roles once its display changes, so in cards form the roles
+  are written out (`table`, `rowgroup`, `row`, `columnheader`, `rowheader`,
+  `cell`: the native ones, so the wide rendering is unchanged), the table is
+  named by its caption with `aria-labelledby`, and each cell names its column
+  header in `headers`.
+  `[src: file: frontend/src/components/ui/Table.tsx:183]`
+- **A selected row is a checked checkbox.** The row's checkbox is the only
+  semantic of the selection: `aria-selected` belongs to a row of a `grid`,
+  not of a plain table. The row carries `data-selected="true"` for its colour,
+  the accent tint of the selected rows of the collection lists
+  (`--kr-accent-bg`), laid over the row as a background image so a toned row
+  keeps its tone tint and its inline-start border.
+  `[src: file: frontend/src/components/ui/Table.css:160]`
+- **A scroll area the keyboard reaches.** The wrapper becomes a `region`
+  named by the caption, with `tabindex="0"`, when `maxHeight` bounds it or
+  when its content is wider than it (measured with a `ResizeObserver`); a
+  table that fits is no Tab stop.
+  `[src: file: frontend/src/components/ui/Table.tsx:107#useOverflowsSideways]`
+- **Sorting is controlled.** The table never reorders rows: a sortable header
+  is a button that calls `onSortChange` with `nextSort` (ascending first,
+  then the other way on the same column); `aria-sort` sits on the sorted
+  header only. `[src: file: frontend/src/components/ui/dataKinds.ts:38#nextSort]`
+- **A row opens from the keyboard.** With `onRowOpen` the first data cell
+  (the `rowHeader` column, else the first) holds a real button. A click on
+  the rest of the row is a mouse shortcut: it never fires from a control in
+  the row (button, link, field, label, checkbox, anything focusable), from a
+  portal (a menu, a tooltip, a dialog opened from the row), or when the
+  reader is selecting text.
+  `[src: file: frontend/src/components/ui/Table.tsx:165]`
+- **Empty and loading inside the table.** One row spanning every column:
+  `empty` (an `EmptyState`, or "Nothing to show") or a `LoadingState` sm with
+  the table `aria-busy`. The select-all is disabled when there is no row.
+- **12 px at least.** Both densities write `--kr-type-sm` or more; so do the
+  tile labels, the delta, the progress label and its legend, and the lines
+  and number gutters of `LogViewer` and `DiffViewer`.
+- **A copy says what happened.** `CopyButton` keeps its name (focus does not
+  re-announce), changes its icon, and writes "Copied" or "Copy failed" in a
+  polite live region next to it, empty again after
+  `COPY_FEEDBACK_MS` (1500). No clipboard, a refused permission or a
+  `getText` that throws are all a failure.
+  `[src: file: frontend/src/components/ui/CopyButton.tsx:42#CopyButton]`
+  `[src: file: frontend/src/components/ui/dataKinds.ts:6]`
+- **Never colour alone.** A delta's direction is written for assistive
+  technology ("Up", "Down", "No change") and its tone colours the arrow
+  only, the text stays `--kr-text-secondary`; an unknown value is "—" with
+  its reason in a title and in hidden text; a missing key-value is "—" read
+  as "No value". A tinted log line also writes its marker in words (the
+  translated "stderr", "error" or "warning"), and a diff line writes its
+  `+`, `−` or space marker as text in a column of its own.
+- **A stacked bar is read once.** Without a legend it is a `role="img"`
+  whose name lists every segment, its count and its share (percent in the UI
+  locale, "<1 %" for a share that would round to 0). With `legend`, the
+  legend is the readable list, named by `label`, and the image is named by
+  `label` alone, so the breakdown is not heard twice. Each drawn segment keeps
+  `--kr-space-1` of width at least.
+  `[src: file: frontend/src/components/ui/ProgressBar.tsx:78]`
+  A single bar with no `value` is indeterminate: it slides, and under
+  `prefers-reduced-motion: reduce` it stands still, the whole track striped.
+  `[src: file: frontend/src/components/ui/ProgressBar.css:130]`
+- **One log viewer (`LogViewer`, KT-2004).** The scroll area is a focusable
+  (`tabIndex={0}`) `role="log"` named by the required `label`; it sets no
+  `aria-live` of its own. A line is a string or `{ text, stream, level, time }`:
+  `stderr` and the `error` level are tinted danger, `warn` warning, from the
+  status tokens, and each also writes its marker in words (`ui.log.stderr`,
+  `ui.log.level.error`, `ui.log.level.warn`); a time is a `<time>` in a column
+  of its own. ANSI escape sequences are removed by `stripAnsi`, on screen and
+  in the copied text. `follow` (default on) keeps the end in view; scrolling
+  up by hand turns it off and shows a "jump to the end" button that resumes
+  it and gives the focus back to the log. The wrap toggle (`aria-pressed`) is
+  always in the toolbar; copy (`copyable`, a `CopyButton` of the whole text),
+  refresh (`onRefresh`) and clear (`onClear`) show only when wired. `note`
+  ("last N lines", "truncated") sits above the log, outside it; `empty`
+  replaces the default "No output". `lineNumbers` are hidden from assistive
+  technology and start at `startNumber` (default 1), so a tail is numbered
+  where it starts. `maxHeight` is `sm`, `md` (default), `lg` or `fill`.
+  `[src: file: frontend/src/components/ui/LogViewer.tsx:142]`
+  `[src: file: frontend/src/components/ui/logKinds.ts:37#stripAnsi]`
+- **One diff viewer (`DiffViewer`, KT-2004).** It renders a model, never raw
+  text: `parseUnifiedDiff` builds it from a git patch (old and new numbers
+  from the hunk headers, renames, binary files), `diffFileFromRows` from the
+  positional pairs of `qp-history-diff.ts`, where a `changed` line carries the
+  new `text` and the old `otherText`. Unified writes a changed line as two
+  rows, marked `−` then `+`, both in the changed tint
+  (`--kr-diff-changed-*`); side by side puts the old text left and the new
+  right on one row. Side by side shows as unified while the viewer's own
+  width is under 40rem (`DIFF_SPLIT_MIN_REM`), measured with a
+  `ResizeObserver`; the viewer is no size container, so it never collapses
+  in a flex row, and the layout toggle hides while it is narrow. Each file
+  has a header (previous path → path, a status badge, +added −removed, and a
+  `CopyButton` of the new text of its shown lines), or "binary" /
+  "truncated" in place of its lines. `highlight(text, path)` must return
+  escaped HTML, since its markup is injected as is; it runs on the new texts
+  (context, added, the new side of a changed line) and is skipped for a file
+  of more than `highlightLimit` lines (default `DIFF_HIGHLIGHT_LIMIT`, 2000);
+  its `hljs-*` classes take the `--kr-code-*` colours in `DiffViewer.css`.
+  With `selectable`, each line holds a toggle button with `aria-pressed`,
+  named by its number; a removed line says so ("Select removed line 13"),
+  because the removed and the added line of a modified hunk often share a
+  number. A click selects one line, a click on it again clears it, and
+  Shift (with a click or the keyboard) extends the range from the first line
+  up to `maxSelection` lines (default `DIFF_MAX_SELECTION`, 50); the caller's
+  `selectionToolbar` shows under the last selected line. Extending needs
+  Shift: a way without a modifier, for touch, is to be decided when the
+  first screen moves to it. `loading` shows a `LoadingState` with the viewer
+  `aria-busy`; no file shows "No change" or `empty`. A bounded `maxHeight`
+  makes the files a focusable region named by `label`.
+  `[src: file: frontend/src/components/ui/DiffViewer.tsx:317-322#DiffViewer]`
+  `[src: file: frontend/src/components/ui/DiffViewer.tsx:185]`
+  `[src: file: frontend/src/lib/diffModel.ts:82#parseUnifiedDiff]`
+  `[src: file: frontend/src/lib/diffModel.ts:193#diffFileFromRows]`
+- **Variants** live in `dataKinds.ts` (`TABLE_DENSITIES`,
+  `TABLE_MAX_HEIGHTS`, `TABLE_NARROW_FORMS`, `TABLE_ROW_TONES`,
+  `KEY_VALUE_LAYOUTS`, `STAT_TILE_SIZES`, `PROGRESS_TONES`,
+  `PROGRESS_SIZES`, `nextSort`, `COPY_FEEDBACK_MS`), `logKinds.ts`
+  (`LOG_LEVELS`, `LOG_MAX_HEIGHTS`, `stripAnsi`) and `diffKinds.ts`
+  (`DIFF_LAYOUTS`, `DIFF_MAX_HEIGHTS`, `DIFF_SPLIT_MIN_REM`,
+  `DIFF_HIGHLIGHT_LIMIT`, `DIFF_MAX_SELECTION`, `DIFF_MARKERS`); the model of
+  a diff and its parsers are in `lib/diffModel.ts`.
+- **In the gallery** each one is shown in a wide container on its own line,
+  then its narrow demos together on the next line (`WideAndNarrow`: each
+  narrow container is 20rem whatever the window and they wrap under each
+  other in a narrow window; the Table shows its cards and its sideways
+  scroll there; no padding on the containers), with sample data whose
+  numbers are written with `Intl.NumberFormat` in the interface's locale;
+  the test is `DesignSystemDataComponents.test.tsx`.
+  `[src: file: frontend/src/components/settings/DesignSystemComponents.tsx:726#WideAndNarrow]`
+- **A size container needs a width of its own.** Inline-size containment
+  ignores the content, so a `Table` or `KeyValueList` placed as a flex item
+  with no width or flex-basis collapses to 0 px and vanishes. In the gallery
+  each one sits directly in a `.ds-demo-container` whose form sets a width
+  (`wide`: `width: 100%`; `narrow`: `flex: 0 1 20rem`); the gallery test
+  checks both. A screen that hosts them in a flex row does the same.
+  `[src: file: frontend/src/components/settings/DesignSystemSection.css:395]`
 
 ## Rules
 
@@ -231,20 +392,18 @@ the four locales; the gallery test fails if a component of the folder is
 missing. A shared component built on those controls (the agent picker,
 KT-1885) goes in `SHARED_GALLERY_COMPONENTS`, shown after them.
 `[src: file: frontend/src/components/settings/designSystemGallery.ts:19#UI_GALLERY_COMPONENTS]`
-`[src: file: frontend/src/components/settings/designSystemGallery.ts:47#SHARED_GALLERY_COMPONENTS]`
+`[src: file: frontend/src/components/settings/designSystemGallery.ts:56#SHARED_GALLERY_COMPONENTS]`
 
 ## The one agent picker
 
 Every place that chooses an agent uses `AgentSwitchPicker` (KT-1885); its
 modes are props, not copies: the trigger `variant` (`chip`, `compact`,
-`field`), `multiple` (several targets, the list stays open), `exactModel`
+`field`), `multiple` (several targets, the list stays open) and `exactModel`
 (an agent and a model id, the catalogue's or one typed in the search, or
-« = principal », with the principal's own model greyed) and `customModel`
-(KT-1994: the full list of a discussion, see below).
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:484#variant]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:507#multiple]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:518#exactModel]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:526#customModel]`
+« = principal », with the principal's own model greyed).
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:418#variant]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:441#multiple]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:452#exactModel]`
 Its popover is in `<body>` on the popover layer, above every dialog, and opens
 on its search field. It is placed from its rendered size, measured on open,
 when the search or the catalogue changes it, and on resize: it stays inside

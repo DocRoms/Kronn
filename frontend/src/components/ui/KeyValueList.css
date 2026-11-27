@@ -1,0 +1,111 @@
+/* KT-1886 — KeyValueList. Tokens only, no theme named. The frame is a size
+   container (ui-kv): the narrow form follows its own width, not the
+   window's. 24rem is 384px at the default text size; a container query cannot
+   read a custom property. */
+
+.ui-kv-frame {
+  container-type: inline-size;
+  container-name: ui-kv;
+  min-width: 0;
+}
+
+.ui-kv {
+  margin: 0;
+  font-size: var(--kr-type-md);
+  color: var(--kr-text-primary);
+}
+
+.ui-kv dt {
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-text-secondary);
+}
+
+.ui-kv dd {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  min-width: 0;
+  margin: 0;
+}
+
+.ui-kv-value {
+  min-width: 0;
+}
+
+.ui-kv dd[data-missing="true"] {
+  color: var(--kr-text-muted);
+}
+
+.ui-kv dd[data-mono="true"],
+.ui-kv dd[data-mono="true"] .ui-kv-value {
+  font-family: var(--kr-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.ui-kv-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── grid: labels in a max-content column ─────────────────────────────── */
+.ui-kv[data-layout="grid"] {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: var(--kr-space-4);
+  row-gap: var(--kr-space-2);
+  align-items: baseline;
+}
+
+.ui-kv[data-layout="grid"] .ui-kv-item {
+  display: contents;
+}
+
+/* ── inline: label left, value right ──────────────────────────────────── */
+.ui-kv[data-layout="inline"] {
+  display: flex;
+  flex-direction: column;
+}
+
+.ui-kv[data-layout="inline"] .ui-kv-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--kr-space-4);
+  padding: var(--kr-space-1) 0;
+  border-bottom: 1px solid var(--kr-border-subtle);
+}
+
+.ui-kv[data-layout="inline"] .ui-kv-item:last-child {
+  border-bottom: 0;
+}
+
+.ui-kv[data-layout="inline"] dd {
+  justify-content: flex-end;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Narrow container: the label above its value ──────────────────────── */
+@container ui-kv (width < 24rem) {
+  .ui-kv[data-layout="grid"] {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 0;
+  }
+
+  .ui-kv[data-layout="grid"] dd {
+    margin-bottom: var(--kr-space-2);
+  }
+
+  .ui-kv[data-layout="inline"] .ui-kv-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .ui-kv[data-layout="inline"] dd {
+    justify-content: flex-start;
+    text-align: start;
+  }
+}

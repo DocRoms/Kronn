@@ -9,10 +9,10 @@ lots (KT-1880 to KT-1886); this lot only defines and shows them.
   and "Semantic colours". Light themes (`light`, `sakura`, `euronews`) override
   the code and diff text colours in one shared block.
   `[src: file: frontend/src/styles/tokens.css:111-171]`
-  `[src: file: frontend/src/styles/tokens.css:293-330]`
+  `[src: file: frontend/src/styles/tokens.css:293-335]`
 - **Typed table:** `frontend/src/styles/designTokens.ts` lists every token of
   a scale with the i18n key of its use line (`designSystem.use.<name>`).
-  `[src: file: frontend/src/styles/designTokens.ts:46-128#DESIGN_TOKEN_GROUPS]`
+  `[src: file: frontend/src/styles/designTokens.ts:46-129#DESIGN_TOKEN_GROUPS]`
 - **In the app:** Settings → appearance panel → "Design system", a sub-page
   of its own since KT-1987 (`/config/design-system`), lazy-loaded, not in the
   section index. Its Tokens tab reads each value with `getComputedStyle` on
@@ -36,7 +36,14 @@ lots (KT-1880 to KT-1886); this lot only defines and shows them.
 | Control height | `--kr-control-h-sm`, `-md`, `-touch`, `-lg` | 28, 34, 40, 44 px, used as `min-height`; `-touch` (KT-1880) is the least size of a control on a coarse pointer |
 | Overlay width | `--kr-overlay-w-sm`, `-md`, `-lg` | 480, 640, 960 px: the three sizes of `Dialog` and `Drawer` (KT-1881); `OVERLAY_WIDTHS` holds them for scripts |
 | Text roles | `--kr-text-primary`, `-secondary`, `-muted` | existing tokens, distinct in every theme |
-| Semantic colours | `--kr-status-*`, `--kr-diff-{added,removed}-{bg,border,text}`, `--kr-code-*` | no component names a theme |
+| Semantic colours | `--kr-status-*`, `--kr-diff-{added,removed,changed}-{bg,border,text}`, `--kr-code-*` | no component names a theme |
+
+`--kr-diff-changed-bg`, `-border` and `-text` (KT-2004) colour a `changed`
+diff line, another text at the same position, in the warning hue; they are
+declared in every block that declares the other diff tokens, and their text
+holds the same 4.5:1 as the added and removed text.
+`[src: file: frontend/src/styles/tokens.css:320-322]`
+`[src: file: frontend/src/styles/__tests__/diffChangedTokens.test.ts:23]`
 
 ## Rules
 
@@ -50,7 +57,7 @@ lots (KT-1880 to KT-1886); this lot only defines and shows them.
   media query. A breakpoint is the first width of the wider layout, as in
   `useIsMobile(bp)`: a stylesheet writes `@media (max-width: <bp - 1>px)`,
   a script uses `BREAKPOINTS`; `useIsMobile()` defaults to `BREAKPOINTS.md`.
-  `[src: file: frontend/src/styles/designTokens.ts:137#BREAKPOINTS]`
+  `[src: file: frontend/src/styles/designTokens.ts:138#BREAKPOINTS]`
   `[src: file: frontend/src/hooks/useMediaQuery.ts:5#useIsMobile]`
 - **Why 640 / 768 / 900** (count of 2026-11-21, all `@media (max-width)`, no `min-width`; `useIsMobile` arguments): small widths — 640 px ×13 + `useIsMobile(641)` ×1, 560 ×11, 700 ×12, 720 ×6, 680 ×4; middle — 760 px ×15 and the `useIsMobile()` default 768 ×8 call sites + 767 px ×1; large — 900 px ×10 + `useIsMobile(900)` ×1, then 980/1050 ×2, `useIsMobile(1024/1100)` ×1.
   640 and 900 are the most used in their range. 760 and 768 are one threshold 8 px apart (24 uses); 768 is kept because the hook default can then read the token with no behaviour change, while 760 would leave CSS and JS split.

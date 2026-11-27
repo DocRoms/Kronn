@@ -64,10 +64,11 @@ function declsFor(block: string, selector: string): string {
 describe('components/ui stylesheets', () => {
   it('finds the stylesheets, so the checks below are not vacuous', () => {
     expect(CSS.map(c => c.file).sort()).toEqual([
-      'Button.css', 'CardHeader.css', 'ConfirmDialog.css', 'DetailHeader.css', 'Dialog.css', 'Drawer.css',
-      'DrawerHeader.css', 'EmptyState.css', 'Field.css', 'FormFooter.css', 'IconButton.css', 'ListHeader.css',
-      'LoadingState.css', 'Menu.css', 'Notice.css', 'SearchField.css', 'SectionHeader.css', 'Select.css',
-      'StatusBadge.css', 'Switch.css', 'TabHeader.css', 'Tabs.css', 'Tooltip.css', 'headerFrame.css', 'overlay.css',
+      'Button.css', 'CardHeader.css', 'ConfirmDialog.css', 'CopyButton.css', 'DetailHeader.css', 'Dialog.css',
+      'DiffViewer.css', 'Drawer.css', 'DrawerHeader.css', 'EmptyState.css', 'Field.css', 'FormFooter.css', 'IconButton.css',
+      'KeyValueList.css', 'ListHeader.css', 'LoadingState.css', 'LogViewer.css', 'Menu.css', 'Notice.css', 'ProgressBar.css',
+      'SearchField.css', 'SectionHeader.css', 'Select.css', 'StatTile.css', 'StatusBadge.css', 'Switch.css',
+      'TabHeader.css', 'Table.css', 'Tabs.css', 'Tooltip.css', 'headerFrame.css', 'overlay.css',
       'visuallyHidden.css',
     ]);
   });
@@ -182,10 +183,11 @@ describe('components/ui stylesheets', () => {
   it('gives every component its stylesheet and its test, next to it', () => {
     const components = files.filter(f => /^[A-Z]\w+\.tsx$/.test(f) && !f.endsWith('.test.tsx'));
     expect(components.sort()).toEqual([
-      'Button.tsx', 'CardHeader.tsx', 'ConfirmDialog.tsx', 'DetailHeader.tsx', 'Dialog.tsx', 'Drawer.tsx',
-      'DrawerHeader.tsx', 'EmptyState.tsx', 'Field.tsx', 'FormFooter.tsx', 'IconButton.tsx', 'ListHeader.tsx',
-      'LoadingState.tsx', 'Menu.tsx', 'Notice.tsx', 'SearchField.tsx', 'SectionHeader.tsx', 'Select.tsx',
-      'StatusBadge.tsx', 'Switch.tsx', 'TabHeader.tsx', 'Tabs.tsx', 'Tooltip.tsx',
+      'Button.tsx', 'CardHeader.tsx', 'ConfirmDialog.tsx', 'CopyButton.tsx', 'DetailHeader.tsx', 'Dialog.tsx',
+      'DiffViewer.tsx', 'Drawer.tsx', 'DrawerHeader.tsx', 'EmptyState.tsx', 'Field.tsx', 'FormFooter.tsx', 'IconButton.tsx',
+      'KeyValueList.tsx', 'ListHeader.tsx', 'LoadingState.tsx', 'LogViewer.tsx', 'Menu.tsx', 'Notice.tsx', 'ProgressBar.tsx',
+      'SearchField.tsx', 'SectionHeader.tsx', 'Select.tsx', 'StatTile.tsx', 'StatusBadge.tsx', 'Switch.tsx',
+      'TabHeader.tsx', 'Table.tsx', 'Tabs.tsx', 'Tooltip.tsx',
     ]);
     for (const component of components) {
       const name = component.replace(/\.tsx$/, '');

@@ -16,7 +16,12 @@ const RULES = ['no-restricted-globals', 'no-restricted-properties'] as const;
 const eslint = new ESLint({ cwd: FRONTEND });
 
 type Suppressions = Record<string, Record<string, { count: number }>>;
-const BASELINE: Suppressions = JSON.parse(readFileSync(join(FRONTEND, 'eslint-suppressions.json'), 'utf8'));
+const ALL: Suppressions = JSON.parse(readFileSync(join(FRONTEND, 'eslint-suppressions.json'), 'utf8'));
+// The file also holds the baselines of the KT-1887 design-system guards
+// (`ui-guards/*`, see uiGuardsLint.test.ts): this test reads the confirm ones.
+const BASELINE: Suppressions = Object.fromEntries(Object.entries(ALL)
+  .map(([file, rules]) => [file, Object.fromEntries(Object.entries(rules).filter(([rule]) => !rule.startsWith('ui-guards/')))])
+  .filter(([, rules]) => Object.keys(rules).length > 0));
 
 async function confirmErrors(code: string, file = 'src/components/Example.tsx') {
   const [result] = await eslint.lintText(code, { filePath: join(FRONTEND, file) });
@@ -45,7 +50,7 @@ describe('the native confirm() lint rule (KT-1881)', () => {
     expect(await confirmErrors(code, 'src/components/__tests__/Example.test.tsx')).toEqual([]);
   });
 
-  it('records only these two rules in the baseline, on files that exist', () => {
+  it('records only these two rules (besides the ui-guards ones) in the baseline, on files that exist', () => {
     const files = Object.keys(BASELINE);
     expect(files.length).toBeGreaterThan(0);
     for (const [file, rules] of Object.entries(BASELINE)) {

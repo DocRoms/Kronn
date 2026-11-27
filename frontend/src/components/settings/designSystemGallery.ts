@@ -40,6 +40,15 @@ export const UI_GALLERY_COMPONENTS: readonly GalleryComponent[] = [
   component('sectionHeader', 'SectionHeader'),
   component('drawerHeader', 'DrawerHeader'),
   component('cardHeader', 'CardHeader'),
+  // KT-1886 — the dense-data components, each in a wide and a narrow container.
+  component('copyButton', 'CopyButton'),
+  component('table', 'Table'),
+  component('keyValueList', 'KeyValueList'),
+  component('statTile', 'StatTile'),
+  component('progressBar', 'ProgressBar'),
+  // KT-2004 — the log and diff viewers, each in a wide and a narrow container.
+  component('logViewer', 'LogViewer'),
+  component('diffViewer', 'DiffViewer'),
 ];
 
 /** KT-1885 — shared components built on those controls, shown after them:

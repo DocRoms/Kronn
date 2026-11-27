@@ -315,6 +315,11 @@
   --kr-diff-removed-bg: rgba(var(--kr-error-rgb), 0.12);
   --kr-diff-removed-border: rgba(var(--kr-error-rgb), 0.65);
   --kr-diff-removed-text: var(--kr-error-soft);
+  /* KT-2004 — a changed line: another text at the same position (the
+     positional pairs of a Quick Prompt or skill history), in the warning hue. */
+  --kr-diff-changed-bg: rgba(var(--kr-warning-rgb), 0.12);
+  --kr-diff-changed-border: rgba(var(--kr-warning-rgb), 0.65);
+  --kr-diff-changed-text: var(--kr-warning);
 
   /* Code: the surface a source or diff viewer reads on, its plain text and
      the syntax roles of highlight.js. Dark themes use a One Dark palette,
@@ -498,6 +503,7 @@
      diff row: the diff text takes the 800 step of the same hues. */
   --kr-diff-added-text: #166534;
   --kr-diff-removed-text: #991b1b;
+  --kr-diff-changed-text: #854d0e;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -598,6 +604,8 @@
   --kr-pink-rgb: 255, 57, 160;
   /* The CRT red with alpha falls under 4.5:1 on a tinted diff row. */
   --kr-diff-removed-text: #ff6b85;
+  /* The CRT amber holds 4.5:1 on its tinted row: restated beside the red. */
+  --kr-diff-changed-text: var(--kr-warning);
   --kr-cancelled: rgba(57, 255, 20, 0.55);
   --kr-text-on-accent: #000;
   --kr-text-on-dark: #39ff14;

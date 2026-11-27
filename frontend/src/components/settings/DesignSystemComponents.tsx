@@ -1,8 +1,19 @@
 import { useId, useState, type ReactNode } from 'react';
-import { Archive, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { Activity, Archive, Coins, Copy, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from 'lucide-react';
 import { Button, type ButtonSize, type ButtonVariant } from '../ui/Button';
 import { CardHeader } from '../ui/CardHeader';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { CopyButton } from '../ui/CopyButton';
+import { KeyValueList, type KeyValueItem } from '../ui/KeyValueList';
+import { ProgressBar, type ProgressSegment } from '../ui/ProgressBar';
+import { StatGrid, StatTile } from '../ui/StatTile';
+import { Table, type TableColumn } from '../ui/Table';
+import { PROGRESS_TONES, type TableSort } from '../ui/dataKinds';
+import { DiffViewer } from '../ui/DiffViewer';
+import { LogViewer } from '../ui/LogViewer';
+import type { LogLine } from '../ui/logKinds';
+import type { DiffFileModel, DiffSelection } from '../../lib/diffModel';
+import { highlightLine, languageForPath } from '../../lib/diff-syntax';
 import { DetailHeader } from '../ui/DetailHeader';
 import { Dialog } from '../ui/Dialog';
 import { Drawer } from '../ui/Drawer';
@@ -27,6 +38,7 @@ import { STATUS_TONES } from '../ui/statusTones';
 import type { OverlaySize } from '../ui/overlay';
 import { OVERLAY_WIDTHS } from '../../styles/designTokens';
 import { GALLERY_COMPONENTS, componentAnchor } from './designSystemGallery';
+import { useT } from '../../lib/I18nContext';
 import { AgentSwitchPicker, type AgentAvailability, type AgentSwitchTarget } from '../AgentSwitchPicker';
 import type { AgentType, ModelTier, ShadowAgent } from '../../types/generated';
 
@@ -725,6 +737,451 @@ function AgentSwitchPickerDemo({ t }: { t: T }) {
   );
 }
 
+/** One narrow demo: what it shows, and the form it shows when there are
+ *  several (the Table's cards and sideways scroll). */
+interface NarrowDemo { id: string; form?: string; node: ReactNode }
+
+/** KT-1886 — a data component in a wide container on its own line, then its
+ *  narrow demos together on the next line, each in a 20rem container (they
+ *  wrap under each other in a narrow window): the narrow form comes from the
+ *  container's width, not from the window's, so both show on any screen. */
+function WideAndNarrow({ t, wide, narrow }: { t: T; wide: ReactNode; narrow: ReactNode | readonly NarrowDemo[] }) {
+  const demos: readonly NarrowDemo[] = Array.isArray(narrow) ? narrow : [{ id: 'narrow', node: narrow }];
+  return (
+    <div className="ds-demo-pair">
+      <div className="ds-demo-container" data-form="wide">
+        <span className="ds-demo-label">{t('designSystem.demo.data.wide')}</span>
+        {wide}
+      </div>
+      <div className="ds-demo-narrow-line">
+        {demos.map(demo => (
+          <div key={demo.id} className="ds-demo-container" data-form="narrow">
+            <span className="ds-demo-label">
+              {t('designSystem.demo.data.narrow')}
+              {demo.form && ` · ${demo.form}`}
+            </span>
+            {demo.node}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** The demos' numbers, written in the interface's locale. */
+function useNumber() {
+  const { locale } = useT();
+  const integer = new Intl.NumberFormat(locale);
+  const decimal = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  const percent = new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 0 });
+  return {
+    number: (n: number) => integer.format(n),
+    decimal: (n: number) => decimal.format(n),
+    percent: (n: number) => percent.format(n),
+  };
+}
+
+/** A clipboard that always refuses, to show the failure. */
+const refusedCopy = (): string => { throw new Error('refused'); };
+
+function CopyButtonDemo({ t }: { t: T }) {
+  const command = 'git worktree add .kronn/worktrees/task-kt-1886-4e41d02c kronn/task/kt-1886-4e41d02c';
+  const copyLine = (
+    <p className="ds-demo-copy-line">
+      <code>{command}</code>
+      <CopyButton size="sm" text={command} label={t('designSystem.demo.data.copyCommand')} />
+    </p>
+  );
+  return (
+    <>
+      <Row label={t('designSystem.demo.data.iconForm')}>
+        {SIZES.map(size => <CopyButton key={size} size={size} text="kt-1886" label={t('designSystem.demo.data.copyId')} />)}
+      </Row>
+      <Row label={t('designSystem.demo.data.textForm')}>
+        <CopyButton form="text" text={command} label={t('designSystem.demo.data.copyCommand')} />
+      </Row>
+      <Row label={t('designSystem.demo.data.failure')}>
+        <CopyButton getText={refusedCopy} label={t('designSystem.demo.data.copyBroken')} />
+        <CopyButton form="text" getText={refusedCopy} label={t('designSystem.demo.data.copyBroken')} />
+      </Row>
+      <WideAndNarrow t={t} wide={copyLine} narrow={copyLine} />
+    </>
+  );
+}
+
+interface DemoRun { id: string; name: string; status: 'failed' | 'done' | 'running' | 'cancelled'; tokens: number; seconds: number; worktree: string }
+
+const DEMO_RUNS: readonly Omit<DemoRun, 'name'>[] = [
+  { id: 'run1', status: 'failed', tokens: 18_240, seconds: 312, worktree: '/srv/kronn/.kronn/worktrees/task-kt-1886-4e41d02c' },
+  { id: 'run2', status: 'done', tokens: 96_400, seconds: 1_284, worktree: '/srv/kronn/.kronn/worktrees/task-kt-1878-a1b2c3d4' },
+  { id: 'run3', status: 'running', tokens: 4_310, seconds: 48, worktree: '/srv/kronn' },
+  { id: 'run4', status: 'cancelled', tokens: 0, seconds: 9, worktree: '/srv/kronn/.kronn/worktrees/task-kt-1990-ffee0011' },
+];
+
+const RUN_TONES = { failed: 'danger', done: 'success', running: 'info', cancelled: 'neutral' } as const;
+const RUN_STATUS_KEYS = {
+  failed: 'designSystem.demo.data.statusFailed',
+  done: 'designSystem.demo.data.statusDone',
+  running: 'designSystem.demo.data.statusRunning',
+  cancelled: 'designSystem.demo.data.statusCancelled',
+} as const;
+
+const formatDuration = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
+/** The bounded table's rows: enough to scroll under its sticky header. */
+const BOUNDED_ROWS = 12;
+
+/** KT-1886 — a sortable, selectable table whose rows open, in its cards form
+ *  in a wide container, then in a narrow one next to the sideways scroll
+ *  form; then a bounded table with a sticky header, empty and loading. */
+function TableDemo({ t }: { t: T }) {
+  const { number } = useNumber();
+  const runNames: Record<string, string> = {
+    run1: t('designSystem.demo.data.run1'),
+    run2: t('designSystem.demo.data.run2'),
+    run3: t('designSystem.demo.data.run3'),
+    run4: t('designSystem.demo.data.run4'),
+  };
+  const [sort, setSort] = useState<TableSort | null>({ column: 'tokens', direction: 'descending' });
+  const [selected, setSelected] = useState<string[]>(['run2']);
+  const [opened, setOpened] = useState<string | null>(null);
+  const runs: DemoRun[] = DEMO_RUNS.map(run => ({ ...run, name: runNames[run.id] }));
+  const bounded: DemoRun[] = Array.from({ length: BOUNDED_ROWS }, (_, i) => {
+    const run = runs[i % runs.length];
+    return { ...run, id: `bounded${i + 1}`, name: `${run.name} ${number(i + 1)}`, tokens: run.tokens + i * 137, seconds: run.seconds + i * 11 };
+  });
+  const sorted = sort ? [...runs].sort((a, b) => {
+    const order = sort.column === 'name' ? a.name.localeCompare(b.name)
+      : sort.column === 'duration' ? a.seconds - b.seconds
+        : a.tokens - b.tokens;
+    return sort.direction === 'ascending' ? order : -order;
+  }) : runs;
+  const columns: TableColumn<DemoRun>[] = [
+    { id: 'name', header: t('designSystem.demo.data.colWorkflow'), cell: r => r.name, rowHeader: true, sortable: true },
+    {
+      id: 'status',
+      header: t('designSystem.demo.data.colStatus'),
+      cell: r => <StatusBadge tone={RUN_TONES[r.status]}>{t(RUN_STATUS_KEYS[r.status])}</StatusBadge>,
+    },
+    { id: 'tokens', header: t('designSystem.demo.data.colTokens'), cell: r => number(r.tokens), numeric: true, sortable: true },
+    { id: 'duration', header: t('designSystem.demo.data.colDuration'), cell: r => formatDuration(r.seconds), numeric: true, sortable: true },
+    { id: 'worktree', header: t('designSystem.demo.data.colWorktree'), cell: r => r.worktree, truncate: 'ellipsis' },
+  ];
+  const common = {
+    caption: t('designSystem.demo.data.runsCaption'),
+    columns,
+    rows: sorted,
+    getRowId: (r: DemoRun) => r.id,
+    sort,
+    onSortChange: setSort,
+    rowTone: (r: DemoRun) => (r.status === 'failed' ? 'danger' as const : r.status === 'cancelled' ? 'muted' as const : undefined),
+    selection: { selected, onChange: setSelected, rowLabel: (r: DemoRun) => r.name },
+    actions: (r: DemoRun) => (
+      <IconButton size="sm" variant="ghost" label={t('designSystem.demo.data.deleteRun', r.name)} icon={<Trash2 />} />
+    ),
+    onRowOpen: (r: DemoRun) => setOpened(r.name),
+    footer: (
+      <>
+        <span>{t('designSystem.demo.data.moreRows')}</span>
+        <Button size="sm">{t('designSystem.demo.data.showMore')}</Button>
+      </>
+    ),
+  };
+  return (
+    <>
+      <WideAndNarrow
+        t={t}
+        wide={<Table {...common} narrow="cards" stickyHeader maxHeight="md" />}
+        narrow={[
+          { id: 'cards', form: t('designSystem.demo.data.formCards'), node: <Table {...common} narrow="cards" stickyHeader hideCaption /> },
+          { id: 'scroll', form: t('designSystem.demo.data.formScroll'), node: <Table {...common} density="compact" hideCaption /> },
+        ]}
+      />
+      <p className="ds-demo-note" aria-live="polite" data-testid="ds-table-opened">
+        {opened ? t('designSystem.demo.data.opened', opened) : t('designSystem.demo.data.openedNone')}
+      </p>
+      <Row label={t('designSystem.demo.data.bounded')}>
+        <div className="ds-demo-container" data-form="wide">
+          <Table
+            caption={t('designSystem.demo.data.boundedCaption')}
+            hideCaption
+            columns={columns.filter(c => c.id !== 'status')}
+            rows={bounded}
+            getRowId={r => r.id}
+            maxHeight="sm"
+            stickyHeader
+          />
+        </div>
+      </Row>
+      <Row label={t('designSystem.demo.data.empty')}>
+        <div className="ds-demo-container" data-form="wide">
+          <Table
+            caption={t('designSystem.demo.data.runsCaption')}
+            hideCaption
+            columns={columns}
+            rows={[]}
+            getRowId={r => r.id}
+            empty={(
+              <EmptyState
+                kind="nothingSelected"
+                title={t('designSystem.demo.data.emptyTitle')}
+                description={t('designSystem.demo.data.emptyDescription')}
+              />
+            )}
+          />
+        </div>
+      </Row>
+      <Row label={t('designSystem.demo.data.loading')}>
+        <div className="ds-demo-container" data-form="wide">
+          <Table
+            caption={t('designSystem.demo.data.runsCaption')}
+            hideCaption
+            columns={columns}
+            rows={[]}
+            getRowId={r => r.id}
+            loading
+            loadingLabel={t('designSystem.demo.data.loadingRuns')}
+          />
+        </div>
+      </Row>
+    </>
+  );
+}
+
+function KeyValueListDemo({ t }: { t: T }) {
+  const { number } = useNumber();
+  const items: KeyValueItem[] = [
+    { label: t('designSystem.demo.data.kvBranch'), value: 'kronn/task/kt-1886-4e41d02c', mono: true, copyable: true },
+    { label: t('designSystem.demo.agent'), value: 'Claude Code' },
+    { label: t('designSystem.demo.data.kvStarted'), value: null },
+    { label: t('designSystem.demo.data.colWorktree'), value: '/srv/kronn/.kronn/worktrees/task-kt-1886-4e41d02c', mono: true, truncate: true },
+    { label: t('designSystem.demo.data.colTokens'), value: number(48_210) },
+  ];
+  return (
+    <>
+      <Row label={t('designSystem.demo.data.grid')}>
+        <WideAndNarrow t={t} wide={<KeyValueList items={items} />} narrow={<KeyValueList items={items} />} />
+      </Row>
+      <Row label={t('designSystem.demo.data.inline')}>
+        <WideAndNarrow
+          t={t}
+          wide={<KeyValueList items={items} layout="inline" />}
+          narrow={<KeyValueList items={items} layout="inline" />}
+        />
+      </Row>
+    </>
+  );
+}
+
+function StatTileDemo({ t }: { t: T }) {
+  const { number, decimal } = useNumber();
+  // Two filter tiles, one of them on: the pressed state shows in the gallery.
+  const [filter, setFilter] = useState<'failed' | 'running' | null>('running');
+  const toggle = (next: 'failed' | 'running') => () => setFilter(f => (f === next ? null : next));
+  const tiles = (
+    <StatGrid label={t('designSystem.demo.data.statWeek')}>
+      <StatTile
+        label={t('designSystem.demo.data.statRuns')}
+        value={number(42)}
+        icon={<Activity />}
+        delta={{ text: t('designSystem.demo.data.deltaRuns'), direction: 'up', tone: 'success' }}
+        hint={t('designSystem.demo.data.last7')}
+      />
+      <StatTile
+        label={t('designSystem.demo.data.statFailed')}
+        value={number(3)}
+        icon={<TriangleAlert />}
+        delta={{ text: t('designSystem.demo.data.deltaFailed'), direction: 'up', tone: 'danger' }}
+        hint={t('designSystem.demo.data.filterHint')}
+        onClick={toggle('failed')}
+        selected={filter === 'failed'}
+      />
+      <StatTile
+        label={t('designSystem.demo.data.statusRunning')}
+        value={number(1)}
+        icon={<RefreshCw />}
+        hint={t('designSystem.demo.data.filterHint')}
+        onClick={toggle('running')}
+        selected={filter === 'running'}
+      />
+      <StatTile label={t('designSystem.demo.data.kvCost')} value={null} unit="$" icon={<Coins />} unknownReason={t('designSystem.demo.data.costUnknown')} />
+      <StatTile label={t('designSystem.demo.data.colTokens')} value={decimal(96.4)} unit="k" loading />
+    </StatGrid>
+  );
+  return (
+    <>
+      <WideAndNarrow t={t} wide={tiles} narrow={tiles} />
+      <Row label={t('designSystem.demo.size.lg')}>
+        <StatTile size="lg" label={t('designSystem.demo.data.colTokens')} value={decimal(96.4)} unit="k" delta={{ text: number(0), direction: 'flat' }} />
+      </Row>
+    </>
+  );
+}
+
+function ProgressBarDemo({ t }: { t: T }) {
+  const { number, percent } = useNumber();
+  const segments: ProgressSegment[] = [
+    { id: 'done', label: t('designSystem.demo.data.segDone'), value: 14, tone: 'success' },
+    { id: 'failed', label: t('designSystem.demo.data.segFailed'), value: 1, tone: 'danger' },
+    { id: 'running', label: t('designSystem.demo.data.segRunning'), value: 4, tone: 'info' },
+    { id: 'waiting', label: t('designSystem.demo.data.segWaiting'), value: 6, tone: 'warning' },
+  ];
+  const bars = (
+    <div className="ds-demo-stack">
+      <ProgressBar label={t('designSystem.demo.data.stepsDone')} value={3} max={8} valueText={`${number(3)}/${number(8)}`} />
+      <ProgressBar label={t('designSystem.demo.data.tasks')} segments={segments} legend />
+    </div>
+  );
+  const toneLabel = (tone: string) => (tone === 'accent' ? t('designSystem.demo.data.accent') : t(`designSystem.demo.tone.${tone}`));
+  return (
+    <>
+      <WideAndNarrow t={t} wide={bars} narrow={bars} />
+      <Row label={t('designSystem.demo.data.determinate')}>
+        <div className="ds-demo-stack">
+          <ProgressBar label={t('designSystem.demo.data.diskUsed')} value={70} valueText={percent(0.7)} tone="warning" />
+          <ProgressBar label={t('designSystem.demo.data.diskUsed')} value={70} tone="warning" size="sm" hideLabel />
+        </div>
+      </Row>
+      <Row label={t('designSystem.demo.data.indeterminate')}>
+        <div className="ds-demo-stack"><ProgressBar label={t('designSystem.demo.data.cloning')} /></div>
+      </Row>
+      <Row label={t('designSystem.demo.data.stacked')}>
+        <div className="ds-demo-stack"><ProgressBar label={t('designSystem.demo.data.tasks')} segments={segments} /></div>
+      </Row>
+      <Row label={t('designSystem.demo.tones')}>
+        <div className="ds-demo-stack">
+          {PROGRESS_TONES.map(tone => <ProgressBar key={tone} label={toneLabel(tone)} value={60} tone={tone} valueText={percent(0.6)} />)}
+        </div>
+      </Row>
+    </>
+  );
+}
+
+/** KT-2004 — a log that looks like a run still writing: commands, a warning
+ *  on stderr with its ANSI colour codes (removed on screen), a failed test
+ *  as an error, times of their own. */
+const DEMO_LOG: readonly LogLine[] = [
+  { text: '$ pnpm install --frozen-lockfile', time: '2026-11-22T09:14:02Z' },
+  { text: 'Lockfile is up to date, resolution step is skipped', time: '2026-11-22T09:14:03Z' },
+  { text: '\u001b[33mWARN\u001b[39m deprecated inflight@1.0.6: this module is not supported', stream: 'stderr', time: '2026-11-22T09:14:05Z' },
+  { text: 'Packages: +1284', time: '2026-11-22T09:14:11Z' },
+  { text: '$ pnpm test -- --run src/components/ui', time: '2026-11-22T09:14:12Z' },
+  { text: ' \u001b[32m✓\u001b[39m src/components/ui/Table.test.tsx (34 tests) 812ms', time: '2026-11-22T09:14:19Z' },
+  { text: ' ✗ src/components/ui/LogViewer.test.tsx > follow > resumes from the jump control', level: 'error', stream: 'stderr', time: '2026-11-22T09:14:20Z' },
+  { text: 'AssertionError: expected 800 to be 120', stream: 'stderr', time: '2026-11-22T09:14:20Z' },
+  { text: ' ✓ src/components/ui/DiffViewer.test.tsx (23 tests) 420ms', time: '2026-11-22T09:14:22Z' },
+  { text: 'Re-running the failed test…', level: 'info', time: '2026-11-22T09:14:23Z' },
+];
+
+/** The demo log is the tail of a longer output: its lines are numbered
+ *  where the tail starts, and its note counts the lines shown. */
+const DEMO_LOG_TOTAL = 1248;
+const DEMO_LOG_START = DEMO_LOG_TOTAL - DEMO_LOG.length + 1;
+
+const LONG_LOG_LINE = 'error[E0308]: mismatched types --> backend/src/workflows/runner.rs:412:27 | expected `Result<RunOutcome, RunError>`, found `Option<RunOutcome>`';
+
+function LogViewerDemo({ t }: { t: T }) {
+  const { number } = useNumber();
+  const [lines, setLines] = useState<readonly LogLine[]>(DEMO_LOG);
+  const label = t('designSystem.demo.log.label');
+  const common = {
+    label,
+    lines,
+    streaming: true,
+    copyable: true,
+    onRefresh: () => setLines(DEMO_LOG),
+    onClear: () => setLines([]),
+    note: t('designSystem.demo.log.note', number(DEMO_LOG.length)),
+  };
+  return (
+    <>
+      <WideAndNarrow
+        t={t}
+        wide={<LogViewer {...common} lineNumbers startNumber={DEMO_LOG_START} />}
+        narrow={<LogViewer {...common} maxHeight="sm" />}
+      />
+      <Row label={t('designSystem.demo.log.sideways')}>
+        <div className="ds-demo-container" data-form="wide">
+          <LogViewer label={label} lines={[...DEMO_LOG.slice(0, 2), { text: LONG_LOG_LINE, level: 'error' }]} wrap={false} maxHeight="sm" />
+        </div>
+      </Row>
+      <Row label={t('designSystem.demo.data.empty')}>
+        <div className="ds-demo-container" data-form="wide">
+          <LogViewer label={label} lines={[]} empty={t('designSystem.demo.log.emptyText')} maxHeight="sm" />
+        </div>
+      </Row>
+    </>
+  );
+}
+
+/** KT-2004 — two files: a rename with a removed, an added and a changed line
+ *  and a meta line; a binary file. */
+const DEMO_DIFF: readonly DiffFileModel[] = [
+  {
+    path: 'src/lib/run.ts',
+    previousPath: 'src/lib/execution.ts',
+    status: 'renamed',
+    added: 3,
+    removed: 2,
+    hunks: [{
+      header: '@@ -12,6 +12,7 @@ export function startRun(task: Task) {',
+      lines: [
+        { kind: 'context', oldNumber: 12, newNumber: 12, text: '  const started = Date.now();' },
+        { kind: 'removed', oldNumber: 13, text: "  const label = 'execution';" },
+        { kind: 'added', newNumber: 13, text: "  const label = 'run';" },
+        { kind: 'changed', oldNumber: 14, newNumber: 14, text: '  log(label, task.id, started);', otherText: '  log(label, task.id);' },
+        { kind: 'context', oldNumber: 15, newNumber: 15, text: '  return dispatch(task);' },
+        { kind: 'added', newNumber: 16, text: '  // The worktree is kept for the review.' },
+        { kind: 'context', oldNumber: 16, newNumber: 17, text: '}' },
+        { kind: 'meta', text: '\\ No newline at end of file' },
+      ],
+    }],
+  },
+  { path: 'assets/logo.png', status: 'modified', binary: true, hunks: [] },
+];
+
+const highlightDemo = (text: string, path: string) => highlightLine(text, languageForPath(path));
+
+function DiffViewerDemo({ t }: { t: T }) {
+  const { number } = useNumber();
+  const [selection, setSelection] = useState<DiffSelection | null>({ path: 'src/lib/run.ts', start: 1, end: 3 });
+  const label = t('designSystem.demo.diff.label');
+  const count = selection ? selection.end - selection.start + 1 : 0;
+  return (
+    <>
+      <WideAndNarrow
+        t={t}
+        wide={(
+          <DiffViewer
+            files={DEMO_DIFF}
+            label={label}
+            layout="split"
+            highlight={highlightDemo}
+            selectable
+            selection={selection}
+            onSelectionChange={setSelection}
+            selectionToolbar={<Button size="sm">{t('designSystem.demo.diff.comment')}</Button>}
+          />
+        )}
+        narrow={<DiffViewer files={DEMO_DIFF} label={label} layout="split" highlight={highlightDemo} maxHeight="sm" />}
+      />
+      <p className="ds-demo-note" aria-live="polite" data-testid="ds-diff-selection">
+        {selection ? t('designSystem.demo.diff.selected', number(count)) : t('designSystem.demo.diff.selectedNone')}
+      </p>
+      <Row label={t('designSystem.demo.data.loading')}>
+        <div className="ds-demo-container" data-form="wide">
+          <DiffViewer files={[]} label={label} loading loadingLabel={t('designSystem.demo.diff.loadingDiff')} />
+        </div>
+      </Row>
+      <Row label={t('designSystem.demo.data.empty')}>
+        <div className="ds-demo-container" data-form="wide">
+          <DiffViewer files={[]} label={label} />
+        </div>
+      </Row>
+    </>
+  );
+}
+
 const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   button: ButtonDemo,
   iconButton: IconButtonDemo,
@@ -749,6 +1206,13 @@ const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   sectionHeader: SectionHeaderDemo,
   drawerHeader: DrawerHeaderDemo,
   cardHeader: CardHeaderDemo,
+  copyButton: CopyButtonDemo,
+  table: TableDemo,
+  keyValueList: KeyValueListDemo,
+  statTile: StatTileDemo,
+  progressBar: ProgressBarDemo,
+  logViewer: LogViewerDemo,
+  diffViewer: DiffViewerDemo,
   agentSwitchPicker: AgentSwitchPickerDemo,
 };
 

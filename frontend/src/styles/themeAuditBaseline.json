@@ -1,0 +1,358 @@
+{
+  "contrast": [
+    "light --kr-success on --kr-bg-raised",
+    "light --kr-error-soft on --kr-bg-raised",
+    "light --kr-warning on --kr-bg-raised",
+    "light --kr-warning-soft on --kr-bg-raised",
+    "light --kr-warning-amber on --kr-bg-raised",
+    "light --kr-cancelled on --kr-bg-raised",
+    "light --kr-status-success on --kr-bg-raised",
+    "light --kr-status-warning on --kr-bg-raised",
+    "light --kr-status-neutral on --kr-bg-raised",
+    "sakura --kr-success on --kr-bg-base",
+    "sakura --kr-success on --kr-bg-raised",
+    "sakura --kr-success on --kr-bg-surface",
+    "sakura --kr-success on --kr-bg-elevated",
+    "sakura --kr-success on --kr-bg-input",
+    "sakura --kr-error-soft on --kr-bg-base",
+    "sakura --kr-error-soft on --kr-bg-raised",
+    "sakura --kr-warning on --kr-bg-raised",
+    "sakura --kr-warning-soft on --kr-bg-raised",
+    "sakura --kr-warning-amber on --kr-bg-raised",
+    "sakura --kr-purple-soft on --kr-bg-base",
+    "sakura --kr-purple-soft on --kr-bg-raised",
+    "sakura --kr-purple-soft on --kr-bg-surface",
+    "sakura --kr-purple-soft on --kr-bg-elevated",
+    "sakura --kr-purple-soft on --kr-bg-input",
+    "sakura --kr-pink on --kr-bg-base",
+    "sakura --kr-pink on --kr-bg-raised",
+    "sakura --kr-status-success on --kr-bg-base",
+    "sakura --kr-status-success on --kr-bg-raised",
+    "sakura --kr-status-success on --kr-bg-surface",
+    "sakura --kr-status-success on --kr-bg-elevated",
+    "sakura --kr-status-success on --kr-bg-input",
+    "sakura --kr-status-warning on --kr-bg-raised",
+    "euronews --kr-accent on --kr-bg-base",
+    "euronews --kr-accent on --kr-bg-raised",
+    "euronews --kr-success on --kr-bg-base",
+    "euronews --kr-success on --kr-bg-raised",
+    "euronews --kr-success on --kr-bg-surface",
+    "euronews --kr-success on --kr-bg-elevated",
+    "euronews --kr-success on --kr-bg-input",
+    "euronews --kr-error-soft on --kr-bg-base",
+    "euronews --kr-error-soft on --kr-bg-raised",
+    "euronews --kr-warning-amber on --kr-bg-raised",
+    "euronews --kr-info on --kr-bg-base",
+    "euronews --kr-info on --kr-bg-raised",
+    "euronews --kr-purple-soft on --kr-bg-base",
+    "euronews --kr-purple-soft on --kr-bg-raised",
+    "euronews --kr-purple-soft on --kr-bg-surface",
+    "euronews --kr-purple-soft on --kr-bg-elevated",
+    "euronews --kr-purple-soft on --kr-bg-input",
+    "euronews --kr-pink on --kr-bg-base",
+    "euronews --kr-pink on --kr-bg-raised",
+    "euronews --kr-status-success on --kr-bg-base",
+    "euronews --kr-status-success on --kr-bg-raised",
+    "euronews --kr-status-success on --kr-bg-surface",
+    "euronews --kr-status-success on --kr-bg-elevated",
+    "euronews --kr-status-success on --kr-bg-input",
+    "euronews --kr-status-info on --kr-bg-base",
+    "euronews --kr-status-info on --kr-bg-raised"
+  ],
+  "offScale": {
+    "components/AgentSwitchPicker.css": {
+      "font-size": 2,
+      "breakpoint": 1
+    },
+    "components/AiDocViewer.css": {
+      "breakpoint": 1,
+      "radius": 3,
+      "font-size": 6,
+      "colour": 1
+    },
+    "components/ArtifactImportDialog.css": {
+      "colour": 2,
+      "radius": 5,
+      "font-size": 6,
+      "breakpoint": 1
+    },
+    "components/AuditRecapPanel.css": {
+      "radius": 7
+    },
+    "components/AuditTimeline.css": {
+      "breakpoint": 1,
+      "radius": 3
+    },
+    "components/AutomationSidebarControls.css": {
+      "radius": 2
+    },
+    "components/BatchComparePanel.css": {
+      "colour": 1,
+      "radius": 3,
+      "font-size": 2,
+      "breakpoint": 1
+    },
+    "components/CollectionShell.css": {
+      "radius": 1,
+      "font-size": 1
+    },
+    "components/ContextHelp.css": {
+      "breakpoint": 1
+    },
+    "components/CopyIdPill.css": {
+      "radius": 1,
+      "font-size": 1
+    },
+    "components/DecisionModelPicker.css": {
+      "font-size": 3
+    },
+    "components/DefaultTodoOffer.css": {
+      "font-size": 2,
+      "radius": 1
+    },
+    "components/DiscussionActionCard.css": {
+      "colour": 1,
+      "radius": 1,
+      "breakpoint": 1
+    },
+    "components/DiscussionPlanPanel.css": {
+      "radius": 5,
+      "font-size": 13,
+      "colour": 1,
+      "breakpoint": 1
+    },
+    "components/DiscussionScope.css": {
+      "radius": 5,
+      "font-size": 9
+    },
+    "components/DiscussionSettingsPanel.css": {
+      "radius": 3
+    },
+    "components/DiscussionSkillPicker.css": {
+      "radius": 1
+    },
+    "components/DiscussionToolPanel.css": {
+      "colour": 1,
+      "breakpoint": 1
+    },
+    "components/DiscussionWeightBadge.css": {
+      "radius": 2,
+      "font-size": 2,
+      "colour": 1
+    },
+    "components/DocPreviewArtifact.css": {
+      "font-size": 1,
+      "radius": 1
+    },
+    "components/DocStateSummary.css": {
+      "breakpoint": 1
+    },
+    "components/Dropdown.css": {
+      "colour": 1
+    },
+    "components/GitPanel.css": {
+      "font-size": 4,
+      "radius": 2,
+      "breakpoint": 1,
+      "colour": 14
+    },
+    "components/ImportantMessageCard.css": {
+      "breakpoint": 1
+    },
+    "components/LearningsBadge.css": {
+      "radius": 1,
+      "font-size": 1
+    },
+    "components/LearningsModal.css": {
+      "radius": 7,
+      "font-size": 9
+    },
+    "components/ListControls.css": {
+      "breakpoint": 1
+    },
+    "components/LivePageActionOverlay.css": {
+      "radius": 1,
+      "font-size": 2
+    },
+    "components/LivePageResources.css": {
+      "breakpoint": 1
+    },
+    "components/LivePageTrustedActions.css": {
+      "font-size": 2,
+      "radius": 3
+    },
+    "components/MarkdownComposerTools.css": {
+      "breakpoint": 1
+    },
+    "components/MediaGenerateForm.css": {
+      "font-size": 10,
+      "radius": 1
+    },
+    "components/MediaPlayer.css": {
+      "radius": 3,
+      "colour": 14,
+      "font-size": 4
+    },
+    "components/MermaidDiagram.css": {
+      "radius": 9,
+      "colour": 2,
+      "font-size": 4
+    },
+    "components/PlanAllTasksView.css": {
+      "radius": 3,
+      "font-size": 2
+    },
+    "components/ProjectCodePanel.css": {
+      "radius": 2,
+      "colour": 1,
+      "breakpoint": 2
+    },
+    "components/ProjectDockerPanel.css": {
+      "font-size": 16,
+      "radius": 2,
+      "breakpoint": 1
+    },
+    "components/ProjectRepositoryResourcesPanel.css": {
+      "font-size": 7,
+      "radius": 4,
+      "breakpoint": 1
+    },
+    "components/ProjectTasksPanel.css": {
+      "radius": 1,
+      "breakpoint": 1
+    },
+    "components/QPHistoryDrawer.css": {
+      "radius": 11,
+      "font-size": 10,
+      "breakpoint": 1
+    },
+    "components/RepositoryResourceSheets.css": {
+      "font-size": 1,
+      "breakpoint": 1
+    },
+    "components/RevalidateAudit.css": {
+      "breakpoint": 1
+    },
+    "components/RunStatusCard.css": {
+      "radius": 1
+    },
+    "components/SidePanelShell.css": {
+      "colour": 1,
+      "font-size": 2,
+      "breakpoint": 1
+    },
+    "components/SkillSheet.css": {
+      "breakpoint": 1
+    },
+    "components/SourceCodeViewer.css": {
+      "font-size": 4,
+      "radius": 4,
+      "colour": 19,
+      "breakpoint": 1
+    },
+    "components/TechDebt.css": {
+      "radius": 8,
+      "breakpoint": 1
+    },
+    "components/TrustLevel.css": {
+      "radius": 3,
+      "font-size": 2,
+      "colour": 1
+    },
+    "components/WorkflowScope.css": {
+      "radius": 3,
+      "breakpoint": 1
+    },
+    "components/activity/ActivityBell.css": {
+      "font-size": 2
+    },
+    "components/aiHelper.css": {
+      "radius": 5,
+      "colour": 4,
+      "breakpoint": 1
+    },
+    "components/settings/AgentFullAccessSwitch.css": {
+      "radius": 1
+    },
+    "components/settings/FallbackRow.css": {
+      "breakpoint": 1
+    },
+    "components/workflows/QuotaPauseControls.css": {
+      "radius": 1
+    },
+    "components/workflows/StepShadowRows.css": {
+      "font-size": 2
+    },
+    "pages/ApiCallLogsPage.css": {
+      "radius": 2,
+      "colour": 5
+    },
+    "pages/Dashboard.css": {
+      "font-size": 6,
+      "colour": 9,
+      "radius": 16,
+      "breakpoint": 5
+    },
+    "pages/DiscussionsPage.css": {
+      "radius": 43,
+      "font-size": 88,
+      "breakpoint": 9,
+      "colour": 13
+    },
+    "pages/McpPage.css": {
+      "colour": 3,
+      "breakpoint": 7,
+      "radius": 5,
+      "font-size": 4
+    },
+    "pages/PagesPage.css": {
+      "font-size": 26,
+      "radius": 12,
+      "colour": 23,
+      "breakpoint": 1
+    },
+    "pages/PlanningPage.css": {
+      "font-size": 6,
+      "radius": 3,
+      "colour": 1,
+      "breakpoint": 1
+    },
+    "pages/SettingsPage.css": {
+      "font-size": 13,
+      "radius": 32,
+      "breakpoint": 11,
+      "colour": 7
+    },
+    "pages/SetupWizard.css": {
+      "font-size": 4,
+      "radius": 3
+    },
+    "pages/StandaloneDiscussionMosaic.css": {
+      "breakpoint": 1
+    },
+    "pages/StandaloneLivePage.css": {
+      "colour": 1
+    },
+    "pages/StandaloneLivePageMosaic.css": {
+      "colour": 2,
+      "breakpoint": 1
+    },
+    "pages/WorkflowsPage.css": {
+      "radius": 80,
+      "font-size": 56,
+      "breakpoint": 18,
+      "colour": 21
+    },
+    "styles/components.css": {
+      "font-size": 12,
+      "radius": 9,
+      "colour": 6
+    },
+    "styles/reset.css": {
+      "colour": 1
+    },
+    "styles/theme-effects.css": {
+      "font-size": 2
+    }
+  }
+}

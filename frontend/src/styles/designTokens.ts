@@ -121,6 +121,7 @@ export const DESIGN_TOKEN_GROUPS: readonly DesignTokenGroup[] = [
       '--kr-status-success', '--kr-status-warning', '--kr-status-danger', '--kr-status-info', '--kr-status-neutral',
       '--kr-diff-added-bg', '--kr-diff-added-border', '--kr-diff-added-text',
       '--kr-diff-removed-bg', '--kr-diff-removed-border', '--kr-diff-removed-text',
+      '--kr-diff-changed-bg', '--kr-diff-changed-border', '--kr-diff-changed-text',
       '--kr-code-surface', '--kr-code-text', '--kr-code-comment', '--kr-code-keyword', '--kr-code-string',
       '--kr-code-number', '--kr-code-function', '--kr-code-variable', '--kr-code-symbol',
     ]),

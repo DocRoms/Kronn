@@ -1,0 +1,152 @@
+/* KT-1886 — StatTile and StatGrid. Tokens only, no theme named. The delta's
+   tone colours its arrow only; its text stays --kr-text-secondary, so it
+   reads at 4.5:1 in every theme, and its direction is written for assistive
+   technology. */
+
+.ui-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--kr-space-8) * 3)), 1fr));
+  gap: var(--kr-space-3);
+  min-width: 0;
+}
+
+.ui-stat-tile {
+  --ui-stat-line: 1.2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--kr-space-1);
+  min-width: 0;
+  padding: var(--kr-space-3);
+  font: inherit;
+  text-align: start;
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-radius-surface);
+}
+
+button.ui-stat-tile {
+  cursor: pointer;
+  transition:
+    background-color var(--kr-duration-fast) ease-out,
+    border-color var(--kr-duration-fast) ease-out;
+}
+
+button.ui-stat-tile:hover {
+  background-image: linear-gradient(var(--kr-bg-hover), var(--kr-bg-hover));
+  border-color: var(--kr-border-medium);
+}
+
+button.ui-stat-tile:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.ui-stat-tile[data-selected="true"] {
+  background-color: var(--kr-accent-bg);
+  border-color: var(--kr-accent-border);
+  box-shadow: inset 0 0 0 1px var(--kr-accent-border);
+}
+
+.ui-stat-head {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  min-width: 0;
+}
+
+.ui-stat-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--kr-text-muted);
+}
+
+.ui-stat-icon svg {
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
+}
+
+.ui-stat-label {
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.ui-stat-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--kr-space-1);
+  font-size: var(--kr-type-xl);
+  font-weight: var(--kr-weight-semibold);
+  line-height: var(--ui-stat-line);
+  font-variant-numeric: tabular-nums;
+  color: var(--kr-text-primary);
+}
+
+.ui-stat-tile[data-size="lg"] .ui-stat-value {
+  font-size: var(--kr-type-2xl);
+}
+
+.ui-stat-value[data-unknown="true"] {
+  color: var(--kr-text-muted);
+}
+
+.ui-stat-unit {
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-text-secondary);
+}
+
+/* The value's height, so nothing moves when the value arrives. */
+.ui-stat-placeholder {
+  display: block;
+  width: calc(var(--kr-space-8) + var(--kr-space-4));
+  max-width: 100%;
+  height: calc(var(--kr-type-xl) * var(--ui-stat-line));
+  border-radius: var(--kr-radius-control);
+  background-color: var(--kr-bg-hover-strong);
+  animation: ui-stat-pulse calc(var(--kr-duration-slow) * 5) ease-in-out infinite;
+}
+
+.ui-stat-tile[data-size="lg"] .ui-stat-placeholder {
+  height: calc(var(--kr-type-2xl) * var(--ui-stat-line));
+}
+
+@keyframes ui-stat-pulse {
+  50% { opacity: 0.5; }
+}
+
+.ui-stat-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-secondary);
+}
+
+.ui-stat-delta-icon {
+  display: inline-flex;
+  color: var(--kr-status-neutral);
+}
+
+.ui-stat-delta-icon svg {
+  width: var(--kr-space-3);
+  height: var(--kr-space-3);
+}
+
+.ui-stat-delta[data-tone="success"] .ui-stat-delta-icon { color: var(--kr-status-success); }
+.ui-stat-delta[data-tone="danger"] .ui-stat-delta-icon { color: var(--kr-status-danger); }
+.ui-stat-delta[data-tone="warning"] .ui-stat-delta-icon { color: var(--kr-status-warning); }
+
+.ui-stat-hint {
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-stat-placeholder {
+    animation: none;
+  }
+}

@@ -30,6 +30,12 @@ export const STATUS_TOKENS = [
   '--kr-purple', '--kr-purple-soft', '--kr-pink', '--kr-cancelled', '--kr-agent-nvidia-text',
 ] as const;
 
+/** KT-1887 — the semantic status colours (`StatusBadge`, notices), measured
+ *  with the status colours above in every theme, light ones included. */
+export const SEMANTIC_STATUS_TOKENS = [
+  '--kr-status-success', '--kr-status-warning', '--kr-status-danger', '--kr-status-info', '--kr-status-neutral',
+] as const;
+
 /** The global `:focus-visible` ring colour: non-text, so 3:1 (WCAG 1.4.11). */
 export const FOCUS_RING_TOKEN = '--kr-accent-ink';
 
@@ -157,6 +163,10 @@ export type ContrastRow = {
   theme: string; text: string; background: string; ratio: number; floor: number;
 };
 
+/** The key of a contrast cell in the baseline: `theme text on background`. */
+export const contrastKey = (r: Pick<ContrastRow, 'theme' | 'text' | 'background'>) =>
+  `${r.theme} ${r.text} on ${r.background}`;
+
 function backgroundsOf(theme: string, tokens: ThemeTokens, withHover: boolean): Array<[string, Rgba]> {
   const out: Array<[string, Rgba]> = [];
   for (const name of SURFACE_TOKENS) {
@@ -172,12 +182,13 @@ function backgroundsOf(theme: string, tokens: ThemeTokens, withHover: boolean): 
 }
 
 /** Text roles on the opaque ramp (plus the hover chip in dark themes) of every
- *  theme, and status colours on the ramp of every dark theme. */
+ *  theme, and status colours (4.5:1: they print as small text) on the ramp of
+ *  every theme, light ones included (KT-1887). */
 export function measureTextContrast(themes: Map<string, ThemeTokens>): ContrastRow[] {
   const rows: ContrastRow[] = [];
   for (const [theme, tokens] of themes) {
     const pairs: Array<[string, number, boolean]> = TEXT_TOKENS.map(t => [t, textFloor(theme, t), true]);
-    if (DARK_THEMES.has(theme)) pairs.push(...STATUS_TOKENS.map(t => [t, 4.5, false] as [string, number, boolean]));
+    pairs.push(...[...STATUS_TOKENS, ...SEMANTIC_STATUS_TOKENS].map(t => [t, 4.5, false] as [string, number, boolean]));
     pairs.push([FOCUS_RING_TOKEN, 3, false]);
     for (const [text, floor, withHover] of pairs) {
       const fg = themeColor(tokens, text);
@@ -296,6 +307,188 @@ export function undeclaredCustomProperties(sources: Source[]): Finding[] {
   return findings;
 }
 
+// ── KT-1887 — values off the design scales ────────────────────────────────
+// The stylesheet half of the off-scale guard; the inline-style half is the
+// ESLint rule `ui-guards/no-off-scale-style` (scripts/eslint-ui-guards.mjs),
+// which reads the same definitions from here.
+
+export type OffScaleKind = 'font-size' | 'radius' | 'colour' | 'breakpoint';
+export const OFF_SCALE_KINDS: readonly OffScaleKind[] = ['font-size', 'radius', 'colour', 'breakpoint'];
+export type OffScaleFinding = Finding & { kind: OffScaleKind };
+
+/** `BREAKPOINTS` of designTokens.ts in px (the test holds them equal): a
+ *  stylesheet writes `@media (max-width: <bp - 1>px)` or `(min-width: <bp>px)`. */
+export const BREAKPOINT_PX: readonly number[] = [640, 768, 900];
+
+/** A font size on the scale: a `--kr-type-*` (or legacy `--kr-fs-*`) token,
+ *  or a keyword that keeps the parent's size. */
+export const FONT_SIZE_OK =
+  /^(?:var\(--kr-(?:type|fs)-[a-z0-9-]+\)|inherit|initial|unset|revert|1em|100%|smaller|larger)(?:\s*!important)?$/;
+
+/** One part of a radius on the scale: 0, a circle, or a radius token. */
+export const RADIUS_PART_OK = /^(?:0|0px|50%|inherit|initial|unset|var\(--kr-(?:radius|r)-[a-z0-9-]+\))$/;
+
+/** `var(--x, fallback)` → `var(--x)`: a fallback is not what a theme paints. */
+export function dropFallbacks(value: string): string {
+  let out = '';
+  let i = 0;
+  for (let at = value.indexOf('var(', i); at >= 0; at = value.indexOf('var(', i)) {
+    let depth = 0;
+    let end = at + 3;
+    for (; end < value.length; end += 1) {
+      if (value[end] === '(') depth += 1;
+      else if (value[end] === ')' && --depth === 0) break;
+    }
+    const name = /^var\(\s*(--[a-z0-9-]+)/i.exec(value.slice(at))?.[1];
+    out += value.slice(i, at) + (name ? `var(${name})` : value.slice(at, end + 1));
+    i = end + 1;
+  }
+  return out + value.slice(i);
+}
+
+export function radiusOk(value: string): boolean {
+  return dropFallbacks(value).replace(/\s*!important$/, '').split(/\s*\/\s*|\s+/).filter(Boolean)
+    .every(part => RADIUS_PART_OK.test(part));
+}
+
+/** A colour written as a value (hex, a colour function on numbers, a common
+ *  name) instead of read from a token; `rgba(var(--kr-x-rgb), a)` reads one. */
+export const LITERAL_COLOUR =
+  /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(\s*[\d.]|\b(?:white|black|red|green|blue|gray|grey|orange|yellow|purple|pink|silver|gold|navy|teal)\b/i;
+
+/** A declaration value with its token reads, fallbacks and `url()` blanked:
+ *  `var(--kr-purple-soft)` names no colour. */
+export function withoutTokens(value: string): string {
+  return dropFallbacks(value).replace(/var\(\s*--[a-z0-9-]+\s*\)/gi, 'var()').replace(/url\([^)]*\)/gi, 'url()')
+    // A fully transparent black is `transparent`, written for a transition.
+    .replace(/rgba?\(\s*0\s*[, ]\s*0\s*[, ]\s*0\s*[,/]\s*0\s*\)/gi, 'transparent');
+}
+
+/** A literal colour in a declaration value. */
+export function hasLiteralColour(value: string): boolean {
+  return LITERAL_COLOUR.test(withoutTokens(value));
+}
+
+/** Where a theme is painted: literal colours are their job. */
+export const COLOUR_EXEMPT: ReadonlySet<string> = new Set([
+  'styles/tokens.css', 'styles/atmosphere.css', 'styles/neon.css', 'styles/theme-effects.css',
+]);
+
+/** Hex and colour functions on numbers: a colour in any property. */
+const VALUE_COLOUR = /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(\s*[\d.]/i;
+
+const RADIUS_PROP = /^border(?:-(?:top|bottom|start|end)-(?:left|right|start|end))?-radius$/;
+// A literal colour in an animation or font name is not a colour, so only the
+// properties that paint one are read for colour names; hex and colour
+// functions count anywhere.
+const NAMED_COLOUR_PROP =
+  /^(?:color|background(?:-color)?|border(?:-(?:top|right|bottom|left))?(?:-color)?|outline(?:-color)?|fill|stroke|(?:box|text)-shadow|caret-color|accent-color|text-decoration(?:-color)?|column-rule(?:-color)?|--.*)$/;
+
+/** Font sizes, radii, colours and `@media` widths of one stylesheet that sit
+ *  off the design scales (docs/conventions/design-tokens.md). */
+export function offScaleValues(file: string, css: string): OffScaleFinding[] {
+  const findings: OffScaleFinding[] = [];
+  const text = stripComments(css);
+  for (const media of text.matchAll(/@media[^{]*/g)) {
+    for (const w of media[0].matchAll(/\(\s*(max|min)-width\s*:\s*([\d.]+)(px|rem|em)\s*\)/g)) {
+      const value = Number(w[2]);
+      const bp = w[3] === 'px' ? (w[1] === 'max' ? value + 1 : value) : Number.NaN;
+      if (!BREAKPOINT_PX.includes(bp)) {
+        findings.push({
+          file, kind: 'breakpoint', line: lineOf(text, (media.index ?? 0) + (w.index ?? 0)),
+          detail: `@media (${w[1]}-width: ${w[2]}${w[3]})`,
+        });
+      }
+    }
+  }
+  for (const rule of cssRules(css)) {
+    let offset = 0;
+    for (const raw of rule.body.split(';')) {
+      const at = offset;
+      offset += raw.length + 1;
+      const i = raw.indexOf(':');
+      if (i < 0) continue;
+      const prop = raw.slice(0, i).trim().toLowerCase();
+      const value = raw.slice(i + 1).trim();
+      if (!value) continue;
+      const lead = raw.length - raw.trimStart().length;
+      const line = rule.line + rule.body.slice(0, at + lead).split('\n').length - 1;
+      const push = (kind: OffScaleKind) =>
+        findings.push({ file, kind, line, detail: `${prop}: ${value.replace(/\s+/g, ' ').slice(0, 60)}` });
+      if (prop === 'font-size') {
+        if (!FONT_SIZE_OK.test(dropFallbacks(value))) push('font-size');
+      } else if (RADIUS_PROP.test(prop)) {
+        if (!radiusOk(value)) push('radius');
+      } else if (!COLOUR_EXEMPT.has(file)) {
+        if (VALUE_COLOUR.test(withoutTokens(value)) || (NAMED_COLOUR_PROP.test(prop) && hasLiteralColour(value))) push('colour');
+      }
+    }
+  }
+  return findings.sort((a, b) => a.line - b.line);
+}
+
+/** Off-scale counts per file and kind, the shape of the baseline. */
+export type OffScaleCounts = Record<string, Partial<Record<OffScaleKind, number>>>;
+
+export function countOffScale(findings: OffScaleFinding[]): OffScaleCounts {
+  const counts: OffScaleCounts = {};
+  for (const f of findings) {
+    counts[f.file] ??= {};
+    counts[f.file][f.kind] = (counts[f.file][f.kind] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/** The debt frozen when the guards came in (KT-1887): `src/styles/
+ *  themeAuditBaseline.json`. A file may hold as many off-scale values of a
+ *  kind as recorded, no more; a contrast cell under its floor must be listed. */
+export type ThemeAuditBaseline = { contrast: string[]; offScale: OffScaleCounts };
+
+export const BASELINE_FILE = 'styles/themeAuditBaseline.json';
+
+export function loadBaseline(srcDir: string): ThemeAuditBaseline {
+  return JSON.parse(readFileSync(join(srcDir, BASELINE_FILE), 'utf8')) as ThemeAuditBaseline;
+}
+
+/** What the baseline lets through, what goes beyond it, and what it holds
+ *  that no longer occurs (to prune, as ESLint's bulk suppressions do). */
+export type BaselineCheck = {
+  /** Off-scale values in a file/kind whose count exceeds the baseline. */
+  newOffScale: OffScaleFinding[];
+  /** `file kind: baseline → now`, for a count that went down. */
+  staleOffScale: string[];
+  /** Contrast cells under their floor, not in the baseline. */
+  newContrast: ContrastRow[];
+  /** Baseline contrast keys that now pass or no longer exist. */
+  staleContrast: string[];
+};
+
+export function checkBaseline(
+  baseline: ThemeAuditBaseline, offScale: OffScaleFinding[], contrast: ContrastRow[],
+): BaselineCheck {
+  const counts = countOffScale(offScale);
+  const newOffScale: OffScaleFinding[] = [];
+  const staleOffScale: string[] = [];
+  const files = new Set([...Object.keys(counts), ...Object.keys(baseline.offScale)]);
+  for (const file of [...files].sort()) {
+    for (const kind of OFF_SCALE_KINDS) {
+      const now = counts[file]?.[kind] ?? 0;
+      const allowed = baseline.offScale[file]?.[kind] ?? 0;
+      if (now > allowed) newOffScale.push(...offScale.filter(f => f.file === file && f.kind === kind));
+      else if (now < allowed) staleOffScale.push(`${file} ${kind}: ${allowed} → ${now}`);
+    }
+  }
+  const frozen = new Set(baseline.contrast);
+  const misses = contrast.filter(r => r.ratio < r.floor);
+  const missKeys = new Set(misses.map(contrastKey));
+  return {
+    newOffScale,
+    staleOffScale,
+    newContrast: misses.filter(r => !frozen.has(contrastKey(r))),
+    staleContrast: baseline.contrast.filter(k => !missKeys.has(k)),
+  };
+}
+
 export function walkFiles(dir: string, exts: string[]): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir)) {
@@ -325,6 +518,10 @@ export type RepoAudit = {
   undeclaredProperties: Finding[];
   forcedText: Finding[];
   focusRemovals: Finding[];
+  /** Every off-scale value of the stylesheets, baseline included. */
+  offScale: OffScaleFinding[];
+  /** The off-scale values and contrast misses checked against the baseline. */
+  baseline: BaselineCheck;
 };
 
 /** Every static check against `frontend/src`, as the CLI and the tests run it. */
@@ -332,9 +529,13 @@ export function auditRepo(srcDir: string): RepoAudit {
   const themes = loadThemes(srcDir);
   const sources = appSources(srcDir);
   const css = sources.filter(s => s.file.endsWith('.css'));
+  const contrast = measureTextContrast(themes);
+  const offScale = css.flatMap(s => offScaleValues(s.file, s.text));
   return {
     themes,
-    contrast: measureTextContrast(themes),
+    contrast,
+    offScale,
+    baseline: checkBaseline(loadBaseline(srcDir), offScale, contrast),
     undefinedTokens: undefinedTokenUsages(sources, new Set(themes.get('dark')?.keys() ?? [])),
     undeclaredProperties: undeclaredCustomProperties(sources),
     forcedText: [

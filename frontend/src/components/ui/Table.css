@@ -1,0 +1,322 @@
+/* KT-1886 — Table. Tokens only, no theme named. The root is a size
+   container (ui-table): its narrow form is decided by its own width, not by
+   the window's, so a table in a side panel takes it on a wide screen too.
+   The scroll wrapper is always there: a table never widens the page. */
+
+.ui-table {
+  container-type: inline-size;
+  container-name: ui-table;
+  --ui-table-bg: var(--kr-bg-surface);
+  --ui-table-cell-y: var(--kr-space-2);
+  --ui-table-cell-x: var(--kr-space-3);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--kr-type-md);
+  color: var(--kr-text-primary);
+}
+
+.ui-table[data-density="compact"] {
+  --ui-table-cell-y: var(--kr-space-1);
+  --ui-table-cell-x: var(--kr-space-2);
+  font-size: var(--kr-type-sm);
+}
+
+.ui-table-scroll {
+  overflow: auto;
+  min-width: 0;
+  border-radius: var(--kr-radius-control);
+}
+
+.ui-table-scroll:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.ui-table-scroll[data-max-height="sm"] { max-height: calc(var(--kr-space-8) * 5); }
+.ui-table-scroll[data-max-height="md"] { max-height: calc(var(--kr-space-8) * 8); }
+.ui-table-scroll[data-max-height="lg"] { max-height: calc(var(--kr-space-8) * 12); }
+
+.ui-table table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.ui-table-caption {
+  padding-bottom: var(--kr-space-2);
+  font-size: var(--kr-type-lg);
+  font-weight: var(--kr-weight-semibold);
+  text-align: start;
+  color: var(--kr-text-primary);
+}
+
+.ui-table th,
+.ui-table td {
+  padding: var(--ui-table-cell-y) var(--ui-table-cell-x);
+  text-align: start;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--kr-border-subtle);
+}
+
+.ui-table thead th {
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-secondary);
+  white-space: nowrap;
+  background-color: var(--ui-table-bg);
+  border-bottom-color: var(--kr-border-medium);
+}
+
+.ui-table tbody th[scope="row"] {
+  font-weight: var(--kr-weight-medium);
+}
+
+.ui-table [data-align="center"] { text-align: center; }
+.ui-table [data-align="end"] { text-align: end; }
+
+.ui-table [data-numeric="true"] {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ui-table td[data-truncate="ellipsis"],
+.ui-table th[data-truncate="ellipsis"] {
+  max-width: calc(var(--kr-space-8) * 5);
+}
+
+.ui-table-truncate {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-table td[data-truncate="wrap"],
+.ui-table th[data-truncate="wrap"] {
+  overflow-wrap: anywhere;
+  min-width: calc(var(--kr-space-8) * 2);
+}
+
+.ui-table[data-sticky-header="true"] thead th {
+  position: sticky;
+  top: 0;
+  z-index: var(--kr-z-sticky);
+}
+
+/* ── Sort ─────────────────────────────────────────────────────────────── */
+.ui-table-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  min-height: var(--kr-control-h-sm);
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+[data-align="end"] > .ui-table-sort { flex-direction: row-reverse; }
+
+.ui-table-sort:hover { color: var(--kr-text-primary); }
+
+.ui-table-sort:focus-visible,
+.ui-table-open:focus-visible,
+.ui-table-checkbox:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+  border-radius: var(--kr-radius-control);
+}
+
+.ui-table-sort-icon {
+  display: inline-flex;
+  color: var(--kr-text-muted);
+}
+
+.ui-table-sort-icon[data-sorted="true"] { color: var(--kr-text-primary); }
+
+.ui-table-sort-icon svg {
+  width: var(--kr-space-3);
+  height: var(--kr-space-3);
+}
+
+/* ── Rows ─────────────────────────────────────────────────────────────── */
+.ui-table tbody tr[data-opens="true"] { cursor: pointer; }
+
+.ui-table[data-hover="true"] tbody tr:not(.ui-table-state-row):hover {
+  background-color: var(--kr-bg-hover);
+}
+
+.ui-table tbody tr[data-tone="danger"] { background-color: rgba(var(--kr-danger-rgb), 0.08); }
+.ui-table tbody tr[data-tone="warning"] { background-color: rgba(var(--kr-warning-rgb), 0.1); }
+.ui-table tbody tr[data-tone="muted"] { color: var(--kr-text-muted); }
+
+/* A selected row takes the accent tint of the selected rows of the collection
+   lists (--kr-accent-bg), laid over the background as an image: a toned row
+   keeps its tone tint underneath and its inline-start border. The checkbox
+   carries the state; this is only its colour. */
+.ui-table tbody tr[data-selected="true"] {
+  background-image: linear-gradient(var(--kr-accent-bg), var(--kr-accent-bg));
+}
+
+.ui-table tbody tr[data-tone="danger"] > :first-child { border-inline-start: 2px solid var(--kr-status-danger); }
+.ui-table tbody tr[data-tone="warning"] > :first-child { border-inline-start: 2px solid var(--kr-status-warning); }
+
+/* The open button looks like the cell's text; the row is the target. */
+.ui-table-open {
+  display: block;
+  width: 100%;
+  min-height: var(--kr-control-h-sm);
+  padding: 0;
+  font: inherit;
+  text-align: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.ui-table-open:hover .ui-table-value { text-decoration: underline; }
+
+.ui-table-select {
+  width: var(--kr-space-6);
+}
+
+.ui-table-checkbox {
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
+  margin: 0;
+  accent-color: var(--kr-accent);
+  cursor: pointer;
+}
+
+.ui-table td.ui-table-actions,
+.ui-table th.ui-table-actions {
+  width: 1%;
+  white-space: nowrap;
+  text-align: end;
+}
+
+.ui-table-actions-items {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+}
+
+.ui-table-state-row > td {
+  padding: var(--kr-space-4);
+  text-align: center;
+}
+
+.ui-table-empty {
+  margin: 0;
+  color: var(--kr-text-secondary);
+}
+
+.ui-table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--kr-space-2);
+  padding-top: var(--kr-space-2);
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-secondary);
+}
+
+/* The header before each value: shown in the cards form only. */
+.ui-table-cell-label {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .ui-table-sort,
+  .ui-table-open {
+    min-height: var(--kr-control-h-touch);
+  }
+
+  .ui-table-checkbox {
+    width: var(--kr-space-5);
+    height: var(--kr-space-5);
+  }
+}
+
+/* ── Narrow container: cards ──────────────────────────────────────────── */
+/* 40rem is --kr-bp-sm (640px at the default text size); a container query
+   cannot read a custom property. */
+@container ui-table (width < 40rem) {
+  .ui-table[data-narrow="cards"] table,
+  .ui-table[data-narrow="cards"] tbody {
+    display: block;
+  }
+
+  .ui-table[data-narrow="cards"] thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* A sort button or the select-all taking the focus shows the header row. */
+  .ui-table[data-narrow="cards"] thead:focus-within {
+    position: static;
+    display: block;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+  }
+
+  .ui-table[data-narrow="cards"] thead:focus-within tr {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--kr-space-2);
+  }
+
+  .ui-table[data-narrow="cards"] tbody tr {
+    display: grid;
+    gap: var(--kr-space-2);
+    margin-bottom: var(--kr-space-2);
+    padding: var(--kr-space-3);
+    border: 1px solid var(--kr-border-subtle);
+    border-radius: var(--kr-radius-surface);
+  }
+
+  .ui-table[data-narrow="cards"] tbody th,
+  .ui-table[data-narrow="cards"] tbody td {
+    display: block;
+    max-width: none;
+    padding: 0;
+    text-align: start;
+    border: 0;
+  }
+
+  .ui-table[data-narrow="cards"] tbody tr[data-tone] > :first-child {
+    border-inline-start: 0;
+  }
+
+  .ui-table[data-narrow="cards"] tbody tr[data-tone="danger"] { border-inline-start: 2px solid var(--kr-status-danger); }
+  .ui-table[data-narrow="cards"] tbody tr[data-tone="warning"] { border-inline-start: 2px solid var(--kr-status-warning); }
+
+  .ui-table[data-narrow="cards"] .ui-table-cell-label {
+    display: block;
+    font-size: var(--kr-type-sm);
+    font-weight: var(--kr-weight-medium);
+    color: var(--kr-text-muted);
+  }
+
+  .ui-table[data-narrow="cards"] .ui-table-truncate {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .ui-table[data-narrow="cards"] .ui-table-state-row {
+    padding: 0;
+    border: 0;
+  }
+}

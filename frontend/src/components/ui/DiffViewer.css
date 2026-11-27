@@ -1,0 +1,305 @@
+/* KT-2004 — DiffViewer. Tokens only, no theme named. Each file's lines are
+   one grid (the rows are `display: contents`), so the gutters line up from
+   the first line to the last; a full-width row (hunk header, meta line, the
+   caller's selection toolbar) spans every column. The layout falls back to
+   unified by the viewer's own width, measured in the component: no size
+   container, so the viewer never collapses in a flex row. */
+
+.ui-diff {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-2);
+  min-width: 0;
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-primary);
+}
+
+.ui-diff-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--kr-space-2);
+}
+
+.ui-diff-layouts {
+  display: inline-flex;
+  gap: var(--kr-space-1);
+}
+
+.ui-diff-files {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-3);
+  min-width: 0;
+}
+
+.ui-diff-files[data-max-height] {
+  overflow: auto;
+  border-radius: var(--kr-radius-control);
+}
+
+.ui-diff-files[data-max-height]:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.ui-diff-files[data-max-height="sm"] { max-height: calc(var(--kr-space-8) * 8); }
+.ui-diff-files[data-max-height="md"] { max-height: calc(var(--kr-space-8) * 14); }
+.ui-diff-files[data-max-height="lg"] { max-height: calc(var(--kr-space-8) * 22); }
+
+.ui-diff-empty {
+  margin: 0;
+  color: var(--kr-text-secondary);
+}
+
+/* ── File ─────────────────────────────────────────────────────────────── */
+.ui-diff-file {
+  min-width: 0;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-radius-control);
+  overflow: hidden;
+}
+
+.ui-diff-file-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kr-space-2);
+  padding: var(--kr-space-1) var(--kr-space-2) var(--kr-space-1) var(--kr-space-3);
+  background-color: var(--kr-bg-elevated);
+  border-bottom: 1px solid var(--kr-border-subtle);
+}
+
+.ui-diff-paths {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--kr-space-1);
+  min-width: 0;
+  font-family: var(--kr-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.ui-diff-path { font-weight: var(--kr-weight-semibold); }
+
+.ui-diff-previous-path,
+.ui-diff-arrow {
+  color: var(--kr-text-secondary);
+}
+
+.ui-diff-counts {
+  display: inline-flex;
+  gap: var(--kr-space-1);
+  font-family: var(--kr-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-diff-count[data-kind="added"] { color: var(--kr-diff-added-text); }
+.ui-diff-count[data-kind="removed"] { color: var(--kr-diff-removed-text); }
+
+.ui-diff-file-actions { margin-inline-start: auto; }
+
+.ui-diff-file-note {
+  margin: 0;
+  padding: var(--kr-space-3);
+  color: var(--kr-text-secondary);
+  background-color: var(--kr-code-surface);
+}
+
+/* ── Lines ────────────────────────────────────────────────────────────── */
+.ui-diff-body {
+  display: grid;
+  overflow-x: auto;
+  font-family: var(--kr-font-mono);
+  line-height: 1.5;
+  color: var(--kr-code-text);
+  background-color: var(--kr-code-surface);
+}
+
+/* Unified: old number, new number, marker, text. */
+.ui-diff[data-layout="unified"] .ui-diff-body { grid-template-columns: auto auto auto minmax(0, 1fr); }
+.ui-diff[data-layout="unified"] .ui-diff-body[data-selectable="true"] { grid-template-columns: auto auto auto auto minmax(0, 1fr); }
+/* Side by side: number, marker and text of the old side, then of the new one. */
+.ui-diff[data-layout="split"] .ui-diff-body { grid-template-columns: auto auto minmax(0, 1fr) auto auto minmax(0, 1fr); }
+.ui-diff[data-layout="split"] .ui-diff-body[data-selectable="true"] {
+  grid-template-columns: auto auto auto minmax(0, 1fr) auto auto auto minmax(0, 1fr);
+}
+
+/* Sideways scroll: a text column is as wide as its longest line. */
+.ui-diff[data-wrap="false"][data-layout="unified"] .ui-diff-body { grid-template-columns: auto auto auto minmax(max-content, 1fr); }
+.ui-diff[data-wrap="false"][data-layout="unified"] .ui-diff-body[data-selectable="true"] {
+  grid-template-columns: auto auto auto auto minmax(max-content, 1fr);
+}
+.ui-diff[data-wrap="false"][data-layout="split"] .ui-diff-body {
+  grid-template-columns: auto auto minmax(max-content, 1fr) auto auto minmax(max-content, 1fr);
+}
+.ui-diff[data-wrap="false"][data-layout="split"] .ui-diff-body[data-selectable="true"] {
+  grid-template-columns: auto auto auto minmax(max-content, 1fr) auto auto auto minmax(max-content, 1fr);
+}
+
+.ui-diff-row { display: contents; }
+
+.ui-diff-cell {
+  min-width: 0;
+  padding: 0 var(--kr-space-1);
+}
+
+.ui-diff-text {
+  padding-inline-end: var(--kr-space-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ui-diff[data-wrap="false"] .ui-diff-text {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.ui-diff-number {
+  padding: 0 var(--kr-space-2);
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+  color: var(--kr-text-muted);
+  user-select: none;
+}
+
+.ui-diff-marker {
+  text-align: center;
+  user-select: none;
+}
+
+/* The old side of a split row ends on a line between the two sides. */
+.ui-diff-text[data-side="old"] { border-inline-end: 1px solid var(--kr-border-subtle); }
+
+/* Kinds: a tinted row, a stronger edge on its marker, text that reads on it. */
+.ui-diff-cell[data-kind="added"] { background-color: var(--kr-diff-added-bg); }
+.ui-diff-marker[data-kind="added"] { box-shadow: inset 2px 0 0 var(--kr-diff-added-border); }
+.ui-diff-marker[data-kind="added"],
+.ui-diff-text[data-kind="added"] { color: var(--kr-diff-added-text); }
+
+.ui-diff-cell[data-kind="removed"] { background-color: var(--kr-diff-removed-bg); }
+.ui-diff-marker[data-kind="removed"] { box-shadow: inset 2px 0 0 var(--kr-diff-removed-border); }
+.ui-diff-marker[data-kind="removed"],
+.ui-diff-text[data-kind="removed"] { color: var(--kr-diff-removed-text); }
+
+.ui-diff-cell[data-kind="changed"] { background-color: var(--kr-diff-changed-bg); }
+.ui-diff-marker[data-kind="changed"] { box-shadow: inset 2px 0 0 var(--kr-diff-changed-border); }
+.ui-diff-marker[data-kind="changed"],
+.ui-diff-text[data-kind="changed"] { color: var(--kr-diff-changed-text); }
+
+.ui-diff-cell[data-kind="empty"] { background-color: var(--kr-bg-hover); }
+
+/* A selected line: the accent tint over its own, as a background image. */
+.ui-diff-cell[data-selected="true"] {
+  background-image: linear-gradient(var(--kr-accent-bg), var(--kr-accent-bg));
+}
+
+.ui-diff-hunk {
+  grid-column: 1 / -1;
+  padding: var(--kr-space-1) var(--kr-space-3);
+  color: var(--kr-text-secondary);
+  background-color: rgba(var(--kr-info-rgb), 0.08);
+  border-block: 1px solid var(--kr-border-subtle);
+}
+
+.ui-diff-hunk-header {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ui-diff-row-full > .ui-diff-cell {
+  grid-column: 1 / -1;
+  padding: 0 var(--kr-space-3);
+}
+
+.ui-diff-meta-text {
+  font-style: italic;
+  color: var(--kr-text-muted);
+}
+
+.ui-diff-selection-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-space-2);
+  padding: var(--kr-space-2) var(--kr-space-3);
+  font-family: var(--kr-font-sans);
+  background-color: var(--kr-bg-elevated);
+  border-block: 1px solid var(--kr-border-subtle);
+}
+
+/* ── Line selection ───────────────────────────────────────────────────── */
+.ui-diff-select {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--kr-space-1);
+}
+
+.ui-diff-select-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: var(--kr-radius-control);
+  cursor: pointer;
+}
+
+/* The box drawn inside the button: empty, filled when the line is selected. */
+.ui-diff-select-button::before {
+  content: "";
+  width: var(--kr-space-3);
+  height: var(--kr-space-3);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+}
+
+.ui-diff-select-button:hover::before { border-color: var(--kr-accent); }
+
+.ui-diff-select-button[aria-pressed="true"]::before {
+  background-color: var(--kr-accent);
+  border-color: var(--kr-accent);
+}
+
+.ui-diff-select-button:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 0;
+}
+
+@media (pointer: coarse) {
+  .ui-diff-select-button {
+    min-width: var(--kr-control-h-touch);
+    min-height: var(--kr-control-h-touch);
+  }
+}
+
+/* ── Syntax highlighting: the caller's highlight.js classes, coloured from
+   the code tokens. ──────────────────────────────────────────────────────── */
+.ui-diff .hljs-comment,
+.ui-diff .hljs-quote { color: var(--kr-code-comment); font-style: italic; }
+.ui-diff .hljs-keyword,
+.ui-diff .hljs-selector-tag,
+.ui-diff .hljs-type,
+.ui-diff .hljs-built_in { color: var(--kr-code-keyword); }
+.ui-diff .hljs-string,
+.ui-diff .hljs-regexp,
+.ui-diff .hljs-attr,
+.ui-diff .hljs-meta { color: var(--kr-code-string); }
+.ui-diff .hljs-number,
+.ui-diff .hljs-literal,
+.ui-diff .hljs-doctag { color: var(--kr-code-number); }
+.ui-diff .hljs-title,
+.ui-diff .hljs-section,
+.ui-diff .hljs-name { color: var(--kr-code-function); }
+.ui-diff .hljs-params,
+.ui-diff .hljs-variable { color: var(--kr-code-variable); }
+.ui-diff .hljs-symbol,
+.ui-diff .hljs-bullet,
+.ui-diff .hljs-link { color: var(--kr-code-symbol); }
+.ui-diff .hljs-emphasis { font-style: italic; }
+.ui-diff .hljs-strong { font-weight: var(--kr-weight-bold); }

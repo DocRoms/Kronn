@@ -1,0 +1,13 @@
+/* KT-1886 — CopyButton: an IconButton or a Button (Button.css), plus the
+   colour of its feedback. The check after a copy takes the success colour on
+   the icon only; a failed copy takes the danger variant of Button. The live
+   region beside it is visually hidden. */
+
+.ui-copy-button-wrap {
+  display: inline-flex;
+  position: relative;
+}
+
+.ui-copy-button[data-state="copied"] .ui-button-icon {
+  color: var(--kr-status-success);
+}
