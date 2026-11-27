@@ -21860,6 +21860,126 @@ async fn the_same_rule_holds_for_a_native_projected_delivery() {
     );
 }
 
+/// The worker's projected delivery in the dispatch the execution holds now.
+async fn deliver_projected_now(db: &Database, exec_id: &str, manifest: &str) -> DeliverOutcome {
+    let execution = exec_of(db, exec_id).await;
+    let child = execution.sub_discussion_id.clone().unwrap();
+    let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
+    let lookup = dispatch_job_id.clone();
+    let trigger = db
+        .with_conn(move |conn| {
+            Ok(crate::db::agent_dispatch::get(conn, &lookup)?
+                .unwrap()
+                .trigger_message_id)
+        })
+        .await
+        .unwrap();
+    deliver_native_worker_manifest(
+        db,
+        exec_id,
+        NativeExecutionCaller {
+            discussion_id: &child,
+            agent_type: &AgentType::ClaudeCode,
+            source_message_id: Some(&trigger),
+            alias: "Claude Code",
+            actor_session_id: Some("native-delivery-turn"),
+        },
+        &dispatch_job_id,
+        manifest,
+    )
+    .await
+    .unwrap()
+}
+
+/// KT-2109 — a rework that hands back the delivery under review unchanged (same
+/// HEAD, same claims) is refused; the same HEAD with new claims is a delivery.
+#[tokio::test]
+async fn a_rework_that_hands_back_the_reviewed_delivery_unchanged_is_refused() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (execution, _child, _dispatch, _trigger) =
+        native_worker_execution(&db, repo.path(), "same-head-rework").await;
+    let parent = execution.parent_discussion_id.clone();
+    let head = git_rev(
+        Path::new(&managed_worktree_path(&db, &execution.id).await),
+        "HEAD",
+    );
+    let manifest = projected_manifest_for_execution(&db, &execution.id).await;
+    let delivered = deliver_projected_now(&db, &execution.id, &manifest).await;
+    assert!(
+        matches!(delivered, DeliverOutcome::Delivered { .. }),
+        "{delivered:?}"
+    );
+    let reviewed = decide_native_review(
+        &db,
+        &execution.id,
+        &review_request_changes("tighten the regression test"),
+        NativeExecutionCaller {
+            discussion_id: &parent,
+            agent_type: &AgentType::ClaudeCode,
+            source_message_id: Some("principal-review"),
+            alias: "Claude Code",
+            actor_session_id: Some("principal-review"),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            reviewed,
+            ReviewOutcome::Reviewed {
+                verdict: ReviewVerdict::RequestChanges,
+                ..
+            }
+        ),
+        "{reviewed:?}"
+    );
+
+    // A reworded summary is not a change.
+    let mut reworded: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    reworded["summary"] = serde_json::json!("tightened, as asked");
+    let outcome = deliver_projected_now(&db, &execution.id, &reworded.to_string()).await;
+    let DeliverOutcome::InvalidManifest(detail) = outcome else {
+        panic!("the reviewed delivery handed back unchanged must be refused, got {outcome:?}")
+    };
+    assert!(detail.starts_with("nothing changed"), "{detail}");
+    assert!(detail.contains(&short_sha(&head)), "{detail}");
+    assert!(detail.contains("attempt 0"), "{detail}");
+    assert!(
+        !detail.contains("your turn") && !detail.contains("Do not call"),
+        "the principal reads this text too, so it gives no order to its reader: {detail}"
+    );
+    assert_eq!(
+        exec_of(&db, &execution.id).await.status,
+        TaskExecutionStatus::Working
+    );
+    assert_eq!(delivery_count(&db).await, 1, "no second delivery row");
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM task_execution_events WHERE action = 'review_requested'"
+        )
+        .await,
+        1,
+        "the principal is not asked to review the same work again"
+    );
+    let id = execution.id.clone();
+    let journaled = db
+        .with_conn(move |conn| crate::db::orchestration::latest_delivery_refusal(conn, &id))
+        .await
+        .unwrap();
+    assert_eq!(journaled.as_deref(), Some(detail.as_str()));
+
+    // A change that needed no commit (a check run again) is still a delivery.
+    let mut checked: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    checked["tests"][0]["evidence"] = serde_json::json!("ran again after the review: passes");
+    let outcome = deliver_projected_now(&db, &execution.id, &checked.to_string()).await;
+    assert!(
+        matches!(outcome, DeliverOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
 /// KT-1992 — the brief says before the worker tries that an empty manifest is
 /// refused, and promises the parking only to a worker Kronn launched.
 #[test]
@@ -28753,7 +28873,7 @@ async fn request_changes_redispatches_a_native_worker_as_a_new_attempt() {
         })
         .await
         .unwrap();
-    let manifest = projected_manifest_for_execution(&db, &exec_id).await;
+    let manifest = rechecked(projected_manifest_for_execution(&db, &exec_id).await, 2);
     let stale = deliver_native_worker_manifest(
         &db,
         &exec_id,
@@ -31483,7 +31603,7 @@ async fn review_loop_reoffers_up_to_the_budget_then_escalates_past_it() {
             exec_of(&db, &exec_id).await.status,
             TaskExecutionStatus::Working
         );
-        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let manifest = rechecked(clean_manifest_for_execution(&db, &exec_id).await, round);
         deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
             .await
             .unwrap();
@@ -32152,6 +32272,14 @@ async fn duplicate_reaccept_of_accepting_rework_converges_without_double_resume(
 
 // ── KT-1345 — the review-round limit ───────────────────────────────────────────────────
 
+/// `manifest` with its first test run again in `round`: a rework that hands the
+/// delivery its review sent back unchanged is refused (KT-2109).
+fn rechecked(manifest: String, round: u32) -> String {
+    let mut manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    manifest["tests"][0]["evidence"] = serde_json::json!(format!("ran again in round {round}"));
+    manifest.to_string()
+}
+
 /// One rework round of the CLI review loop: `request_changes`, the worker re-accepts the
 /// offer and delivers again.
 async fn rework_round(db: &Database, exec_id: &str, round: u32) {
@@ -32181,7 +32309,7 @@ async fn rework_round(db: &Database, exec_id: &str, round: u32) {
             .await
             .unwrap();
     assert!(matches!(attached, AcceptAttachOutcome::Attached { .. }));
-    let manifest = clean_manifest_for_execution(db, exec_id).await;
+    let manifest = rechecked(clean_manifest_for_execution(db, exec_id).await, round);
     deliver_worker_manifest(db, exec_id, "ClaudeCode", "sess-a", &manifest)
         .await
         .unwrap();
@@ -32670,7 +32798,7 @@ async fn request_changes_with_a_spent_token_budget_schedules_no_attempt_even_unl
             accept_worker_offer_and_attach(&db, &live[0].id, "ClaudeCode", "sess-a", "sess-a")
                 .await
                 .unwrap();
-            let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+            let manifest = rechecked(clean_manifest_for_execution(&db, &exec_id).await, 1);
             deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
                 .await
                 .unwrap();

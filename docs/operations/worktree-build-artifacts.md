@@ -485,7 +485,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_lane_warm.rs:1786-1798#first_build_args]
 [src: file: backend/src/core/project_toolchains.rs:609#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:12920-12951#warm_failure_notice]
+[src: file: backend/src/api/orchestration.rs:12990-13021#warm_failure_notice]
 
 ## Seed and lane agree on the C flags (KT-1742)
 
@@ -1055,8 +1055,8 @@ Cargo (`pnpm tauri build`) is not detected: the rule reads binaries, not scripts
 [src: file: backend/src/core/task_worker_warm_skip.rs:81#cold_target_note]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1845#warm_worktree]
 [src: file: backend/src/core/task_worker_lane_warm.rs:507#skipped_by_validations]
-[src: file: backend/src/api/orchestration.rs:12801-12805#warm_lane_for_validations]
-[src: file: backend/src/api/orchestration.rs:13003-13006#record_toolchain_smoke_check_on]
+[src: file: backend/src/api/orchestration.rs:12871-12875#warm_lane_for_validations]
+[src: file: backend/src/api/orchestration.rs:13073-13076#record_toolchain_smoke_check_on]
 [src: file: backend/src/db/orchestration.rs:8113#refusal_for]
 
 ## Maintenance command

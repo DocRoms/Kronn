@@ -182,6 +182,12 @@ Release notes for 0.9.3 and earlier are available in the
   refused: nothing is stored and no review is requested. The refusal opens
   with the worker's own reason, credentials masked, and the principal reads it
   in the "ended without delivery" notice.
+- Workers: a rework that hands back unchanged the delivery its review sent
+  back is refused (KT-2109). The same HEAD with the same claims went back to
+  review, and the principal reviewed identical work again. A reworded summary
+  is not a change; a test run again or new Definition of Done evidence is. A
+  delivery reassigned unreviewed, or sent back by the integration, may still
+  be handed back as it was.
 - Workers: a worker session that ended leaves no process behind (KT-1986,
   KT-2021). Each CLI worker launch is recorded with the instance that launched
   it and its agent's process group. When its dispatch ends, that group and
