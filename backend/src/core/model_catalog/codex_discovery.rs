@@ -92,6 +92,12 @@ fn discovery_command_for(program: &str) -> tokio::process::Command {
     command
 }
 
+/// The English sentences this discovery writes (KT-2003: the refresh log
+/// stores them, `refresh_error_code` reads them back as codes).
+pub(crate) const STDIN_UNAVAILABLE: &str = "codex app-server stdin unavailable";
+pub(crate) const STDOUT_UNAVAILABLE: &str = "codex app-server stdout unavailable";
+pub(crate) const STDOUT_CLOSED: &str = "codex app-server closed stdout before responding";
+
 pub async fn discover() -> DiscoveryOutcome {
     let mut command = discovery_command();
     let mut child = match command.spawn() {
@@ -106,11 +112,11 @@ pub async fn discover() -> DiscoveryOutcome {
     };
     let Some(stdin) = child.stdin.take() else {
         let _ = child.start_kill();
-        return DiscoveryOutcome::ProviderError("codex app-server stdin unavailable".into());
+        return DiscoveryOutcome::ProviderError(STDIN_UNAVAILABLE.into());
     };
     let Some(stdout) = child.stdout.take() else {
         let _ = child.start_kill();
-        return DiscoveryOutcome::ProviderError("codex app-server stdout unavailable".into());
+        return DiscoveryOutcome::ProviderError(STDOUT_UNAVAILABLE.into());
     };
     let mut stdin = stdin;
     let mut reader = BufReader::new(stdout);
@@ -236,9 +242,7 @@ async fn read_response<R: AsyncBufRead + Unpin>(
             DiscoveryOutcome::ProviderError(format!("read codex app-server response: {error}"))
         })?;
         if read == 0 {
-            return Err(DiscoveryOutcome::ProviderError(
-                "codex app-server closed stdout before responding".into(),
-            ));
+            return Err(DiscoveryOutcome::ProviderError(STDOUT_CLOSED.into()));
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {

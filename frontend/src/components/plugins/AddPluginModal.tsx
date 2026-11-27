@@ -1,10 +1,11 @@
 import {
-  Puzzle, Plus, Check, X, Key, ExternalLink, Plug, Globe, Download,
+  Puzzle, Plus, Check, X, Key, ExternalLink, Download,
   Terminal, Eye,
 } from 'lucide-react';
 import { useLayoutEffect, useRef, type UIEvent } from 'react';
 import { onActivationKey } from '../../lib/keyboardActivation';
 import { pluginKind } from '../../lib/pluginKind';
+import { RegistryKindBadge } from './PluginKindBadge';
 import { pluginCredentialKeys, pluginCredentialKind } from '../../lib/pluginCredentials';
 import { CustomApiForm } from './CustomApiForm';
 import { PluginScopeEditor } from './PluginScopeEditor';
@@ -336,9 +337,7 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                       </div>
                       <div className="mcp-registry-card-desc">{t('mcp.custom.importTileDesc')}</div>
                       <div className="mcp-registry-card-meta">
-                        <span className="mcp-kind-badge mcp-kind-badge-api" title={t('mcp.kind.apiTooltip')}>
-                          <Globe size={9} /> {t('mcp.kind.api')}
-                        </span>
+                        <RegistryKindBadge kind="api" />
                         <span className="mcp-origin-badge mcp-origin-community">
                           {t('mcp.custom.tileBadge')}
                         </span>
@@ -366,9 +365,7 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                       </div>
                       <div className="mcp-registry-card-desc">{t('mcp.custom.tileDesc')}</div>
                       <div className="mcp-registry-card-meta">
-                        <span className="mcp-kind-badge mcp-kind-badge-api" title={t('mcp.kind.apiTooltip')}>
-                          <Globe size={9} /> {t('mcp.kind.api')}
-                        </span>
+                        <RegistryKindBadge kind="api" />
                         <span className="mcp-origin-badge mcp-origin-community">
                           {t('mcp.custom.tileBadge')}
                         </span>
@@ -423,20 +420,7 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                             </div>
                             <div className="mcp-registry-card-desc">{m.description}</div>
                             <div className="mcp-registry-card-meta">
-                              {(() => {
-                                const kind = pluginKind(m);
-                                const label = kind === 'api'
-                                  ? t('mcp.kind.api')
-                                  : kind === 'hybrid'
-                                    ? t('mcp.kind.hybrid')
-                                    : t('mcp.kind.mcp');
-                                const Icon = kind === 'mcp' ? Plug : kind === 'api' ? Globe : Puzzle;
-                                return (
-                                  <span className={`mcp-kind-badge mcp-kind-badge-${kind}`} title={t(`mcp.kind.${kind}Tooltip`)}>
-                                    <Icon size={9} /> {label}
-                                  </span>
-                                );
-                              })()}
+                              <RegistryKindBadge kind={pluginKind(m)} />
                               <span className={`mcp-origin-badge ${m.official ? 'mcp-origin-official' : 'mcp-origin-community'}`}>
                                 {m.official ? t('mcp.official') : t('mcp.community')} — {m.publisher}
                               </span>

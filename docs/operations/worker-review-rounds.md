@@ -8,7 +8,7 @@ way to set the limit, so every principal-driven lane was capped at the SQL defau
 
 A task execution gets `max_review_rounds` rounds of `request_changes`. `N` allows `N` re-offers and
 escalates on the `N+1`-th (`new_rounds > max_review_rounds`).
-`[src: file: backend/src/db/orchestration.rs:5004-5100#commit_review_checkpoint]`
+`[src: file: backend/src/db/orchestration.rs:5033-5129#commit_review_checkpoint]`
 
 - **Integer:** 1 to 1000. `0` is refused at every boundary.
   `[src: file: backend/src/models/setup.rs:890-911#parse_review_rounds_arg]`

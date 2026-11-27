@@ -23,7 +23,7 @@ response-attested historical fact. Both panels now derive the displayed model
 only from `answer.model` (normalized, the response that actually produced the
 compared answer) or, failing that, the last message in history that recorded
 a concrete `model` — never from `discussion.model`.
-[src: file: frontend/src/types/generated.ts:4072#model]
+[src: file: frontend/src/types/generated.ts:4107#model]
 [src: file: frontend/src/components/BatchComparePanel.tsx:199-203]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
@@ -99,7 +99,7 @@ the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3683-3697#AgentCompareSelector]
 [src: file: frontend/src/components/AgentCompareSelector.tsx:85-111#AgentSwitchPicker]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1307-1319#resolvedTier]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1315-1327#resolvedTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:13-26#resolveCatalogTier]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-359#AgentSwitchPicker]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412-428#AgentSwitchPicker]

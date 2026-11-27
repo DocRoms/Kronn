@@ -42,7 +42,8 @@ vi.mock('../../lib/api', () => ({
 }));
 
 import { McpPage } from '../McpPage';
-import { mcps as mcpsApi, discussions as discussionsApi, assistantConversations as assistantApi } from '../../lib/api';
+import { mcps as mcpsApi, discussions as discussionsApi, assistantConversations as assistantApi, config as configApi } from '../../lib/api';
+import { dictionaries } from '../../lib/i18n/testing';
 import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, AgentType, McpProbeResponse } from '../../types/generated';
 
 // Use fake timers to prevent the setTimeout in handleAddDuplicateConfig (50ms
@@ -2930,6 +2931,59 @@ describe('McpPage', () => {
       // API: shown again.
       await click('api');
       expect(tile()).toBeTruthy();
+    });
+
+    // KT-2020 — a CLI card read "MCP" and its tooltip was the raw key
+    // `mcp.kind.cliTooltip`: the badge only knew `api` and `hybrid`.
+    const hybridServer: McpDefinition = {
+      id: 'mcp-hybrid', name: 'Hybrid Tool',
+      description: 'Both',
+      transport: { Stdio: { command: 'hybrid-mcp', args: [] } },
+      env_keys: [], tags: ['tools'],
+      token_url: null, token_help: null,
+      publisher: 'Someone', official: false,
+      api_spec: { base_url: 'https://api.example.com', auth: 'None', endpoints: [], config_keys: [] },
+    };
+    const kindBadgeOf = (name: string) => {
+      const card = Array.from(document.querySelectorAll<HTMLElement>('.mcp-registry-grid .mcp-registry-card'))
+        .find(c => c.querySelector('.mcp-registry-card-name')?.textContent === name);
+      if (!card) throw new Error(`${name} card not found`);
+      const badge = card.querySelector<HTMLElement>('.mcp-kind-badge');
+      if (!badge) throw new Error(`${name} card has no kind badge`);
+      return badge;
+    };
+
+    it.each(['fr', 'en', 'es', 'zh'] as const)('labels a CLI registry card "CLI" with the terminal icon and a translated tooltip (%s, KT-2020)', async (locale) => {
+      localStorage.setItem('kronn:ui-locale', locale);
+      vi.mocked(configApi.getUiLanguage).mockResolvedValueOnce(locale);
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
+      wrap(<McpPage projects={[]} mcpOverview={overview}
+        mcpRegistry={[mcpServer, apiServer, cliServer, hybridServer]} refetchMcps={noop} />);
+      await act(async () => {});
+      await openAddMcpPanel();
+      const dict = dictionaries[locale];
+
+      const cli = kindBadgeOf('Fastly');
+      expect(cli).toHaveClass('mcp-kind-badge-cli');
+      expect(cli.textContent?.trim()).toBe(dict['mcp.kind.cli']);
+      expect(cli.textContent?.trim()).toBe('CLI');
+      expect(cli.getAttribute('title')).toBe(dict['mcp.kind.cliTooltip']);
+      expect(cli.querySelector('svg.lucide-terminal')).not.toBeNull();
+
+      // The other kinds keep their own label and tooltip.
+      expect(kindBadgeOf('PostgreSQL').getAttribute('title')).toBe(dict['mcp.kind.mcpTooltip']);
+      expect(kindBadgeOf('Resend').getAttribute('title')).toBe(dict['mcp.kind.apiTooltip']);
+      expect(kindBadgeOf('Hybrid Tool').getAttribute('title')).toBe(dict['mcp.kind.hybridTooltip']);
+
+      // No kind badge anywhere in the form names itself with a key.
+      const badges = Array.from(document.querySelectorAll<HTMLElement>('.mcp-kind-badge'));
+      expect(badges.length).toBeGreaterThanOrEqual(5);
+      for (const badge of badges) {
+        const title = badge.getAttribute('title') ?? '';
+        expect(title).not.toBe('');
+        expect(title, `kind badge "${badge.textContent}" has a key for a title`).not.toMatch(/^[a-z][A-Za-z0-9]*(\.[A-Za-z0-9]+)+$/);
+        expect(badge.textContent).not.toMatch(/\bmcp\.kind\./);
+      }
     });
   });
 });

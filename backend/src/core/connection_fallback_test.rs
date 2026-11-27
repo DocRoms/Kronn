@@ -53,6 +53,41 @@ fn a_bad_model_is_refused() {
     }
 }
 
+/// KT-1998 — the connection fallback row goes through the shared model rule:
+/// a dash-led model is refused before `set_row` can store the row.
+#[test]
+fn model_id_guard_connection_fallback_refuses_a_dash_led_model() {
+    let config = agents();
+    let padded = format!("{}flux-dev", " ".repeat(100_000));
+    for model in [
+        "-c",
+        "  --help",
+        "\nflux-dev\n",
+        "\tflux-dev",
+        padded.as_str(),
+    ] {
+        let target = ConnectionFallbackTarget {
+            connection: "conn-a".into(),
+            model: Some(model.into()),
+        };
+        let error = validate_row(&config, COMFYUI_OWNER, FallbackMode::Image, &target)
+            .expect_err("a dash-led model is refused");
+        assert!(
+            matches!(error, ConnectionChainError::BadModel(_)),
+            "{error}"
+        );
+        assert!(
+            error.to_string().starts_with("Fallback refused: model "),
+            "{error}"
+        );
+    }
+    let named = ConnectionFallbackTarget {
+        connection: "conn-a".into(),
+        model: Some("flux-dev".into()),
+    };
+    assert!(validate_row(&config, COMFYUI_OWNER, FallbackMode::Image, &named).is_ok());
+}
+
 #[test]
 fn a_loop_through_the_rows_of_the_fallbacks_is_refused() {
     let mut config = agents();

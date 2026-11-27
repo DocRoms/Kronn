@@ -693,7 +693,7 @@ pub struct UpdateDiscussionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentType>,
     /// KT-1993 — the exact model. `Some(Some(id))` = set (validated by
-    /// `normalize_exact_model`: trimmed, one line, at most 200 characters, no
+    /// `normalize_exact_model`: trimmed, one line, at most 256 characters, no
     /// leading `-`), `Some(None)` = clear (the tier applies again),
     /// absent = no change. Changing `agent` or `connection_id`, or sending a
     /// `tier`, without a model clears the stored model.

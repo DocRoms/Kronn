@@ -2215,7 +2215,11 @@ description?: string | null,
  * instead of `display_name`, even after the record is reconciled to
  * `Live` (KT-531: operator display choices survive reconciliation).
  */
-display_alias?: string | null, provenance: ModelProvenance, availability: ModelAvailability, unavailable_reason?: ModelUnavailableReason | null, unavailable_detail?: string | null, capabilities: Array<string>, reasoning_modes: Array<string>, default_reasoning_mode?: string | null,
+display_alias?: string | null, provenance: ModelProvenance, availability: ModelAvailability, unavailable_reason?: ModelUnavailableReason | null, unavailable_detail?: string | null,
+/**
+ * KT-2003 — `unavailable_detail` as a code, when Kronn wrote it.
+ */
+unavailable_code?: CatalogReasonCode | null, capabilities: Array<string>, reasoning_modes: Array<string>, default_reasoning_mode?: string | null,
 /**
  * Operator-assigned Economy/Default/Reasoning tier, if any. Survives
  * reconciliation the same way `display_alias` does.
@@ -2270,7 +2274,11 @@ last_answered_at?: string | null, created_at: string, updated_at: string, };
  * dispatch, Quick Prompt runs, comparisons and workflow steps so the UI
  * renders one consistent card regardless of the launch surface.
  */
-export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: AgentType, model_id?: string | null, reason: ModelUnavailableReason, detail: string, last_checked_at: string,
+export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: AgentType, model_id?: string | null, reason: ModelUnavailableReason, detail: string,
+/**
+ * KT-2003 — `detail` as a code, when Kronn wrote it.
+ */
+detail_code?: CatalogReasonCode | null, last_checked_at: string,
 /**
  * Machine-readable recommended next step (`"configure_manual_model"`,
  * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`,
@@ -2291,14 +2299,33 @@ export type CatalogPreflightResolution = { requested_model: string | null, effec
  * Shown before the run, which still goes ahead: the runtime's complete
  * listing does not contain the model.
  */
-notice?: string | null, };
+notice?: string | null,
+/**
+ * KT-2003 — `notice` as a code.
+ */
+notice_code?: CatalogReasonCode | null, };
 
 /**
  * Non-blocking catalogue decision made immediately before a launch. The
  * requested and effective identifiers remain distinct so execution history
  * can explain an automatic same-agent replacement without rewriting config.
  */
-export type CatalogPreflightWarning = { requested_model: string, effective_model: string, reason: ModelUnavailableReason, detail: string, replacement_source: CatalogReplacementSource, equivalent_tier: ModelTier, };
+export type CatalogPreflightWarning = { requested_model: string, effective_model: string, reason: ModelUnavailableReason, detail: string,
+/**
+ * KT-2003 — `detail` as a code, when Kronn wrote it.
+ */
+detail_code?: CatalogReasonCode | null, replacement_source: CatalogReplacementSource, equivalent_tier: ModelTier, };
+
+/**
+ * KT-2003 — a reason Kronn itself writes (an unavailable agent, a refused
+ * model), as a stable code and its parameters. It rides next to the English
+ * sentence the API keeps for agents and logs; the interface writes the
+ * sentence from its own locale files. A text that comes from a third party
+ * (a provider's error body, a CLI's stderr) is a `detail` parameter, quoted
+ * as received. An older client ignores the field; a newer code a client does
+ * not know falls back to the English sentence.
+ */
+export type CatalogReasonCode = { "code": "native_full_access_required", agent: string, } | { "code": "catalog_not_refreshed" } | { "code": "catalog_refresh_failed", detail: string, } | { "code": "catalog_lookup_failed", detail: string, } | { "code": "discovery_timeout" } | { "code": "agent_cli_missing", agent: string, } | { "code": "agent_auth_required", agent: string, } | { "code": "catalog_invalid", agent: string, } | { "code": "catalog_too_large", agent: string, } | { "code": "discovery_failed", agent: string, } | { "code": "cli_discovery_failed", agent: string, } | { "code": "catalog_http_error", agent: string, status: number, } | { "code": "discovery_unsupported" } | { "code": "model_disappeared", model_id: string, } | { "code": "model_disappeared_no_replacement", model_id: string, tier: ModelTier, agent: string, } | { "code": "model_unavailable", model_id: string, } | { "code": "model_not_found", status: number, } | { "code": "model_access_denied", status: number, } | { "code": "model_not_chat", model_id: string, capabilities: Array<string>, } | { "code": "model_not_listed", model_id: string, agent: string, version: string | null, };
 
 export type CatalogReplacementSource = "resolved_model" | "equivalent_tier";
 
@@ -2312,9 +2339,17 @@ export type CatalogTierVerdict = { tier: ModelTier, requested_model?: string | n
  */
 detail?: string | null,
 /**
+ * KT-2003 — `detail` as a code, when Kronn wrote it.
+ */
+detail_code?: CatalogReasonCode | null,
+/**
  * A launchable tier's pre-launch warning (model absent from the listing).
  */
-notice?: string | null, };
+notice?: string | null,
+/**
+ * KT-2003 — `notice` as a code.
+ */
+notice_code?: CatalogReasonCode | null, };
 
 /**
  * The fallback of one mode row, for display: its own link, the links inherited
@@ -6954,6 +6989,10 @@ live_refresh_ok: boolean,
  * `Cached`/`Migrated` entries as a current discovery when this is true.
  */
 stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null,
+/**
+ * KT-2003 — `last_error_detail` as a code, when Kronn wrote it.
+ */
+last_error_code?: CatalogReasonCode | null,
 /**
  * Referenced models that the latest successful catalogue no longer
  * contains. This is a warning only: changing a reference remains an
@@ -12703,7 +12742,7 @@ tier?: ModelTier | null,
 agent?: AgentType | null,
 /**
  * KT-1993 — the exact model. `Some(Some(id))` = set (validated by
- * `normalize_exact_model`: trimmed, one line, at most 200 characters, no
+ * `normalize_exact_model`: trimmed, one line, at most 256 characters, no
  * leading `-`), `Some(None)` = clear (the tier applies again),
  * absent = no change. Changing `agent` or `connection_id`, or sending a
  * `tier`, without a model clears the stored model.

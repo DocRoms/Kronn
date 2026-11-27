@@ -42,6 +42,7 @@ import { formatRelativeTime } from '../lib/relativeTime';
 import { discussions as discussionsApi, autoTriggersApi, config as configApi } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
+import { fullAccessRequiredText, serverReasonText } from '../lib/serverReason';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
 import { useTargetReachability, reachabilityKey } from '../hooks/useTargetReachability';
 import { composerTargetWarning, formatWarningDate, type ComposerTargetWarning } from '../lib/composerTargetWarnings';
@@ -1550,7 +1551,7 @@ export function ChatInput({
                     detail: m.label,
                     group: t(group === 'active' ? 'disc.routingActiveAgents' : 'disc.routingAvailableAgents'),
                     availability: mode?.unavailable
-                      ? { state: 'unavailable', label: t('modelCatalog.unavailable'), title: mode.resolved?.refusal ?? undefined }
+                      ? { state: 'unavailable', label: t('modelCatalog.unavailable'), title: serverReasonText(t, mode.resolved?.refusalSource) || undefined }
                       : null,
                     trailing: m.target?.kind === 'cli' ? (
                       <span
@@ -2307,7 +2308,7 @@ export function ChatInput({
                       <AlertTriangle size={10} className="text-warning flex-shrink-0" />
                       <span className="disc-restricted-warn-text">
                         {debateAgents.some(a => isAgentRestricted(a) && FULL_ACCESS_REQUIRED_AGENTS.includes(a))
-                          ? t('config.fullAccessRequired', debateAgents
+                          ? fullAccessRequiredText(t, debateAgents
                             .filter(a => isAgentRestricted(a) && FULL_ACCESS_REQUIRED_AGENTS.includes(a))
                             .map(a => AGENT_LABELS[a] ?? a)
                             .join(', '))

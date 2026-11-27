@@ -40,12 +40,10 @@ async fn validate_manual_request(
 ) -> Result<(), String> {
     store::validate_runtime_target_id(&request.runtime_target_id)
         .map_err(|error| error.to_string())?;
-    if request.model_id.trim().is_empty()
-        || request.model_id.len() > 256
-        || request.model_id.chars().any(char::is_control)
-    {
-        return Err("model_id must contain 1 to 256 printable characters".into());
-    }
+    // KT-1998 — the shared rule: a catalogue id can be assigned to a tier and
+    // reach `--model`.
+    crate::models::setup::check_model_id(&request.model_id)
+        .map_err(|error| format!("model_id: {error}"))?;
     if request.display_name.trim().is_empty()
         || request.display_name.len() > 256
         || request.display_name.chars().any(char::is_control)
@@ -297,5 +295,112 @@ pub async fn delete_manual(
             ApiErrorCode::Conflict,
             error.to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod model_id_guard_tests {
+    use super::*;
+    use crate::models::AgentType;
+
+    /// KT-1998 — a manual catalogue id that starts with a dash is refused
+    /// and not stored: a catalogue id can be assigned to a tier.
+    #[tokio::test]
+    async fn model_id_guard_manual_catalogue_refuses_a_dash_led_model() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let target = store::agent_runtime_target_id(&AgentType::OpenCode);
+        let before = state.db.with_conn(store::list_all).await.unwrap().len();
+        let request: UpsertManualModelRequest = serde_json::from_value(serde_json::json!({
+            "runtime_target_id": target,
+            "agent_type": "OpenCode",
+            "model_id": "--help",
+            "display_name": "Help",
+        }))
+        .unwrap();
+        let Json(refused) = create_manual(State(state.clone()), Json(request)).await;
+        let error = refused.error.expect("a dash-led id is refused");
+        assert!(error.contains("must not start with '-'"), "{error}");
+        let after = state.db.with_conn(store::list_all).await.unwrap().len();
+        assert_eq!(before, after, "nothing is written");
+    }
+
+    fn manual_request(model_id: &str) -> UpsertManualModelRequest {
+        serde_json::from_value(serde_json::json!({
+            "runtime_target_id": store::agent_runtime_target_id(&AgentType::OpenCode),
+            "agent_type": "OpenCode",
+            "model_id": model_id,
+            "display_name": "Guarded",
+        }))
+        .unwrap()
+    }
+
+    /// KT-1998 — the manual catalogue uses the shared rule on create and on
+    /// update: a dash-led id, line breaks or a tab around an id, and a long
+    /// run of spaces are refused and nothing is written. Its limit is the
+    /// shared one (256 characters), so an id it accepts can be put in a tier,
+    /// a Quick Prompt or a discussion.
+    #[tokio::test]
+    async fn model_id_guard_manual_catalogue_update_and_shared_limit() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        // Written through the store directly: the handler's success path also
+        // refreshes the process-wide runtime projection, which other tests read.
+        let longest = "m".repeat(crate::models::setup::MAX_MODEL_ID_CHARS);
+        validate_manual_request(&state, &manual_request(&longest))
+            .await
+            .expect("the shared limit is accepted by the catalogue");
+        let saved = manual_request(&longest);
+        state
+            .db
+            .with_conn(move |conn| store::create_manual(conn, &saved))
+            .await
+            .unwrap()
+            .expect("stored");
+        for chosen in [
+            crate::models::setup::check_model_id(&longest),
+            crate::models::setup::normalize_exact_model(&longest).map(|_| ()),
+        ] {
+            chosen.expect("a catalogue id is accepted by every other save");
+        }
+        let too_long = "m".repeat(crate::models::setup::MAX_MODEL_ID_CHARS + 1);
+        let before = state.db.with_conn(store::list_all).await.unwrap();
+        let padded = format!("{}gpt-5", " ".repeat(100_000));
+        for bad in [
+            "--help",
+            " -c",
+            "\ngpt-5\n",
+            "\tgpt-5",
+            padded.as_str(),
+            too_long.as_str(),
+        ] {
+            let Json(refused) =
+                update_manual(State(state.clone()), Json(manual_request(bad))).await;
+            let error = refused.error.expect("update refuses");
+            assert!(error.starts_with("model_id: model "), "{bad:?}: {error}");
+            let Json(refused) =
+                create_manual(State(state.clone()), Json(manual_request(bad))).await;
+            assert!(refused.error.is_some(), "{bad:?}: create refuses");
+            let refused = manual_request(bad);
+            let stored = state
+                .db
+                .with_conn(move |conn| store::create_manual(conn, &refused))
+                .await;
+            assert!(stored.is_err(), "{bad:?}: the store refuses too");
+        }
+        let after = state.db.with_conn(store::list_all).await.unwrap();
+        assert_eq!(before.len(), after.len(), "nothing is written");
     }
 }

@@ -27,11 +27,11 @@ five-minute cache keyed by command and working directory. Workflow attempts reta
 facts separately from the output, including through serialization and templates.
 Settings detection is a cached backend-level probe, not a record of a particular
 project's run. A missing version remains unknown.
-[src: file: backend/src/agents/runner.rs:4905-4938#record_npx_fallback]
+[src: file: backend/src/agents/runner.rs:4954-4987#record_npx_fallback]
 [src: file: backend/src/agents/provenance.rs:7-19#AgentRuntimeProvenance]
 [src: file: backend/src/agents/provenance.rs:23-34#record_npx_fallback]
-[src: file: backend/src/models/workflows.rs:2368-2402#WorkflowAgentAttempt]
-[src: file: backend/src/workflows/steps.rs:1610-1631#npx_fallback_command]
+[src: file: backend/src/models/workflows.rs:2369-2403#WorkflowAgentAttempt]
+[src: file: backend/src/workflows/steps.rs:1455-1476#npx_fallback_command]
 [src: file: backend/src/workflows/template.rs:157-198#set_step_provenance]
 [src: file: backend/src/agents/mod.rs:44-45#RUNTIME_CACHE]
 [src: file: backend/src/agents/mod.rs:1257#cache_key]

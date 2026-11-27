@@ -8410,3 +8410,110 @@ fn a_kronn_run_validation_never_trips_the_silent_worker_clock() {
         "a validation outlasting the activity clock was reported silent: {expired:?}"
     );
 }
+
+/// KT-1998 — the values a model check must judge as given: a dash-led id,
+/// line breaks or a tab around an id, and a long run of spaces before one.
+fn model_id_guard_bad_models() -> Vec<String> {
+    vec![
+        "--help".into(),
+        "\ngpt-5\n".into(),
+        "\tgpt-5".into(),
+        format!("{}gpt-5", " ".repeat(100_000)),
+    ]
+}
+
+fn model_id_guard_count(conn: &Connection, table: &str) -> i64 {
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+/// KT-1998 — a task worker model (prepare, launch in a campaign, reassign)
+/// and a campaign's default worker and reviewer models are refused by the
+/// shared rule; nothing is written.
+#[test]
+fn model_id_guard_task_worker_and_campaign_models_are_refused() {
+    let conn = setup();
+    seed_plan_task(&conn, "t-guard", 1998, 0, "active");
+    for bad in model_id_guard_bad_models() {
+        let mut input = LaunchSingleTaskInput::new("t-guard", DISC);
+        input.worker_agent_type = Some("Codex".into());
+        input.worker_model = Some(bad.clone());
+        let error = launch_single_task(&conn, &input, &backend_actor())
+            .expect_err("a single-task launch refuses the worker model")
+            .to_string();
+        assert!(error.contains("worker model"), "{bad:?}: {error}");
+    }
+    assert_eq!(model_id_guard_count(&conn, "task_executions"), 0);
+    assert_eq!(model_id_guard_count(&conn, "orchestration_runs"), 0);
+
+    for bad in model_id_guard_bad_models() {
+        let mut input = OrchestrationRunInput::single_task(DISC);
+        input.kind = OrchestrationRunKind::Campaign;
+        input.default_worker = Some(CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::Codex),
+            model: Some(bad.clone()),
+            profile_id: None,
+        });
+        let error = create_orchestration_run(&conn, &input)
+            .expect_err("a campaign refuses its default worker model")
+            .to_string();
+        assert!(error.contains("default worker model"), "{bad:?}: {error}");
+        input.default_worker = None;
+        input.reviewer = Some(crate::models::CampaignReviewer {
+            kind: crate::models::CampaignReviewerKind::Agent,
+            agent: Some(AgentType::ClaudeCode),
+            model: Some(bad.clone()),
+            connection_id: None,
+            defaulted: false,
+        });
+        let error = create_orchestration_run(&conn, &input)
+            .expect_err("a campaign refuses its reviewer model")
+            .to_string();
+        assert!(error.contains("reviewer model"), "{bad:?}: {error}");
+    }
+    assert_eq!(model_id_guard_count(&conn, "orchestration_runs"), 0);
+
+    let run = campaign(&conn, 1, 1);
+    for bad in model_id_guard_bad_models() {
+        let selection = CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::Codex),
+            model: Some(bad.clone()),
+            profile_id: None,
+        };
+        let mut input = LaunchSingleTaskInput::new("t-guard", DISC);
+        input.worker_agent_type = Some("Codex".into());
+        input.worker_model = selection.model.clone();
+        let error = launch_task_in_run(&conn, &run.id, &input, &selection, &backend_actor())
+            .expect_err("a campaign launch refuses the worker model")
+            .to_string();
+        assert!(error.contains("worker model"), "{bad:?}: {error}");
+    }
+    assert_eq!(model_id_guard_count(&conn, "task_executions"), 0);
+
+    let mut input = LaunchSingleTaskInput::new("t-guard", DISC);
+    input.worker_agent_type = Some("Codex".into());
+    input.worker_model = Some("gpt-5".into());
+    let execution = launch_single_task(&conn, &input, &backend_actor())
+        .expect("a plain id is accepted")
+        .execution;
+    for bad in model_id_guard_bad_models() {
+        let selection = CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::ClaudeCode),
+            model: Some(bad.clone()),
+            profile_id: None,
+        };
+        let error =
+            reassign_execution_worker(&conn, &execution.id, &selection, "guard", &backend_actor())
+                .expect_err("a reassignment refuses the worker model")
+                .to_string();
+        assert!(error.contains("worker model"), "{bad:?}: {error}");
+    }
+    let kept = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(
+        kept.worker_model.as_deref(),
+        Some("gpt-5"),
+        "nothing written"
+    );
+}

@@ -2026,6 +2026,9 @@ fn import_document(
         }
         ProjectRepositoryResourceKind::QuickPrompt => {
             let mut resource: QuickPrompt = serde::Deserialize::deserialize(&document.resource)?;
+            // KT-1998 — the model of a synced Quick Prompt, like a saved one's.
+            crate::models::check_agent_settings_model(resource.agent_settings.as_ref())
+                .map_err(|error| anyhow::anyhow!("Quick Prompt `{}`: {error}", resource.name))?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -2589,6 +2592,53 @@ pub async fn copy_native_skill(
         Err(error) => Json(ApiResponse::err(format!(
             "Unable to copy native skill into Kronn: {error}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod model_id_guard_tests {
+    use super::*;
+
+    /// KT-1998 — a Quick Prompt synced from the project's resource library is
+    /// refused when its model is bad; nothing is written.
+    #[tokio::test]
+    async fn model_id_guard_repository_sync_refuses_a_prompt_model() {
+        let db = crate::db::Database::open_in_memory().expect("db");
+        let padded = format!("{}gpt-5", " ".repeat(100_000));
+        for bad in ["--help", " -c", "\ngpt-5\n", "\tgpt-5", padded.as_str()] {
+            let now = chrono::Utc::now();
+            let document = crate::core::repository_resources::RepositoryDocument {
+                schema_version: 1,
+                kind: ProjectRepositoryResourceKind::QuickPrompt,
+                slug: "guarded".into(),
+                updated_at: now,
+                requires: vec![],
+                resource: serde_json::json!({
+                    "id": "qp-src", "name": "Synced", "icon": "✨",
+                    "prompt_template": "Say hello", "variables": [], "agent": "OpenCode",
+                    "agent_settings": { "model": bad },
+                    "created_at": now, "updated_at": now,
+                }),
+                redacted_fields: vec![],
+            };
+            let error = db
+                .with_conn(move |conn| {
+                    Ok(import_document(conn, "p1", "key-p1", &document).map_err(|e| e.to_string()))
+                })
+                .await
+                .unwrap()
+                .expect_err("refused");
+            assert!(error.contains("Quick Prompt `Synced`"), "{bad:?}: {error}");
+            assert!(
+                error.contains("must not start with '-'") || error.contains("one line"),
+                "{bad:?}: {error}"
+            );
+        }
+        let prompts = db
+            .with_conn(crate::db::quick_prompts::list_quick_prompts)
+            .await
+            .unwrap();
+        assert!(prompts.is_empty(), "nothing is written");
     }
 }
 

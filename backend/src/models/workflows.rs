@@ -1893,6 +1893,13 @@ pub struct PublishPageDataWrite {
     pub key_field: Option<String>,
 }
 
+/// KT-1998 — the `model` of saved agent settings (a Quick Prompt, a workflow
+/// step) through the shared rule `models::setup::check_optional_model`.
+pub fn check_agent_settings_model(settings: Option<&AgentSettings>) -> Result<(), String> {
+    crate::models::setup::check_optional_model(settings.and_then(|s| s.model.as_deref()))
+        .map_err(|error| format!("agent_settings.model: {error}"))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentSettings {

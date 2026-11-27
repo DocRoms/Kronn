@@ -70,18 +70,27 @@ pub async fn set_discussion_fallback(
     Json(req): Json<SetDiscussionFallbackRequest>,
 ) -> Json<ApiResponse<DiscussionFallback>> {
     let agents = state.config.read().await.agents.clone();
-    let chain_override: Option<Vec<AgentFallback>> = req.chain_override.map(|chain| {
-        chain
-            .into_iter()
-            .map(|mut link| {
-                link.model = link
-                    .model
-                    .map(|model| model.trim().to_string())
-                    .filter(|model| !model.is_empty());
-                link
-            })
-            .collect()
-    });
+    // KT-1998 — each model is judged as sent, then stored trimmed.
+    let chain_override: Option<Vec<AgentFallback>> = match req
+        .chain_override
+        .map(|chain| {
+            chain
+                .into_iter()
+                .map(|mut link| {
+                    link.model = crate::models::setup::clean_optional_model(link.model)?;
+                    Ok(link)
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()
+    {
+        Ok(chain) => chain,
+        Err(why) => {
+            return Json(ApiResponse::err(
+                fallback::ChainError::BadModel(why).to_string(),
+            ))
+        }
+    };
     if let Some(chain) = &chain_override {
         if let Err(error) = fallback::validate_chain(&agents, None, Some(req.mode), chain) {
             return Json(ApiResponse::err(error.to_string()));

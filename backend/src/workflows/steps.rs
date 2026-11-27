@@ -1380,6 +1380,7 @@ async fn preflight_workflow_launch(
             effective_model: model,
             warning: None,
             notice: None,
+            notice_code: None,
         });
     };
     let runtime_target_id = connection

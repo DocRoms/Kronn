@@ -36,7 +36,10 @@ pub fn record_npx_fallback(
 pub fn observe_model(capture: Option<&AgentProvenanceCapture>, model: &str) {
     // This is a protocol identifier, not arbitrary provider output. Bound
     // cardinality and length independently of the number of streamed chunks.
-    if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+    if model.is_empty()
+        || model.chars().count() > crate::models::setup::MAX_MODEL_ID_CHARS
+        || model.chars().any(char::is_control)
+    {
         return;
     }
     if let Some(capture) = capture {

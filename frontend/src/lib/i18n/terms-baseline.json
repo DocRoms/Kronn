@@ -21,7 +21,7 @@
         "executions?": 46
       },
       "settings": {
-        "configs?": 76,
+        "configs?": 74,
         "configurations?": 50
       },
       "task": {
@@ -71,7 +71,7 @@
         "lancements?": 50
       },
       "settings": {
-        "configs?": 75,
+        "configs?": 73,
         "configurations?": 57
       },
       "step": {
@@ -111,7 +111,7 @@
         "runs?": 60
       },
       "settings": {
-        "configs?": 56,
+        "configs?": 54,
         "configuraci(?:ón|ones)": 81
       },
       "step": {
@@ -130,7 +130,7 @@
     },
     "zh": {
       "agent": {
-        "智能体": 185
+        "智能体": 184
       },
       "credentials": {
         "凭证": 10
@@ -151,7 +151,7 @@
         "Quick Execs?": 38
       },
       "settings": {
-        "配置": 208
+        "配置": 206
       },
       "step": {
         "steps?": 1
@@ -202,8 +202,6 @@
       "config.executionVariableRetention.activeRun": ["15fcdb5d","term:run:executions?"],
       "config.externalMcps": ["b3b0e977","term:plugin:MCPs?"],
       "config.fullAccess": ["4afcbc96","term:run:executions?"],
-      "config.fullAccessRequired": ["456c83bc","term:settings:configs?"],
-      "config.fullAccessRequiredLink": ["2681fc43","term:settings:configs?"],
       "config.mcpGroup": ["89127e12","term:plugin:MCPs?"],
       "config.mcpGroupHint": ["6ec920ce","term:plugin:MCPs?"],
       "config.reset": ["1317cbd2","term:settings:configurations?"],
@@ -673,8 +671,6 @@
       "config.executionVariableRetention.activeRun": ["cab43e3f","term:run:exécutions?"],
       "config.externalMcps": ["adff1936","term:plugin:MCPs?"],
       "config.fullAccess": ["586a2a23","term:run:exécutions?"],
-      "config.fullAccessRequired": ["07a8cc2f","term:settings:configs?"],
-      "config.fullAccessRequiredLink": ["545a7654","term:settings:configs?"],
       "config.mcpGroup": ["5245c4b5","term:plugin:MCPs?"],
       "config.mcpGroupHint": ["815c9ef7","term:plugin:MCPs?"],
       "config.outputLanguageInfoNewDiscussions": ["37cdeb10","term:run:exécutions?","term:step:steps?"],
@@ -1459,8 +1455,6 @@
       "config.defaultSummaryInfoHistory": ["3f88d45d","term:discussion:conversaci(?:ón|ones)"],
       "config.defaultTierHint": ["41384865","term:step:steps?"],
       "config.externalMcps": ["e4399c37","term:plugin:MCPs?"],
-      "config.fullAccessRequired": ["9a575b21","term:settings:configs?"],
-      "config.fullAccessRequiredLink": ["8405fce4","term:settings:configs?"],
       "config.mcpGroup": ["daf100c8","term:plugin:MCPs?"],
       "config.mcpGroupHint": ["5982f826","term:plugin:MCPs?"],
       "config.outputLanguageInfoNewDiscussions": ["ccf17c92","term:settings:configuraci(?:ón|ones)"],
@@ -2112,8 +2106,6 @@
       "config.externalMcps": ["f4ebd796","term:plugin:MCPs?"],
       "config.fullAccessAcp": ["dda8b43f","term:agent:智能体"],
       "config.fullAccessNoticeTitle": ["de57fcb3","term:agent:智能体"],
-      "config.fullAccessRequired": ["c47237a7","term:agent:智能体","term:settings:配置"],
-      "config.fullAccessRequiredLink": ["01c1491d","term:agent:智能体","term:settings:配置"],
       "config.fullAccessRisk": ["cd4c03c0","term:agent:智能体"],
       "config.languagesHint": ["49e3c01a","term:agent:智能体"],
       "config.maxAgentsHint": ["f3947ff4","term:settings:配置"],
@@ -2501,6 +2493,7 @@
       "readiness.title": ["9a455e32","term:agent:智能体"],
       "runProgress.phase.initializing": ["8f8479d9","term:discussion:会话"],
       "runProgress.phase.opening_session": ["d9dcb26c","term:discussion:会话"],
+      "serverReason.fullAccessRequired": ["d0848676","term:agent:智能体"],
       "settings.clHint": ["f76a508d","term:plugin:MCPs?"],
       "settings.discussionNotesHint": ["e310b16a","term:discussion:对话"],
       "settings.disk.confirmStalled": ["8cad8042","term:worktree:worktrees?"],

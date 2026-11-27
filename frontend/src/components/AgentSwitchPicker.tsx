@@ -10,6 +10,7 @@ import {
   type ResolvedCatalogTier,
 } from '../lib/modelCatalogSelection';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
+import { entryReasonText, serverReasonText } from '../lib/serverReason';
 import { isFreeModel } from '../lib/freeModel';
 import { useT } from '../lib/I18nContext';
 import {
@@ -101,22 +102,25 @@ function tierDetails(
 ) {
   const availability = tierAvailability(resolution, t);
   const state = tier === null ? null : tierChoiceState(resolution, t);
+  // KT-2003 — the server's refusal and notice, in the interface's language.
+  const refusal = serverReasonText(t, resolution?.refusalSource) || resolution?.refusal || '';
+  const notice = serverReasonText(t, resolution?.noticeSource) || resolution?.notice || '';
   const title = [
     name,
     state && state.state !== 'not-listed' ? state.label : '',
-    resolution?.notice,
-    resolution?.refusal,
+    notice,
+    refusal,
   ].filter(Boolean).join(' — ');
   const provenance = resolution?.entry && resolution.provenance
     ? t(`modelCatalog.provenance.${resolution.provenance}`)
     : resolution?.configured ? t('modelCatalog.notInCatalog') : '';
   const description = [title, resolution?.entry?.model_id, provenance,
     availability?.state === 'unavailable' ? availability.label : '',
-    resolution?.refusal ?? resolution?.entry?.unavailable_reason ?? '',
+    refusal || entryReasonText(t, resolution?.entry) || resolution?.entry?.unavailable_reason || '',
     resolution?.replacement
       ? t('modelCatalog.runsInstead', resolution.replacement, resolution.configured || resolution.entry?.model_id || '')
       : '',
-    resolution?.notice ?? '',
+    notice,
     resolution?.entry ? t('modelCatalog.lastChecked', resolution.entry.last_checked_at) : '',
   ].filter(Boolean).join(' · ');
   return { availability, state, title, description, blocked: availabilityBlocks(availability) };
@@ -896,20 +900,24 @@ function AgentModelList({
   /**
    * Why an agent cannot be chosen, written under its header (its badge alone
    * says « Indisponible »): the caller's detail, else the launch verdict's,
-   * else what the catalogue says of its models.
+   * else what the catalogue says of its models. KT-2003 — a reason the server
+   * wrote is written from the locale files (`serverReasonText`).
    */
   const blockedReason = (group: Group, badge: AgentAvailability | null) => {
     if (!availabilityBlocks(badge)) return '';
     if (badge?.title) return badge.title;
     for (const mode of group.allModes) {
       const entry = mode.resolution?.entry;
-      const reason = mode.resolution?.refusal || entry?.unavailable_detail
+      const reason = serverReasonText(t, mode.resolution?.refusalSource) || entryReasonText(t, entry)
         || (entry?.unavailable_reason === 'not_found' || entry?.unavailable_reason === 'access_denied'
           ? t(`modelCatalog.reason.${entry.unavailable_reason}`) : '');
       if (reason) return reason;
     }
-    return catalog?.targets.find(view =>
-      view.runtime_target_id === modelRuntimeTargetId(group.target.agent, group.target.connectionId))?.last_error_detail ?? '';
+    const view = catalog?.targets.find(candidate =>
+      candidate.runtime_target_id === modelRuntimeTargetId(group.target.agent, group.target.connectionId));
+    return serverReasonText(t, view && {
+      detail: view.last_error_detail, code: view.last_error_code, reason: view.last_error_reason,
+    });
   };
 
   const header = (group: Group, badge: AgentAvailability | null) => (<>

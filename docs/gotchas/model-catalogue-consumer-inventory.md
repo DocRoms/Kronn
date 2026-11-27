@@ -21,8 +21,8 @@ Normal resolution prefers explicit configuration and then available durable
 tier assignments. HTTP agents may use their explicit/durable default tier;
 they do not revive the old embedded model list. Frontend display fallback is
 also configuration/caller supplied, rather than a second embedded catalogue.
-[src: file: backend/src/agents/runner.rs:3654-3705#configured_model_flag]
-[src: file: backend/src/agents/runner.rs:3674-3693#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3575-3626#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3628-3647#resolve_model_flag]
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 
 The production-library migration tests cover file-backed reopen, deletion
@@ -45,16 +45,16 @@ disables unavailable choices, and displays provenance/check time/diagnostics.
 An expired or failed live snapshot renders as cached without changing the
 stored model's availability or operator metadata. Opening a mention/picker
 reads a snapshot once; typing filters locally, without provider discovery.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:77-88#AGENT_RUNTIME_TARGETS]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:103-106#catalogModelProvenance]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:86-97#AGENT_RUNTIME_TARGETS]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:112-115#catalogModelProvenance]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:132-195#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 
 | Surface | Shared path and source |
 |---|---|
-| Discussion creation and header | `AgentSwitchPicker`. [src: file: frontend/src/components/NewDiscussionForm.tsx:1251#AgentSwitchPicker] [src: file: frontend/src/components/ChatHeader.tsx:340#AgentSwitchPicker] The project audit selector is not on this path: its tier buttons show the model configured in settings (or on the named connection), read without the catalogue. [src: file: frontend/src/components/AuditTimeline.tsx:522-527#tierModel] |
+| Discussion creation and header | `AgentSwitchPicker`. [src: file: frontend/src/components/NewDiscussionForm.tsx:1252#AgentSwitchPicker] [src: file: frontend/src/components/ChatHeader.tsx:340#AgentSwitchPicker] The project audit selector is not on this path: its tier buttons show the model configured in settings (or on the named connection), read without the catalogue. [src: file: frontend/src/components/AuditTimeline.tsx:522-527#tierModel] |
 | Chat and creation mentions | Shared catalogue resolver/search and the agent picker's palette and tier choices (`AgentPickerPalette`, `AgentPickerTierChoices`, KT-1885); keyboard traversal skips unavailable tiers while preserving exact joined-CLI identity. [src: file: frontend/src/components/ChatInput.tsx:741-751#mentionTierResolution] [src: file: frontend/src/components/NewDiscussionForm.tsx:206-207#targetTierResolution] [src: file: frontend/src/lib/mentionTierSelection.ts:6-16#nextMentionTierIndex] |
-| QP and workflow authoring, including compensation and review | `AgentSwitchPicker` plus `ModelCatalogPicker`/`SearchableSelect` where a model or reasoning override is editable. [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:246#AgentSwitchPicker] [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:312#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:336#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4560#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4624#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1395#AgentSwitchPicker] [src: file: frontend/src/pages/WorkflowsPage.tsx:3369#AgentSwitchPicker] [src: file: frontend/src/components/AgentCompareSelector.tsx:85#AgentSwitchPicker] |
+| QP and workflow authoring, including compensation and review | `AgentSwitchPicker` plus `ModelCatalogPicker`/`SearchableSelect` where a model or reasoning override is editable. [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:246#AgentSwitchPicker] [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:312#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:337#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4561#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4625#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1396#AgentSwitchPicker] [src: file: frontend/src/pages/WorkflowsPage.tsx:3369#AgentSwitchPicker] [src: file: frontend/src/components/AgentCompareSelector.tsx:85#AgentSwitchPicker] |
 | Planning launch/reassignment | The same agent and model controls, without clearing unrelated execution policy/history. [src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker] [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1189-1206#AgentSwitchPicker] |
 | Comparison rerun/reviewer | Shared target picker for new selections; historical identity stays recorded/attested/unknown rather than being replaced by current settings. [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343#AgentSwitchPicker] [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412#AgentSwitchPicker] See [comparison identity](compare-model-identity.md). |
 | Agent and Ollama settings | Shared `catalogModelOptions`, exact runtime target and searchable model choices. [src: file: frontend/src/components/settings/AgentsSection.tsx:924#catalogModelOptions] [src: file: frontend/src/components/settings/OllamaCard.tsx:498#catalogModelOptions] See [tier settings](agent-tier-catalogue-settings.md). |
@@ -87,7 +87,7 @@ fallbacks. The OpenRouter GLM preset selects only a model actually returned by
 its test and preserves an existing choice; it is not an unconditional runtime
 fallback. Neither is removed by this inventory.
 [src: file: frontend/src/components/settings/OllamaCard.tsx:412-442#suggestions]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:710-719#open_router]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:705-714#open_router]
 
 This closes the catalogue migration/consumer audit only after its final gates
 pass and the exact change is integrated. It does not qualify KT-619/635,

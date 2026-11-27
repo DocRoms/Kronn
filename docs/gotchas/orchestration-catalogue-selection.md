@@ -11,13 +11,13 @@ replaced.
 [src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:400-406#selectReassignAgent]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1192-1207#AgentSwitchPicker]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:163-171#configured]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:24-32#configured]
 
 The launch dialog must let picker-owned Escape handling finish first: the model
 picker prevents the event, while the agent picker’s portal is recognised before
 the dialog’s window-level close handler runs.
 [src: file: frontend/src/components/SearchableSelect.tsx:209-213]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1494-1498#createPortal]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1502-1506#createPortal]
 [src: file: frontend/src/components/TaskLaunchDialog.tsx:137-143]
 
 The regression also unmounts the launch dialog and checks that focus actually

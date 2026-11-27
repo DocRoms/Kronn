@@ -441,6 +441,59 @@ pub fn validate_launch_variables(
 fn validate_required_fields_per_type(steps: &[WorkflowStep]) -> Result<(), String> {
     for s in steps {
         validate_step_required_fields(s)?;
+        validate_step_models(s)?;
+    }
+    Ok(())
+}
+
+/// KT-1998 — the model ids of every step of a workflow, for a write path
+/// that does not run the full step checks (a bundle).
+pub fn validate_workflow_models(wf: &Workflow) -> Result<(), String> {
+    wf.steps
+        .iter()
+        .chain(wf.on_failure.iter())
+        .try_for_each(validate_step_models)
+}
+
+/// KT-1998 — every model id a step saves (its own, each shadow's, the merge
+/// pass's, each delegated worker's, the Decide model) goes through the shared
+/// rule `models::setup::check_optional_model`.
+fn validate_step_models(step: &WorkflowStep) -> Result<(), String> {
+    let name = &step.name;
+    crate::models::check_agent_settings_model(step.agent_settings.as_ref())
+        .map_err(|error| format!("Step `{name}`: {error}"))?;
+    if let Some(delegate) = step.delegate_subtasks.as_ref() {
+        let workers = delegate
+            .worker_map
+            .iter()
+            .map(|(key, worker)| (key.as_str(), worker))
+            .chain(
+                delegate
+                    .default_worker
+                    .iter()
+                    .map(|worker| ("default", worker)),
+            );
+        for (key, worker) in workers {
+            crate::models::setup::check_optional_model(worker.model.as_deref())
+                .map_err(|error| format!("Step `{name}`, worker `{key}`: {error}"))?;
+        }
+    }
+    if let Some(decide) = step.decide.as_ref() {
+        crate::models::setup::check_optional_model(decide.model.as_deref())
+            .map_err(|error| format!("Step `{name}`, decide: {error}"))?;
+    }
+    let shadow_models = step
+        .shadows
+        .iter()
+        .map(|shadow| (shadow.id.as_str(), shadow.agent.as_ref()))
+        .chain(
+            step.shadow_merge
+                .iter()
+                .map(|merge| ("merge", merge.agent.as_ref())),
+        );
+    for (shadow, agent) in shadow_models {
+        crate::models::setup::check_optional_model(agent.and_then(|a| a.model.as_deref()))
+            .map_err(|error| format!("Step `{name}`, shadow `{shadow}`: {error}"))?;
     }
     Ok(())
 }
@@ -3680,9 +3733,9 @@ mod step_patch_tests;
 #[path = "workflow_examples_tests.rs"]
 mod examples_tests;
 
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "workflow_connection_pair_tests.rs"]
-mod connection_pair_tests;
+#[cfg(test)]
+#[path = "workflows_model_id_guard_tests.rs"]
+mod model_id_guard_tests;
 
 async fn update_written(
     state: AppState,
@@ -5099,6 +5152,13 @@ async fn import_workflow_written(
     let mut qps_to_insert: Vec<QuickPrompt> =
         Vec::with_capacity(envelope.referenced_quick_prompts.len());
     for mut qp in envelope.referenced_quick_prompts {
+        // KT-1998 — a bundled Quick Prompt's model, like a saved one's.
+        if let Err(error) = crate::models::check_agent_settings_model(qp.agent_settings.as_ref()) {
+            return Json(ApiResponse::err(format!(
+                "Quick Prompt `{}`: {error}",
+                qp.name
+            )));
+        }
         let old_id = qp.id.clone();
         let new_id = Uuid::new_v4().to_string();
         qp_id_remap.insert(old_id, new_id.clone());

@@ -281,6 +281,7 @@ it('presents the launchable catalogue warning visually before choosing the menti
       configured: 'operator-choice', entry: model('operator-choice', tier), view: undefined,
       model: 'operator-choice', unavailable: false, replacement: null, refusal: null,
       notice: tier === 'reasoning' ? notice : null, provenance: 'live' as const,
+      refusalSource: null, noticeSource: tier === 'reasoning' ? { detail: notice } : null,
     })}
     tierLabel={tier => tier} modelLabel={() => 'operator-choice'} defaultLabel="default"
     onSelect={onSelect} t={(key, ...args) => [key, ...args].join(' ')} />);

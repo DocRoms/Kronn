@@ -15,6 +15,7 @@ import { workflows as workflowsApi, quickPrompts as quickPromptsApi, skills as s
 import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
 import { requiresFullAccessToRun } from '../../lib/agentFullAccess';
 import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
+import { fullAccessRequiredText } from '../../lib/serverReason';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
 import { DecisionModelPicker } from '../DecisionModelPicker';
 import { decideModelChoice, type DecisionModelChoice } from '../../lib/decisionModels';
@@ -857,7 +858,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
         {isAgentLike && requiresFullAccessToRun(agentAccess, step.agent) ? (
           <span className="flex-row gap-1 text-xs text-warning" data-testid="step-full-access-required">
             <AlertTriangle size={10} />
-            {t('config.fullAccessRequired', AGENT_LABELS[step.agent] ?? step.agent)}
+            {fullAccessRequiredText(t, AGENT_LABELS[step.agent] ?? step.agent)}
           </span>
         ) : isAgentLike && checkAgentRestricted(agentAccess ?? undefined, step.agent) && (
           <span className="flex-row gap-1 text-xs text-warning">

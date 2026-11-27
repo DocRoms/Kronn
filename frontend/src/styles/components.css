@@ -482,7 +482,7 @@ select.input option {
   background: var(--kr-warning);
 }
 
-/* ── Plugin kind badge (MCP / API / hybrid) ─────────────────────────────── */
+/* ── Plugin kind badge (MCP / API / hybrid / CLI) ───────────────────────── */
 .mcp-kind-badge {
   display: inline-flex;
   align-items: center;
@@ -510,6 +510,15 @@ select.input option {
 }
 .mcp-kind-badge-api svg {
   color: var(--kr-purple-soft);
+}
+/* KT-2020 — a CLI wrapper: the terminal icon and the hue of the CLI
+   credential badge (`--kr-warning`), the label in `--kr-text-secondary`. */
+.mcp-kind-badge-cli {
+  color: var(--kr-text-secondary);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+}
+.mcp-kind-badge-cli svg {
+  color: var(--kr-warning);
 }
 .mcp-kind-badge-hybrid {
   color: var(--kr-text-primary);

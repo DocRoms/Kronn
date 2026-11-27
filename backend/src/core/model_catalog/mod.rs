@@ -28,10 +28,10 @@ use crate::db::model_catalog::{self as db, DiscoveredModel};
 use crate::db::Database;
 use crate::models::{
     AgentType, AppConfig, CatalogListing, CatalogModelEntry, CatalogPreflightFailure,
-    CatalogPreflightResolution, CatalogPreflightWarning, CatalogReplacementSource,
-    CatalogTierVerdict, ModelAvailability, ModelCatalogAlert, ModelCatalogReference,
-    ModelCatalogReferenceKind, ModelCatalogView, ModelProvenance, ModelTier, ModelTierConfig,
-    ModelTiersConfig, ModelUnavailableReason, StepType,
+    CatalogPreflightResolution, CatalogPreflightWarning, CatalogReasonCode,
+    CatalogReplacementSource, CatalogTierVerdict, ModelAvailability, ModelCatalogAlert,
+    ModelCatalogReference, ModelCatalogReferenceKind, ModelCatalogView, ModelProvenance, ModelTier,
+    ModelTierConfig, ModelTiersConfig, ModelUnavailableReason, StepType,
 };
 
 /// How long a successful live snapshot is trusted before a consumer should
@@ -438,7 +438,7 @@ fn reason_for(outcome: &DiscoveryOutcome) -> Option<(ModelUnavailableReason, Str
         }
         DiscoveryOutcome::Timeout => Some((
             ModelUnavailableReason::Timeout,
-            "discovery did not complete within the bound".into(),
+            DISCOVERY_TIMEOUT_DETAIL.into(),
         )),
         DiscoveryOutcome::CliMissing(detail) => {
             Some((ModelUnavailableReason::CliMissing, detail.clone()))
@@ -451,8 +451,100 @@ fn reason_for(outcome: &DiscoveryOutcome) -> Option<(ModelUnavailableReason, Str
         }
         DiscoveryOutcome::Unsupported => Some((
             ModelUnavailableReason::Unsupported,
-            "no live discovery path is implemented for this runtime".into(),
+            DISCOVERY_UNSUPPORTED_DETAIL.into(),
         )),
+    }
+}
+
+/// The English sentence of a discovery that did not finish in time.
+pub const DISCOVERY_TIMEOUT_DETAIL: &str = "discovery did not complete within the bound";
+/// The English sentence of a runtime without live discovery.
+pub const DISCOVERY_UNSUPPORTED_DETAIL: &str =
+    "no live discovery path is implemented for this runtime";
+
+/// KT-2003 — the code of a refresh error Kronn itself wrote, read back from
+/// the refresh log (which stores the English sentence only). `None` for a
+/// third-party text (a CLI's stderr, a provider's answer): the interface
+/// quotes it as received.
+pub fn refresh_error_code(agent_type: &AgentType, detail: &str) -> Option<CatalogReasonCode> {
+    let full_access = crate::agents::runner::native_full_access_refusal_in(agent_type, "en");
+    if detail == full_access
+        || detail == crate::agents::runner::native_full_access_refusal(agent_type)
+    {
+        return Some(CatalogReasonCode::NativeFullAccessRequired {
+            agent: crate::agents::runner::agent_settings_label(agent_type).to_string(),
+        });
+    }
+    match detail {
+        DISCOVERY_TIMEOUT_DETAIL => Some(CatalogReasonCode::DiscoveryTimeout),
+        DISCOVERY_UNSUPPORTED_DETAIL => Some(CatalogReasonCode::DiscoveryUnsupported),
+        _ => discovery_error_code(
+            crate::agents::runner::agent_settings_label(agent_type).to_string(),
+            detail,
+        ),
+    }
+}
+
+/// KT-2003 — the code of a fixed sentence a discovery module writes (CLI
+/// missing, sign-in needed, unreadable catalogue, failed discovery), by kind.
+/// A sentence that embeds a value Kronn did not write (an OS error, a CLI's
+/// stderr, an ACP transport detail) is not among them and keeps its quote.
+fn discovery_error_code(agent: String, detail: &str) -> Option<CatalogReasonCode> {
+    use claude_discovery as claude;
+    use codex_discovery as codex;
+    use ollama_discovery as ollama;
+    Some(match detail {
+        claude::CLI_NOT_INSTALLED | claude::CLI_UNAVAILABLE => {
+            CatalogReasonCode::AgentCliMissing { agent }
+        }
+        claude::AUTH_REQUIRED => CatalogReasonCode::AgentAuthRequired { agent },
+        claude::INVALID_CATALOG | ollama::SCHEMA_INVALID | ollama::INVALID_MODEL_ID => {
+            CatalogReasonCode::CatalogInvalid { agent }
+        }
+        ollama::RESPONSE_TOO_LARGE => CatalogReasonCode::CatalogTooLarge { agent },
+        claude::DISCOVERY_FAILED => CatalogReasonCode::CliDiscoveryFailed { agent },
+        ollama::HTTP_CLIENT_FAILED
+        | ollama::REQUEST_FAILED
+        | ollama::RESPONSE_UNREADABLE
+        | codex::STDIN_UNAVAILABLE
+        | codex::STDOUT_UNAVAILABLE
+        | codex::STDOUT_CLOSED => CatalogReasonCode::DiscoveryFailed { agent },
+        _ => {
+            let status = ollama::http_error_status(detail)?;
+            CatalogReasonCode::CatalogHttpError { agent, status }
+        }
+    })
+}
+
+/// KT-2003 — the code of an entry's `unavailable_detail` when Kronn wrote it
+/// (the reconciliation's « disappeared », a proxy's not-found / access-denied
+/// verdict), read back from the stored English sentence.
+pub fn entry_reason_code(
+    model_id: &str,
+    reason: Option<ModelUnavailableReason>,
+    detail: Option<&str>,
+) -> Option<CatalogReasonCode> {
+    let detail = detail?;
+    match reason? {
+        ModelUnavailableReason::Disappeared if detail == db::DISAPPEARED_DETAIL => {
+            Some(CatalogReasonCode::ModelDisappeared {
+                model_id: model_id.to_string(),
+            })
+        }
+        reason @ (ModelUnavailableReason::NotFound | ModelUnavailableReason::AccessDenied) => {
+            let status = detail
+                .split_once("(HTTP ")
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .and_then(|(status, _)| status.parse::<u16>().ok())?;
+            (crate::api::lite_llm::model_failure_detail(reason, status) == detail).then_some(
+                if reason == ModelUnavailableReason::AccessDenied {
+                    CatalogReasonCode::ModelAccessDenied { status }
+                } else {
+                    CatalogReasonCode::ModelNotFound { status }
+                },
+            )
+        }
+        _ => None,
     }
 }
 
@@ -820,6 +912,10 @@ pub async fn build_view(
         }
         None => true,
     };
+    let last_error_code = log
+        .as_ref()
+        .and_then(|l| l.last_error_detail.as_deref())
+        .and_then(|detail| refresh_error_code(&agent_type, detail));
     Ok(ModelCatalogView {
         runtime_target_id,
         target_label: None,
@@ -830,6 +926,7 @@ pub async fn build_view(
         last_live_success_at,
         last_attempt_at: log.as_ref().map(|l| l.last_attempt_at),
         last_error_reason: log.as_ref().and_then(|l| l.last_error_reason),
+        last_error_code,
         last_error_detail: log.as_ref().and_then(|l| l.last_error_detail.clone()),
         alerts: Vec::new(),
         tier_verdicts: Vec::new(),
@@ -1211,6 +1308,11 @@ pub fn decide_model(
                     .last_error_detail
                     .clone()
                     .unwrap_or_else(|| "the runtime catalog could not be refreshed".into()),
+                detail_code: if view.last_error_detail.is_some() {
+                    view.last_error_code.clone()
+                } else {
+                    Some(CatalogReasonCode::CatalogNotRefreshed)
+                },
                 last_checked_at: view.last_attempt_at.unwrap_or_else(Utc::now),
                 recommended_action: recommended_action_for(reason).to_string(),
                 replacement: None,
@@ -1251,6 +1353,12 @@ pub fn decide_model(
                         })
                 });
             if let Some((effective_model, replacement_source, equivalent_tier)) = replacement {
+                let detail_code = match &entry.unavailable_detail {
+                    Some(_) => entry.unavailable_code.clone(),
+                    None => Some(CatalogReasonCode::ModelDisappeared {
+                        model_id: model_id.clone(),
+                    }),
+                };
                 let detail = entry.unavailable_detail.clone().unwrap_or_else(|| {
                     "this model disappeared from the latest live catalogue".into()
                 });
@@ -1258,26 +1366,41 @@ pub fn decide_model(
                     requested_model: Some(model_id.clone()),
                     effective_model: Some(effective_model.clone()),
                     notice: None,
+                    notice_code: None,
                     warning: Some(CatalogPreflightWarning {
                         requested_model: model_id,
                         effective_model,
                         reason,
                         detail,
+                        detail_code,
                         replacement_source,
                         equivalent_tier,
                     }),
                 });
             }
-            let detail = if reason == ModelUnavailableReason::Disappeared {
-                format!(
-                    "model `{model_id}` disappeared and no available replacement exists for the {:?} tier on agent {:?}",
-                    equivalent_tier, agent_type
+            let (detail, detail_code) = if reason == ModelUnavailableReason::Disappeared {
+                (
+                    format!(
+                        "model `{model_id}` disappeared and no available replacement exists for the {:?} tier on agent {:?}",
+                        equivalent_tier, agent_type
+                    ),
+                    Some(CatalogReasonCode::ModelDisappearedNoReplacement {
+                        model_id: model_id.clone(),
+                        tier: equivalent_tier,
+                        agent: crate::agents::runner::agent_settings_label(&agent_type)
+                            .to_string(),
+                    }),
                 )
             } else {
-                entry
-                    .unavailable_detail
-                    .clone()
-                    .unwrap_or_else(|| "this model is not currently available".into())
+                match &entry.unavailable_detail {
+                    Some(detail) => (detail.clone(), entry.unavailable_code.clone()),
+                    None => (
+                        "this model is not currently available".into(),
+                        Some(CatalogReasonCode::ModelUnavailable {
+                            model_id: model_id.clone(),
+                        }),
+                    ),
+                }
             };
             Err(Box::new(CatalogPreflightFailure {
                 runtime_target_id,
@@ -1285,6 +1408,7 @@ pub fn decide_model(
                 model_id: Some(model_id),
                 reason,
                 detail,
+                detail_code,
                 last_checked_at: entry.last_checked_at,
                 recommended_action: recommended_action_for(reason).to_string(),
                 replacement: None,
@@ -1311,6 +1435,10 @@ pub fn decide_model(
                     entry.model_id,
                     entry.capabilities.join(", ")
                 ),
+                detail_code: Some(CatalogReasonCode::ModelNotChat {
+                    model_id: entry.model_id.clone(),
+                    capabilities: entry.capabilities.clone(),
+                }),
                 last_checked_at: entry.last_checked_at,
                 recommended_action: recommended_action_for(ModelUnavailableReason::Unsupported)
                     .to_string(),
@@ -1318,6 +1446,13 @@ pub fn decide_model(
             }))
         }
         entry => Ok(CatalogPreflightResolution {
+            notice_code: entry
+                .filter(|entry| entry.listing == CatalogListing::NotListed)
+                .map(|_| CatalogReasonCode::ModelNotListed {
+                    model_id: model_id.clone(),
+                    agent: crate::agents::runner::agent_settings_label(&agent_type).to_string(),
+                    version: crate::agents::cached_version(&agent_type),
+                }),
             notice: entry
                 .filter(|entry| entry.listing == CatalogListing::NotListed)
                 .map(|_| {
@@ -1357,6 +1492,9 @@ async fn requested_launch_model(
                 model_id: None,
                 reason: ModelUnavailableReason::ProviderError,
                 detail: format!("catalog assignment lookup failed: {error}"),
+                detail_code: Some(CatalogReasonCode::CatalogLookupFailed {
+                    detail: error.to_string(),
+                }),
                 last_checked_at: Utc::now(),
                 recommended_action: "recheck_catalog".into(),
                 replacement: None,
@@ -1404,6 +1542,7 @@ pub async fn preflight_resolve(
             effective_model: None,
             warning: None,
             notice: None,
+            notice_code: None,
         });
     };
 
@@ -1423,6 +1562,9 @@ pub async fn preflight_resolve(
                     model_id: Some(model_id),
                     reason: ModelUnavailableReason::ProviderError,
                     detail: format!("catalog refresh failed: {error}"),
+                    detail_code: Some(CatalogReasonCode::CatalogRefreshFailed {
+                        detail: error.to_string(),
+                    }),
                     last_checked_at: Utc::now(),
                     recommended_action: "recheck_catalog".into(),
                     replacement: None,
@@ -1473,6 +1615,7 @@ pub async fn launch_verdict(
             effective_model: None,
             warning: None,
             notice: None,
+            notice_code: None,
         });
     };
     let view = if refresh_state_applies(&agent_type, &runtime_target_id) {
@@ -1609,6 +1752,9 @@ pub async fn preflight_check(
     .err()
     .map(|failure| *failure)
 }
+
+#[cfg(all(test, feature = "full-tests"))]
+mod reason_code_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {

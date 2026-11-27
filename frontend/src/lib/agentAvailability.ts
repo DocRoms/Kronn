@@ -3,6 +3,7 @@
 // (components/AgentSwitchPicker.tsx), so a state reads the same in a header, a
 // step, an assistant and the composer's @ menu.
 import type { ResolvedCatalogTier } from './modelCatalogSelection';
+import { serverReasonText } from './serverReason';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
 
@@ -27,10 +28,10 @@ export const availabilityBlocks = (availability?: AgentAvailability | null) =>
 export function tierAvailability(resolution: ResolvedCatalogTier | null | undefined, t: Translate): AgentAvailability | null {
   if (!resolution) return null;
   if (resolution.unavailable) {
-    return { state: 'unavailable', label: t('modelCatalog.unavailable'), title: resolution.refusal ?? undefined };
+    return { state: 'unavailable', label: t('modelCatalog.unavailable'), title: serverReasonText(t, resolution.refusalSource) || resolution.refusal || undefined };
   }
   if (resolution.notice) {
-    return { state: 'not-listed', label: `⚠ ${t('modelCatalog.notListedBadge')}`, title: resolution.notice };
+    return { state: 'not-listed', label: `⚠ ${t('modelCatalog.notListedBadge')}`, title: serverReasonText(t, resolution.noticeSource) || resolution.notice };
   }
   return null;
 }

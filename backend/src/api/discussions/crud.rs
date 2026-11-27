@@ -476,6 +476,16 @@ pub async fn create(
                 .flatten()
         })
     });
+    // KT-2023 — the discussion's own target carries the creation mode, which
+    // is not a mode chosen for the first message: kept, it would drop the
+    // exact model the discussion was created with on its first turn.
+    drop_creation_mode_of_own_target(
+        &mut req.initial_targets,
+        &req.agent,
+        req.connection_id.as_deref(),
+        req.tier,
+        pinned_model.as_deref(),
+    );
     let prompt_limit = super::prompt_limit::resolve_for_targets(
         &state,
         &req.initial_targets,
@@ -841,6 +851,33 @@ pub async fn create(
                 Json(ApiResponse::err(format!("DB error: {}", e)))
             }
         }
+    }
+}
+
+/// KT-2023 — a target's tier is a per-message mode, which drops the
+/// discussion's exact model for that turn (KT-1993). The tier a creation
+/// writes on the discussion's own target (its agent and connection) is the
+/// discussion's mode, not one chosen for the first message: when the
+/// discussion holds an exact model (`model`), that tier is removed so the first
+/// turn runs the model like every later one. A different tier on that target,
+/// a mention and a second participant keep theirs.
+pub(crate) fn drop_creation_mode_of_own_target(
+    targets: &mut [MessageTarget],
+    agent: &AgentType,
+    connection_id: Option<&str>,
+    tier: ModelTier,
+    model: Option<&str>,
+) {
+    if model.is_none() {
+        return;
+    }
+    for target in targets.iter_mut().filter(|target| {
+        target.kind == MessageTargetKind::DiscussionAgent
+            && &target.agent_type == agent
+            && target.connection_id.as_deref() == connection_id
+            && target.tier == Some(tier)
+    }) {
+        target.tier = None;
     }
 }
 
@@ -1819,6 +1856,10 @@ pub async fn delete_message(
 }
 
 #[cfg(all(test, feature = "full-tests"))]
+#[path = "crud_exact_model_first_turn_tests.rs"]
+mod exact_model_first_turn_tests;
+
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -2171,7 +2212,7 @@ mod tests {
     #[tokio::test]
     async fn exact_model_create_refuses_an_invalid_id_and_creates_nothing() {
         let state = state_with_disc("exact-refuse-create").await;
-        let too_long = "m".repeat(crate::models::setup::MAX_EXACT_MODEL_CHARS + 1);
+        let too_long = "m".repeat(crate::models::setup::MAX_MODEL_ID_CHARS + 1);
         for bad in [
             "   ",
             "bad\nmodel",

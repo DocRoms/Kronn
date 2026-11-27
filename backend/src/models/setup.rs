@@ -1932,33 +1932,111 @@ pub struct SetAgentFallbackRequest {
 
 // ─── Model tiers ──────────────────────────────────────────────────────────
 
-/// Longest exact model id a discussion stores (KT-1993).
-pub const MAX_EXACT_MODEL_CHARS: usize = 200;
+/// Longest model id Kronn stores (KT-1993, KT-1998). A discussion's exact
+/// model, every saved model slot, a fallback link and a manual catalogue id
+/// share it, so an id the catalogue accepts can be chosen everywhere else.
+pub const MAX_MODEL_ID_CHARS: usize = 256;
 
 /// The validation rule for the exact model id of a discussion (KT-1993): trimmed,
-/// not empty, one line of at most [`MAX_EXACT_MODEL_CHARS`] characters, and not
+/// not empty, one line of at most [`MAX_MODEL_ID_CHARS`] characters, and not
 /// starting with `-`. The id reaches the agent CLI as the token right after
-/// `--model`, so a leading dash would be read as an option (`-c`,
-/// `--dangerously-skip-permissions`). No model id starts with a dash.
+/// `--model`, so a leading dash would be read as an option. No model id starts
+/// with a dash.
 /// Inner spaces are kept: each id is one argv token, not a shell line, so a
 /// space cannot add a token. The id is not checked against any catalogue here.
 /// At launch, `model_catalog::preflight_resolve` passes an unknown id through
 /// unchanged; only an id that disappeared from the live catalogue is replaced
 /// by a same-agent model or refused.
+/// The rule judges the trimmed text, which is what the caller stores. A save
+/// that keeps the text as given uses [`check_model_id`].
 pub fn normalize_exact_model(value: &str) -> Result<String, String> {
     let model = value.trim();
     if model.is_empty() {
         return Err("model is empty".into());
     }
-    if model.chars().count() > MAX_EXACT_MODEL_CHARS || model.chars().any(char::is_control) {
+    refuse_multi_line_or_long(model)?;
+    refuse_option_like_model(model)?;
+    Ok(model.to_string())
+}
+
+/// KT-1998 — the same rule for a save that stores the text as given. A
+/// control character anywhere (line break, tab, NUL) and a length over
+/// [`MAX_MODEL_ID_CHARS`] are judged on the raw text, so trimming cannot hide
+/// them. Plain spaces before or after the id stay tolerated, as before:
+/// readers trim them.
+pub fn check_model_id(value: &str) -> Result<(), String> {
+    refuse_multi_line_or_long(value)?;
+    normalize_exact_model(value).map(|_| ())
+}
+
+fn refuse_multi_line_or_long(model: &str) -> Result<(), String> {
+    if model.chars().count() > MAX_MODEL_ID_CHARS || model.chars().any(char::is_control) {
         return Err(format!(
-            "model must be one line of at most {MAX_EXACT_MODEL_CHARS} characters"
+            "model must be one line of at most {MAX_MODEL_ID_CHARS} characters"
         ));
     }
-    if model.starts_with('-') {
+    Ok(())
+}
+
+/// KT-1998 — the dash rule alone, used by [`normalize_exact_model`] and by the
+/// runner's last check before a command line is built. Leading spaces are
+/// ignored.
+pub fn refuse_option_like_model(model: &str) -> Result<(), String> {
+    if model.trim_start().starts_with('-') {
         return Err("model is an agent option, not a model id: it must not start with '-'".into());
     }
-    Ok(model.to_string())
+    Ok(())
+}
+
+/// KT-1998 — an optional model id a save stores as given (a Quick Prompt or
+/// workflow step `agent_settings.model`, a shadow, a tier slot, a connection
+/// slot). `None` and a value of plain spaces mean "no model" and pass, as
+/// before: every reader treats them as unset. Any other value, including one
+/// made only of control characters, must pass [`check_model_id`].
+pub fn check_optional_model(value: Option<&str>) -> Result<(), String> {
+    match value {
+        Some(model) if !model.trim_matches(' ').is_empty() => check_model_id(model),
+        _ => Ok(()),
+    }
+}
+
+/// KT-1998 — an optional model a save trims before storing it (a fallback
+/// link): the raw text is judged by [`check_optional_model`] first, then a
+/// value of plain spaces becomes `None` and any other is stored trimmed.
+pub fn clean_optional_model(value: Option<String>) -> Result<Option<String>, String> {
+    check_optional_model(value.as_deref())?;
+    Ok(value
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty()))
+}
+
+/// KT-1998 — every model slot of the tier settings, checked by
+/// [`check_optional_model`]. The effort slots are not model ids.
+pub fn check_model_tiers(tiers: &ModelTiersConfig) -> Result<(), String> {
+    let agents = [
+        ("claude_code", &tiers.claude_code),
+        ("codex", &tiers.codex),
+        ("open_code", &tiers.open_code),
+        ("gemini_cli", &tiers.gemini_cli),
+        ("kiro", &tiers.kiro),
+        ("vibe", &tiers.vibe),
+        ("copilot_cli", &tiers.copilot_cli),
+        ("ollama", &tiers.ollama),
+        ("lite_llm", &tiers.lite_llm),
+        ("nvidia", &tiers.nvidia),
+    ];
+    for (agent, slots) in agents {
+        for (slot, model) in [
+            ("economy", &slots.economy),
+            ("default", &slots.default),
+            ("reasoning", &slots.reasoning),
+            ("decision", &slots.decision),
+        ] {
+            check_optional_model(model.as_deref())
+                .map_err(|error| format!("{agent}.{slot}: {error}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Abstract model capability tier. Kronn maps each tier to a concrete --model flag per agent.
@@ -2495,4 +2573,39 @@ pub struct UpdateServerConfigRequest {
     /// An IANA name, or an empty string to follow the machine's zone again.
     #[serde(default)]
     pub timezone: Option<String>,
+}
+
+#[cfg(test)]
+mod model_id_guard_tests {
+    use super::*;
+
+    /// KT-1998 — a check that stores the text as given judges the raw text:
+    /// line breaks, a tab or a long run of spaces around an id are refused,
+    /// plain spaces around an id are tolerated and blank is "no model".
+    #[test]
+    fn model_id_guard_stored_text_is_judged_raw() {
+        let padded = format!("{}gpt-5", " ".repeat(100_000));
+        for bad in ["\ngpt-5\n", "\tgpt-5", padded.as_str(), "--help", " -c"] {
+            let error = check_model_id(bad).expect_err("refused");
+            assert!(error.starts_with("model "), "{bad:?}: {error}");
+            check_optional_model(Some(bad)).expect_err("refused when optional too");
+            clean_optional_model(Some(bad.to_string())).expect_err("refused before trimming");
+        }
+        check_optional_model(Some("\n")).expect_err("a lone control character is refused");
+        check_model_id(" gpt-5 ").expect("plain spaces stay tolerated");
+        check_model_id("opus[1m]").expect("a bracketed id passes");
+        check_model_id("vendor/model:tag@v1").expect("a namespaced id passes");
+        check_model_id("model with space").expect("an inner space passes");
+        check_model_id(&"m".repeat(MAX_MODEL_ID_CHARS)).expect("the limit itself passes");
+        check_model_id(&"m".repeat(MAX_MODEL_ID_CHARS + 1)).expect_err("one more is refused");
+        check_optional_model(None).expect("none");
+        check_optional_model(Some("   ")).expect("blank is no model");
+        assert_eq!(
+            clean_optional_model(Some(" gpt-5 ".into()))
+                .unwrap()
+                .as_deref(),
+            Some("gpt-5")
+        );
+        assert_eq!(clean_optional_model(Some("  ".into())).unwrap(), None);
+    }
 }

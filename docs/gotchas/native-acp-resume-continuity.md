@@ -69,8 +69,8 @@ The safe fresh-session fallback is restricted to absent resume capability or a
 positively identified missing session before a prompt is sent. Authentication,
 timeouts and ambiguous transport errors fail visibly. Prompt, cancellation and
 persistence failures are not followed by an automatic fresh-session replay.
-[src: file: backend/src/agents/runner.rs:5699-5755#resume_refused]
-[src: file: backend/src/agents/runner.rs:6200-6265#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:5788-5844#resume_refused]
+[src: file: backend/src/agents/runner.rs:6249-6314#acp_failure_diagnostic]
 
 OpenCode v1.18.27 defines a structured missing-session error using code -32602,
 the exact message `session not found: <id>` and `data.sessionId`. The transport
@@ -111,8 +111,8 @@ cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
 [src: file: backend/src/api/discussions/streaming.rs:9185-9504#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
-[src: file: backend/src/agents/runner.rs:16295-16396#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
-[src: file: backend/src/agents/runner.rs:16453-16657#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
+[src: file: backend/src/agents/runner.rs:16286-16387#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
+[src: file: backend/src/agents/runner.rs:16444-16648#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
 
 These tests do not launch a live provider or qualify real model behavior.
 Kronn normalizes ACP token counts but does not yet normalize optional cumulative

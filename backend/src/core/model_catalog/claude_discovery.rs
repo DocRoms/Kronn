@@ -28,8 +28,17 @@ struct ModelInfo {
     supported_effort_levels: Vec<String>,
 }
 
+/// The English sentences this discovery writes (KT-2003: the refresh log
+/// stores them, `refresh_error_code` reads them back as codes).
+pub(crate) const INVALID_CATALOG: &str = "Claude returned an invalid model catalogue";
+pub(crate) const DISCOVERY_FAILED: &str =
+    "Claude model discovery failed; check CLI authentication and support for safe-mode";
+pub(crate) const AUTH_REQUIRED: &str = "Authenticate the Claude CLI to discover its models";
+pub(crate) const CLI_NOT_INSTALLED: &str = "Claude CLI is not installed";
+pub(crate) const CLI_UNAVAILABLE: &str = "Claude CLI executable is unavailable";
+
 fn invalid() -> DiscoveryOutcome {
-    DiscoveryOutcome::InvalidCatalog("Claude returned an invalid model catalogue".into())
+    DiscoveryOutcome::InvalidCatalog(INVALID_CATALOG.into())
 }
 
 fn printable(value: &str, limit: usize) -> bool {
@@ -106,9 +115,7 @@ fn discovery_args() -> Vec<&'static str> {
 }
 
 fn provider_error() -> DiscoveryOutcome {
-    DiscoveryOutcome::ProviderError(
-        "Claude model discovery failed; check CLI authentication and support for safe-mode".into(),
-    )
+    DiscoveryOutcome::ProviderError(DISCOVERY_FAILED.into())
 }
 
 fn classify_error(value: &str) -> DiscoveryOutcome {
@@ -123,7 +130,7 @@ fn classify_error(value: &str) -> DiscoveryOutcome {
     .iter()
     .any(|word| lower.contains(word))
     {
-        DiscoveryOutcome::AuthRequired("Authenticate the Claude CLI to discover its models".into())
+        DiscoveryOutcome::AuthRequired(AUTH_REQUIRED.into())
     } else {
         provider_error()
     }
@@ -131,7 +138,7 @@ fn classify_error(value: &str) -> DiscoveryOutcome {
 
 pub async fn discover() -> DiscoveryOutcome {
     let Some(location) = crate::agents::find_binary("claude") else {
-        return DiscoveryOutcome::CliMissing("Claude CLI is not installed".into());
+        return DiscoveryOutcome::CliMissing(CLI_NOT_INSTALLED.into());
     };
     let mut command = crate::core::cmd::discovery_cmd(
         &location.path,
@@ -162,7 +169,7 @@ pub async fn discover() -> DiscoveryOutcome {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return DiscoveryOutcome::CliMissing("Claude CLI executable is unavailable".into());
+            return DiscoveryOutcome::CliMissing(CLI_UNAVAILABLE.into());
         }
         Err(_) => return provider_error(),
     };

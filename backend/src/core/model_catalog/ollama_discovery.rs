@@ -49,11 +49,35 @@ fn valid_model_id(value: &str) -> bool {
             .any(|character| character.is_control() || character.is_whitespace())
 }
 
+/// The English sentences this discovery writes (KT-2003: the refresh log
+/// stores them, `refresh_error_code` reads them back as codes).
+pub(crate) const HTTP_CLIENT_FAILED: &str = "failed to create HTTP client";
+pub(crate) const REQUEST_FAILED: &str = "Ollama catalogue request failed";
+pub(crate) const RESPONSE_UNREADABLE: &str = "Ollama catalogue response could not be read";
+pub(crate) const RESPONSE_TOO_LARGE: &str = "Ollama catalogue response exceeded the size limit";
+pub(crate) const SCHEMA_INVALID: &str = "Ollama catalogue schema is invalid";
+pub(crate) const INVALID_MODEL_ID: &str = "Ollama catalogue contains an invalid model identifier";
+const HTTP_ERROR_PREFIX: &str = "Ollama catalogue returned HTTP ";
+
+/// The English sentence of a catalogue request answered with an error status.
+pub(crate) fn http_error_detail(status: u16) -> String {
+    format!("{HTTP_ERROR_PREFIX}{status}")
+}
+
+/// The status of a sentence `http_error_detail` wrote, `None` for any other text.
+pub(crate) fn http_error_status(detail: &str) -> Option<u16> {
+    let status = detail
+        .strip_prefix(HTTP_ERROR_PREFIX)?
+        .parse::<u16>()
+        .ok()?;
+    (http_error_detail(status) == detail).then_some(status)
+}
+
 pub async fn discover(base_url: &str) -> Result<Vec<OllamaTag>, DiscoveryOutcome> {
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
-        .map_err(|_| DiscoveryOutcome::ProviderError("failed to create HTTP client".into()))?;
+        .map_err(|_| DiscoveryOutcome::ProviderError(HTTP_CLIENT_FAILED.into()))?;
     let response = client
         .get(format!("{}/api/tags", base_url.trim_end_matches('/')))
         .send()
@@ -62,22 +86,19 @@ pub async fn discover(base_url: &str) -> Result<Vec<OllamaTag>, DiscoveryOutcome
             if error.is_timeout() {
                 DiscoveryOutcome::Timeout
             } else {
-                DiscoveryOutcome::ProviderError("Ollama catalogue request failed".into())
+                DiscoveryOutcome::ProviderError(REQUEST_FAILED.into())
             }
         })?;
     if !response.status().is_success() {
-        return Err(DiscoveryOutcome::ProviderError(format!(
-            "Ollama catalogue returned HTTP {}",
-            response.status().as_u16()
+        return Err(DiscoveryOutcome::ProviderError(http_error_detail(
+            response.status().as_u16(),
         )));
     }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_TAGS_RESPONSE_BYTES as u64)
     {
-        return Err(DiscoveryOutcome::InvalidCatalog(
-            "Ollama catalogue response exceeded the size limit".into(),
-        ));
+        return Err(DiscoveryOutcome::InvalidCatalog(RESPONSE_TOO_LARGE.into()));
     }
 
     let mut bytes = Vec::new();
@@ -87,15 +108,11 @@ pub async fn discover(base_url: &str) -> Result<Vec<OllamaTag>, DiscoveryOutcome
             if error.is_timeout() {
                 DiscoveryOutcome::Timeout
             } else {
-                DiscoveryOutcome::ProviderError(
-                    "Ollama catalogue response could not be read".into(),
-                )
+                DiscoveryOutcome::ProviderError(RESPONSE_UNREADABLE.into())
             }
         })?;
         if bytes.len().saturating_add(chunk.len()) > MAX_TAGS_RESPONSE_BYTES {
-            return Err(DiscoveryOutcome::InvalidCatalog(
-                "Ollama catalogue response exceeded the size limit".into(),
-            ));
+            return Err(DiscoveryOutcome::InvalidCatalog(RESPONSE_TOO_LARGE.into()));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -107,16 +124,13 @@ pub async fn discover(base_url: &str) -> Result<Vec<OllamaTag>, DiscoveryOutcome
 /// the request so what is read off the wire (the digest included) is testable
 /// without a server.
 fn parse_tags(bytes: &[u8]) -> Result<Vec<OllamaTag>, DiscoveryOutcome> {
-    let envelope: TagsEnvelope = serde_json::from_slice(bytes).map_err(|_| {
-        DiscoveryOutcome::InvalidCatalog("Ollama catalogue schema is invalid".into())
-    })?;
+    let envelope: TagsEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| DiscoveryOutcome::InvalidCatalog(SCHEMA_INVALID.into()))?;
     let mut seen = HashSet::new();
     let mut tags = Vec::new();
     for tag in envelope.models {
         if !valid_model_id(&tag.name) {
-            return Err(DiscoveryOutcome::InvalidCatalog(
-                "Ollama catalogue contains an invalid model identifier".into(),
-            ));
+            return Err(DiscoveryOutcome::InvalidCatalog(INVALID_MODEL_ID.into()));
         }
         if seen.insert(tag.name.clone()) {
             tags.push(OllamaTag {

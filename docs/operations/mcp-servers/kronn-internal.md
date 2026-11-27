@@ -893,7 +893,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:13941-13991#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2748-2776#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:13932-13982#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2748-2776#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5955-5987#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5985-5998#_spawned_task_worker_mode]`
 
@@ -1260,7 +1260,7 @@ Discussion creation currently persists an initial `User`/`main` message even
 when `initial_prompt` is empty and `no_agent` is true. An empty opening bubble
 therefore does not prove that a later workflow Agent step received an empty
 prompt; inspect the workflow input separately.
-[src: file: backend/src/api/discussions/crud.rs:566-589#initial_message]
+[src: file: backend/src/api/discussions/crud.rs:576-599#initial_message]
 [src: file: backend/src/api/discussions/crud.rs:630-647]
 
 ## Multi-agent collab — required protocol

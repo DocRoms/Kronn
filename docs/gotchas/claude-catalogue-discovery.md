@@ -6,8 +6,8 @@ control request. It reads the response's `models`, the same catalogue exposed
 by `supportedModels()` / `initializationResult().models`. It sends no user
 prompt, model selection, permission approval or inference request.
 [src: file: backend/src/core/model_catalog/mod.rs:420-431#discover_inner]
-[src: file: backend/src/core/model_catalog/claude_discovery.rs:88-106#discovery_args]
-[src: file: backend/src/core/model_catalog/claude_discovery.rs:214-270#initialize]
+[src: file: backend/src/core/model_catalog/claude_discovery.rs:97-115#discovery_args]
+[src: file: backend/src/core/model_catalog/claude_discovery.rs:221-277#initialize]
 [src: url: https://code.claude.com/docs/en/agent-sdk/typescript]
 
 The process uses safe mode, an empty strict MCP configuration, no tools,
@@ -18,9 +18,9 @@ explicitly; Kronn does not retry with weaker isolation, install an SDK, require
 an additional API key, or change the configured execution transport. The
 initialization is bounded to 18 seconds inside the common 20-second discovery
 budget, with bounded output and owned-child shutdown.
-[src: file: backend/src/core/model_catalog/claude_discovery.rs:88-106#discovery_args]
-[src: file: backend/src/core/model_catalog/claude_discovery.rs:108-112#provider_error]
-[src: file: backend/src/core/model_catalog/claude_discovery.rs:132-186#discover]
+[src: file: backend/src/core/model_catalog/claude_discovery.rs:97-115#discovery_args]
+[src: file: backend/src/core/model_catalog/claude_discovery.rs:117-121#provider_error]
+[src: file: backend/src/core/model_catalog/claude_discovery.rs:139-193#discover]
 [src: file: backend/src/core/model_catalog/mod.rs:43-44#DISCOVERY_TIMEOUT]
 
 The catalogue preserves `ModelInfo.value` exactly, including aliases and
@@ -31,7 +31,7 @@ remain separate from model tiers; a missing effort list stays empty and no
 default effort is invented. Shape, bounds and identity uniqueness are checked
 on discovery output, not on free-form user model settings.
 [src: file: backend/src/core/model_catalog/claude_discovery.rs:18-29#ModelInfo]
-[src: file: backend/src/core/model_catalog/claude_discovery.rs:39-86#parse_models]
+[src: file: backend/src/core/model_catalog/claude_discovery.rs:48-95#parse_models]
 [src: file: backend/src/db/model_catalog.rs:27-30#canonical_id]
 
 Listing is not proof that an account can execute a model. The UI says that
@@ -41,8 +41,8 @@ changing the CLI account; no account, token or credential is copied into the
 catalogue. CLI aliases can change their resolution; the special `default`
 choice is labelled accordingly and is never automatically assigned to a tier.
 The same warning is shown in the Settings catalogue table, not just in pickers.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
-[src: file: backend/src/db/model_catalog.rs:585-730#reconcile_listing]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
+[src: file: backend/src/db/model_catalog.rs:584-729#reconcile_listing]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:447-449#cliDefault]
 
 Opening a selector serves its saved snapshot first, then refreshes stale CLI
@@ -55,7 +55,7 @@ ten-minute retry TTL. HTTP and Ollama are excluded from this automatic CLI
 refresh; their existing explicit boundaries remain unchanged.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:6-30#refreshTarget]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
-[src: file: backend/src/core/model_catalog/mod.rs:1048-1090#refresh_if_stale]
+[src: file: backend/src/core/model_catalog/mod.rs:1142-1184#refresh_if_stale]
 [src: file: backend/src/core/model_catalog/mod.rs:37-41#LIVE_CATALOG_TTL]
 [src: file: backend/src/db/mod.rs:330-342#lock_catalog_refresh]
 
@@ -64,7 +64,7 @@ error. A successful empty catalogue marks previous live entries unavailable;
 their return restores availability. Manual/migrated aliases and existing
 tiers are not removed merely because the CLI lists a different spelling.
 Refresh does not choose a replacement or write configuration.
-[src: file: backend/src/db/model_catalog.rs:585-730#reconcile_listing]
+[src: file: backend/src/db/model_catalog.rs:584-729#reconcile_listing]
 [src: file: backend/src/db/model_catalog.rs:732-761#record_refresh_failure]
 
 Retaining a catalogue and allowing a launch are distinct decisions. Claude
@@ -73,7 +73,7 @@ selected model is still `Available`. It keeps cached provenance and the error
 visible and leaves authentication to the execution boundary. `AuthRequired`,
 `CliMissing`, absent identities and positively unavailable models remain blocked
 when accompanied by a blocking refresh error. Other runtimes are unchanged.
-[src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1254-1290#retained_claude_model]
 
 Regression coverage includes the initialization-only protocol, malformed and
 oversized responses, stderr EOF, namespace separation, missing effort levels,
@@ -81,10 +81,10 @@ concurrent refreshes, failure cooldown, disappearance/reappearance, late UI
 results and explicit Fable selection. Tests use isolated database/protocol
 fixtures and mocked UI APIs; they do not assert an authorized billable call.
 [src: file: backend/src/core/model_catalog/claude_discovery.rs:272-427#tests]
-[src: file: backend/src/core/model_catalog/mod.rs:1635-1673#overlapping_forced_refreshes_share_one_attempt_but_an_explicit_later_recheck_runs]
-[src: file: backend/src/core/model_catalog/mod.rs:1675-1805#claude_refresh_preserves_manual_tiers_http_namespace_and_last_good_on_failure]
-[src: file: backend/src/db/model_catalog.rs:1310-1336#disappearance_downgrades_to_cached_never_deletes]
-[src: file: backend/src/db/model_catalog.rs:1375-1398#mark_unavailable_then_reappear_reactivates]
+[src: file: backend/src/core/model_catalog/mod.rs:1781-1819#overlapping_forced_refreshes_share_one_attempt_but_an_explicit_later_recheck_runs]
+[src: file: backend/src/core/model_catalog/mod.rs:1821-1951#claude_refresh_preserves_manual_tiers_http_namespace_and_last_good_on_failure]
+[src: file: backend/src/db/model_catalog.rs:1323-1349#disappearance_downgrades_to_cached_never_deletes]
+[src: file: backend/src/db/model_catalog.rs:1388-1411#mark_unavailable_then_reappear_reactivates]
 [src: file: frontend/src/hooks/__tests__/useModelCatalogSnapshot.test.tsx:25-107#refreshes]
 [src: file: frontend/src/components/settings/__tests__/AgentsSection.catalog.test.tsx:77-100#Fable]
 

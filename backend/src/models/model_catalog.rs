@@ -73,6 +73,74 @@ pub enum ModelUnavailableReason {
     AccessDenied,
 }
 
+/// KT-2003 — a reason Kronn itself writes (an unavailable agent, a refused
+/// model), as a stable code and its parameters. It rides next to the English
+/// sentence the API keeps for agents and logs; the interface writes the
+/// sentence from its own locale files. A text that comes from a third party
+/// (a provider's error body, a CLI's stderr) is a `detail` parameter, quoted
+/// as received. An older client ignores the field; a newer code a client does
+/// not know falls back to the English sentence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "code", rename_all = "snake_case")]
+#[ts(export)]
+pub enum CatalogReasonCode {
+    /// A native ACP agent runs only with its full-access setting on.
+    /// `agent` is the agent's name as Settings › Agents shows it.
+    NativeFullAccessRequired { agent: String },
+    /// The runtime's catalogue could not be refreshed (no detail recorded).
+    CatalogNotRefreshed,
+    /// The refresh before a launch failed; `detail` is the error as received.
+    CatalogRefreshFailed { detail: String },
+    /// Reading the catalogue's assignments failed; `detail` as received.
+    CatalogLookupFailed { detail: String },
+    /// Model discovery did not complete within its bound.
+    DiscoveryTimeout,
+    /// The agent's CLI is not installed or cannot be started. `agent` is the
+    /// agent's name as Settings › Agents shows it (as for every `agent` below).
+    AgentCliMissing { agent: String },
+    /// The agent's CLI must be signed in before it lists its models.
+    AgentAuthRequired { agent: String },
+    /// The model list the agent returned cannot be read (wrong shape, an
+    /// invalid model identifier).
+    CatalogInvalid { agent: String },
+    /// The model list the agent returned is larger than Kronn reads.
+    CatalogTooLarge { agent: String },
+    /// Model discovery failed before an answer could be read.
+    DiscoveryFailed { agent: String },
+    /// The CLI's model discovery failed: its sign-in and its safe-mode support
+    /// are what to check.
+    CliDiscoveryFailed { agent: String },
+    /// The model list endpoint answered with an HTTP error status.
+    CatalogHttpError { agent: String, status: u16 },
+    /// The runtime has no live model discovery.
+    DiscoveryUnsupported,
+    /// The model is absent from the latest successful live catalogue.
+    ModelDisappeared { model_id: String },
+    /// The model disappeared and no available model replaces it for the tier.
+    ModelDisappearedNoReplacement {
+        model_id: String,
+        tier: ModelTier,
+        agent: String,
+    },
+    /// The model is marked unavailable without a recorded detail.
+    ModelUnavailable { model_id: String },
+    /// A real call answered not-found: the proxy lists it, the upstream does not answer.
+    ModelNotFound { status: u16 },
+    /// A real call was refused for this key or project.
+    ModelAccessDenied { status: u16 },
+    /// The catalogue's capabilities for the model exclude chat.
+    ModelNotChat {
+        model_id: String,
+        capabilities: Vec<String>,
+    },
+    /// The model is absent from the CLI's complete listing (a notice, the run goes ahead).
+    ModelNotListed {
+        model_id: String,
+        agent: String,
+        version: Option<String>,
+    },
+}
+
 /// Evidence from a runtime listing, kept apart from availability: a listing
 /// is not proof of access, so `NotListed` is a warning, never a refusal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -144,6 +212,9 @@ pub struct CatalogModelEntry {
     pub unavailable_reason: Option<ModelUnavailableReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_detail: Option<String>,
+    /// KT-2003 — `unavailable_detail` as a code, when Kronn wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_code: Option<CatalogReasonCode>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
@@ -251,6 +322,9 @@ pub struct ModelCatalogView {
     pub last_error_reason: Option<ModelUnavailableReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error_detail: Option<String>,
+    /// KT-2003 — `last_error_detail` as a code, when Kronn wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_code: Option<CatalogReasonCode>,
     /// Referenced models that the latest successful catalogue no longer
     /// contains. This is a warning only: changing a reference remains an
     /// explicit operator action.
@@ -278,9 +352,15 @@ pub struct CatalogTierVerdict {
     /// Why the tier is refused, or why another model runs in its place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// KT-2003 — `detail` as a code, when Kronn wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_code: Option<CatalogReasonCode>,
     /// A launchable tier's pre-launch warning (model absent from the listing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// KT-2003 — `notice` as a code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_code: Option<CatalogReasonCode>,
 }
 
 impl CatalogTierVerdict {
@@ -293,15 +373,18 @@ impl CatalogTierVerdict {
             Ok(resolution) => {
                 let warning = resolution.as_ref().and_then(|r| r.warning.clone());
                 let notice = resolution.as_ref().and_then(|r| r.notice.clone());
+                let notice_code = resolution.as_ref().and_then(|r| r.notice_code.clone());
                 Self {
                     tier,
                     notice,
+                    notice_code,
                     effective_model: resolution
                         .and_then(|r| r.effective_model)
                         .or_else(|| requested_model.clone()),
                     requested_model,
                     launchable: true,
                     reason: warning.as_ref().map(|w| w.reason),
+                    detail_code: warning.as_ref().and_then(|w| w.detail_code.clone()),
                     detail: warning.map(|w| w.detail),
                 }
             }
@@ -312,7 +395,9 @@ impl CatalogTierVerdict {
                 launchable: false,
                 reason: Some(failure.reason),
                 detail: Some(failure.detail),
+                detail_code: failure.detail_code,
                 notice: None,
+                notice_code: None,
             },
         }
     }
@@ -381,6 +466,9 @@ pub struct CatalogPreflightFailure {
     pub model_id: Option<String>,
     pub reason: ModelUnavailableReason,
     pub detail: String,
+    /// KT-2003 — `detail` as a code, when Kronn wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_code: Option<CatalogReasonCode>,
     pub last_checked_at: DateTime<Utc>,
     /// Machine-readable recommended next step (`"configure_manual_model"`,
     /// `"recheck_catalog"`, `"install_cli"`, `"authenticate"`,
@@ -413,6 +501,9 @@ pub struct CatalogPreflightWarning {
     pub effective_model: String,
     pub reason: ModelUnavailableReason,
     pub detail: String,
+    /// KT-2003 — `detail` as a code, when Kronn wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_code: Option<CatalogReasonCode>,
     pub replacement_source: CatalogReplacementSource,
     pub equivalent_tier: ModelTier,
 }
@@ -428,4 +519,7 @@ pub struct CatalogPreflightResolution {
     /// listing does not contain the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// KT-2003 — `notice` as a code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_code: Option<CatalogReasonCode>,
 }

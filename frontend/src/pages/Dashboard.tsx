@@ -18,6 +18,7 @@ import { detectStaleStreams, abortStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { AGENT_LABELS, AGENT_MENTIONS, isUsable } from '../lib/constants';
+import { fullAccessRequiredText } from '../lib/serverReason';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import { requiresFullAccessToRun } from '../lib/agentFullAccess';
 import { hydrateTtsVoicesFromBackend } from '../lib/tts-models';
@@ -897,7 +898,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   )}
                   {bootstrapNeedsFullAccess && (
                     <p className="dash-field-warn" role="alert" data-testid="bootstrap-full-access-required">
-                      {t('config.fullAccessRequired', AGENT_LABELS[selectedBootstrapAgent] ?? selectedBootstrapAgent)}
+                      {fullAccessRequiredText(t, AGENT_LABELS[selectedBootstrapAgent] ?? selectedBootstrapAgent)}
                     </p>
                   )}
                 </div>

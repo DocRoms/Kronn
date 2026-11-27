@@ -157,7 +157,8 @@ describe('catalogue selection contract', () => {
       entry('gone', { availability: 'unavailable', unavailable_reason: 'disappeared' }),
       entry('listed'),
     ];
-    expect(modelCallVerdict('refused', undefined, saved)).toEqual({ state: 'refused', detail: 'HTTP 404' });
+    // KT-2003 — with its reason (and code, when Kronn wrote it), so the detail is written in the UI's language.
+    expect(modelCallVerdict('refused', undefined, saved)).toEqual({ state: 'refused', detail: 'HTTP 404', reason: 'not_found' });
     expect(modelCallVerdict('answered', undefined, saved)).toEqual({ state: 'answered' });
     // Unavailable for another reason, or only listed: no call proved anything.
     expect(modelCallVerdict('gone', undefined, saved)).toBeNull();

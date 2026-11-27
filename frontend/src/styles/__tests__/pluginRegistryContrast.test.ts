@@ -85,7 +85,7 @@ describe('add-plugin form contrast (KT-2006)', () => {
   it('reads the card metadata at 4.5:1 on a card and on the bare panel', () => {
     for (const selector of [
       '.mcp-registry-card-cat', '.mcp-registry-card-desc', '.mcp-registry-card-meta',
-      '.mcp-kind-badge-mcp', '.mcp-kind-badge-api', '.mcp-credential-kind',
+      '.mcp-kind-badge-mcp', '.mcp-kind-badge-api', '.mcp-kind-badge-cli', '.mcp-credential-kind',
     ]) expect(misses(selector, cardSurfaces)).toEqual([]);
   });
 

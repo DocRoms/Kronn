@@ -1537,7 +1537,7 @@ describe('NewDiscussionForm — native agents need full access', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
       target: { value: 'Lance OpenCode.' },
     });
-    expect(screen.getByTestId('full-access-required')).toHaveTextContent('config.fullAccessRequired');
+    expect(screen.getByTestId('full-access-required')).toHaveTextContent('serverReason.fullAccessRequired');
     expect(document.querySelector('.disc-create-btn')).toBeDisabled();
     fireEvent.click(screen.getByText('config.fullAccessRequiredLink'));
     expect(onNavigate).toHaveBeenCalledWith('settings');

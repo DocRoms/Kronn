@@ -95,6 +95,9 @@ pub async fn create_as(
     if let Err(error) = known_directives(&req.directive_ids, &[]) {
         return Json(ApiResponse::err(error));
     }
+    if let Err(error) = check_agent_settings_model(req.agent_settings.as_ref()) {
+        return Json(ApiResponse::err(error));
+    }
 
     let agent = req.agent.unwrap_or(AgentType::ClaudeCode);
     let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
@@ -194,6 +197,9 @@ pub async fn update_as(
         return Json(ApiResponse::err(error));
     }
     if let Err(error) = known_directives(&req.directive_ids, &existing.directive_ids) {
+        return Json(ApiResponse::err(error));
+    }
+    if let Err(error) = check_agent_settings_model(req.agent_settings.as_ref()) {
         return Json(ApiResponse::err(error));
     }
     let before = quick_prompt_execution(&existing);
@@ -494,6 +500,9 @@ pub async fn import_qp(
         return Json(ApiResponse::err(
             "Le Quick Prompt importé n'a pas de prompt template — fichier corrompu ?",
         ));
+    }
+    if let Err(error) = check_agent_settings_model(qp.agent_settings.as_ref()) {
+        return Json(ApiResponse::err(error));
     }
 
     let now = Utc::now();
@@ -1715,5 +1724,128 @@ mod compare_tests {
         assert!(targets
             .iter()
             .all(|target| target.tier == ModelTier::Reasoning));
+    }
+}
+
+#[cfg(test)]
+mod model_id_guard_tests {
+    use super::*;
+
+    fn state() -> AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let config = crate::core::config::default_config();
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(config)),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    fn request(model: &str) -> CreateQuickPromptRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": "Guarded",
+            "icon": null,
+            "prompt_template": "Say hello",
+            "agent": "OpenCode",
+            "project_id": null,
+            "agent_settings": { "model": model },
+        }))
+        .unwrap()
+    }
+
+    async fn stored(state: &AppState) -> Vec<QuickPrompt> {
+        state
+            .db
+            .with_conn(crate::db::quick_prompts::list_quick_prompts)
+            .await
+            .unwrap()
+    }
+
+    /// KT-1998 — create, update and import refuse a dash-led
+    /// `agent_settings.model` and write nothing; a blank model is still "none".
+    #[tokio::test]
+    async fn model_id_guard_quick_prompt_save_refuses_a_dash_led_model() {
+        let state = state();
+        let Json(refused) = create_as(state.clone(), request("--help"), None).await;
+        let error = refused.error.expect("create refuses a dash-led model");
+        assert!(error.contains("must not start with '-'"), "{error}");
+        assert!(stored(&state).await.is_empty(), "create wrote nothing");
+
+        let Json(blank) = create_as(state.clone(), request("  "), None).await;
+        assert!(blank.success, "a blank model still means none");
+        let Json(created) = create_as(state.clone(), request("gpt-5"), None).await;
+        let created = created.data.expect("a plain id is saved");
+        let id = created.id.clone();
+
+        let Json(refused) = update_as(state.clone(), id.clone(), request(" -c"), None).await;
+        assert!(refused.error.expect("update refuses").contains("'-'"));
+        let kept = state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            kept.agent_settings.and_then(|s| s.model).as_deref(),
+            Some("gpt-5"),
+            "update wrote nothing"
+        );
+
+        let mut exported = created;
+        exported.agent_settings = Some(AgentSettings {
+            model: Some("--yolo".into()),
+            ..AgentSettings::default()
+        });
+        let content = serde_json::to_string(&QuickPromptExportEnvelope {
+            kind: QP_EXPORT_KIND.into(),
+            version: QP_EXPORT_VERSION,
+            exported_at: Utc::now(),
+            quick_prompt: exported,
+        })
+        .unwrap();
+        let before = stored(&state).await.len();
+        let Json(refused) = import_qp(
+            State(state.clone()),
+            Json(ImportQuickPromptRequest {
+                content,
+                project_id: None,
+            }),
+        )
+        .await;
+        assert!(refused.error.expect("import refuses").contains("'-'"));
+        assert_eq!(stored(&state).await.len(), before, "import wrote nothing");
+    }
+
+    /// KT-1998 — the model is judged as stored: line breaks, a tab or a long
+    /// run of spaces around an id are refused on create and update; nothing
+    /// is written.
+    #[tokio::test]
+    async fn model_id_guard_quick_prompt_judges_the_stored_text() {
+        let state = state();
+        let padded = format!("{}gpt-5", " ".repeat(100_000));
+        for bad in ["\ngpt-5\n", "\tgpt-5", padded.as_str()] {
+            let Json(refused) = create_as(state.clone(), request(bad), None).await;
+            let error = refused.error.expect("create refuses");
+            assert!(error.contains("one line"), "{bad:?}: {error}");
+        }
+        assert!(stored(&state).await.is_empty(), "create wrote nothing");
+        let Json(created) = create_as(state.clone(), request(" gpt-5 "), None).await;
+        let id = created.data.expect("plain spaces stay tolerated").id;
+        for bad in ["\ngpt-5\n", "\tgpt-5", padded.as_str()] {
+            let Json(refused) = update_as(state.clone(), id.clone(), request(bad), None).await;
+            assert!(refused.error.expect("update refuses").contains("one line"));
+        }
+        let lookup = id.clone();
+        let kept = state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &lookup))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            kept.agent_settings.and_then(|s| s.model).as_deref(),
+            Some(" gpt-5 "),
+            "update wrote nothing"
+        );
     }
 }

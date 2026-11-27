@@ -21,6 +21,7 @@ import type { Project, AgentDetection, AgentReadiness, AgentType, AgentsConfig, 
 import { requiresFullAccessToRun } from '../lib/agentFullAccess';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
 import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
+import { agentsSettingsLinkLabel, fullAccessRequiredText, serverReasonText } from '../lib/serverReason';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
 import { MENTION_TIER_CHOICES, nextMentionTierIndex } from '../lib/mentionTierSelection';
 import { clearDraft, loadDraft, NEW_DISCUSSION_DRAFT_ID, saveDraft, type DraftRoutingTiers } from '../lib/chat-drafts';
@@ -884,7 +885,7 @@ export function NewDiscussionForm({
                           detail: target.label,
                           group: t('disc.routingAvailableAgents'),
                           availability: current.unavailable
-                            ? { state: 'unavailable', label: t('modelCatalog.unavailable'), title: current.refusal ?? undefined }
+                            ? { state: 'unavailable', label: t('modelCatalog.unavailable'), title: serverReasonText(t, current.refusalSource) || undefined }
                             : null,
                           highlighted: index === mentionIndex,
                           onHover: () => {
@@ -1375,8 +1376,8 @@ export function NewDiscussionForm({
           <div className="disc-restricted-warn" role="alert" data-testid="full-access-required">
             <AlertTriangle size={11} style={{ color: 'var(--kr-warning)', flexShrink: 0 }} />
             <span className="disc-restricted-warn-text">
-              {t(
-                'config.fullAccessRequired',
+              {fullAccessRequiredText(
+                t,
                 fullAccessRequiredAgents.map(agent => AGENT_LABELS[agent] ?? agent).join(', '),
               )}
               {' — '}
@@ -1384,7 +1385,7 @@ export function NewDiscussionForm({
                 className="disc-inline-link kr-inline-link"
                 to={PAGE_PATHS.settings}
                 onNavigate={() => { dismiss(); onNavigate('settings'); }}
-              >{t('config.fullAccessRequiredLink')}</AppLink>
+              >{agentsSettingsLinkLabel(t)}</AppLink>
             </span>
           </div>
         )}

@@ -2,6 +2,7 @@ import type { SearchableSelectOption } from '../components/SearchableSelect';
 import type { ExternalApiTierCheck } from './api';
 import type { AgentType, CatalogModelEntry, ModelCatalogSnapshot, ModelCatalogView, ModelTier, ModelTierConfig, ModelTiersConfig } from '../types/generated';
 import { modelForAgentTier } from './constants';
+import { entryReasonText, type ServerReason } from './serverReason';
 
 export interface CatalogAgentTarget {
   agent: AgentType;
@@ -32,6 +33,10 @@ export function resolveCatalogTier(
     && verdict.effective_model !== verdict.requested_model ? verdict.effective_model : null;
   const replacement = replacementId
     ? view?.models.find(model => model.model_id === replacementId) : undefined;
+  const refusalSource: ServerReason | null = verdict && !verdict.launchable
+    ? { detail: verdict.detail, code: verdict.detail_code, reason: verdict.reason } : null;
+  const noticeSource: ServerReason | null = verdict?.launchable && verdict.notice
+    ? { detail: verdict.notice, code: verdict.notice_code } : null;
   return {
     configured, entry, view,
     model: replacementId
@@ -40,10 +45,14 @@ export function resolveCatalogTier(
     unavailable: verdict ? !verdict.launchable : entry?.availability === 'unavailable',
     /** Model that runs instead of the configured one, when the catalogue replaces it. */
     replacement: replacementId,
-    /** Why the launch would be refused, as the preflight words it. */
+    /** Why the launch would be refused, as the preflight words it (English; the API's sentence). */
     refusal: verdict && !verdict.launchable ? verdict.detail ?? null : null,
+    /** KT-2003 — the same refusal with its code, for `serverReasonText`. */
+    refusalSource,
     /** Pre-launch warning that does not block, e.g. absent from the CLI's listing. */
     notice: verdict?.launchable ? verdict.notice ?? null : null,
+    /** KT-2003 — the same notice with its code. */
+    noticeSource,
     provenance: entry ? catalogModelProvenance(entry, view) : null,
   };
 }
@@ -160,7 +169,7 @@ export function catalogModelOptions(
           t('modelCatalog.lastChecked', model.last_checked_at),
           !unavailable && model.last_answered_at ? t('modelCatalog.answered', model.last_answered_at) : '',
           model.reasoning_modes.length ? `${t('modelCatalog.reasoningModes')}: ${model.reasoning_modes.join(', ')}` : '',
-          unavailable ? model.unavailable_detail || model.unavailable_reason : '',
+          unavailable ? entryReasonText(t, model) || model.unavailable_reason : '',
           replacement ? t('modelCatalog.replacement', replacement) : '',
           observedCost(model.model_id) || t(`modelCatalog.costHint.${model.cost_hint ?? 'unknown'}`),
           model.privacy_note,
@@ -197,14 +206,14 @@ export function modelCallVerdict(
   model: string,
   checks: Array<Pick<ExternalApiTierCheck, 'model' | 'ok' | 'status' | 'hint'>> | undefined,
   saved: CatalogModelEntry[] | undefined,
-): { state: 'answered' | 'refused'; detail?: string | null } | null {
+): { state: 'answered' | 'refused'; detail?: string | null } & ServerReason | null {
   const check = checks?.find(entry => entry.model === model
     && (entry.status === 'ok' || entry.status === 'not_found' || entry.status === 'access_denied'));
   if (check) return check.ok ? { state: 'answered' } : { state: 'refused', detail: check.hint };
   const entry = saved?.find(candidate => candidate.model_id === model);
   if (entry?.availability === 'unavailable'
     && (entry.unavailable_reason === 'not_found' || entry.unavailable_reason === 'access_denied')) {
-    return { state: 'refused', detail: entry.unavailable_detail };
+    return { state: 'refused', detail: entry.unavailable_detail, code: entry.unavailable_code, reason: entry.unavailable_reason };
   }
   return entry?.last_answered_at ? { state: 'answered' } : null;
 }

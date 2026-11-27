@@ -284,7 +284,7 @@ the model its tier maps to.
   The choice is `turn_exact_model`, called once per turn.
   [src: file: backend/src/api/discussions/streaming.rs:2171] [src: file: backend/src/api/discussions/streaming.rs:3047]
   The id reaches the CLI as the token after `--model`.
-  [src: file: backend/src/agents/runner.rs:13989]
+  [src: file: backend/src/agents/runner.rs:14078]
 - **Update field, three states** (as `connection_id`): absent keeps the stored model,
   `null` clears it so the tier applies again, a string sets it. The field is applied
   last in the update transaction, so a model sent with an agent change wins over that
@@ -295,10 +295,29 @@ the model its tier maps to.
   fire only on a real change.
   [src: file: backend/src/db/discussions.rs:1194] [src: file: backend/src/db/discussions.rs:1226] [src: file: backend/src/api/discussions/crud.rs:1077]
 - **Validation** (`normalize_exact_model`): trimmed, not empty, one line of at most
-  200 characters, and not starting with `-`, because the CLI would read a leading dash
-  as an option (`-c`, `--dangerously-skip-permissions`). Inner spaces are kept: each id
-  is one argv token, not a shell line. A refused id returns an error and writes nothing.
-  [src: file: backend/src/models/setup.rs:1788] [src: file: backend/src/models/setup.rs:1800]
+  256 characters (`MAX_MODEL_ID_CHARS`), and not starting with `-`, because the CLI
+  would read a leading dash as an option. Inner spaces are kept: each id is one argv
+  token, not a shell line. A refused id returns an error and writes nothing.
+  [src: file: backend/src/models/setup.rs:1790] [src: file: backend/src/models/setup.rs:1804]
+- **Every stored model id, and the runner as a last check (KT-1998).** The same rule,
+  with the same 256-character limit as the manual catalogue, applies wherever a model id
+  is saved: Quick Prompt `agent_settings.model` (create, update, JSON import, bundle,
+  Artifact import, repository resource sync, a workflow import's bundled prompts);
+  workflow steps, shadow and merge agents, delegated workers and the Decide model
+  (create, update, step patch, import, bundle); a launch's `step_agents` choice, before
+  the run row exists; tier slots; the six model slots of an HTTP connection; agent and
+  connection fallback links; the worker and reviewer models of a task execution and a
+  campaign; the manual catalogue. A save that stores the text as given
+  (`check_model_id`) judges that raw text: a control character anywhere or a length
+  over the limit is refused; plain spaces around the id are tolerated. A blank optional
+  slot still means "no model". A database restore (`do_import_db`) is not checked: its
+  rows, like rows saved before the rule and hand-edited config, rely on the runner.
+  `launch_model_flag` resolves the model every CLI route (native ACP, adapted ACP,
+  direct CLI) receives and refuses one that starts with `-` or holds a control
+  character, naming the value and where it comes from (the run's pin, a tier slot of
+  the settings, the catalogue); no other model is substituted. HTTP agents send the
+  model in a JSON body, not on a command line.
+  [src: file: backend/src/models/setup.rs:1819] [src: file: backend/src/models/setup.rs:1848] [src: file: backend/src/models/setup.rs:1858] [src: file: backend/src/api/workflows.rs:461] [src: file: backend/src/db/orchestration.rs:1293] [src: file: backend/src/api/setup.rs:2707] [src: file: backend/src/agents/runner.rs:3673] [src: file: backend/src/agents/runner.rs:3733] [src: file: backend/src/agents/runner.rs:4601]
 - **Unknown ids** are accepted. At launch `preflight_resolve` passes an id absent from
   the catalogue through unchanged. Only an id that disappeared from the live catalogue
   is replaced by a same-agent model or refused.
