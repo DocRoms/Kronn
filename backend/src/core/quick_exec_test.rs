@@ -427,7 +427,7 @@ fn the_summary_is_capped_in_bytes() {
         true,
     );
     assert!(
-        extracted.summary.len() <= SUMMARY_MAX_BYTES + 32,
+        extracted.summary.len() <= SUMMARY_MAX_BYTES,
         "summary was {} bytes",
         extracted.summary.len()
     );
@@ -439,8 +439,118 @@ fn truncation_never_splits_a_character() {
     // Cutting mid-character would leave the summary invalid where a UI reads it.
     let text = "é".repeat(100);
     let cut = truncate_on_char_boundary(text, 51);
-    assert!(cut.starts_with(&"é".repeat(25)));
+    assert!(cut.starts_with(&"é".repeat(18)));
     assert!(cut.contains("truncated"));
+}
+
+/// KT-2116 — the cap bounds the marker too: what is kept plus the line that
+/// says it was cut never exceeds the cap.
+#[test]
+fn the_truncation_marker_is_inside_the_cap() {
+    for max in [40, 51, 100, 4_096] {
+        let cut = truncate_on_char_boundary("x".repeat(10_000), max);
+        assert!(cut.len() <= max, "cap {max}: {} bytes", cut.len());
+        assert!(cut.contains("truncated"));
+        let cut = truncate_on_char_boundary("é".repeat(10_000), max);
+        assert!(cut.len() <= max, "cap {max}: {} bytes", cut.len());
+    }
+}
+
+/// KT-2116 — a summary at the cap, marker included, stays within it.
+#[test]
+fn a_full_summary_stays_within_the_byte_cap_marker_included() {
+    let long_lines: String = (0..20)
+        .map(|i| format!("{} {}\n", "x".repeat(2_000), i))
+        .collect();
+    let extracted = summarise(
+        Summariser::Generic,
+        "",
+        &long_lines,
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        extracted.summary.len() <= SUMMARY_MAX_BYTES,
+        "summary was {} bytes",
+        extracted.summary.len()
+    );
+    assert!(extracted.summary.contains("truncated"));
+}
+
+/// KT-2116 — coloured output is summarised like plain output.
+#[test]
+fn coloured_output_is_summarised_like_plain_output() {
+    let plain = "test db::a::works ... ok\ntest db::b::breaks ... FAILED\n\
+                 test result: FAILED. 1 passed; 1 failed\n";
+    let coloured = "\x1b[32mtest\x1b[0m db::a::works ... \x1b[32mok\x1b[0m\n\
+                    \x1b[1m\x1b[31mtest db::b::breaks ... FAILED\x1b[0m\n\
+                    \x1b[1m\x1b[31mtest result: FAILED. 1 passed; 1 failed\x1b[0m\n";
+    let plain = summarise(
+        Summariser::CargoTest,
+        plain,
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    let coloured = summarise(
+        Summariser::CargoTest,
+        coloured,
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert_eq!(coloured.failed_tests, plain.failed_tests);
+    assert_eq!(coloured.summary, plain.summary);
+    assert!(!coloured.summary.contains('\u{1b}'));
+}
+
+/// KT-2116 — a coloured nextest run and a coloured clippy run are read the same
+/// as their plain forms.
+#[test]
+fn coloured_nextest_and_clippy_output_is_read_like_plain_output() {
+    let nextest = |fail: &str| {
+        format!(
+            "        {fail} [   0.020s] kronn-l1 core::sample::tests::the_late_one\n\
+             \x20   thread 'core::sample::tests::the_late_one' panicked at src/x.rs:9:5:\n\
+             \x20   late assertion failed\n\
+             ────────────\n\
+             \x20    Summary [  12.000s] 3 tests run: 2 passed, 1 failed, 0 skipped\n"
+        )
+    };
+    let plain = nextest("FAIL");
+    let coloured = format!(
+        "\x1b[1m\x1b[31m{}\x1b[0m",
+        nextest("FAIL").replace("FAIL", "\x1b[31mFAIL\x1b[0m")
+    );
+    let plain = summarise(
+        Summariser::CargoNextest,
+        "",
+        &plain,
+        QuickExecStatus::Failed,
+        true,
+    );
+    let coloured = summarise(
+        Summariser::CargoNextest,
+        "",
+        &coloured,
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert_eq!(coloured.failed_tests, plain.failed_tests);
+    assert_eq!(coloured.summary, plain.summary);
+
+    let clippy = "\x1b[1m\x1b[33mwarning\x1b[0m\x1b[1m: unused variable\x1b[0m\n\
+                  \x1b[1m\x1b[34m  --> \x1b[0msrc/lib.rs:4:9\n";
+    let extracted = summarise(
+        Summariser::Clippy,
+        "",
+        clippy,
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert_eq!(extracted.diagnostics.len(), 1);
+    assert_eq!(extracted.diagnostics[0].path.as_deref(), Some("src/lib.rs"));
+    assert_eq!(extracted.diagnostics[0].line, Some(4));
 }
 
 // ── summarisers ─────────────────────────────────────────────────────
@@ -456,6 +566,104 @@ fn cargo_test_failures_are_named() {
     );
     assert_eq!(extracted.failed_tests, vec!["db::b::breaks"]);
     assert!(extracted.summary.contains("test result: FAILED"));
+}
+
+#[test]
+fn cargo_test_keeps_an_error_without_a_code_beside_a_coded_one() {
+    let stderr = "error[E0425]: cannot find value `x` in this scope\n\
+                  error: linking with `cc` failed: exit status: 1\n\
+                  warning: unused variable: `y`\n";
+    let extracted = summarise(
+        Summariser::CargoTest,
+        "",
+        stderr,
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(extracted
+        .summary
+        .contains("error[E0425]: cannot find value `x` in this scope"));
+    assert!(extracted
+        .summary
+        .contains("error: linking with `cc` failed: exit status: 1"));
+    assert!(!extracted.summary.contains("warning: unused variable"));
+}
+
+#[test]
+fn cargo_test_error_lines_are_deduplicated() {
+    let stderr = "error: could not compile `kronn`\nerror: could not compile `kronn`\n";
+    let extracted = summarise(
+        Summariser::CargoTest,
+        "",
+        stderr,
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert_eq!(
+        extracted
+            .summary
+            .matches("error: could not compile `kronn`")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_cargo_test_failed_name_is_capped_on_a_char_boundary() {
+    let name = format!("a{}", "é".repeat(3_000));
+    let stdout = format!("test {name} ... FAILED\ntest result: FAILED. 0 passed; 1 failed");
+    let extracted = summarise(
+        Summariser::CargoTest,
+        &stdout,
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert_eq!(extracted.failed_tests.len(), 1);
+    let stored = &extracted.failed_tests[0];
+    assert!(stored.len() <= MAX_FAILED_TEST_NAME_BYTES);
+    assert!(name.starts_with(stored.as_str()));
+}
+
+#[test]
+fn a_nextest_failed_name_is_capped_on_a_char_boundary() {
+    let name = format!("core::a{}", "é".repeat(3_000));
+    let stderr = format!(
+        "        FAIL [   0.004s] kronn {name}\n\
+         ────────────\n\
+         \x20    Summary [  1.000s] 1 test run: 0 passed, 1 failed, 0 skipped\n\
+         \x20       FAIL [   0.004s] kronn {name}\n\
+         error: test run failed\n"
+    );
+    let extracted = summarise(
+        Summariser::CargoNextest,
+        "",
+        &stderr,
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert_eq!(extracted.failed_tests.len(), 1);
+    let stored = &extracted.failed_tests[0];
+    assert!(stored.len() <= MAX_FAILED_TEST_NAME_BYTES);
+    // The stored name keeps its binary id ahead of the test path.
+    assert!(format!("kronn {name}").starts_with(stored.as_str()));
+}
+
+#[test]
+fn a_vitest_failed_name_is_capped_on_a_char_boundary() {
+    let name = "é".repeat(3_000);
+    let stdout = format!("FAIL {name}\n");
+    let extracted = summarise(
+        Summariser::Vitest,
+        &stdout,
+        "",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert_eq!(extracted.failed_tests.len(), 1);
+    let stored = &extracted.failed_tests[0];
+    assert!(stored.len() <= MAX_FAILED_TEST_NAME_BYTES);
+    assert!(name.starts_with(stored.as_str()));
 }
 
 #[test]
@@ -583,6 +791,41 @@ fn a_count_of_zero_errors_is_not_a_first_error() {
     let extracted = summarise(
         Summariser::Generic,
         "build: 0 errors\n",
+        "boom\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(!extracted.summary.contains("first errors"));
+    assert!(extracted.summary.contains("boom"));
+}
+
+/// KT-2116 — `0 failed` is a benign count, `10 failed` is not: the first is a
+/// substring of the second.
+#[test]
+fn a_line_reporting_ten_or_more_failures_is_a_first_error() {
+    let mut stdout = String::from("running the suite\n10 failed, 40 passed\n");
+    for index in 0..30 {
+        stdout.push_str(&format!("progress line {index}\n"));
+    }
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        "make: Error 1\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        extracted.summary.contains("10 failed, 40 passed"),
+        "{}",
+        extracted.summary
+    );
+}
+
+#[test]
+fn a_zero_failure_count_on_its_own_line_is_still_benign() {
+    let extracted = summarise(
+        Summariser::Generic,
+        "suite: 0 failed\n",
         "boom\n",
         QuickExecStatus::Failed,
         true,

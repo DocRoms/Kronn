@@ -549,7 +549,7 @@ after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`. The preflight answers the verdict
 and a task header (reference, title, status, DoD items); the description and
 the history stay in `task_get`.
-`[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:378-425#check_command_line]`
+`[src: file: backend/src/core/quick_exec.rs:56-72#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:378-425#check_command_line]`
 `[src: file: backend/src/api/orchestration.rs:14663-14673#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls

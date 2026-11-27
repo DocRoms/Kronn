@@ -41,6 +41,9 @@ pub const ARTIFACT_MAX_BYTES: usize = 1_048_576;
 const CUT_MARKER_RESERVE: usize = 64;
 
 pub const MAX_FAILED_TESTS: usize = 50;
+/// KT-2116: a failed test's name is a line of the tool's output, and a name
+/// can be arbitrarily long (a generated test, a parametrised case).
+pub const MAX_FAILED_TEST_NAME_BYTES: usize = 300;
 pub const MAX_DIAGNOSTICS: usize = 50;
 pub const MAX_ARGV: usize = 64;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
@@ -943,10 +946,11 @@ pub fn summarise(
     let stdout = if summariser == Summariser::Collected {
         stdout
     } else {
-        redacted_stdout = redact(stdout);
+        redacted_stdout = redact(&strip_ansi(stdout));
         redacted_stdout.as_str()
     };
-    let stderr = &redact(stderr);
+    // KT-2116: colour codes leave before the summarisers read the lines.
+    let stderr = &redact(&strip_ansi(stderr));
 
     match summariser {
         Summariser::CargoTest => {
@@ -955,11 +959,24 @@ pub fn summarise(
                 // testing for an individual case ahead of it would swallow it.
                 if line.starts_with("test result:") || line.starts_with("error[") {
                     push_capped(&mut lines, line.trim().to_string(), MAX_DIAGNOSTICS);
+                } else if status != QuickExecStatus::Passed && line.starts_with("error: ") {
+                    // KT-2116: on a red run, an error without a code (a link, a
+                    // build script, `could not compile`) is an error too. A green
+                    // run's stray `error:` text (a test's own output) is not, and
+                    // `warning:` lines stay out.
+                    let text = line.trim().to_string();
+                    if !lines.contains(&text) {
+                        push_capped(&mut lines, text, MAX_DIAGNOSTICS);
+                    }
                 } else if let Some(name) = line
                     .strip_prefix("test ")
                     .and_then(|name| name.strip_suffix(" ... FAILED"))
                 {
-                    push_capped(&mut failed_tests, redact(name.trim()), MAX_FAILED_TESTS);
+                    push_capped(
+                        &mut failed_tests,
+                        cap_failed_test_name(redact(name.trim())),
+                        MAX_FAILED_TESTS,
+                    );
                 }
             }
             if status != QuickExecStatus::Passed {
@@ -1031,7 +1048,11 @@ pub fn summarise(
                 for marker in ["FAIL ", "× ", "✗ "] {
                     if let Some(name) = trimmed.strip_prefix(marker) {
                         // A vitest name is free text.
-                        push_capped(&mut failed_tests, redact(name.trim()), MAX_FAILED_TESTS);
+                        push_capped(
+                            &mut failed_tests,
+                            cap_failed_test_name(redact(name.trim())),
+                            MAX_FAILED_TESTS,
+                        );
                         break;
                     }
                 }
@@ -1173,6 +1194,21 @@ const ERROR_LINE_MAX_CHARS: usize = 300;
 /// a failed assertion, a panic), stdout then stderr, minus those the tail
 /// already shows. A line that merely says a count of `0 errors` is not one.
 /// The `--> file:line` a compiler prints under its error comes with it.
+/// KT-2116: a count of zero (`0 failed`) is benign, a count of ten or more
+/// (`10 failed`, which contains `0 failed`) is not.
+fn is_benign_count(lower: &str) -> bool {
+    ["0 error", "no error", "0 failed", "0 failure"]
+        .iter()
+        .any(|benign| {
+            lower.match_indices(benign).any(|(at, _)| {
+                !lower[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|before| before.is_ascii_digit())
+            })
+        })
+}
+
 fn first_error_lines(stdout: &str, stderr: &str, tail: &[String]) -> Vec<String> {
     const MARKERS: &[&str] = &[
         "error",
@@ -1193,10 +1229,8 @@ fn first_error_lines(stdout: &str, stderr: &str, tail: &[String]) -> Vec<String>
         .filter(|line| {
             let lower = line.to_ascii_lowercase();
             let location = after_error && line.starts_with("--> ");
-            after_error = MARKERS.iter().any(|marker| lower.contains(marker))
-                && !["0 error", "no error", "0 failed", "0 failure"]
-                    .iter()
-                    .any(|benign| lower.contains(benign));
+            after_error =
+                MARKERS.iter().any(|marker| lower.contains(marker)) && !is_benign_count(&lower);
             after_error || location
         })
         .filter(|line| !tail.iter().any(|shown| shown == line))
@@ -1383,13 +1417,28 @@ fn nextest_failed_tests<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String>
         .take(MAX_FAILED_TESTS)
         .map(|(name, status)| {
             // A test name is a Rust path, but a binary id comes from a path.
-            redact(&match status {
+            cap_failed_test_name(redact(&match status {
                 "FAIL" => name.to_string(),
                 "TMT" => format!("{name} (TIMEOUT)"),
                 status => format!("{name} ({status})"),
-            })
+            }))
         })
         .collect()
+}
+
+/// KT-2116: a failed test's name, cut to [`MAX_FAILED_TEST_NAME_BYTES`] on a
+/// character boundary. Applied after redaction, so a cut never splits a secret
+/// the redaction would have matched whole.
+fn cap_failed_test_name(mut name: String) -> String {
+    if name.len() <= MAX_FAILED_TEST_NAME_BYTES {
+        return name;
+    }
+    let mut cut = MAX_FAILED_TEST_NAME_BYTES;
+    while !name.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    name.truncate(cut);
+    name
 }
 
 /// What closes the output of a failed test: the next test, or the end of the
@@ -1619,17 +1668,73 @@ fn split_paren_location(head: &str) -> (Option<String>, Option<i64>) {
 
 /// Cut to at most `max` bytes without splitting a character. Truncating a
 /// multi-byte character would make the summary invalid UTF-8 at the boundary.
+/// KT-2116: the marker counts against the cap, so the result never exceeds `max`.
 fn truncate_on_char_boundary(mut text: String, max: usize) -> String {
+    const MARKER: &str = "\n… truncated\n";
     if text.len() <= max {
         return text;
     }
-    let mut cut = max;
+    let mut cut = max.saturating_sub(MARKER.len());
     while cut > 0 && !text.is_char_boundary(cut) {
         cut -= 1;
     }
     text.truncate(cut);
-    text.push_str("\n… truncated\n");
+    if max >= MARKER.len() {
+        text.push_str(MARKER);
+    }
     text
+}
+
+/// KT-2116: a stream with its ANSI colour and style sequences removed. A tool
+/// forced to colour wraps its status words and its `-->` locations in them, and
+/// the summarisers read the words, not the codes around them.
+fn strip_ansi(text: &str) -> String {
+    if !text.contains('\u{1b}') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            // CSI: parameters and intermediates, then a final byte in 0x40..=0x7E.
+            Some('[') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to BEL, or up to ESC \.
+            Some(']') => {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' {
+                        chars.next_if_eq(&'\\');
+                        break;
+                    }
+                }
+            }
+            // Charset designation (`ESC ( B`): an intermediate, then a final byte.
+            Some(intermediate) if ('\u{20}'..='\u{2f}').contains(&intermediate) => {
+                chars.next();
+                chars.next();
+            }
+            // Any other two-byte escape (`ESC =`, `ESC 7`).
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 /// Write the kept streams next to each other under `dir`.
