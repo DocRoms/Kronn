@@ -333,9 +333,9 @@ Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5#collection-detail-header]`
 `[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1948#collection-detail-header]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3345#selectedQuickPromptId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3825#selectedQuickApiId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:4248#selectedQuickExecId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3353#selectedQuickPromptId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3833#selectedQuickApiId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:4256#selectedQuickExecId]`
 
 The Projects initial loading state keeps the complete master/detail shell
 mounted. Its indicators render inside the sidebar and detail slots rather than
@@ -359,9 +359,9 @@ resource and collapsed resource categories, while search expands matching
 categories only temporarily.
 `[src: file: frontend/src/lib/automationNavigation.ts:20-33#readAutomationLastVisit]`
 `[src: file: frontend/src/lib/automationNavigation.ts:35-41#writeAutomationLastVisit]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:271-281#readCollapsedAutomationSections]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:172-181#AUTOMATION_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2699-2704#isGroupCollapsed]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:265-275#readCollapsedAutomationSections]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:604-613#AUTOMATION_COLLAPSED_STORAGE_KEY]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2680-2685#isGroupCollapsed]`
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
 `[src: file: frontend/src/pages/PagesPage.tsx:85#PAGE_NAVIGATION_STORAGE_KEY]`

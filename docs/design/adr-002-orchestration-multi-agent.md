@@ -77,7 +77,7 @@ composition and one genuinely new capability (protected merge), not reinvention.
    `discussion_workspaces.task_id` `[src: file: backend/src/db/sql/101_discussion_workspaces.sql:26]`).
 2. **Parent-discussion → child-sub-discussion relation** — none existed, and none lives on the
    discussion row: `Discussion` carries only the batch `workflow_run_id`
-   `[src: file: backend/src/models/discussions.rs:270-274#workflow_run_id]` and its task links sit in
+   `[src: file: backend/src/models/discussions.rs:280-284#workflow_run_id]` and its task links sit in
    `planning_task_discussions` (§2). The edge is carried by the execution row
    (`parent_discussion_id`, `sub_discussion_id`) `[src: file: backend/src/models/orchestration.rs:811-820#TaskExecution]`.
 3. **Cross-discussion wake** — deliver a child worker's result into the parent discussion and wake
@@ -444,7 +444,7 @@ All three are versioned (`"version": "1"`) and validated with the existing `Type
 `AgentDecision.gate_status` `[src: file: backend/src/models/agent_decisions.rs:53-77]`.
 
 **Brief v1** (backend → worker, immutable per attempt, frozen into the sub-discussion's
-`pin_first_message` `[src: file: backend/src/models/discussions.rs:243-245#pin_first_message]`):
+`pin_first_message` `[src: file: backend/src/models/discussions.rs:251-253#pin_first_message]`):
 ```json
 { "version":"1", "task_ref":"KT-142", "objective":"<task description>",
   "definition_of_done":[{"dod_id":"…","sentence":"…"}],

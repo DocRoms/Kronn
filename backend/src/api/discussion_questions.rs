@@ -280,8 +280,12 @@ pub async fn answer(
     }
 }
 
-/// Refuse an arbitration. Same shape as `answer`: the refusal is a decision,
-/// so it is published, routed to the asker and dispatched the same way.
+/// Refuse an arbitration. With a message, same shape as `answer`: the refusal
+/// is a decision, so it is published, routed to the asker and dispatched the
+/// same way. Without one (KT-1955) the card only closes: no lease, no resume,
+/// and no notify unless the close relayed the earlier answers of an ended
+/// step's message — the rule lives here and in the database, so every client
+/// of the route gets it. Human-only: this route is on no bridge-token list.
 pub async fn decline(
     State(state): State<AppState>,
     Path((discussion_id, question_id)): Path<(String, String)>,
@@ -298,16 +302,22 @@ pub async fn decline(
             config.server.avatar_email.clone(),
         )
     };
-    let lease = match dispute_lease(&state, &discussion_id, &question_id).await {
-        Ok(lease) => lease,
-        Err(refusal) => return *refusal,
+    let silent = discussion_questions::is_blank_refusal(&request);
+    // A silent close writes no docs and decides no dispute: it needs no lease.
+    let lease = if silent {
+        None
+    } else {
+        match dispute_lease(&state, &discussion_id, &question_id).await {
+            Ok(lease) => lease,
+            Err(refusal) => return *refusal,
+        }
     };
     let resolution_discussion_id = discussion_id.clone();
     let result = state
         .db
         .with_conn(move |conn| {
             let _lease = lease;
-            Ok(discussion_questions::decline(
+            Ok(discussion_questions::decline_reporting_relay(
                 conn,
                 &resolution_discussion_id,
                 &question_id,
@@ -318,7 +328,15 @@ pub async fn decline(
         })
         .await;
     match result {
-        Ok(Ok(question)) => {
+        // The one dispatch a blank refusal can enqueue: the earlier answers of
+        // an ended step's message, which waited for this card (KT-1401).
+        Ok(Ok((question, relayed))) if silent => {
+            if relayed {
+                state.agent_dispatch_notify.notify_one();
+            }
+            (StatusCode::OK, Json(ApiResponse::ok(question)))
+        }
+        Ok(Ok((question, _))) => {
             release_held_reviews(&state, &discussion_id, &question).await;
             state.agent_dispatch_notify.notify_one();
             let question = resume_and_reload(&state, &discussion_id, question).await;

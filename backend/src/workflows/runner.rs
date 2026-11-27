@@ -5436,14 +5436,7 @@ pub fn apply_step_snapshot(
                 .or_else(|| provenance.attempts.last());
             result.step_agent = selected.map(|attempt| attempt.agent.clone());
             result.step_model = selected.and_then(|attempt| {
-                let model = if !attempt.observed_models.is_empty() {
-                    Some(attempt.observed_models.join(" / "))
-                } else if attempt.model_applied == Some(false) {
-                    None
-                } else {
-                    attempt.resolved_model.clone()
-                };
-                model.map(|model| match attempt.tier {
+                attempt.served_model().map(|model| match attempt.tier {
                     crate::models::ModelTier::Default => model,
                     tier => format!("{model} · {}", format!("{tier:?}").to_lowercase()),
                 })

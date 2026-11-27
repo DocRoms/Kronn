@@ -646,6 +646,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                     workflow_name: r.get(19)?,
                     step_key: r.get(20)?,
                     step_name: r.get(21)?,
+                    model: None,
                 }),
                 None => None,
             };

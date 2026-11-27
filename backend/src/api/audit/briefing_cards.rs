@@ -734,7 +734,9 @@ pub fn on_card_answered(
                 text: answer.text.as_deref(),
             });
         } else {
-            // Another card of the set still waits for the human.
+            // Another card of the set still waits for the human, or was
+            // cancelled (KT-1955): either way it has no answer, so the set is
+            // not saved and what it would resume stays parked.
             return Ok(None);
         }
     }

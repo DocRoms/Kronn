@@ -1101,12 +1101,8 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/301_workflow_runs_shadow_tokens.sql"),
     ),
     (
-        "302_step_execution_artifacts",
-        include_str!("sql/302_step_execution_artifacts.sql"),
-    ),
-    (
-        "303_step_shadow_main_rows_restart",
-        include_str!("sql/303_step_shadow_main_rows_restart.sql"),
+        "302_discussion_question_cancelled",
+        include_str!("sql/302_discussion_question_cancelled.sql"),
     ),
     (
         "304_task_worker_processes",

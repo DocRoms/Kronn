@@ -23,7 +23,7 @@ const question: DiscussionQuestion = {
   items: [],
   multiple: false, recommended_option_ids: [], task_ref: null,
   requester_workflow_step: null, resume: null,
-  state: 'pending', answer: null,
+  state: 'pending', answer: null, cancellation: null,
   created_at: '2026-09-08T15:00:00Z', updated_at: '2026-09-08T15:00:00Z',
 };
 const content = '```kronn-question\n{"version":1,"key":"refresh-proof","question":"Choisir sans perdre le formulaire"}\n```';

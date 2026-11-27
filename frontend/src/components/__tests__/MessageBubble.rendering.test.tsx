@@ -687,6 +687,48 @@ describe('MessageBubble — agent label + copy buttons', () => {
     expect(label).not.toHaveTextContent('CLI 3');
   });
 
+  // KT-2009 — a step message writes the model its attempt ran, read from the run.
+  describe('the model of a workflow-step message', () => {
+    const step = {
+      run_id: 'run-1',
+      workflow_id: 'workflow-1',
+      workflow_name: 'Implementation',
+      step_key: 'orchestrate',
+      step_name: 'Orchestrate',
+    };
+    const modelOf = (container: HTMLElement) =>
+      container.querySelector('.disc-msg-agent-label [data-testid="agent-identity-model"]');
+
+    it('writes the model the run recorded for the attempt, keeping the workflow › step label', () => {
+      const { container } = renderBubble(
+        makeMessage({ role: 'Agent', agent_type: 'Codex', model: null }),
+        { workflowStep: { ...step, model: 'gpt-5-codex' } },
+      );
+      expect(modelOf(container)).toHaveAttribute('data-state', 'id');
+      expect(modelOf(container)).toHaveTextContent(/^gpt-5-codex$/);
+      const label = container.querySelector('.disc-msg-agent-label');
+      expect(label).toHaveTextContent('@codex · gpt-5-codex · étape de workflow');
+      expect(label).toHaveTextContent('Implementation › Orchestrate');
+    });
+
+    it('prefers the model the message itself recorded over the run’s', () => {
+      const { container } = renderBubble(
+        makeMessage({ role: 'Agent', agent_type: 'ClaudeCode', model: 'claude-opus-4-7' }),
+        { workflowStep: { ...step, model: 'claude-sonnet-4-6' } },
+      );
+      expect(modelOf(container)).toHaveTextContent(/^claude-opus-4-7$/);
+    });
+
+    it('keeps « model not recorded » when neither the message nor the run names one', () => {
+      const { container } = renderBubble(
+        makeMessage({ role: 'Agent', agent_type: 'ClaudeCode', model: '  ' }),
+        { workflowStep: step },
+      );
+      expect(modelOf(container)).toHaveAttribute('data-state', 'notRecorded');
+      expect(modelOf(container)).toHaveTextContent('modèle non enregistré');
+    });
+  });
+
   it('labels the agentless guided-tour document as preloaded Kronn content', () => {
     const { container } = renderBubble(
       makeMessage({

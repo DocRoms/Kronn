@@ -70,6 +70,12 @@ pub enum DiscussionQuestionState {
     /// Without it, picking an option was the only way to clear a question,
     /// including one that should never have been asked.
     Declined,
+    /// KT-1955 — a human refused the card without a message (« Refuser » with
+    /// an empty field): it was settled elsewhere, or no longer deserves a
+    /// decision. The reader sees a refusal; unlike `Declined`, nothing reaches
+    /// the asker and nothing resumes: no message, no dispatch, no workflow
+    /// launch. The card carries no answer, only who closed it and when.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -101,6 +107,20 @@ pub struct DiscussionQuestionWorkflowStep {
     #[serde(flatten)]
     pub identity: crate::models::WorkflowStepIdentity,
     pub active: bool,
+}
+
+/// Who refused a card without a message, and when (KT-1955).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionQuestionCancellation {
+    pub author_pseudo: String,
+    pub cancelled_at: String,
+    /// The card was the last pending one of a message whose step had ended,
+    /// and the human's answers to its other cards — which waited for it —
+    /// were then dispatched to an agent, the recap naming this card as
+    /// refused without a message (KT-1401). The refusal alone wakes nobody.
+    #[serde(default)]
+    pub relayed_answers: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -163,6 +183,8 @@ pub struct DiscussionQuestion {
     pub resume: Option<DiscussionQuestionResume>,
     pub state: DiscussionQuestionState,
     pub answer: Option<DiscussionQuestionAnswer>,
+    /// Set only when `state` is `cancelled`; such a card never has an answer.
+    pub cancellation: Option<DiscussionQuestionCancellation>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -763,7 +785,7 @@ pub fn report_invalid_cards(
 pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestionList> {
     let mut statement = conn.prepare(
         "SELECT id, source_message_id, fence_index, payload_json, state, answer_json, created_at, updated_at,
-                resume_state, resume_run_id, resume_error
+                resume_state, resume_run_id, resume_error, cancelled_by, cancelled_at
          FROM discussion_questions WHERE discussion_id = ?1 ORDER BY created_at, id"
     )?;
     let rows = statement.query_map([discussion_id], |r| {
@@ -779,6 +801,8 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
             r.get::<_, Option<String>>(8)?,
             r.get::<_, Option<String>>(9)?,
             r.get::<_, Option<String>>(10)?,
+            r.get::<_, Option<String>>(11)?,
+            r.get::<_, Option<String>>(12)?,
         ))
     })?;
     let mut questions = Vec::new();
@@ -795,12 +819,15 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
             resume_state,
             resume_run_id,
             resume_error,
+            cancelled_by,
+            cancelled_at,
         ) = row?;
         let spec: QuestionSpec = serde_json::from_str(&payload)?;
         let state = match state.as_str() {
             "pending" => DiscussionQuestionState::Pending,
             "answered" => DiscussionQuestionState::Answered,
             "declined" => DiscussionQuestionState::Declined,
+            "cancelled" => DiscussionQuestionState::Cancelled,
             _ => anyhow::bail!("Invalid question state"),
         };
         let requester_workflow_step =
@@ -825,6 +852,20 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
                 })
             })
             .transpose()?;
+        let cancellation = match (state, cancelled_by, cancelled_at) {
+            (DiscussionQuestionState::Cancelled, Some(author_pseudo), Some(cancelled_at)) => {
+                Some(DiscussionQuestionCancellation {
+                    author_pseudo,
+                    cancelled_at,
+                    relayed_answers: conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM agent_dispatch_jobs WHERE trigger_message_id=?1)",
+                        [relay_message_id(&id)],
+                        |r| r.get(0),
+                    )?,
+                })
+            }
+            _ => None,
+        };
         questions.push(DiscussionQuestion {
             id,
             discussion_id: discussion_id.to_string(),
@@ -843,6 +884,7 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
             resume,
             state,
             answer: answer.map(|a| serde_json::from_str(&a)).transpose()?,
+            cancellation,
             created_at,
             updated_at,
         });
@@ -1025,6 +1067,12 @@ fn publish_human_resolution(
 /// One resolved card of a message, as the room's agent reads it with the
 /// others: the question, then what the human chose or said.
 fn recap_line(question: &DiscussionQuestion) -> String {
+    if question.state == DiscussionQuestionState::Cancelled {
+        return format!(
+            "- {} → refusée sans message par un humain",
+            question.question
+        );
+    }
     let Some(answer) = question.answer.as_ref() else {
         return String::new();
     };
@@ -1115,7 +1163,13 @@ pub fn claim_resume(
         .into_iter()
         .find(|question| question.id == question_id)
         .ok_or(AnswerError::NotFound)?;
-    if question.state == DiscussionQuestionState::Pending {
+    // A card refused without a message decided nothing (KT-1955): what it
+    // would resume stays parked on it, never launched as if it had been
+    // answered.
+    if matches!(
+        question.state,
+        DiscussionQuestionState::Pending | DiscussionQuestionState::Cancelled
+    ) {
         return Ok(None);
     }
     let Some(resume) = question.resume else {
@@ -1261,11 +1315,13 @@ pub fn comment(
 
 /// Refuse an arbitration instead of answering it.
 ///
-/// Recorded as a resolution, not a deletion: the row keeps its author, its
-/// reason and its timestamp, and the asker receives the refusal through the
-/// same dispatch as an answer. A question the human will not arbitrate is a
-/// decision the agent has to act on — leaving it pending, or deleting it
-/// silently, both leave the agent waiting on something that will never come.
+/// With a message, the refusal is recorded as a resolution, not a deletion:
+/// the row keeps its author, its reason and its timestamp, and the asker
+/// receives the refusal through the same dispatch as an answer.
+///
+/// Without one — `reason` absent, empty or only whitespace — the card is
+/// closed and nothing else happens (KT-1955): waking an agent for a refusal
+/// that says nothing is useless. See [`close_without_message`].
 pub fn decline(
     conn: &Connection,
     discussion_id: &str,
@@ -1274,10 +1330,41 @@ pub fn decline(
     author_pseudo: &str,
     author_avatar_email: Option<&str>,
 ) -> Result<DiscussionQuestion, AnswerError> {
+    decline_reporting_relay(
+        conn,
+        discussion_id,
+        question_id,
+        request,
+        author_pseudo,
+        author_avatar_email,
+    )
+    .map(|(question, _)| question)
+}
+
+/// [`decline`], also saying whether a refusal without a message just relayed
+/// the earlier answers of its message to the room's agent — the one case
+/// where it enqueues a dispatch the caller must notify.
+pub fn decline_reporting_relay(
+    conn: &Connection,
+    discussion_id: &str,
+    question_id: &str,
+    request: &DeclineDiscussionQuestionRequest,
+    author_pseudo: &str,
+    author_avatar_email: Option<&str>,
+) -> Result<(DiscussionQuestion, bool), AnswerError> {
     if !nonempty_bounded(&request.idempotency_key, 128) {
         return Err(AnswerError::Invalid(
             "A bounded idempotency key is required".into(),
         ));
+    }
+    if is_blank_refusal(request) {
+        return close_without_message(
+            conn,
+            discussion_id,
+            question_id,
+            author_pseudo,
+            author_avatar_email,
+        );
     }
     conn.execute_batch("SAVEPOINT decline_discussion_question")
         .map_err(anyhow::Error::from)?;
@@ -1293,7 +1380,7 @@ pub fn decline(
         Ok(question) => {
             conn.execute_batch("RELEASE decline_discussion_question")
                 .map_err(anyhow::Error::from)?;
-            Ok(question)
+            Ok((question, false))
         }
         Err(error) => {
             let _ = conn.execute_batch(
@@ -1345,8 +1432,11 @@ fn decline_inner(
             return Err(AnswerError::Conflict);
         }
         // An answered question is decided. Refusing it afterwards would rewrite
-        // a decision the agent already received.
-        DiscussionQuestionState::Answered => return Err(AnswerError::Conflict),
+        // a decision the agent already received. One refused without a
+        // message is closed.
+        DiscussionQuestionState::Answered | DiscussionQuestionState::Cancelled => {
+            return Err(AnswerError::Conflict)
+        }
         DiscussionQuestionState::Pending => {}
     }
     let now = Utc::now();
@@ -1359,13 +1449,11 @@ fn decline_inner(
         answered_at: now.to_rfc3339(),
         message_id: message_id.clone(),
     };
+    // A blank refusal never reaches here: `decline` closes it silently.
     let content = format!(
         "Arbitrage refusé — {}\n\n{}",
         question.question,
-        reason.as_deref().unwrap_or(
-            "Aucune raison donnée. Ne bloque pas sur cette question : poursuis \
-                        sans elle, ou reformule-la si la décision reste nécessaire."
-        )
+        reason.as_deref().unwrap_or_default()
     );
     let kronn_key = stored_key(conn, question_id)?;
     if let Some(mut target) = cross_dispute_of(conn, discussion_id, &kronn_key)? {
@@ -1426,6 +1514,173 @@ fn stored_key(conn: &Connection, question_id: &str) -> Result<String, AnswerErro
             |row| row.get(0),
         )
         .map_err(anyhow::Error::from)?)
+}
+
+/// A refusal that says nothing: `reason` absent, empty or only whitespace.
+pub fn is_blank_refusal(request: &DeclineDiscussionQuestionRequest) -> bool {
+    request
+        .reason
+        .as_deref()
+        .is_none_or(|reason| reason.trim().is_empty())
+}
+
+/// A human refused a pending card without a message (KT-1955): close it and
+/// do nothing else.
+///
+/// The refusal is told to nobody: no message about it, no target, no
+/// dispatch, no ceiling or dispute decision, no workflow resume. Whatever was
+/// parked on the card stays parked, and an agent reading the key gets
+/// `cancelled` with no answer. Only the human UI reaches this: `decline` is on
+/// no bridge-token list and no agent tool leads here.
+///
+/// One exception, owed to earlier answers rather than to this refusal: see
+/// [`relay_earlier_answers`]. The returned flag says it happened.
+///
+/// Repeating it on a closed card returns that card unchanged (a double click,
+/// a second tab) and relays nothing again; a card already answered or refused
+/// with a message is a conflict.
+fn close_without_message(
+    conn: &Connection,
+    discussion_id: &str,
+    question_id: &str,
+    author_pseudo: &str,
+    author_avatar_email: Option<&str>,
+) -> Result<(DiscussionQuestion, bool), AnswerError> {
+    let find = || -> Result<DiscussionQuestion, AnswerError> {
+        list(conn, discussion_id)?
+            .questions
+            .into_iter()
+            .find(|q| q.id == question_id)
+            .ok_or(AnswerError::NotFound)
+    };
+    let question = find()?;
+    match question.state {
+        DiscussionQuestionState::Cancelled => return Ok((question, false)),
+        DiscussionQuestionState::Answered | DiscussionQuestionState::Declined => {
+            return Err(AnswerError::Conflict)
+        }
+        DiscussionQuestionState::Pending => {}
+    }
+    conn.execute_batch("SAVEPOINT close_discussion_question")
+        .map_err(anyhow::Error::from)?;
+    let outcome = (|| -> Result<(DiscussionQuestion, bool), AnswerError> {
+        let now = Utc::now().to_rfc3339();
+        let changed = conn
+            .execute(
+                "UPDATE discussion_questions SET state='cancelled', cancelled_by=?2, \
+                 cancelled_at=?3, updated_at=?3 WHERE id=?1 AND discussion_id=?4 AND state='pending'",
+                params![question_id, author_pseudo, now, discussion_id],
+            )
+            .map_err(anyhow::Error::from)?;
+        let question = find()?;
+        if changed == 0 {
+            // Lost a race to an answer or a refusal written meanwhile, or to
+            // the same blank refusal from another tab, which relayed already.
+            return match question.state {
+                DiscussionQuestionState::Cancelled => Ok((question, false)),
+                _ => Err(AnswerError::Conflict),
+            };
+        }
+        let relayed = relay_earlier_answers(
+            conn,
+            discussion_id,
+            &question,
+            author_pseudo,
+            author_avatar_email,
+        )?;
+        Ok((if relayed { find()? } else { question }, relayed))
+    })();
+    match outcome {
+        Ok(closed) => {
+            conn.execute_batch("RELEASE close_discussion_question")
+                .map_err(anyhow::Error::from)?;
+            Ok(closed)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO close_discussion_question; RELEASE close_discussion_question",
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Where a blank refusal relays the earlier answers of its message.
+fn relay_message_id(question_id: &str) -> String {
+    format!("question-relay:{question_id}")
+}
+
+/// KT-1401 — when the step that asked has ended, the answers to the earlier
+/// cards of its message are only recorded: the last pending card carries them
+/// to the room's agent. A blank refusal of that last card (KT-1955) must not
+/// lose them. So, when `question` — just closed — was the last pending card of
+/// such a message and at least one other card of it was answered or refused
+/// with a message, those decisions are published once to the room's agent,
+/// exactly as an answer on this card would have carried them: the same
+/// recap, this card listed as refused without a message, one dispatch.
+///
+/// The wake is owed to the earlier answers, not to the refusal: with none to
+/// carry, or while the step still runs (each answer already reached it),
+/// nothing is published. Returns whether a message was published.
+fn relay_earlier_answers(
+    conn: &Connection,
+    discussion_id: &str,
+    question: &DiscussionQuestion,
+    author_pseudo: &str,
+    author_avatar_email: Option<&str>,
+) -> Result<bool, AnswerError> {
+    let step_ended = question
+        .requester_workflow_step
+        .as_ref()
+        .is_some_and(|source| !source.active);
+    if !step_ended {
+        return Ok(false);
+    }
+    let mut cards = list(conn, discussion_id)?
+        .questions
+        .into_iter()
+        .filter(|q| q.source_message_id == question.source_message_id)
+        .collect::<Vec<_>>();
+    let still_pending = cards
+        .iter()
+        .any(|q| q.state == DiscussionQuestionState::Pending);
+    let decided = cards.iter().any(|q| {
+        q.id != question.id
+            && matches!(
+                q.state,
+                DiscussionQuestionState::Answered | DiscussionQuestionState::Declined
+            )
+    });
+    if still_pending || !decided {
+        return Ok(false);
+    }
+    cards.sort_by_key(|q| q.fence_index);
+    let recap = cards
+        .iter()
+        .map(recap_line)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = format!(
+        "Arbitrage refusé sans message — {}\n\nCe refus ne décide rien. Il fermait la dernière \
+         question en attente de ce message ; voici les décisions humaines sur ses questions :\n{recap}",
+        question.question
+    );
+    let message_id = relay_message_id(&question.id);
+    publish_human_resolution(
+        conn,
+        discussion_id,
+        question,
+        &message_id,
+        content,
+        &message_id,
+        Utc::now(),
+        author_pseudo,
+        author_avatar_email,
+        true,
+        RoomAgentWake::ForAnswer,
+    )?;
+    Ok(true)
 }
 
 /// The cross-agent finding a card decides, when the card is a dispute card
@@ -1587,7 +1842,12 @@ fn answer_inner(
     }
     // A refused question is decided. Answering it afterwards would publish a
     // second resolution and a second dispatch for one decision.
-    if question.state == DiscussionQuestionState::Declined {
+    // One refused without a message is closed: reopening it by an answer is
+    // not offered.
+    if matches!(
+        question.state,
+        DiscussionQuestionState::Declined | DiscussionQuestionState::Cancelled
+    ) {
         return Err(AnswerError::Conflict);
     }
     if question.state == DiscussionQuestionState::Answered {
@@ -1886,3 +2146,6 @@ fn answer_inner(
 
 #[cfg(all(test, feature = "full-tests"))]
 mod tests;
+
+#[cfg(all(test, feature = "full-tests"))]
+mod question_cancel_tests;

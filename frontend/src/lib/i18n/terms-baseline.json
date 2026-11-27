@@ -130,7 +130,7 @@
     },
     "zh": {
       "agent": {
-        "智能体": 184
+        "智能体": 182
       },
       "credentials": {
         "凭证": 10
@@ -2200,8 +2200,6 @@
       "disc.noMcps": ["474532ea","term:settings:配置"],
       "disc.parallelLaunchCount": ["5db9d36e","term:agent:智能体"],
       "disc.portability.exportHint": ["51bbee7d","term:discussion:对话"],
-      "disc.question.commentHint": ["56e55042","term:agent:智能体"],
-      "disc.question.declineHint": ["286aa8bc","term:agent:智能体"],
       "disc.routingDisabledAgent": ["6fe6b92e","term:settings:配置"],
       "disc.routingHelpDefault": ["601bd421","term:settings:配置"],
       "disc.routingHelpDefaultDisabled": ["42b5b5dc","term:settings:配置"],

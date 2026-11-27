@@ -95,6 +95,10 @@ pub mod versions;
 pub mod vibe_trust;
 pub mod yaml_lite;
 
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "ts_rs_bindings_test.rs"]
+mod ts_rs_bindings_test;
+
 // crypto_test.rs removed 2026-07-01 — it was a strict subset of crypto.rs's
 // richer inline `tests` module (roundtrip / wrong-key / base64 / parse / mask),
 // adding duplicate tests with zero new coverage. The inline suite + proptest

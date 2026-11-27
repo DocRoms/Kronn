@@ -55,7 +55,7 @@ does not resolve the question and does not start it. The declaration accepts at
 most 16 variables. Workflow ids are non-empty and at most 128 characters;
 variable names are 1–64 ASCII letters, digits, `_`, `-`, or `.`, and each value
 is a control-free string of at most 8,000 characters.
-`[src: file: backend/src/db/discussion_questions.rs:239-246#valid_resume_variable] [src: file: backend/src/db/discussion_questions.rs:354-361#nonempty_bounded]`
+`[src: file: backend/src/db/discussion_questions.rs:260-267#valid_resume_variable] [src: file: backend/src/db/discussion_questions.rs:248-255#nonempty_bounded]`
 `[src: file: backend/src/api/discussion_questions.rs:64-135#launch_question_resume] [src: file: backend/src/api/discussion_questions.rs:137-164#resume_and_reload]`
 
 Pause execution, delegation and completion of the affected lot until the human
@@ -87,6 +87,38 @@ is itself an answer to the next agent that considers asking again.
 SQLite cannot extend one in place (migration 175 is the precedent).
 `[src: file: backend/src/db/sql/177_discussion_question_declined.sql:1-19#declined]`
 
+« Refuser » depends on its free-text field (KT-1955). **With a message**, it is
+the refusal above: published, routed to the asker, dispatched, and what waited
+resumes. **Without one** — `reason` absent, empty or only whitespace — it only
+closes the card: waking an agent for a refusal that says nothing is useless,
+and a card settled elsewhere (in a CLI, by voice) or no longer worth deciding
+could otherwise only leave the red banner by waking one. The rule lives on the
+server, in `decline`, so every client of the route gets it; there is no
+separate cancel route or button. Such a card is stored as `cancelled`, with
+`answer: null` and `cancellation: {author_pseudo, cancelled_at}`, and reads as
+a refusal in the room: « Arbitrage refusé », « Refusé sans message : l'agent
+n'a pas été prévenu et rien n'a été lancé », who and when. The silent close
+writes only the card's row: no room message, no target, no dispatch notify, no
+ceiling, dispute or Docker-elevation decision, and no docs lease is taken.
+`claim_resume` refuses such a card, so a declared workflow `resume` stays
+`pending` (never launched), and when something waited on the card it says
+« Ce qui attendait cet arbitrage ne reprend pas ». Repeating a blank refusal
+returns the same card; an answered or declined card answers 409, and a
+cancelled card refuses later answers, refusals and comments. It leaves
+`pending_count`, `pending_question_count` and the monitor badge. Only a human
+refuses: `decline` is on no bridge-token list and no agent tool reaches it.
+For an agent, `disc_question_list({key})` returns `state: "cancelled"`: the
+human refused without a message, the agent was not woken, the answer is null
+and `cancellation` says who and when — not consent, nothing resumes, do not
+advance the affected lot; ask again only if the decision is still needed. A
+sibling card's recap reads « refusée sans message par un humain ». Migration
+302 rebuilt the table to add the state.
+`[src: file: backend/src/db/discussion_questions.rs:1285-1290#is_blank_refusal]`
+`[src: file: backend/src/db/discussion_questions.rs:1307-1371#close_without_message]`
+`[src: file: backend/src/db/discussion_questions.rs:1390-1449#relay_earlier_answers]`
+`[src: file: backend/src/api/discussion_questions.rs:288-366#silent]`
+`[src: file: backend/src/db/sql/302_discussion_question_cancelled.sql:1-20#cancelled]`
+
 API contract: `GET /api/discussions/{id}/questions` returns
 `{questions, pending_count}` including answered history;
 `POST /api/discussions/{id}/questions/{question_id}/answer` accepts
@@ -98,15 +130,14 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 `POST /api/discussions/{id}/questions/{question_id}/comment` accepts
 `{text, idempotency_key}`: the asker receives the text through the same path,
 as a message that says it is not a decision, and the question stays pending.
+`decline` accepts `{reason?, idempotency_key}`; a blank `reason` closes the
+card silently (see above).
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
 `[src: file: backend/src/lib.rs:2743-2791#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:871-986#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
-
-## Steering cards (`kronn-important`)
-
 A decision, a scope change, a DoD waiver, a blocking alert, an action needed
 from a human or an accepted delivery is published as a `kronn-important` fence,
 which mints a DURABLE card — not a bold line, a colour or an emoji. The

@@ -186,7 +186,7 @@ of its reviewer sessions (`DiscussionMessage.cost_usd`); `TaskExecution` has no
 cost field today. `cost_usd` is set only when every agent reply carries a
 cost; otherwise it is `null` and `cost_unknown_reason` says why (a partial
 sum, or the worker session's own reason when no reply is priced), so a
-missing or partial cost never reads as the whole (KT-1802). `[src: file: backend/src/models/discussions.rs:369-371#cost_usd]`
+missing or partial cost never reads as the whole (KT-1802). `[src: file: backend/src/models/discussions.rs:377-379#cost_usd]`
 
 ## 6. Resume and cleanup
 

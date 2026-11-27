@@ -6,7 +6,9 @@ use anyhow::{bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{ActiveWorkflowStep, WorkflowStepIdentity};
+use crate::models::{
+    ActiveWorkflowStep, WorkflowAgentAttempt, WorkflowAgentProvenance, WorkflowStepIdentity,
+};
 
 fn identity_from_row(
     row: &rusqlite::Row<'_>,
@@ -18,6 +20,7 @@ fn identity_from_row(
         workflow_name: row.get(start + 2)?,
         step_key: row.get(start + 3)?,
         step_name: row.get(start + 4)?,
+        model: None,
     })
 }
 
@@ -109,19 +112,37 @@ pub fn message_authors(
 ) -> Result<std::collections::HashMap<String, WorkflowStepIdentity>> {
     let mut statement = conn.prepare(
         "SELECT mca.message_id, a.run_id, a.workflow_id, a.workflow_name,
-                a.step_key, a.step_name
+                a.step_key, a.step_name, m.timestamp, s.agent_type, s.model
            FROM message_cli_authors mca
            JOIN messages m ON m.id = mca.message_id
            JOIN workflow_step_room_sessions link ON link.session_pk = mca.cli_session_id
            JOIN workflow_step_room_activities a
              ON a.run_id = link.run_id AND a.step_key = link.step_key
+           LEFT JOIN discussion_sessions s ON s.id = mca.cli_session_id
           WHERE m.discussion_id = ?1 AND a.disc_id = ?1",
     )?;
-    let rows = statement.query_map([disc_id], |row| {
-        Ok((row.get::<_, String>(0)?, identity_from_row(row, 1)?))
-    })?;
-    rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
-        .map_err(Into::into)
+    let rows = statement
+        .query_map([disc_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                identity_from_row(row, 1)?,
+                PostedBy::from_row(row, 6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // One read of a step's attempts, however many messages it posted.
+    let mut attempts = std::collections::HashMap::<(String, String), Vec<_>>::new();
+    let mut authors = std::collections::HashMap::with_capacity(rows.len());
+    for (message_id, mut identity, posted) in rows {
+        let key = (identity.run_id.clone(), identity.step_name.clone());
+        if !attempts.contains_key(&key) {
+            let read = step_attempts(conn, &key.0, &key.1)?;
+            attempts.insert(key.clone(), read);
+        }
+        identity.model = posted.model(&attempts[&key]);
+        authors.insert(message_id, identity);
+    }
+    Ok(authors)
 }
 
 /// Workflow-step provenance of one message, plus whether that exact step is
@@ -131,23 +152,125 @@ pub fn message_author(
     disc_id: &str,
     message_id: &str,
 ) -> Result<Option<(WorkflowStepIdentity, bool)>> {
-    conn.query_row(
-        "SELECT a.run_id, a.workflow_id, a.workflow_name, a.step_key, a.step_name,
-                CASE WHEN a.finished_at IS NULL AND s.status != 'left'
-                           AND r.status = 'Running' THEN 1 ELSE 0 END
-           FROM message_cli_authors mca
-           JOIN messages m ON m.id = mca.message_id
-           JOIN discussion_sessions s ON s.id = mca.cli_session_id
-           JOIN workflow_step_room_sessions link ON link.session_pk = s.id
-           JOIN workflow_step_room_activities a
-             ON a.run_id = link.run_id AND a.step_key = link.step_key
-           JOIN workflow_runs r ON r.id = a.run_id
-          WHERE mca.message_id = ?1 AND m.discussion_id = ?2 AND a.disc_id = ?2",
-        params![message_id, disc_id],
-        |row| Ok((identity_from_row(row, 0)?, row.get::<_, bool>(5)?)),
-    )
-    .optional()
-    .map_err(Into::into)
+    let found = conn
+        .query_row(
+            "SELECT a.run_id, a.workflow_id, a.workflow_name, a.step_key, a.step_name,
+                    CASE WHEN a.finished_at IS NULL AND s.status != 'left'
+                               AND r.status = 'Running' THEN 1 ELSE 0 END,
+                    m.timestamp, s.agent_type, s.model
+               FROM message_cli_authors mca
+               JOIN messages m ON m.id = mca.message_id
+               JOIN discussion_sessions s ON s.id = mca.cli_session_id
+               JOIN workflow_step_room_sessions link ON link.session_pk = s.id
+               JOIN workflow_step_room_activities a
+                 ON a.run_id = link.run_id AND a.step_key = link.step_key
+               JOIN workflow_runs r ON r.id = a.run_id
+              WHERE mca.message_id = ?1 AND m.discussion_id = ?2 AND a.disc_id = ?2",
+            params![message_id, disc_id],
+            |row| {
+                Ok((
+                    identity_from_row(row, 0)?,
+                    row.get::<_, bool>(5)?,
+                    PostedBy::from_row(row, 6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((mut identity, active, posted)) = found else {
+        return Ok(None);
+    };
+    let attempts = step_attempts(conn, &identity.run_id, &identity.step_name)?;
+    identity.model = posted.model(&attempts);
+    Ok(Some((identity, active)))
+}
+
+/// When, and by which session, a step message was posted (KT-2009).
+struct PostedBy {
+    timestamp: String,
+    agent_type: Option<String>,
+    declared_model: Option<String>,
+}
+
+impl PostedBy {
+    fn from_row(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            timestamp: row.get(start)?,
+            agent_type: row.get(start + 1)?,
+            declared_model: row.get(start + 2)?,
+        })
+    }
+
+    /// The model of the message's author, never guessed: the attempt running
+    /// when it was posted, else what its session declared at join.
+    fn model(&self, attempts: &[WorkflowAgentAttempt]) -> Option<String> {
+        // The attempt's model wins: the runner resolves it at launch for that
+        // very attempt, while a session declares once, at join, for itself.
+        attempt_running_at(attempts, &self.timestamp, self.agent_type.as_deref())
+            .and_then(WorkflowAgentAttempt::served_model)
+            .or_else(|| {
+                self.declared_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(str::to_string)
+            })
+    }
+}
+
+/// Every attempt the run recorded for its step `step_name`, over all passes of
+/// it. Empty when the run is gone, never ran it, or predates attempt records.
+fn step_attempts(
+    conn: &Connection,
+    run_id: &str,
+    step_name: &str,
+) -> Result<Vec<WorkflowAgentAttempt>> {
+    let mut statement = conn.prepare(
+        "SELECT json_extract(e.value, '$.agent_provenance')
+           FROM workflow_runs r,
+                json_each(CASE WHEN json_valid(r.step_results_json)
+                               THEN r.step_results_json ELSE '[]' END) e
+          WHERE r.id = ?1
+            AND json_extract(e.value, '$.step_name') = ?2
+            AND json_type(e.value, '$.agent_provenance') = 'object'",
+    )?;
+    let provenances = statement
+        .query_map(params![run_id, step_name], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(provenances
+        .iter()
+        .filter_map(|json| serde_json::from_str::<WorkflowAgentProvenance>(json).ok())
+        .flat_map(|provenance| provenance.attempts)
+        .collect())
+}
+
+/// The attempt running at `posted_at`: the latest one started by then and not
+/// over yet, preferring one of the posting session's agent.
+fn attempt_running_at<'a>(
+    attempts: &'a [WorkflowAgentAttempt],
+    posted_at: &str,
+    agent_type: Option<&str>,
+) -> Option<&'a WorkflowAgentAttempt> {
+    // An attempt's end is measured once its process has exited; a second
+    // absorbs a coarser message clock, and a next attempt still wins by its
+    // later start.
+    const END_GRACE_MS: i64 = 1_000;
+    let posted = chrono::DateTime::parse_from_rfc3339(posted_at)
+        .ok()?
+        .with_timezone(&Utc);
+    attempts
+        .iter()
+        .filter(|attempt| {
+            let ran_ms = i64::try_from(attempt.duration_ms).unwrap_or(i64::MAX);
+            let end = chrono::TimeDelta::try_milliseconds(ran_ms.saturating_add(END_GRACE_MS))
+                .and_then(|ran| attempt.started_at.checked_add_signed(ran));
+            // An end past chrono's range is no end: the attempt covers it.
+            attempt.started_at <= posted && end.is_none_or(|end| posted <= end)
+        })
+        .max_by_key(|attempt| {
+            let same_agent =
+                agent_type.is_some_and(|agent| format!("{:?}", attempt.agent) == agent);
+            (same_agent, attempt.started_at)
+        })
 }
 
 pub fn session_identity(
@@ -497,5 +620,298 @@ mod tests {
             "active",
             "no eviction from another room"
         );
+    }
+
+    // KT-2009 — the model of a step message comes from the attempt that ran
+    // when it was posted.
+
+    const T0: &str = "2026-11-24T10:00:00Z";
+
+    fn at(seconds: i64) -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339(T0)
+            .unwrap()
+            .with_timezone(&Utc)
+            + chrono::Duration::seconds(seconds)
+    }
+
+    fn attempt(
+        id: u32,
+        agent: crate::models::AgentType,
+        resolved_model: Option<&str>,
+        from: i64,
+        to: i64,
+    ) -> WorkflowAgentAttempt {
+        WorkflowAgentAttempt {
+            id,
+            role: crate::models::WorkflowAgentAttemptRole::Initial,
+            retry: id,
+            agent,
+            tier: crate::models::ModelTier::Default,
+            connection_id: None,
+            requested_model: resolved_model.map(str::to_string),
+            resolved_model: resolved_model.map(str::to_string),
+            preflight_warning: None,
+            model_applied: resolved_model.map(|_| true),
+            observed_models: vec![],
+            format_fallback: false,
+            npx_fallback_command: None,
+            npx_fallback_version: None,
+            started_at: at(from),
+            duration_ms: u64::try_from((to - from) * 1_000).unwrap(),
+            succeeded: true,
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            session_id: None,
+            cost_usd: None,
+            cost_unknown_reason: None,
+        }
+    }
+
+    /// The run's step results: one row per pass of the step `Orchestrate`.
+    fn record_passes(conn: &Connection, passes: Vec<Vec<WorkflowAgentAttempt>>) {
+        let rows: Vec<serde_json::Value> = passes
+            .into_iter()
+            .map(|attempts| {
+                serde_json::json!({
+                    "step_name": "Orchestrate",
+                    "status": "Success",
+                    "output": "done",
+                    "duration_ms": 0,
+                    "agent_provenance": WorkflowAgentProvenance {
+                        attempts,
+                        selected_attempt: None,
+                    },
+                })
+            })
+            .collect();
+        conn.execute(
+            "UPDATE workflow_runs SET step_results_json = ?1 WHERE id = 'run'",
+            [serde_json::Value::Array(rows).to_string()],
+        )
+        .unwrap();
+    }
+
+    /// The step joined with `agent`, as its bridge does for each attempt.
+    fn step_session(conn: &Connection, agent: &str, session: &str) -> i64 {
+        join(conn, "run", "orchestrate", "room", agent, session)
+            .unwrap()
+            .session_pk
+    }
+
+    fn post(conn: &Connection, message_id: &str, session_pk: i64, seconds: i64) {
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp,
+                                   sort_order)
+             VALUES (?1, 'room', 'Agent', 'working', 'ClaudeCode', ?2, ?3)",
+            params![message_id, at(seconds).to_rfc3339(), seconds],
+        )
+        .unwrap();
+        crate::db::discussions::set_message_cli_author(conn, message_id, session_pk).unwrap();
+    }
+
+    /// The model each read gives the message; both reads must agree.
+    fn model_of(conn: &Connection, message_id: &str) -> Option<String> {
+        let listed = message_authors(conn, "room").unwrap()[message_id]
+            .model
+            .clone();
+        let (single, _) = message_author(conn, "room", message_id)
+            .unwrap()
+            .expect("the step message keeps its provenance");
+        assert_eq!(single.model, listed, "the two reads agree");
+        listed
+    }
+
+    fn step_room(conn: &Connection) {
+        seed(conn, "Running");
+        begin_activity(
+            conn,
+            "run",
+            "orchestrate",
+            "Orchestrate",
+            "room",
+            "ClaudeCode",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_step_message_reads_the_model_its_attempt_ran() {
+        let conn = conn();
+        step_room(&conn);
+        let session = step_session(&conn, "ClaudeCode", "s1");
+        post(&conn, "m", session, 30);
+        record_passes(
+            &conn,
+            vec![vec![attempt(
+                1,
+                crate::models::AgentType::ClaudeCode,
+                Some("claude-opus-4-7"),
+                0,
+                60,
+            )]],
+        );
+
+        assert_eq!(model_of(&conn, "m").as_deref(), Some("claude-opus-4-7"));
+        let json = serde_json::to_value(&message_authors(&conn, "room").unwrap()["m"]).unwrap();
+        assert_eq!(json["model"], "claude-opus-4-7");
+    }
+
+    #[test]
+    fn a_fallback_or_retry_attempt_message_reads_that_attempt_model() {
+        let conn = conn();
+        step_room(&conn);
+        let first = step_session(&conn, "ClaudeCode", "s1");
+        post(&conn, "initial", first, 5);
+        let fallback = step_session(&conn, "Codex", "s2");
+        post(&conn, "fallback", fallback, 30);
+        let replay = step_session(&conn, "ClaudeCode", "s3");
+        post(&conn, "replay", replay, 130);
+        record_passes(
+            &conn,
+            vec![
+                vec![
+                    attempt(
+                        1,
+                        crate::models::AgentType::ClaudeCode,
+                        Some("claude-opus-4-7"),
+                        0,
+                        10,
+                    ),
+                    attempt(
+                        2,
+                        crate::models::AgentType::Codex,
+                        Some("gpt-5-codex"),
+                        20,
+                        40,
+                    ),
+                ],
+                // The step ran again later in the run, on another model.
+                vec![attempt(
+                    1,
+                    crate::models::AgentType::ClaudeCode,
+                    Some("claude-sonnet-4-6"),
+                    120,
+                    140,
+                )],
+            ],
+        );
+
+        assert_eq!(
+            model_of(&conn, "initial").as_deref(),
+            Some("claude-opus-4-7")
+        );
+        assert_eq!(model_of(&conn, "fallback").as_deref(), Some("gpt-5-codex"));
+        assert_eq!(
+            model_of(&conn, "replay").as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn the_attempt_model_wins_over_the_session_declared_one() {
+        let conn = conn();
+        step_room(&conn);
+        let session = step_session(&conn, "Codex", "s1");
+        crate::db::discussion_sessions::set_session_model(&conn, session, "declared-model")
+            .unwrap();
+        post(&conn, "covered", session, 30);
+        post(&conn, "uncovered", session, 300);
+        record_passes(
+            &conn,
+            vec![vec![attempt(
+                1,
+                crate::models::AgentType::Codex,
+                Some("gpt-5-codex"),
+                0,
+                60,
+            )]],
+        );
+
+        assert_eq!(model_of(&conn, "covered").as_deref(), Some("gpt-5-codex"));
+        assert_eq!(
+            model_of(&conn, "uncovered").as_deref(),
+            Some("declared-model"),
+            "a declaration stands when no attempt covers the message"
+        );
+    }
+
+    #[test]
+    fn a_step_message_whose_run_recorded_no_model_stays_unknown() {
+        let conn = conn();
+        step_room(&conn);
+        let session = step_session(&conn, "ClaudeCode", "s1");
+        post(&conn, "m", session, 30);
+
+        // The step has not finished: no attempt is recorded yet.
+        assert_eq!(model_of(&conn, "m"), None);
+
+        // An attempt whose transport kept its default names no model.
+        let mut kept_default = attempt(
+            1,
+            crate::models::AgentType::ClaudeCode,
+            Some("claude-opus-4-7"),
+            0,
+            60,
+        );
+        kept_default.model_applied = Some(false);
+        record_passes(&conn, vec![vec![kept_default]]);
+        assert_eq!(model_of(&conn, "m"), None);
+
+        // No attempt ran when the message was posted.
+        record_passes(
+            &conn,
+            vec![vec![attempt(
+                1,
+                crate::models::AgentType::ClaudeCode,
+                Some("claude-opus-4-7"),
+                100,
+                160,
+            )]],
+        );
+        assert_eq!(model_of(&conn, "m"), None);
+
+        // A run recorded before attempts existed.
+        conn.execute(
+            "UPDATE workflow_runs SET step_results_json =
+                 '[{\"step_name\":\"Orchestrate\",\"status\":\"Success\",\"output\":\"\",\"duration_ms\":0,\"step_model\":\"opus\"}]'
+              WHERE id = 'run'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(model_of(&conn, "m"), None);
+
+        // Its step results unreadable.
+        conn.execute(
+            "UPDATE workflow_runs SET step_results_json = '{not json' WHERE id = 'run'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(model_of(&conn, "m"), None);
+    }
+
+    #[test]
+    fn a_purged_run_leaves_no_model_to_read() {
+        let conn = conn();
+        step_room(&conn);
+        let session = step_session(&conn, "ClaudeCode", "s1");
+        post(&conn, "m", session, 30);
+        record_passes(
+            &conn,
+            vec![vec![attempt(
+                1,
+                crate::models::AgentType::ClaudeCode,
+                Some("claude-opus-4-7"),
+                0,
+                60,
+            )]],
+        );
+        conn.execute("DELETE FROM workflow_runs WHERE id = 'run'", [])
+            .unwrap();
+
+        assert!(
+            !message_authors(&conn, "room").unwrap().contains_key("m"),
+            "nothing of the purged run is read back"
+        );
+        assert!(message_author(&conn, "room", "m").unwrap().is_none());
     }
 }

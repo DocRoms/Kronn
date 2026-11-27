@@ -2602,7 +2602,9 @@ export const discussions = {
 
   /** Refuse an arbitration instead of answering it. Same idempotency contract:
    *  a refusal posts a durable message and dispatches to the asker, so a
-   *  repeated click must not record it twice. */
+   *  repeated click must not record it twice. Without a `reason` (absent,
+   *  empty or blank) the server only closes the card as `cancelled`: nobody
+   *  is told and nothing resumes (KT-1955). */
   declineQuestion: (
     id: string,
     questionId: string,

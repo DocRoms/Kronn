@@ -22,6 +22,12 @@ pub struct WorkflowStepIdentity {
     pub workflow_name: String,
     pub step_key: String,
     pub step_name: String,
+    /// KT-2009 — the model the step's attempt that posted a message ran, read
+    /// from the run's recorded attempts. Only on a message's identity; absent
+    /// when the run recorded none, so the header keeps its unknown state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

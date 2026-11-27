@@ -1944,13 +1944,18 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
         project_id: qp.project_id ?? null,
         title,
         agent: qp.agent,
+        // KT-2025 — a Quick Prompt saved on a named connection launches on
+        // it: the connection is the discussion's own (the server refuses a
+        // Custom agent without one) and, matching the Quick Prompt's, lets
+        // the server hand its saved model down (KT-2023). No `model` here.
+        ...(qp.connection_id ? { connection_id: qp.connection_id } : {}),
         language: configLanguage || 'fr',
         // The backend performs canonical rendering after JIT resolution so
         // project-provided values never cross this launch payload.
         initial_prompt: qp.prompt_template,
         launch_variables: launchVars,
         initial_targets: qp.connection_id ? [{
-          kind: 'agent',
+          kind: 'discussion_agent',
           agent_type: qp.agent,
           connection_id: qp.connection_id,
           tier: qp.tier,
@@ -1972,7 +1977,9 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
       setLaunchVars({});
       onNavigateDiscussion?.(disc.id);
     } catch (e) {
+      // The form keeps its values so the user can fix and relaunch.
       console.warn('Launch failed:', e);
+      toastProp?.(t('qp.launch.failed', userError(e)), 'error');
     } finally {
       launchingRef.current = false;
       setLaunching(false);
@@ -2146,6 +2153,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
       }
     } catch (e) {
       console.warn('Compare-agents launch failed:', e);
+      toastProp?.(t('qp.launch.failed', userError(e)), 'error');
     } finally {
       launchingRef.current = false;
       setLaunching(false);

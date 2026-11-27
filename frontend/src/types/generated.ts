@@ -128,7 +128,13 @@ progress_run_id?: string,
  * yet. `step_*` then name the step the run executes now (the preparation),
  * and `agent_type` the agent about to enter.
  */
-preparing?: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+preparing?: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string,
+/**
+ * KT-2009 — the model the step's attempt that posted a message ran, read
+ * from the run's recorded attempts. Only on a message's identity; absent
+ * when the run recorded none, so the header keeps its unknown state.
+ */
+model?: string, };
 
 /**
  * An existing action a row offers. `id` names the UI handler that performs it
@@ -4395,9 +4401,25 @@ export type DiscussionQuestion = { id: string, discussion_id: string, source_mes
  * The TDs a partial audit card could not record, with the reason for each;
  * cleared once the card is fully answered.
  */
-td_errors: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
+td_errors: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null,
+/**
+ * Set only when `state` is `cancelled`; such a card never has an answer.
+ */
+cancellation: DiscussionQuestionCancellation | null, created_at: string, updated_at: string, };
 
 export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, item_answers: Array<DiscussionQuestionItemAnswer>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
+
+/**
+ * Who refused a card without a message, and when (KT-1955).
+ */
+export type DiscussionQuestionCancellation = { author_pseudo: string, cancelled_at: string,
+/**
+ * The card was the last pending one of a message whose step had ended,
+ * and the human's answers to its other cards — which waited for it —
+ * were then dispatched to an agent, the recap naming this card as
+ * refused without a message (KT-1401). The refusal alone wakes nobody.
+ */
+relayed_answers: boolean, };
 
 export type DiscussionQuestionItem = { id: string, label: string, description: string | null, };
 
@@ -4411,9 +4433,15 @@ export type DiscussionQuestionResume = { workflow_id: string, variables: Record<
 
 export type DiscussionQuestionResumeState = "pending" | "launching" | "launched" | "failed";
 
-export type DiscussionQuestionState = "pending" | "answered" | "declined";
+export type DiscussionQuestionState = "pending" | "answered" | "declined" | "cancelled";
 
-export type DiscussionQuestionWorkflowStep = { active: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+export type DiscussionQuestionWorkflowStep = { active: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string,
+/**
+ * KT-2009 — the model the step's attempt that posted a message ran, read
+ * from the run's recorded attempts. Only on a message's identity; absent
+ * when the run recorded none, so the header keeps its unknown state.
+ */
+model?: string, };
 
 /**
  * A room's whole scope, as the human panel and the agent see it.
@@ -14279,7 +14307,13 @@ delegate_subtasks?: DelegateSubtasksConfig, };
  * This is not a host-launched CLI identity: the workflow and step own the
  * process, while the provider only describes which runtime executes it.
  */
-export type WorkflowStepIdentity = { run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+export type WorkflowStepIdentity = { run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string,
+/**
+ * KT-2009 — the model the step's attempt that posted a message ran, read
+ * from the run's recorded attempts. Only on a message's identity; absent
+ * when the run recorded none, so the header keeps its unknown state.
+ */
+model?: string, };
 
 export type WorkflowSuggestion = { id: string, title: string, description: string, reason: string, required_mcps: Array<string>, audience: string, complexity: string, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, };
 

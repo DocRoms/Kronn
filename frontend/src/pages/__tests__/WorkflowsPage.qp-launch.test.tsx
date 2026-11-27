@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { WorkflowsPage } from '../WorkflowsPage';
+import { ApiRequestError } from '../../lib/apiRequestError';
 import type { AgentsConfig, QuickPrompt } from '../../types/generated';
 
 /** Shows the Quick Prompts through the type chip of the sidebar (KT-916). */
@@ -794,5 +795,121 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     await waitFor(() => {
       expect(document.body.textContent).toContain('Ticket');
     });
+  });
+});
+
+describe('WorkflowsPage — QP launch on a named connection (KT-2025)', () => {
+  const refusal = 'A custom external API target requires a connection_id';
+
+  it('creates the discussion on the Quick Prompt’s connection, with a discussion_agent target', async () => {
+    const qp: QuickPrompt = {
+      ...sampleQpNoVar,
+      agent: 'Custom',
+      connection_id: 'conn-router',
+      tier: 'reasoning',
+    };
+    mockQuickPromptsApi.list.mockResolvedValue([qp]);
+    mockDiscussionsApi.create.mockResolvedValue({ id: 'disc-conn', title: qp.name });
+    const onNavigateDiscussion = vi.fn();
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode']}
+        agentAccess={fullConfig}
+        onNavigateDiscussion={onNavigateDiscussion}
+      />,
+    );
+    await showQuickPrompts();
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('.qp-card .qp-launch-btn')!); });
+
+    expect(mockDiscussionsApi.create).toHaveBeenCalledTimes(1);
+    const payload = mockDiscussionsApi.create.mock.calls[0][0];
+    expect(payload.agent).toBe('Custom');
+    expect(payload.connection_id).toBe('conn-router');
+    expect(payload.initial_targets).toEqual([{
+      kind: 'discussion_agent',
+      agent_type: 'Custom',
+      connection_id: 'conn-router',
+      tier: 'reasoning',
+    }]);
+    expect(payload.tier).toBe('reasoning');
+    // The server hands the Quick Prompt's saved model down itself (KT-2023).
+    expect(payload).not.toHaveProperty('model');
+    expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-conn');
+  });
+
+  it('keeps today’s payload for a Quick Prompt without a connection', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
+    mockDiscussionsApi.create.mockResolvedValue({ id: 'disc-plain', title: sampleQpNoVar.name });
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />,
+    );
+    await showQuickPrompts();
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('.qp-card .qp-launch-btn')!); });
+
+    expect(mockDiscussionsApi.create).toHaveBeenCalledTimes(1);
+    const payload = mockDiscussionsApi.create.mock.calls[0][0];
+    expect(payload.agent).toBe('ClaudeCode');
+    expect(payload).not.toHaveProperty('connection_id');
+    expect(payload.initial_targets).toEqual([]);
+  });
+
+  it('says why a refused launch failed, keeps the form and gives the button back', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpWithVar]);
+    mockDiscussionsApi.create.mockRejectedValue(new ApiRequestError(refusal));
+    const toast = vi.fn();
+    const onNavigateDiscussion = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode']}
+        agentAccess={fullConfig}
+        toast={toast}
+        onNavigateDiscussion={onNavigateDiscussion}
+      />,
+    );
+    await showQuickPrompts();
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('.qp-card .qp-launch-btn')!); });
+    const ticketInput = await screen.findByPlaceholderText('EW-1234') as HTMLInputElement;
+    await act(async () => { fireEvent.change(ticketInput, { target: { value: 'EW-4242' } }); });
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('.qp-launch-go-btn')!); });
+
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    expect(toast).toHaveBeenCalledWith(`Impossible de lancer : ${refusal}`, 'error');
+    expect(onNavigateDiscussion).not.toHaveBeenCalled();
+    expect((screen.getByPlaceholderText('EW-1234') as HTMLInputElement).value).toBe('EW-4242');
+    expect(document.querySelector<HTMLButtonElement>('.qp-launch-go-btn')!.disabled).toBe(false);
+    warn.mockRestore();
+  });
+
+  it('says why a refused compare launch failed and gives the button back', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
+    mockQuickPromptsApi.compareAgents.mockRejectedValue(new ApiRequestError(refusal));
+    const toast = vi.fn();
+    const onBatchLaunched = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+        toast={toast}
+        onBatchLaunched={onBatchLaunched}
+      />,
+    );
+    await showQuickPrompts();
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('qp-compare-agents-launch')); });
+
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    expect(toast).toHaveBeenCalledWith(`Impossible de lancer : ${refusal}`, 'error');
+    expect(onBatchLaunched).not.toHaveBeenCalled();
+    expect((screen.getByTestId('qp-compare-agents-launch') as HTMLButtonElement).disabled).toBe(false);
+    warn.mockRestore();
   });
 });

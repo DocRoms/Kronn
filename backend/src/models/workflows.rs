@@ -2435,6 +2435,20 @@ pub struct WorkflowAgentAttempt {
     pub cost_unknown_reason: Option<String>,
 }
 
+impl WorkflowAgentAttempt {
+    /// The model this attempt ran: what the runtime reported serving it, else
+    /// the one resolved at launch, unless the transport refused to apply it.
+    pub fn served_model(&self) -> Option<String> {
+        if !self.observed_models.is_empty() {
+            Some(self.observed_models.join(" / "))
+        } else if self.model_applied == Some(false) {
+            None
+        } else {
+            self.resolved_model.clone()
+        }
+    }
+}
+
 impl WorkflowAgentProvenance {
     /// Cache reads and writes summed over the attempts that reported them.
     pub fn prompt_cache_totals(&self) -> (Option<u64>, Option<u64>) {

@@ -1,14 +1,14 @@
 use super::*;
 use crate::models::{DiscussionMessage, MessageChannel, MessageRole, MessageTargetKind};
 
-fn database() -> Connection {
+pub(super) fn database() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     crate::db::migrations::run(&conn).unwrap();
     conn.execute("INSERT INTO discussions (id,title,agent,created_at,updated_at) VALUES ('d','D','Codex','now','now')", []).unwrap();
     conn
 }
 
-fn payload() -> serde_json::Value {
+pub(super) fn payload() -> serde_json::Value {
     serde_json::json!({"version":1,"key":"quota-policy","question":"Quel choix pour écarter le blocage ?",
         "options":[{"id":"retry","label":"Réarmer"},{"id":"wait","label":"Attendre"}],
         "recommended_option_ids":["retry"],"task_ref":"KT-593"})
@@ -46,7 +46,7 @@ fn message(id: &str, content: String) -> DiscussionMessage {
     }
 }
 
-fn insert(conn: &Connection, id: &str, value: serde_json::Value) {
+pub(super) fn insert(conn: &Connection, id: &str, value: serde_json::Value) {
     crate::db::discussions::insert_message(
         conn,
         "d",
@@ -134,13 +134,39 @@ fn a_fence_carrying_a_token_is_still_ingested_with_the_token_masked() {
     }
 }
 
-fn finished_step_question(value: serde_json::Value) -> Connection {
+pub(super) fn finished_step_question(value: serde_json::Value) -> Connection {
     finished_step_cards(&[value])
 }
 
 /// One message of a workflow step carrying several cards, the step then ended.
-fn finished_step_cards(values: &[serde_json::Value]) -> Connection {
+pub(super) fn finished_step_cards(values: &[serde_json::Value]) -> Connection {
     let conn = database();
+    let session_pk = seed_step_cards(&conn, values);
+    end_step(&conn, session_pk);
+    conn
+}
+
+/// One message of a workflow step carrying several cards, the step still running.
+pub(super) fn active_step_cards(values: &[serde_json::Value]) -> Connection {
+    let conn = database();
+    seed_step_cards(&conn, values);
+    conn
+}
+
+/// Ends the step [`seed_step_cards`] started: its agent will not read again.
+pub(crate) fn end_step(conn: &Connection, session_pk: i64) {
+    crate::db::workflow_step_rooms::finish_activity(conn, "source-run", "orchestrate").unwrap();
+    crate::db::workflow_step_rooms::revoke(conn, &[session_pk]).unwrap();
+    conn.execute(
+        "UPDATE workflow_runs SET status='Success', finished_at='now' WHERE id='source-run'",
+        [],
+    )
+    .unwrap();
+}
+
+/// In discussion `d`, message `step-question` of a running workflow step
+/// carrying `values` as cards. Returns the step's session.
+pub(crate) fn seed_step_cards(conn: &Connection, values: &[serde_json::Value]) -> i64 {
     conn.execute(
         "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
          VALUES ('source-workflow', 'Implementation', '{}', '[]', 'now', 'now')",
@@ -154,7 +180,7 @@ fn finished_step_cards(values: &[serde_json::Value]) -> Connection {
     )
     .unwrap();
     crate::db::workflow_step_rooms::begin_activity(
-        &conn,
+        conn,
         "source-run",
         "orchestrate",
         "Orchestrate",
@@ -163,7 +189,7 @@ fn finished_step_cards(values: &[serde_json::Value]) -> Connection {
     )
     .unwrap();
     let session = crate::db::workflow_step_rooms::join(
-        &conn,
+        conn,
         "source-run",
         "orchestrate",
         "d",
@@ -172,7 +198,7 @@ fn finished_step_cards(values: &[serde_json::Value]) -> Connection {
     )
     .unwrap();
     crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
-        &conn,
+        conn,
         "d",
         &message(
             "step-question",
@@ -187,17 +213,10 @@ fn finished_step_cards(values: &[serde_json::Value]) -> Connection {
         session.session_pk,
     )
     .unwrap();
-    crate::db::workflow_step_rooms::finish_activity(&conn, "source-run", "orchestrate").unwrap();
-    crate::db::workflow_step_rooms::revoke(&conn, &[session.session_pk]).unwrap();
-    conn.execute(
-        "UPDATE workflow_runs SET status='Success', finished_at='now' WHERE id='source-run'",
-        [],
-    )
-    .unwrap();
-    conn
+    session.session_pk
 }
 
-fn request() -> AnswerDiscussionQuestionRequest {
+pub(super) fn request() -> AnswerDiscussionQuestionRequest {
     AnswerDiscussionQuestionRequest {
         selected_option_ids: vec!["retry".into()],
         item_answers: vec![],
@@ -824,7 +843,7 @@ fn an_agent_fence_cannot_write_the_failure_note() {
 
 const GHOST_ROW: &str = "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-ghost | Ghost one-liner | API | High | Open |\n";
 
-fn dispatch_count(conn: &Connection) -> i64 {
+pub(super) fn dispatch_count(conn: &Connection) -> i64 {
     conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| {
         row.get(0)
     })
@@ -1324,7 +1343,7 @@ fn an_unclosed_context_block_swallows_the_rest() {
     assert!(!strip_context_blocks(content).contains("kronn-question"));
 }
 
-fn decline_request() -> DeclineDiscussionQuestionRequest {
+pub(super) fn decline_request() -> DeclineDiscussionQuestionRequest {
     DeclineDiscussionQuestionRequest {
         idempotency_key: "decline-1".into(),
         reason: Some("La question n'a plus d'objet.".into()),
@@ -1374,31 +1393,6 @@ fn declining_resolves_the_question_and_reaches_the_asker() {
 }
 
 #[test]
-fn a_refusal_without_a_reason_still_tells_the_agent_what_to_do() {
-    // A human owes no justification, but an empty refusal must not read as a
-    // shrug: the agent needs to know it may proceed without the decision.
-    let conn = database();
-    insert(&conn, "m", payload());
-    let request = DeclineDiscussionQuestionRequest {
-        idempotency_key: "decline-bare".into(),
-        reason: None,
-    };
-    let q = decline(&conn, "d", "question:m:0", &request, "Romu", None).unwrap();
-    assert_eq!(q.state, DiscussionQuestionState::Declined);
-    let content: String = conn
-        .query_row(
-            "SELECT content FROM messages WHERE id=?1",
-            [&q.answer.unwrap().message_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(
-        content.contains("Ne bloque pas sur cette question"),
-        "{content}"
-    );
-}
-
-#[test]
 fn declining_replays_on_the_same_key_and_refuses_to_overwrite_a_decision() {
     let conn = database();
     insert(&conn, "m", payload());
@@ -1411,7 +1405,7 @@ fn declining_replays_on_the_same_key_and_refuses_to_overwrite_a_decision() {
     // A different key on an already-refused question IS a conflict.
     let other = DeclineDiscussionQuestionRequest {
         idempotency_key: "decline-2".into(),
-        reason: None,
+        reason: Some("Autre raison.".into()),
     };
     assert!(matches!(
         decline(&conn, "d", &q.id, &other, "Romu", None),
@@ -1701,7 +1695,7 @@ fn a_resolved_step_question_claims_exactly_one_resume_run() {
         .is_none());
 }
 
-fn card(key: &str) -> serde_json::Value {
+pub(super) fn card(key: &str) -> serde_json::Value {
     serde_json::json!({"version":1,"key":key,"question":format!("Question {key} ?"),
         "options":[{"id":"retry","label":"Réarmer"},{"id":"wait","label":"Attendre"}]})
 }

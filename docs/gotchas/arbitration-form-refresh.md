@@ -51,10 +51,10 @@ stable, and supplies fresh values through a per-message React context. Polling
 is unchanged and citation verdicts still update. Question/planning-card keys
 include the discussion, message and fence identity, so changing the question
 does not transfer the previous draft.
-`[src: file: frontend/src/components/MessageBubble.tsx:2060-2076#MarkdownRenderContext]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2086-2158#MarkdownPre]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2067-2083#MarkdownRenderContext]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2093-2165#MarkdownPre]`
 `[src: file: frontend/src/components/MessageBubble.tsx:2165-2170#discussionMdComponents]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2205-2207#renderContext]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2208-2210#renderContext]`
 
 Seven product regressions cover question-store refresh, same-reference and
 repeated equivalent sources, changing citation verdicts in paragraphs/lists,

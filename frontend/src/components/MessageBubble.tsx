@@ -852,12 +852,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                    *  (handle_incoming_chat_message) so "ClaudeCode · reasoning · Romu"
                    *  reads as "Romu's ClaudeCode on the other instance". */}
                   {/* KT-1936 — name, model (or « model not recorded »: never the
-                   *  tier name), its mode's icon and its role, one component. */}
+                   *  tier name), its mode's icon and its role, one component.
+                   *  KT-2009 — a step message without its own model writes the
+                   *  one its run recorded for the attempt that posted it. */}
                   <AgentIdentity
                     icon={<Cpu size={12} />}
                     name={agentTrigger}
                     color={agentTextColor(agentType, mentionColors)}
-                    model={agentModel(msg.model, 'notRecorded')}
+                    model={agentModel(msg.model?.trim() || workflowStep?.model, 'notRecorded')}
                     role={agentIdentityRole}
                     roleLabel={isTourDemo ? t('disc.tourDemoKind') : undefined}
                     tier={messageTier}

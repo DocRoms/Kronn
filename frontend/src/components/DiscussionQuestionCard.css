@@ -295,3 +295,29 @@
 .disc-question-card[data-state='declined'] {
   opacity: 0.85;
 }
+
+/* KT-1955 — refused without a message: closed, nobody told. Neutral, not red
+   (nobody is waiting on it any more) and not green (nothing was decided). */
+.disc-question-card[data-state='cancelled'] {
+  border-color: var(--kr-border);
+  border-left-color: var(--kr-text-ghost);
+  background: var(--kr-bg-subtle);
+}
+
+/* The card takes the focus once refused, so the keyboard continues from it. */
+.disc-question-card:focus {
+  outline: none;
+}
+
+.disc-question-card:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.disc-question-card[data-state='cancelled'] .disc-question-head {
+  color: var(--kr-text-tertiary);
+}
+
+.disc-question-card[data-state='cancelled'] .disc-question-text {
+  color: var(--kr-text-secondary);
+}

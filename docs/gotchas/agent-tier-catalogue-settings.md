@@ -131,7 +131,7 @@ model (KT-1994).
 [src: file: frontend/src/lib/modelCatalogSelection.ts:112-115#catalogModelProvenance]
 [src: file: frontend/src/components/ChatHeader.tsx:361#customModel]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1717-1748#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3375-3376#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3383-3384#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -335,7 +335,7 @@ requested field is written: an explicit clear is refused for Custom.
 Resending the same agent no longer clears an existing connection or invalidates
 the summary cache. A lightweight agent lookup avoids loading the transcript
 merely to compare targets.
-[src: file: backend/src/models/discussions.rs:609-618#connection_id]
+[src: file: backend/src/models/discussions.rs:615-624#connection_id]
 [src: file: backend/src/api/discussions/crud.rs:972-1002#validate_connection_target]
 [src: file: backend/src/api/discussions/crud.rs:1062-1086#invalidate_summary_cache]
 [src: file: backend/src/db/discussions.rs:1110-1119#get_discussion_agent]

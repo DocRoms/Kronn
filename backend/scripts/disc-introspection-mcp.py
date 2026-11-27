@@ -10279,7 +10279,11 @@ TOOL_MANUALS = {
         "Wait with disc_wait_for_peer; do not "
         "execute/delegate/complete the affected lot until state=answered. "
         "Independent tasks may continue. Only the human UI can answer. The "
-        "answer and its User reply remain durable even if the original CLI is offline."
+        "answer and its User reply remain durable even if the original CLI is offline. "
+        "state=cancelled means the human refused without a message: you were "
+        "not woken, answer null, `cancellation` says who and when; not consent, "
+        "nothing resumes, do not advance the affected lot; ask again only if the "
+        "decision is still needed."
     ),
     "agent_list": (
         "Use `agent_list()` before `task_exec_prepare` when the worker identity is not "
