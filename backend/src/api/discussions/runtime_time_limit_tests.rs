@@ -21,9 +21,35 @@ async fn stopped_worker(
     String,
     crate::db::agent_dispatch::AgentDispatchJob,
 ) {
+    stopped_worker_by(chain, crate::api::worker_time_limit::StopKind::TimeLimit).await
+}
+
+/// [`stopped_worker`], stopped by the limit of `kind`: 240 of 240 minutes for
+/// the time limit, 20 minutes without output after 95 for inactivity.
+async fn stopped_worker_by(
+    chain: Option<AgentFallback>,
+    kind: crate::api::worker_time_limit::StopKind,
+) -> (
+    crate::AppState,
+    String,
+    crate::db::agent_dispatch::AgentDispatchJob,
+) {
+    worker_on_dispatch(chain, Some(kind)).await
+}
+
+/// The worker execution of the fixtures above; `stop`, when given, is the limit
+/// that stopped its run.
+async fn worker_on_dispatch(
+    chain: Option<AgentFallback>,
+    stop: Option<crate::api::worker_time_limit::StopKind>,
+) -> (
+    crate::AppState,
+    String,
+    crate::db::agent_dispatch::AgentDispatchJob,
+) {
     let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
     let (execution_id, job) = db
-        .with_conn(|conn| {
+        .with_conn(move |conn| {
             let now = chrono::Utc::now().to_rfc3339();
             for (id, title) in [(PARENT, "Parent"), (CHILD, "Child")] {
                 conn.execute(
@@ -83,15 +109,26 @@ async fn stopped_worker(
             let job = crate::db::agent_dispatch::claim(conn, JOB)?
                 .ok_or_else(|| anyhow::anyhow!("dispatch was not claimable"))?;
             crate::db::orchestration::attach_execution_dispatch(conn, &execution.id, JOB)?;
-            let limit = std::time::Duration::from_secs(240 * 60);
-            crate::api::worker_time_limit::record_stop_event(
-                conn,
-                &execution.id,
-                JOB,
-                limit,
-                limit,
-                None,
-            )?;
+            let minutes = |n: u64| std::time::Duration::from_secs(n * 60);
+            if let Some(kind) = stop {
+                let (elapsed, limit) = match kind {
+                    crate::api::worker_time_limit::StopKind::TimeLimit => {
+                        (minutes(240), minutes(240))
+                    }
+                    crate::api::worker_time_limit::StopKind::Inactivity => {
+                        (minutes(95), minutes(20))
+                    }
+                };
+                crate::api::worker_time_limit::record_stop(
+                    conn,
+                    &execution.id,
+                    JOB,
+                    kind,
+                    elapsed,
+                    limit,
+                    None,
+                )?;
+            }
             Ok((execution.id, job))
         })
         .await
@@ -218,4 +255,105 @@ async fn a_timed_out_reply_that_quotes_a_rate_limit_is_not_moved_to_a_fallback()
         "no provider is put on cooldown: {cooling:?}"
     );
     assert_eq!(fallback_notices, 0, "no fallback line is posted");
+}
+
+/// KT-2107 — a worker Kronn stopped for lack of output ends with that cause,
+/// and its prose quoting a rate limit moves it to no fallback agent.
+#[tokio::test]
+async fn an_inactivity_stopped_reply_that_quotes_a_rate_limit_is_not_moved_to_a_fallback() {
+    let (state, execution_id, job) = stopped_worker_by(
+        Some(AgentFallback {
+            agent: AgentType::Codex,
+            model: None,
+            mode: None,
+        }),
+        crate::api::worker_time_limit::StopKind::Inactivity,
+    )
+    .await;
+
+    finish_dispatch_turn(
+        &state,
+        job,
+        "The client answered HTTP 429 Too Many Requests: rate_limit_exceeded.\n\n---\n⚠️ **Agent interrupted by Kronn after 20 min without output.** Retry the turn."
+            .to_string(),
+        false,
+    )
+    .await;
+
+    let (status, last_error, _) = dispatch_status(&state).await;
+    assert_eq!(status, "Failed");
+    let last_error = last_error.expect("the stop is the dispatch's last error");
+    let head: String = last_error.chars().take(160).collect();
+    assert!(
+        head.contains("failure_kind=inactivity_timeout"),
+        "{last_error}"
+    );
+    assert!(
+        !last_error.contains("worker_reported_failure"),
+        "{last_error}"
+    );
+    let (execution, cooling, recovery) = state
+        .db
+        .with_read_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            let cooling = fallback::cooling_lookup(conn, chrono::Utc::now())?;
+            let recovery = crate::db::orchestration::get_execution_recovery(conn, &execution_id)?;
+            Ok((execution, cooling, recovery))
+        })
+        .await
+        .unwrap();
+    assert_eq!(execution.worker_agent_type.as_deref(), Some("ClaudeCode"));
+    assert_eq!(execution.status, TaskExecutionStatus::Interrupted);
+    assert!(
+        cooling.is_empty(),
+        "no provider is put on cooldown: {cooling:?}"
+    );
+    assert_eq!(
+        recovery.map(|recovery| recovery.recovery_reason).as_deref(),
+        Some(crate::db::orchestration::WORKER_INACTIVE_REASON)
+    );
+}
+
+/// KT-2107 — a rate-limited worker that no fallback link can take ends with the
+/// rate limit, and its announced reset, as the dispatch's cause; it is parked.
+#[tokio::test]
+async fn a_rate_limited_worker_with_no_link_ends_with_the_rate_limit_named() {
+    for (reply, reset) in [
+        ("HTTP 429 Too Many Requests: rate_limit_exceeded.", false),
+        ("HTTP 429 Too Many Requests; try again in 3 hours", true),
+    ] {
+        let (state, execution_id, job) = worker_on_dispatch(None, None).await;
+
+        finish_dispatch_turn(&state, job, reply.to_string(), false).await;
+
+        let (status, last_error, _) = dispatch_status(&state).await;
+        assert_eq!(status, "Failed", "{reply}");
+        let last_error = last_error.expect("the cause is the dispatch's last error");
+        let head: String = last_error.chars().take(160).collect();
+        assert!(head.contains("failure_kind=rate_limit"), "{last_error}");
+        assert!(
+            !last_error.contains("worker_reported_failure"),
+            "{last_error}"
+        );
+        assert_eq!(
+            last_error.contains("announced reset"),
+            reset,
+            "{last_error}"
+        );
+        assert!(last_error.contains("task_exec_resume"), "{last_error}");
+        let execution = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::orchestration::get_task_execution(conn, &execution_id)
+            })
+            .await
+            .unwrap()
+            .expect("execution must remain queryable");
+        assert_eq!(
+            execution.status,
+            TaskExecutionStatus::Interrupted,
+            "{reply}"
+        );
+    }
 }

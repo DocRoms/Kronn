@@ -10,13 +10,13 @@ directly to the CLI. A bridge reload therefore resumes the principal room instea
 of the child.
 [src: file: backend/src/api/orchestration.rs:9083-9103#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:9228-9232#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:20579-20580#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:20594-20595#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6472-6507#call_task_exec_accept_worker_offer]
 
 The terminal return path remains compatibility code for offers accepted by older
 bridges. It emits return messages only when it actually moved legacy child-owned
 state; an execution-scoped worker already in its origin is a no-op.
-[src: file: backend/src/db/orchestration.rs:7036-7079#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:7045-7088#return_cli_worker_to_origin]
 
 ## Historical pre-KT-837 recovery contract
 
@@ -94,7 +94,7 @@ do not require a return because they never transfer the session.
 [src: file: backend/src/db/sql/171_cli_worker_bindings.sql:1-11#task_execution_cli_bindings]
 [src: file: backend/src/db/worker_offers.rs:523-533#pin]
 [src: file: backend/src/db/cli_worker_bindings.rs:33-73#pin]
-[src: file: backend/src/db/orchestration.rs:7041-7048#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:7045-7052#return_cli_worker_to_origin]
 [src: file: backend/src/db/orchestration.rs:9393-9417#restore_reassigned_cli_worker_to_origin]
 
 The return refuses a source binding or active membership moved to a third room,

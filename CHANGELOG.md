@@ -161,6 +161,15 @@ Release notes for 0.9.3 and earlier are available in the
   task waits for the owner's answer in the principal's room, the notice is
   held, then posted as soon as the card is answered or declined. A delivery
   whose joined CLI worker left is still proposed for review.
+- Workers: a worker Kronn stopped for lack of output, or that its provider
+  refused with no fallback link to take it over, says so (KT-2107). Both ended
+  as "the worker reported a failure". A stop for lack of output is journaled
+  like a time-limit stop: its uncommitted work is saved in a WIP commit, the
+  dispatch error and the principal's notice name the silence, and a resumed
+  worker is told which generation stopped. A refusal names the provider's
+  reason and the reset it announced. A reply Kronn cut at its time or
+  inactivity limit is no longer read as a provider refusal that would move
+  the worker to a fallback agent.
 - Workers: a worker stopped by the run time limit is reported as such
   (KT-2037). The dispatch error says Kronn stopped the worker, with the minutes
   run, the limit and what was kept, and the principal's room gets a notice of

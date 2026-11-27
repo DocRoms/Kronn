@@ -172,6 +172,7 @@ fn a_refused_commit_leaves_a_patch_in_the_evidence() {
     let checkpoint = checkpoint_worktree_with_hooks(
         &worktree,
         "KT-1",
+        StopKind::TimeLimit,
         secs(120),
         secs(120),
         None,
@@ -381,6 +382,7 @@ fn a_limit_stop_is_read_back_for_its_dispatch() {
     assert_eq!(
         limit_stop_of_dispatch(&conn, "dispatch-1").unwrap(),
         Some(LimitStop {
+            kind: StopKind::TimeLimit,
             elapsed: secs(120),
             limit: secs(120),
             files: 2,
@@ -391,6 +393,93 @@ fn a_limit_stop_is_read_back_for_its_dispatch() {
         limit_stop_of_dispatch(&conn, "another-dispatch").unwrap(),
         None
     );
+}
+
+/// KT-2107 — a stop of the inactivity limit is read back as that kind; a stop
+/// recorded before kinds existed is a time-limit stop.
+#[test]
+fn an_inactivity_stop_is_read_back_with_its_kind() {
+    let (conn, exec) = seeded_execution();
+    claimed_dispatch(&conn, "dispatch-1");
+    record_stop(
+        &conn,
+        &exec,
+        "dispatch-1",
+        StopKind::Inactivity,
+        secs(95),
+        secs(20),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        limit_stop_of_dispatch(&conn, "dispatch-1").unwrap(),
+        Some(LimitStop {
+            kind: StopKind::Inactivity,
+            elapsed: secs(95),
+            limit: secs(20),
+            files: 0,
+            checkpoint_commit: None,
+        })
+    );
+
+    conn.execute(
+        "UPDATE task_execution_events SET changes_json = json_remove(changes_json, '$.kind')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        limit_stop_of_dispatch(&conn, "dispatch-1")
+            .unwrap()
+            .map(|stop| stop.kind),
+        Some(StopKind::TimeLimit)
+    );
+}
+
+/// KT-2107 — the inactivity stop names its cause in the 160 characters the
+/// compact status shows, and the worker is not blamed.
+#[test]
+fn the_inactivity_diagnostic_names_its_cause_within_160_characters() {
+    let diagnostic = stop_diagnostic(&LimitStop {
+        kind: StopKind::Inactivity,
+        elapsed: secs(95),
+        limit: secs(20),
+        files: 2,
+        checkpoint_commit: Some("abc1234".into()),
+    });
+    let head: String = diagnostic.chars().take(160).collect();
+    assert!(head.contains("failure_kind=inactivity_timeout"), "{head}");
+    assert!(head.contains("20 min without output"), "{head}");
+    assert!(
+        diagnostic.contains("2 uncommitted file(s) are saved in WIP commit `abc1234`"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("task_exec_resume"), "{diagnostic}");
+    assert!(
+        !diagnostic.contains("worker_reported_failure") && !diagnostic.contains("time limit"),
+        "{diagnostic}"
+    );
+}
+
+/// KT-2107 — the resume handoff says which generation the inactivity limit
+/// stopped, and does not call it the time limit.
+#[test]
+fn the_handoff_names_an_inactivity_stop_as_such() {
+    let (conn, exec) = seeded_execution();
+    record_stop(
+        &conn,
+        &exec,
+        "dispatch-1",
+        StopKind::Inactivity,
+        secs(95),
+        secs(20),
+        None,
+    )
+    .unwrap();
+    let note = handoff_note(&conn, &exec, false).unwrap();
+    assert!(note.contains("20 min without output"), "{note}");
+    assert!(!note.contains("of the 20-min limit"), "{note}");
+    let fr = handoff_note(&conn, &exec, true).unwrap();
+    assert!(fr.contains("20 min sans sortie"), "{fr}");
 }
 
 /// KT-2037 — a dispatch claimed again after a stop (a requeue) is a new run:
@@ -419,6 +508,7 @@ fn a_stop_of_an_earlier_claim_is_not_this_runs_stop() {
 #[test]
 fn the_stop_diagnostic_names_the_limit_within_160_characters() {
     let stop = |files, commit: Option<&str>| LimitStop {
+        kind: StopKind::TimeLimit,
         elapsed: secs(240),
         limit: secs(240),
         files,

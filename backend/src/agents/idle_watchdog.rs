@@ -279,6 +279,14 @@ pub fn is_stall_reason(text: &str) -> bool {
     text.starts_with(STALL_PREFIX)
 }
 
+/// KT-2107 — the bound a [`stall_reason`] or [`tool_stall_reason`] states, so a
+/// stop inside a long tool call is not reported with the model's own delay.
+pub fn stall_limit(text: &str) -> Option<Duration> {
+    let rest = text.trim_start().strip_prefix(STALL_PREFIX)?.trim_start();
+    let secs = rest.split_once("s)")?.0.parse().ok()?;
+    Some(Duration::from_secs(secs))
+}
+
 /// The failure when a tool call itself runs past [`tool_execution_timeout`].
 /// Unlike [`stall_reason`] this is not an accusation of silence from the
 /// model — the agent was busy running `tool` — so the wording says that

@@ -135,7 +135,11 @@ impl Trigger {
 pub fn classify_trigger(error: &str) -> Option<Trigger> {
     use crate::core::quota_text::is_hard_quota_exhausted;
     let lower = error.to_lowercase();
-    if lower.contains("agent stalled") || lower.contains("global timeout") {
+    // KT-2107 — "interrupted by kronn" is how Kronn's own stop notices read.
+    if lower.contains("agent stalled")
+        || lower.contains("global timeout")
+        || lower.contains("agent interrupted by kronn")
+    {
         return None;
     }
     if is_hard_quota_exhausted(error) {

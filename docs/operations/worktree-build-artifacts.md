@@ -1057,7 +1057,7 @@ Cargo (`pnpm tauri build`) is not detected: the rule reads binaries, not scripts
 [src: file: backend/src/core/task_worker_lane_warm.rs:507#skipped_by_validations]
 [src: file: backend/src/api/orchestration.rs:12871-12875#warm_lane_for_validations]
 [src: file: backend/src/api/orchestration.rs:13073-13076#record_toolchain_smoke_check_on]
-[src: file: backend/src/db/orchestration.rs:8113#refusal_for]
+[src: file: backend/src/db/orchestration.rs:8117#refusal_for]
 
 ## Maintenance command
 

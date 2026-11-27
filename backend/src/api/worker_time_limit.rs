@@ -29,6 +29,32 @@ pub const TIME_LIMIT_EVENT: &str = "worker_time_limit";
 /// First line of the checkpoint commit, so it is recognisable in `git log`.
 pub const CHECKPOINT_SUBJECT_PREFIX: &str = "WIP checkpoint (Kronn)";
 
+/// KT-2107 — which of Kronn's limits stopped a worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopKind {
+    /// The wall-clock limit of one run.
+    TimeLimit,
+    /// No output for the inactivity limit (the stream's or the model watchdog's).
+    Inactivity,
+}
+
+impl StopKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TimeLimit => "time_limit",
+            Self::Inactivity => "inactivity",
+        }
+    }
+
+    /// A stop recorded before kinds existed was a time-limit stop.
+    fn read(stop: &Value) -> Self {
+        match stop["kind"].as_str() {
+            Some("inactivity") => Self::Inactivity,
+            _ => Self::TimeLimit,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitStage {
     /// The limit is about 30 minutes away (90 of 120).
@@ -214,13 +240,28 @@ pub struct Checkpoint {
     pub commit_error: Option<String>,
 }
 
-fn checkpoint_message(reference: &str, files: usize, elapsed: Duration, limit: Duration) -> String {
+fn checkpoint_message(
+    reference: &str,
+    files: usize,
+    kind: StopKind,
+    elapsed: Duration,
+    limit: Duration,
+) -> String {
+    let (stopped_by, trailer) = match kind {
+        StopKind::TimeLimit => (
+            format!("the {}-minute execution limit", minutes(limit)),
+            "execution-time-limit",
+        ),
+        StopKind::Inactivity => (
+            format!("{} min without output", minutes(limit)),
+            "inactivity-timeout",
+        ),
+    };
     format!(
-        "{CHECKPOINT_SUBJECT_PREFIX}: {reference} worker stopped by the {}-minute execution limit\n\n\
+        "{CHECKPOINT_SUBJECT_PREFIX}: {reference} worker stopped by {stopped_by}\n\n\
          Uncommitted work of a worker stopped after {} min ({files} path(s)). This is not a \
          delivery: the resumed worker reviews it and builds on it.\n\n\
-         Kronn-Checkpoint: execution-time-limit",
-        minutes(limit),
+         Kronn-Checkpoint: {trailer}",
         minutes(elapsed),
     )
 }
@@ -259,6 +300,7 @@ pub fn checkpoint_worktree(
     checkpoint_worktree_with_hooks(
         root,
         reference,
+        StopKind::TimeLimit,
         elapsed,
         limit,
         data_dir_lock,
@@ -271,6 +313,7 @@ pub fn checkpoint_worktree(
 pub fn checkpoint_worktree_with_hooks(
     root: &Path,
     reference: &str,
+    kind: StopKind,
     elapsed: Duration,
     limit: Duration,
     data_dir_lock: Option<&std::fs::File>,
@@ -281,7 +324,7 @@ pub fn checkpoint_worktree_with_hooks(
         return Ok(None);
     }
     let files: Vec<String> = dirty.into_iter().map(|file| file.path).collect();
-    let message = checkpoint_message(reference, files.len(), elapsed, limit);
+    let message = checkpoint_message(reference, files.len(), kind, elapsed, limit);
     let committed = if crate::api::git_ops::merge_in_progress(root) {
         Err("a merge is in progress in the worktree".to_string())
     } else {
@@ -322,6 +365,7 @@ pub fn checkpoint_worktree_with_hooks(
 pub fn record_time_limit_stop(
     conn: &Connection,
     dispatch_job_id: &str,
+    kind: StopKind,
     elapsed: Duration,
     limit: Duration,
     checkpoint: Option<&Checkpoint>,
@@ -331,10 +375,11 @@ pub fn record_time_limit_stop(
     else {
         return Ok(false);
     };
-    record_stop_event(
+    record_stop(
         conn,
         &execution.id,
         dispatch_job_id,
+        kind,
         elapsed,
         limit,
         checkpoint,
@@ -342,10 +387,33 @@ pub fn record_time_limit_stop(
     Ok(true)
 }
 
+/// A stop of the run time limit; see [`record_stop`].
 pub fn record_stop_event(
     conn: &Connection,
     execution_id: &str,
     dispatch_job_id: &str,
+    elapsed: Duration,
+    limit: Duration,
+    checkpoint: Option<&Checkpoint>,
+) -> Result<()> {
+    record_stop(
+        conn,
+        execution_id,
+        dispatch_job_id,
+        StopKind::TimeLimit,
+        elapsed,
+        limit,
+        checkpoint,
+    )
+}
+
+/// Journals a stop of `kind`: `limit` is the bound that fired (the run limit, or
+/// the silence allowed), `elapsed` how long the run had lasted.
+pub fn record_stop(
+    conn: &Connection,
+    execution_id: &str,
+    dispatch_job_id: &str,
+    kind: StopKind,
     elapsed: Duration,
     limit: Duration,
     checkpoint: Option<&Checkpoint>,
@@ -358,6 +426,7 @@ pub fn record_stop_event(
     )?;
     let mut changes = json!({
         "generation": previous + 1,
+        "kind": kind.as_str(),
         "dispatch_job_id": dispatch_job_id,
         "elapsed_secs": elapsed.as_secs(),
         "limit_secs": limit.as_secs(),
@@ -393,6 +462,7 @@ pub fn record_stop_event(
 pub async fn checkpoint_stopped_worker(
     state: &crate::AppState,
     dispatch_job_id: &str,
+    kind: StopKind,
     elapsed: Duration,
     limit: Duration,
 ) {
@@ -441,6 +511,7 @@ pub async fn checkpoint_stopped_worker(
                 checkpoint_worktree_with_hooks(
                     Path::new(&root),
                     &reference,
+                    kind,
                     elapsed,
                     limit,
                     lock.as_deref(),
@@ -469,7 +540,7 @@ pub async fn checkpoint_stopped_worker(
     if let Err(error) = state
         .db
         .with_conn(move |conn| {
-            record_time_limit_stop(conn, &id, elapsed, limit, checkpoint.as_ref())
+            record_time_limit_stop(conn, &id, kind, elapsed, limit, checkpoint.as_ref())
         })
         .await
     {
@@ -480,6 +551,7 @@ pub async fn checkpoint_stopped_worker(
 /// KT-2037 — a limit stop read back from the journal for one run of a dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitStop {
+    pub kind: StopKind,
     pub elapsed: Duration,
     pub limit: Duration,
     /// How many paths were uncommitted when the worker was stopped.
@@ -539,6 +611,7 @@ pub fn limit_stop_of_dispatch(
     };
     let stop: Value = serde_json::from_str(&changes)?;
     Ok(Some(LimitStop {
+        kind: StopKind::read(&stop),
         elapsed: Duration::from_secs(stop["elapsed_secs"].as_u64().unwrap_or(0)),
         limit: Duration::from_secs(stop["limit_secs"].as_u64().unwrap_or(0)),
         files: stop["files"].as_array().map_or(0, Vec::len),
@@ -549,6 +622,17 @@ pub fn limit_stop_of_dispatch(
 /// The dispatch `last_error` of a run the limit stopped. The cause sits in the
 /// first 160 characters, which is all the compact status shows.
 pub fn stop_diagnostic(stop: &LimitStop) -> String {
+    if stop.kind == StopKind::Inactivity {
+        return format!(
+            "task worker stopped by Kronn: failure_kind=inactivity_timeout; {} min without output \
+             after {} min of run (Config > Server, Agent inactivity timeout). The worker reported \
+             no failure and had not delivered. {} Use `task_exec_resume`, or `task_exec_reassign` \
+             with a `reason` that says what was running when the output stopped.",
+            minutes(stop.limit),
+            minutes(stop.elapsed),
+            stop.kept(false),
+        );
+    }
     format!(
         "task worker stopped by Kronn: failure_kind=execution_time_limit; ran {} of {} min, the \
          limit of one run of its agent (Config > Server). The worker reported no failure and \
@@ -671,16 +755,23 @@ pub fn handoff_note(conn: &Connection, execution_id: &str, fr: bool) -> Option<S
                 }
             }
         };
-        lines.push(if fr {
-            format!(
+        lines.push(match (StopKind::read(stop), fr) {
+            (StopKind::TimeLimit, true) => format!(
                 "- génération {generation} : {elapsed} min sur {limit} min de limite, arrêtée par \
                  la limite ; {outcome}."
-            )
-        } else {
-            format!(
+            ),
+            (StopKind::TimeLimit, false) => format!(
                 "- generation {generation}: {elapsed} min of the {limit}-min limit, stopped by \
                  the limit; {outcome}."
-            )
+            ),
+            (StopKind::Inactivity, true) => format!(
+                "- génération {generation} : arrêtée après {limit} min sans sortie, au bout de \
+                 {elapsed} min ; {outcome}."
+            ),
+            (StopKind::Inactivity, false) => format!(
+                "- generation {generation}: stopped after {limit} min without output, {elapsed} \
+                 min into the run; {outcome}."
+            ),
         });
     }
     let list = lines.join("\n");
@@ -696,6 +787,30 @@ pub fn handoff_note(conn: &Connection, execution_id: &str, fr: bool) -> Option<S
         (None, true) => "Ne relance pas".to_string(),
         (None, false) => "Do not start again".to_string(),
     };
+    // KT-2107 — a generation stopped for lack of output did not reach any limit.
+    if stops
+        .iter()
+        .any(|stop| StopKind::read(stop) == StopKind::Inactivity)
+    {
+        return Some(if fr {
+            format!(
+                "**Arrêts par Kronn** — les générations précédentes ont été arrêtées par Kronn \
+                 :\n{list}\n\
+                 Relis ce travail (`git show` du commit WIP, ou `git diff`), poursuis-le sans \
+                 réécrire l'historique, commite avec l'outil de commit déclaré et livre avec \
+                 `task_exec_deliver`. {advice} la commande qui tournait, ou restait muette, quand \
+                 une génération a été arrêtée ; lance seulement les tests ciblés, puis livre."
+            )
+        } else {
+            format!(
+                "**Stopped by Kronn** — earlier generations were stopped by Kronn:\n{list}\n\
+                 Review that work (`git show` of the WIP commit, or `git diff`), carry on without \
+                 rewriting history, commit with the declared commit tool and deliver with \
+                 `task_exec_deliver`. {advice} the command that was running, or silent, when a \
+                 generation was stopped; run the targeted tests only, then deliver."
+            )
+        });
+    }
     Some(if fr {
         format!(
             "**Limite de temps** — les générations précédentes ont été arrêtées par la limite \

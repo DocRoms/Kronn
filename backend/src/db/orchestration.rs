@@ -2925,6 +2925,9 @@ pub fn interrupt_undelivered_execution_for_dispatch(
 /// KT-2037 — recovery reason of a worker Kronn stopped at the run time limit.
 pub const WORKER_TIMED_OUT_REASON: &str = "worker_timed_out_without_delivery";
 
+/// KT-2107 — recovery reason of a worker Kronn stopped for lack of output.
+pub const WORKER_INACTIVE_REASON: &str = "worker_inactive_without_delivery";
+
 /// Whether a recovery reason is the one [`interrupt_undelivered_execution_for_dispatch`]
 /// writes: the worker's turn ended (by itself, or stopped) and no delivery came
 /// out of it.
@@ -2933,6 +2936,7 @@ pub fn is_undelivered_worker_reason(reason: &str) -> bool {
         || reason.starts_with("worker_failed_without_delivery")
         || reason.starts_with("worker_stopped_without_delivery")
         || reason.starts_with(WORKER_TIMED_OUT_REASON)
+        || reason.starts_with(WORKER_INACTIVE_REASON)
 }
 
 /// KT-1540 — a message posted in the child room of an `Interrupted`,
