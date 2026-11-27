@@ -409,8 +409,11 @@ fn the_ollama_request_carries_the_image_and_a_screenshot_does_not_inflate_the_wi
 
     // The size guards read the body the way the tool loop does.
     fit_ollama_num_ctx(&mut body, 32768);
+    // A tool-free request reserves the long-answer reply (KT-2123); the image may
+    // add only its flat cost on top of that, never its payload.
     assert!(
-        body["options"]["num_ctx"].as_u64().unwrap() <= 8192,
+        body["options"]["num_ctx"].as_u64().unwrap()
+            <= crate::agents::runner::LONG_ANSWER_REPLY_TOKENS + 4096,
         "an image is a flat few thousand tokens, not its payload: {}",
         body["options"]["num_ctx"]
     );

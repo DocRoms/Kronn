@@ -6636,13 +6636,20 @@ const PROSE_TENTHS_PER_TOKEN: u64 = 45;
 const TOOLS_TENTHS_PER_TOKEN: u64 = 35;
 /// What a reply needs on top of the prompt.
 pub const REPLY_HEADROOM_TOKENS: u64 = 2048;
+/// What a tool-free reply needs: the answer itself, e.g. one whole HTML page
+/// (6-12k output tokens). Sized to the output ceiling, not to a prompt.
+pub const LONG_ANSWER_REPLY_TOKENS: u64 = 8_192;
+
+/// Tokens of the messages and declared catalogue, without any reply room.
+fn prompt_tokens_without_reply(messages_bytes: usize, tools_bytes: usize) -> u64 {
+    (messages_bytes as u64 * 10 / PROSE_TENTHS_PER_TOKEN)
+        + (tools_bytes as u64 * 10 / TOOLS_TENTHS_PER_TOKEN)
+}
 
 /// Tokens a prompt of `messages_bytes` of text plus `tools_bytes` of declared
 /// catalogue is worth, with the room a reply needs.
 pub fn estimated_prompt_tokens(messages_bytes: usize, tools_bytes: usize) -> u64 {
-    (messages_bytes as u64 * 10 / PROSE_TENTHS_PER_TOKEN)
-        + (tools_bytes as u64 * 10 / TOOLS_TENTHS_PER_TOKEN)
-        + REPLY_HEADROOM_TOKENS
+    prompt_tokens_without_reply(messages_bytes, tools_bytes) + REPLY_HEADROOM_TOKENS
 }
 /// Persistent Settings overrides are bounded against accidental values that
 /// would allocate an absurd KV cache. The process-global env override remains
@@ -7364,7 +7371,16 @@ pub fn reachable_tools_bytes(body: &serde_json::Value) -> usize {
 pub fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
     let messages = super::vision::messages_wire_len(body);
     let tools = reachable_tools_bytes(body);
-    let est = estimated_prompt_tokens(messages, tools);
+    let prompt = prompt_tokens_without_reply(messages, tools);
+    // A request without tools is the answer itself: it reserves room for a long
+    // one. With tools, the reply is a short call or a summary, so the old headroom stays.
+    let tool_free = body["tools"].as_array().is_none_or(Vec::is_empty);
+    let reply = if tool_free {
+        LONG_ANSWER_REPLY_TOKENS
+    } else {
+        REPLY_HEADROOM_TOKENS
+    };
+    let est = prompt + reply;
     let ceiling = ctx_cap.max(OLLAMA_NUM_CTX_FLOOR);
     if est > ceiling {
         tracing::warn!(
@@ -7375,7 +7391,12 @@ pub fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
     }
     let num_ctx = est.clamp(OLLAMA_NUM_CTX_FLOOR, ceiling);
     body["options"]["num_ctx"] = serde_json::json!(num_ctx);
-    if let Some(num_predict) = ollama_num_predict(num_ctx) {
+    let num_predict = if tool_free {
+        ollama_reply_predict(num_ctx, num_ctx.saturating_sub(prompt))
+    } else {
+        ollama_num_predict(num_ctx)
+    };
+    if let Some(num_predict) = num_predict {
         body["options"]["num_predict"] = serde_json::json!(num_predict);
     }
 }
@@ -7383,6 +7404,11 @@ pub fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
 /// How many tokens one turn may generate, or `None` when the operator lifted
 /// the cap. Pure so the rule can be tested without touching the process env.
 pub fn num_predict_for(num_ctx: u64, raw_override: Option<String>) -> Option<i64> {
+    num_predict_or(raw_override, default_num_predict(num_ctx))
+}
+
+/// `raw_override` when it is set, else `fallback`; nonpositive lifts the cap.
+fn num_predict_or(raw_override: Option<String>, fallback: i64) -> Option<i64> {
     if let Some(raw) = raw_override {
         let raw = raw.trim();
         if !raw.is_empty() {
@@ -7390,11 +7416,11 @@ pub fn num_predict_for(num_ctx: u64, raw_override: Option<String>) -> Option<i64
                 Ok(n) if n <= 0 => None,
                 Ok(n) => Some(n),
                 // A typo must not silently remove the guard.
-                Err(_) => Some(default_num_predict(num_ctx)),
+                Err(_) => Some(fallback),
             };
         }
     }
-    Some(default_num_predict(num_ctx))
+    Some(fallback)
 }
 
 fn default_num_predict(num_ctx: u64) -> i64 {
@@ -7405,6 +7431,19 @@ pub fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
     num_predict_for(
         num_ctx,
         crate::core::child_env::var("KRONN_OLLAMA_NUM_PREDICT").ok(),
+    )
+}
+
+/// Output budget of a tool-free reply: what the window leaves after the prompt
+/// (`room`), bounded to [FLOOR, CEIL] and kept below the window. The operator's
+/// KRONN_OLLAMA_NUM_PREDICT still wins when set.
+pub fn ollama_reply_predict(num_ctx: u64, room: u64) -> Option<i64> {
+    let budget = room
+        .clamp(OLLAMA_NUM_PREDICT_FLOOR, OLLAMA_NUM_PREDICT_CEIL)
+        .min(num_ctx.saturating_sub(1)) as i64;
+    num_predict_or(
+        crate::core::child_env::var("KRONN_OLLAMA_NUM_PREDICT").ok(),
+        budget,
     )
 }
 
@@ -8277,7 +8316,15 @@ pub fn resize_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
     // The output budget follows the window. Sized once on the small first-turn
     // window, it capped every later turn at ~1.9k tokens: a whole document in
     // one write_file was cut off and the model never wrote it (KT-967).
-    if let Some(num_predict) = ollama_num_predict(num_ctx) {
+    // Without tools (the final-answer turn) the reply is the answer: the room
+    // after the history is its budget (KT-2123).
+    let num_predict = if body["tools"].as_array().is_none_or(Vec::is_empty) {
+        let history = est.saturating_sub(REPLY_HEADROOM_TOKENS);
+        ollama_reply_predict(num_ctx, num_ctx.saturating_sub(history))
+    } else {
+        ollama_num_predict(num_ctx)
+    };
+    if let Some(num_predict) = num_predict {
         body["options"]["num_predict"] = serde_json::json!(num_predict);
     }
 }
@@ -9188,6 +9235,17 @@ pub async fn forward_chat_line(
             if let Ok(mut stderr) = stderr.lock() {
                 stderr.push(format!("{backend} stopped with finish_reason: {reason}"));
             }
+        }
+        // `length`: the reply hit its output budget, so the text stops mid-answer
+        // (KT-2123: a 3.5k-character HTML page reported as a success). Not retried:
+        // the same budget cuts the same answer again.
+        if reason == "length" {
+            if let Ok(mut stderr) = stderr.lock() {
+                stderr.push(format!(
+                    "{backend} reached its output budget (finish_reason: length) — the answer is cut, not complete"
+                ));
+            }
+            *got_error = true;
         }
     }
     if let Some(err) = &chunk.error {

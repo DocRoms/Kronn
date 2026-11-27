@@ -96,6 +96,8 @@ impl ChatCodec for OllamaCodec {
             chunk.done = true;
             chunk.prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0);
             chunk.eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
+            // `length` = the reply hit `num_predict`: the text is cut, not finished.
+            chunk.finish_reason = json["done_reason"].as_str().map(str::to_owned);
         }
         Some(chunk)
     }
@@ -306,6 +308,21 @@ mod tests {
             .unwrap();
         assert!(end.done);
         assert_eq!((end.prompt_tokens, end.eval_tokens), (12, 34));
+        assert_eq!(end.finish_reason, None, "no done_reason, no stop reason");
+    }
+
+    #[test]
+    fn ollama_reports_done_reason_length_as_the_stop_reason() {
+        // Captured from a local Ollama: a reply capped by num_predict ends with
+        // done_reason "length" and eval_count equal to the cap.
+        let end = OllamaCodec
+            .parse_line(
+                r#"{"message":{"role":"assistant","content":"x"},"done":true,"done_reason":"length","prompt_eval_count":23,"eval_count":24}"#,
+            )
+            .unwrap();
+        assert!(end.done);
+        assert_eq!(end.finish_reason.as_deref(), Some("length"));
+        assert_eq!(end.eval_tokens, 24);
     }
 
     #[test]
