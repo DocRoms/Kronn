@@ -8001,7 +8001,7 @@ button.disc-contact-open {
   border: none;
   cursor: pointer;
   text-align: left;
-  font-size: var(--kr-fs-xs, 11px);
+  font-size: var(--kr-fs-xs);
   color: var(--kr-text-tertiary, #888);
 }
 .disc-injected-context-toggle:hover { background: rgba(var(--kr-accent-rgb, 99,102,241), 0.07); }

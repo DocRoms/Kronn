@@ -47,7 +47,16 @@ interface AgentSwitchPickerProps {
   title: string;
   ariaLabel: string;
   staticClassName?: string;
+  /** The model shown after the agent; defaults to the current tier's resolved model. */
   suffix?: string;
+  /**
+   * The agent's role, shown as its own label next to the name. A role is
+   * never shown alone: the current model stays visible with it, in the
+   * switchable and in the static form.
+   */
+  role?: string;
+  /** Model named for the current selection when nothing resolves one (instead of `defaultModelLabel`). */
+  currentModelFallback?: string;
   displayName?: string;
   /** Agents that cannot run until their full access is turned on (badged in the list). */
   needsFullAccess?: (agent: AgentType) => boolean;
@@ -79,6 +88,8 @@ export function AgentSwitchPicker({
   ariaLabel,
   staticClassName,
   suffix,
+  role,
+  currentModelFallback,
   displayName,
   needsFullAccess,
 }: AgentSwitchPickerProps) {
@@ -135,11 +146,19 @@ export function AgentSwitchPicker({
   const catalogEntry = (target: AgentSwitchTarget, tier: ModelTier) =>
     resolvedTier(target, tier).entry;
   const targetModel = (target: AgentSwitchTarget, tier: ModelTier) =>
-    resolvedTier(target, tier).model || defaultModelLabel;
+    resolvedTier(target, tier).model
+    || (targetKey(target) === targetKey(currentTarget) && tier === currentTier
+      ? currentModelFallback?.trim()
+      : undefined)
+    || defaultModelLabel;
   const tierTitle = (target: AgentSwitchTarget, tier: ModelTier) =>
     `${tierLabels?.[tier] ?? tier} · ${targetModel(target, tier)}`;
+  const showsCurrentModel = Boolean(currentTier) && (tierPicker || role !== undefined);
   const effectiveSuffix = suffix
-    ?? (tierPicker && currentTier ? targetModel(currentTarget, currentTier) : undefined);
+    ?? (showsCurrentModel && currentTier ? targetModel(currentTarget, currentTier) : undefined);
+  const roleLabel = role && (
+    <span className="kr-agent-switch-role" data-testid="agent-switch-role">{role}</span>
+  );
   const visibleChoices = choices.filter(target => matchesCatalogSearch(query, [
     targetLabel(target),
     ...catalogTargetSearchTerms(target, tierChoices.map(tier => resolvedTier(target, tier))),
@@ -272,6 +291,7 @@ export function AgentSwitchPicker({
         style={{ color: agentTextColor(currentTarget.agent) }}
       >
         {displayName ?? targetLabel(currentTarget)}
+        {roleLabel}
         {effectiveSuffix && <span className="kr-agent-switch-suffix"> · {effectiveSuffix}</span>}
       </span>
     );
@@ -306,6 +326,7 @@ export function AgentSwitchPicker({
       >
         {saving ? <Loader2 size={9} className="spin" /> : <RefreshCw size={9} />}
         <span>{displayName ?? targetLabel(currentTarget)}</span>
+        {roleLabel}
         {tierPicker && currentTier && (
           <span
             className="kr-agent-switch-current-tier"

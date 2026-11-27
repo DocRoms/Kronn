@@ -17,7 +17,7 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink, Gamepad2,
-  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge, FolderInput, Bot, KeyRound,
+  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge, FolderInput, Bot, KeyRound, Palette,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
@@ -89,6 +89,7 @@ import { revealWhenSettled } from '../lib/revealWhenSettled';
 import { settingsSectionPath } from '../lib/routes';
 import { ContextHelp } from '../components/ContextHelp';
 import { DebugSection } from '../components/settings/DebugSection';
+import { DesignSystemSection, DESIGN_SYSTEM_SECTION_ID } from '../components/settings/DesignSystemSection';
 import { ExternalContentSection, EXTERNAL_CONTENT_SECTION_ID, type EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
 import { UserContextEditor } from '../components/UserContextEditor';
 import { MatrixText } from '../components/MatrixText';
@@ -1382,6 +1383,19 @@ export function SettingsPage({
                 <div>
                   <h3>{t('config.appearance')}</h3>
                   <p>{t('config.appearanceHint')}</p>
+                  {/* KT-1878 — the tokens behind the look, in the current theme. */}
+                  <AppLink
+                    to={settingsSectionPath(DESIGN_SYSTEM_SECTION_ID)}
+                    className="set-design-system-link"
+                    data-testid="design-system-link"
+                    onNavigate={() => {
+                      document.getElementById(DESIGN_SYSTEM_SECTION_ID)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+                      onAnchorFollowed?.(DESIGN_SYSTEM_SECTION_ID);
+                    }}
+                  >
+                    <Palette size={13} aria-hidden="true" />
+                    {t('designSystem.link')}
+                  </AppLink>
                 </div>
               </div>
               <div className="set-preferences-controls-grid">
@@ -2194,6 +2208,10 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+
+      {/* KT-1878 — the design tokens, reached from the appearance settings
+          (and its address), not listed in the section index. */}
+      <DesignSystemSection t={t} />
         </div>
       </div>
       <div className="set-footer">

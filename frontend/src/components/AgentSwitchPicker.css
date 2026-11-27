@@ -41,6 +41,21 @@
   font-weight: 500;
 }
 
+/* The agent's role, as its own label: never in place of the model. */
+.kr-agent-switch-role {
+  padding: 0 5px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-tertiary);
+  background: var(--kr-bg-subtle);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.kr-agent-switch-static .kr-agent-switch-role {
+  margin-left: 4px;
+}
+
 .kr-agent-switch-current-tier {
   display: inline-grid;
   place-items: center;

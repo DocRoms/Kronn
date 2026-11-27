@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { buildApiMock } from '../../test/apiMock';
 
@@ -10,12 +10,14 @@ vi.mock('../../lib/I18nContext', () => ({
 
 import { discussions as discussionsApi } from '../../lib/api';
 import { ChatHeader } from '../ChatHeader';
+import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import type { AgentDetection, AgentType, Discussion, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import type { ExternalApiConnectionView } from '../../lib/api';
 
 const noop = () => {};
-const t = (key: string) => key;
+const t = (key: string, ...args: (string | number)[]) =>
+  args.length ? `${key}(${args.join(',')})` : key;
 
 function makeDiscussion(): Discussion {
   return {
@@ -256,6 +258,139 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(screen.getByRole('menuitem', {
       name: 'Codex · disc.tier.reasoning',
     })).toHaveAttribute('title', 'disc.tier.reasoning · gpt-company-review');
+  });
+
+  /// KT-1935 — the role used to replace the model on the button. Now the
+  /// agent, its role and the concrete model are visible together.
+  describe('agent, role and model together', () => {
+    const blank = { economy: null, default: null, reasoning: null };
+    const tiers: ModelTiersConfig = {
+      claude_code: { ...blank, default: 'sonnet' },
+      codex: { ...blank },
+      open_code: { ...blank },
+      gemini_cli: { ...blank },
+      kiro: { ...blank },
+      vibe: { ...blank },
+      copilot_cli: { ...blank },
+      ollama: { ...blank },
+      lite_llm: { ...blank },
+      nvidia: { ...blank },
+    };
+    const agentReply = (id: string, model: string | null, extra: Partial<Discussion['messages'][number]> = {}) => ({
+      id,
+      role: 'Agent' as const,
+      channel: 'main' as const,
+      content: 'reply',
+      agent_type: 'ClaudeCode' as const,
+      timestamp: '2026-11-20T10:00:00Z',
+      tokens_used: 0,
+      auth_mode: null,
+      model,
+      ...extra,
+    });
+
+    it('shows the agent, its role as its own label and the concrete model on the switchable button', async () => {
+      renderHeader({ modelTiers: tiers });
+      const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+      await waitFor(() => expect(trigger).toBeEnabled());
+
+      expect(trigger).toHaveTextContent('@claude');
+      const role = within(trigger).getByTestId('agent-switch-role');
+      expect(role).toHaveTextContent(/^disc\.targetDiscussionAgent$/);
+      expect(trigger.querySelector('.kr-agent-switch-suffix')).toHaveTextContent('· sonnet');
+      // The tier stays an icon, its name in the tooltip.
+      expect(trigger.querySelector('.kr-agent-switch-current-tier')).toHaveAttribute(
+        'title', 'disc.tier.default · sonnet',
+      );
+    });
+
+    it('shows the saved discussion model next to the role', async () => {
+      renderHeader({ modelTiers: tiers, discussion: { ...makeDiscussion(), model: 'opus' } });
+      const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      expect(within(trigger).getByTestId('agent-switch-role')).toBeInTheDocument();
+      expect(trigger.querySelector('.kr-agent-switch-suffix')).toHaveTextContent('· opus');
+    });
+
+    it('falls back to the model of the last agent reply when nothing resolves one', async () => {
+      const discussion = makeDiscussion();
+      discussion.agent = 'Codex';
+      discussion.messages = [
+        { ...agentReply('older', 'gpt-old'), agent_type: 'Codex' },
+        { ...agentReply('newer', 'gpt-5.5-codex'), agent_type: 'Codex' },
+        // Another agent's reply, or one without a model, names nothing for Codex.
+        agentReply('other-agent', 'sonnet'),
+        { ...agentReply('no-model', null), agent_type: 'Codex' },
+      ];
+      renderHeader({ modelTiers: tiers, discussion });
+      const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+      await waitFor(() => expect(trigger).toBeEnabled());
+
+      expect(within(trigger).getByTestId('agent-switch-role')).toBeInTheDocument();
+      const model = trigger.querySelector('.kr-agent-switch-suffix');
+      expect(model).toHaveTextContent('· gpt-5.5-codex');
+      expect(model).not.toHaveTextContent('disc.targetDiscussionAgent');
+      expect(model).not.toHaveTextContent('config.defaultModel');
+      expect(trigger).toHaveAttribute('title', 'disc.switchAgentAndTier · disc.tier.default · gpt-5.5-codex');
+    });
+
+    it('names the default model of the agent when no reply recorded one', async () => {
+      const discussion = makeDiscussion();
+      discussion.agent = 'Codex';
+      discussion.messages = [
+        // Recorded on another tier: not what runs now.
+        { ...agentReply('economy', 'gpt-mini', { model_tier: 'economy' }), agent_type: 'Codex' },
+      ];
+      renderHeader({ modelTiers: tiers, discussion });
+      const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+      await waitFor(() => expect(trigger).toBeEnabled());
+
+      const model = trigger.querySelector('.kr-agent-switch-suffix');
+      expect(model).toHaveTextContent('· disc.defaultModelOf(Codex)');
+      expect(model).not.toHaveTextContent('config.defaultModel');
+      expect(model).not.toHaveTextContent('disc.tier.default');
+    });
+
+    it('keeps the role and the model together in the static form', () => {
+      render(
+        <AgentSwitchPicker
+          currentAgent="ClaudeCode"
+          availableAgents={['ClaudeCode']}
+          title="disc.switchAgentAndTier"
+          ariaLabel="disc.switchAgentAndTier"
+          displayName="@claude"
+          role="disc.targetDiscussionAgent"
+          currentTier="default"
+          modelTiers={tiers}
+          defaultModelLabel="config.defaultModel"
+          currentModelFallback="disc.defaultModelOf(Claude Code)"
+        />,
+      );
+      expect(screen.queryByRole('button', { name: 'disc.switchAgentAndTier' })).toBeNull();
+      const label = document.querySelector('.kr-agent-switch-static')!;
+      expect(label).toHaveTextContent('@claude');
+      expect(within(label as HTMLElement).getByTestId('agent-switch-role'))
+        .toHaveTextContent('disc.targetDiscussionAgent');
+      expect(label.querySelector('.kr-agent-switch-suffix')).toHaveTextContent('· sonnet');
+    });
+
+    it('names the fallback model, not the role, in the static form', () => {
+      render(
+        <AgentSwitchPicker
+          currentAgent="Codex"
+          availableAgents={['Codex']}
+          title="disc.switchAgentAndTier"
+          ariaLabel="disc.switchAgentAndTier"
+          role="disc.targetDiscussionAgent"
+          currentTier="default"
+          modelTiers={tiers}
+          defaultModelLabel="config.defaultModel"
+          currentModelFallback="disc.defaultModelOf(Codex)"
+        />,
+      );
+      const model = document.querySelector('.kr-agent-switch-static .kr-agent-switch-suffix');
+      expect(model).toHaveTextContent('· disc.defaultModelOf(Codex)');
+    });
   });
 
   it('is disabled while the discussion is sending', () => {

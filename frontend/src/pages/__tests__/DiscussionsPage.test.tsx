@@ -4789,7 +4789,7 @@ describe('DiscussionsPage', () => {
     const switchBtn = screen.getByRole('button', { name: "Changer d'agent ou de mode IA" });
     expect(switchBtn).toBeTruthy();
     expect(switchBtn?.textContent).toContain('@claude');
-    expect(switchBtn?.textContent).toContain('agent de discussion');
+    expect(switchBtn?.textContent).toContain('agent principal');
   });
 
   // ─── Global discussion search entry point ────────────────────────────

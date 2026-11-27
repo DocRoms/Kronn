@@ -1,0 +1,159 @@
+/* KT-1878 — Settings > Design system. Written with the scales it shows. */
+
+/* The link to this section from the appearance panel of the preferences. */
+.set-design-system-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  margin-top: var(--kr-space-1);
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.set-design-system-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.ds-title {
+  margin: 0;
+  font-size: var(--kr-type-lg);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+.ds-group {
+  margin-top: var(--kr-space-6);
+}
+
+.ds-group-title {
+  margin: 0 0 var(--kr-space-2);
+  font-size: var(--kr-type-md);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+.ds-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-secondary);
+}
+
+.ds-table th,
+.ds-table td {
+  padding: var(--kr-space-2) var(--kr-space-3) var(--kr-space-2) 0;
+  border-bottom: 1px solid var(--kr-border-light);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.ds-table thead th {
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-text-muted);
+}
+
+.ds-table tbody th {
+  font-weight: var(--kr-weight-regular);
+  white-space: nowrap;
+}
+
+.ds-table code {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-primary);
+}
+
+.ds-value {
+  font-family: var(--kr-font-mono);
+  color: var(--kr-text-primary);
+  white-space: nowrap;
+}
+
+.ds-px,
+.ds-use {
+  color: var(--kr-text-muted);
+}
+
+.ds-px {
+  font-family: var(--kr-font-sans);
+}
+
+.ds-preview-cell {
+  width: 30%;
+}
+
+.ds-preview {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  color: var(--kr-text-primary);
+}
+
+.ds-preview[data-kind="space"],
+.ds-preview[data-kind="width"] {
+  height: var(--kr-space-2);
+  border-radius: var(--kr-radius-control);
+  background: var(--kr-accent);
+}
+
+.ds-preview[data-kind="radius"],
+.ds-preview[data-kind="colour"] {
+  width: var(--kr-space-7);
+  height: var(--kr-space-6);
+  border: 1px solid var(--kr-border-medium);
+}
+
+.ds-preview[data-kind="radius"] {
+  background: var(--kr-bg-elevated);
+}
+
+.ds-preview[data-kind="colour"] {
+  border-radius: var(--kr-radius-control);
+}
+
+.ds-preview[data-kind="height"] {
+  width: var(--kr-space-8);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+  background: var(--kr-bg-elevated);
+}
+
+.ds-preview[data-kind="duration"] {
+  width: var(--kr-space-3);
+  height: var(--kr-space-3);
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-accent);
+  transition-property: transform;
+  transition-timing-function: ease-out;
+}
+
+/* The dot slides at the token's duration when the row is pointed at; no
+   looping animation, which at 120ms would flash. */
+.ds-table tr:hover .ds-preview[data-kind="duration"] {
+  transform: translateX(var(--kr-space-8));
+}
+
+.ds-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Narrower than --kr-bp-md (768px): a custom property cannot be read in @media. */
+@media (max-width: 767px) {
+  .ds-preview-cell,
+  .ds-table thead th:last-child {
+    display: none;
+  }
+  .ds-table tbody th,
+  .ds-value {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}

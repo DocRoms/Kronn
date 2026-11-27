@@ -116,7 +116,7 @@ CLI tiers. No embedded model list participates in the display helper anymore.
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:12-49#resolveCatalogTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:77-88#catalogTierEntry]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:130-140#resolvedTier]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:141-151#resolvedTier]
 
 The shared picker keeps an unavailable configured entry disabled. A failed
 snapshot read reports the error and retains previous data as cached, not live.
@@ -126,9 +126,9 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/ChatHeader.tsx:315#currentModel]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1744-1775#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3395-3396#currentModel]
+[src: file: frontend/src/components/ChatHeader.tsx:332#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1717-1748#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3375-3376#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -146,7 +146,7 @@ refetches the catalogue. An unknown configured ID remains searchable, and a
 known unavailable choice remains disabled; accessible descriptions retain the
 model, provenance and unavailable state after filtering.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:53-62#matchesCatalogSearch]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:143-149#visibleChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:162-168#visibleChoices]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:358-393#tierOptions]
 
 The search field is outside the menu, within a portalled non-modal dialog.
@@ -155,11 +155,11 @@ search and navigate choices when an option has focus. Escape inside the picker
 does not propagate to its parent form. Closing with Escape or completing an
 asynchronous selection restores trigger focus. Reopening clears the query,
 an empty result is explicit, and the popup's height is bounded by the viewport.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:151-176#navigateChoices]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:178-195#updatePopoverPosition]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:230-235#restoreFocusRef]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:299-305#setQuery]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:321-341#createPortal]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:170-195#navigateChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:197-214#updatePopoverPosition]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:104-109#restoreFocusRef]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:319-325#setQuery]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:342-362#createPortal]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:168-205#reports]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:229-256#closes]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.accessibility.test.tsx:40-76#repositions]

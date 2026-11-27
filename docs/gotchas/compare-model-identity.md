@@ -92,7 +92,7 @@ the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3683-3697#AgentCompareSelector]
 [src: file: frontend/src/components/AgentCompareSelector.tsx:85-111#AgentSwitchPicker]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:130-142#resolvedTier]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:141-153#resolvedTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:13-26#resolveCatalogTier]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-359#AgentSwitchPicker]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412-428#AgentSwitchPicker]

@@ -52,7 +52,8 @@ code, .mono { font-family: var(--kr-font-mono); }
 ::selection { background: rgba(var(--kr-accent-rgb), 0.3); }
 
 /* ── Focus ──────────────────────────────────────────────────────────────── */
-*:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+/* The one global *:focus-visible rule lives in tokens.css (accent ink and
+   halo). A second one here overrode its colour (KT-1878). */
 
 /* ── Keyframes ──────────────────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }

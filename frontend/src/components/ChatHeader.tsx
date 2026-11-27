@@ -7,7 +7,7 @@ import type {
   AgentType,
   ModelTiersConfig,
 } from '../types/generated';
-import { AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Pencil, ShieldCheck, Zap, Rocket,
@@ -115,6 +115,23 @@ export function ChatHeader({
       if (retryTimer) clearTimeout(retryTimer);
     };
   }, [discussion.id]);
+
+  // KT-1935 — when neither the catalogue nor the discussion override names a
+  // model, the header names the one the agent last replied with, else "default
+  // model of <agent>"; never the role or the tier alone.
+  const currentTier = discussion.tier ?? 'default';
+  const lastReplyModel = useMemo(() => {
+    for (let index = discussion.messages.length - 1; index >= 0; index--) {
+      const message = discussion.messages[index];
+      if (message.role !== 'Agent' || message.agent_type !== discussion.agent) continue;
+      if (message.model_tier && message.model_tier !== currentTier) continue;
+      const model = message.model?.trim();
+      if (model) return model;
+    }
+    return null;
+  }, [discussion.messages, discussion.agent, currentTier]);
+  const headerModelFallback = lastReplyModel
+    ?? t('disc.defaultModelOf', externalConnection?.display_name ?? AGENT_LABELS[discussion.agent] ?? discussion.agent);
 
   const installedAgentsList = agents.filter(isUsable);
   const nativeAgentDisabled = nativeAgentMode?.discussionId === discussion.id
@@ -310,9 +327,10 @@ export function ChatHeader({
                 disabled={sending || nativeAgentDisabled === null || nativeAgentModeSaving}
                 title={t('disc.switchAgentAndTier')}
                 ariaLabel={t('disc.switchAgentAndTier')}
-                suffix={t('disc.targetDiscussionAgent')}
+                role={t('disc.targetDiscussionAgent')}
                 currentTier={discussion.tier ?? 'default'}
                 currentModel={discussion.model}
+                currentModelFallback={headerModelFallback}
                 tierLabels={{
                   economy: t('disc.tier.economy'),
                   default: t('disc.tier.default'),

@@ -17,7 +17,7 @@ The launch dialog must let picker-owned Escape handling finish first: the model
 picker prevents the event, while the agent picker’s portal is recognised before
 the dialog’s window-level close handler runs.
 [src: file: frontend/src/components/SearchableSelect.tsx:209-213]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:321-325#createPortal]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:342-346#createPortal]
 [src: file: frontend/src/components/TaskLaunchDialog.tsx:137-143]
 
 The regression also unmounts the launch dialog and checks that focus actually

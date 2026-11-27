@@ -108,29 +108,84 @@
   --kr-border-heavy: rgba(255, 255, 255, 0.28);
   --kr-border-emphasis: #0078d4;
 
-  /* ── Spacing scale ────────────────────────────────────────────────────── */
-  --kr-sp-1: 2px;
-  --kr-sp-2: 4px;
-  --kr-sp-3: 6px;
-  --kr-sp-4: 8px;
-  --kr-sp-5: 10px;
-  --kr-sp-6: 12px;
-  --kr-sp-7: 14px;
-  --kr-sp-8: 16px;
-  --kr-sp-9: 20px;
-  --kr-sp-10: 24px;
-  --kr-sp-12: 32px;
+  /* ── Design scales (KT-1878) ──────────────────────────────────────────────
+     The scales new and reworked screens pick from. Each is listed, with its
+     use, in src/styles/designTokens.ts and shown in Settings > Design system
+     (src/styles/__tests__/designTokens.test.ts keeps the three in step).
+     The older --kr-sp-*, --kr-r-* and --kr-fs-* names stay valid: where a
+     value sits on a scale it is mapped to it, the others keep their value
+     until the screens move to the scales in the later lots.               */
 
-  /* ── Border radius ────────────────────────────────────────────────────── */
+  /* Text: five sizes in rem on a 16px root, so the browser's text-size
+     preference applies. 0.75rem (12px) is the floor: nothing smaller. */
+  --kr-type-sm: 0.75rem;     /* 12px — metadata, captions, badges */
+  --kr-type-md: 0.8125rem;   /* 13px — body and controls */
+  --kr-type-lg: 0.875rem;    /* 14px — emphasised body, card titles */
+  --kr-type-xl: 1rem;        /* 16px — section titles */
+  --kr-type-2xl: 1.25rem;    /* 20px — page titles */
+
+  /* Spacing: one scale on a 4px grid. */
+  --kr-space-1: 4px;
+  --kr-space-2: 8px;
+  --kr-space-3: 12px;
+  --kr-space-4: 16px;
+  --kr-space-5: 20px;
+  --kr-space-6: 24px;
+  --kr-space-7: 32px;
+  --kr-space-8: 48px;
+
+  /* Radius: three corners. A round pill stays --kr-radius-pill. */
+  --kr-radius-control: 4px;  /* buttons, inputs, chips */
+  --kr-radius-surface: 8px;  /* cards, panels, popovers */
+  --kr-radius-overlay: 12px; /* dialogs, drawers */
+
+  /* Breakpoints: three window widths, each the first width of the wider
+     layout. A custom property cannot be read inside @media, so a stylesheet
+     writes @media (max-width: <bp - 1>px) and scripts read BREAKPOINTS from
+     src/styles/designTokens.ts (useIsMobile() defaults to the md one). */
+  --kr-bp-sm: 640px;         /* phone: one column */
+  --kr-bp-md: 768px;         /* narrow window: side panels stack */
+  --kr-bp-lg: 900px;         /* laptop: master-detail collapses */
+
+  /* Durations of transitions and animations. */
+  --kr-duration-fast: 120ms; /* hover, press, focus */
+  --kr-duration-base: 150ms; /* open/close of a menu or a disclosure */
+  --kr-duration-slow: 300ms; /* panels and dialogs entering */
+
+  /* Font weights: the four faces reset.css loads. */
+  --kr-weight-regular: 400;
+  --kr-weight-medium: 500;
+  --kr-weight-semibold: 600;
+  --kr-weight-bold: 700;
+
+  /* Control heights, as min-height so a larger text size grows the control. */
+  --kr-control-h-sm: 28px;   /* dense toolbars, inline actions */
+  --kr-control-h-md: 34px;   /* default buttons and inputs */
+  --kr-control-h-lg: 44px;   /* primary actions, touch targets */
+
+  /* ── Spacing scale (legacy names) ─────────────────────────────────────── */
+  --kr-sp-1: 2px;
+  --kr-sp-2: var(--kr-space-1);
+  --kr-sp-3: 6px;
+  --kr-sp-4: var(--kr-space-2);
+  --kr-sp-5: 10px;
+  --kr-sp-6: var(--kr-space-3);
+  --kr-sp-7: 14px;
+  --kr-sp-8: var(--kr-space-4);
+  --kr-sp-9: var(--kr-space-5);
+  --kr-sp-10: var(--kr-space-6);
+  --kr-sp-12: var(--kr-space-7);
+
+  /* ── Border radius (legacy names) ─────────────────────────────────────── */
   --kr-r-xs: 3px;
-  --kr-r-sm: 4px;
+  --kr-r-sm: var(--kr-radius-control);
   --kr-r-md: 6px;
-  --kr-r-lg: 8px;
+  --kr-r-lg: var(--kr-radius-surface);
   /* Every discussion panel opens at the same width — the widest one — so
      switching between them does not shift the conversation sideways. */
   --kr-panel-w: min(430px, 42vw);
   --kr-r-xl: 10px;
-  --kr-r-2xl: 12px;
+  --kr-r-2xl: var(--kr-radius-overlay);
   --kr-r-3xl: 16px;
   --kr-r-full: 50%;
 
@@ -227,6 +282,45 @@
   --kr-text-rgb: 232, 234, 237;
   --kr-text-faint-rgb: 255, 255, 255;
   --kr-text-ghost-rgb: 255, 255, 255;
+
+  /* ── Semantic colours (KT-1878) ───────────────────────────────────────────
+     What a colour MEANS, so a component never names a theme: it asks for
+     "a keyword" or "an added line", and each theme answers below. Defined
+     once here as references where the meaning maps to an existing token,
+     so a theme that retunes the canonical token flows through.
+
+     Text roles: three. --kr-text-primary (headings, body),
+     --kr-text-secondary (supporting text) and --kr-text-muted (metadata,
+     timestamps), all declared above per theme.                          */
+
+  /* Status of a run, a check, a task. */
+  --kr-status-success: var(--kr-success);
+  --kr-status-warning: var(--kr-warning);
+  --kr-status-danger: var(--kr-error);
+  --kr-status-info: var(--kr-info);
+  --kr-status-neutral: var(--kr-cancelled);
+
+  /* Diff lines: a tinted row, a stronger edge, text that holds 4.5:1 on
+     the row over the code surface. */
+  --kr-diff-added-bg: rgba(var(--kr-success-rgb), 0.12);
+  --kr-diff-added-border: rgba(var(--kr-success-rgb), 0.65);
+  --kr-diff-added-text: var(--kr-success);
+  --kr-diff-removed-bg: rgba(var(--kr-error-rgb), 0.12);
+  --kr-diff-removed-border: rgba(var(--kr-error-rgb), 0.65);
+  --kr-diff-removed-text: var(--kr-error-soft);
+
+  /* Code: the surface a source or diff viewer reads on, its plain text and
+     the syntax roles of highlight.js. Dark themes use a One Dark palette,
+     light themes override it with a GitHub-light one below. */
+  --kr-code-surface: var(--kr-bg-surface);
+  --kr-code-text: var(--kr-text-primary);
+  --kr-code-comment: #8b98a8;
+  --kr-code-keyword: #c678dd;
+  --kr-code-string: #98c379;
+  --kr-code-number: #d19a66;
+  --kr-code-function: #61afef;
+  --kr-code-variable: #e8787f;
+  --kr-code-symbol: #56b6c2;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -380,6 +474,25 @@
   --kr-text-ghost-rgb: 10, 14, 30;
 }
 
+/* Code colours of the light themes (KT-1878): a GitHub-light palette, dark
+   ink on a light code surface, each at 4.5:1 or more on it, and diff text
+   that holds 4.5:1 on its tinted row. */
+:root[data-theme="light"],
+:root[data-theme="sakura"],
+:root[data-theme="euronews"] {
+  --kr-code-comment: #6a737d;
+  --kr-code-keyword: #6f42c1;
+  --kr-code-string: #22863a;
+  --kr-code-number: #955800;
+  --kr-code-function: #005cc5;
+  --kr-code-variable: #b31d28;
+  --kr-code-symbol: #1b7c83;
+  /* The status greens and reds of these themes fall under 4.5:1 on a tinted
+     diff row: the diff text takes the 800 step of the same hues. */
+  --kr-diff-added-text: #166534;
+  --kr-diff-removed-text: #991b1b;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    Focus ring — explicit, visible in both themes
    A11y rule: focus must always be visible, and must work on ANY background.
@@ -476,6 +589,8 @@
   --kr-purple-soft-rgb: 179, 136, 255;
   --kr-pink: #ff39a0;
   --kr-pink-rgb: 255, 57, 160;
+  /* The CRT red with alpha falls under 4.5:1 on a tinted diff row. */
+  --kr-diff-removed-text: #ff6b85;
   --kr-cancelled: rgba(57, 255, 20, 0.55);
   --kr-text-on-accent: #000;
   --kr-text-on-dark: #39ff14;

@@ -422,6 +422,17 @@ describe('SettingsPage', () => {
     expect(document.querySelector('.set-content > #settings-languages')).toBeNull();
   });
 
+  it('links the appearance settings to the Design system section, absent from the section index', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    const link = document.querySelector('[data-kind="appearance"] [data-testid="design-system-link"]');
+    expect(link?.getAttribute('href')).toBe('/config#design-system');
+    expect(link?.textContent).toContain('Design system');
+    expect(document.querySelector('.set-content > #design-system')).toBeTruthy();
+    expect(document.querySelector('#design-system tr[data-token="--kr-type-sm"]')).toBeTruthy();
+    expect(document.querySelector('.set-nav a[href="/config#design-system"]')).toBeNull();
+  });
+
   it('explains the output-language scope for launched agents and external CLIs', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
 
