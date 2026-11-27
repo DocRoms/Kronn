@@ -156,6 +156,7 @@ static SNAPSHOT: std::sync::LazyLock<RwLock<Snapshot>> = std::sync::LazyLock::ne
             rust_roots: None,
             dependency_dirs: None,
             validation_executables: None,
+            validation_max_timeout_secs: None,
         },
         projects: BTreeMap::new(),
         registered: BTreeSet::new(),
@@ -339,16 +340,81 @@ pub fn effective_for(worktree: &Path, main_checkout: Option<&Path>) -> Effective
 /// filled by saves alone may miss a nested project, and would widen.
 pub fn validation_executables_for(worktree: &Path) -> Vec<String> {
     let worktree = key_of(worktree);
-    let managed = crate::core::task_worker_env::WorkerLane::for_worktree(&worktree)
+    let Some(main_checkout) = owning_checkout(&worktree) else {
+        return Vec::new();
+    };
+    effective_for(&worktree, Some(&main_checkout)).validation_executables
+}
+
+/// The checkout that owns `worktree` (see [`validation_executables_for`]), if any.
+fn owning_checkout(worktree: &Path) -> Option<PathBuf> {
+    let managed = crate::core::task_worker_env::WorkerLane::for_worktree(worktree)
         .ok()
         .and_then(|lane| lane.main_checkout);
     let armed = SNAPSHOT.read().unwrap_or_else(|e| e.into_inner()).armed;
-    let main_checkout = match managed {
+    match managed {
         Some(checkout) => Some(checkout),
-        None if armed => project_listing(&worktree),
-        None => return Vec::new(),
-    };
-    effective_for(&worktree, main_checkout.as_deref()).validation_executables
+        None if armed => project_listing(worktree),
+        None => None,
+    }
+}
+
+/// KT-2129 — Settings > Workers' validation ceiling, in seconds, published at
+/// boot and on every config save.
+static GLOBAL_VALIDATION_CEILING_SECS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(crate::models::DEFAULT_VALIDATION_MAX_TIMEOUT_SECS);
+
+/// Publish the owner's global validation ceiling to this process.
+pub fn set_global_validation_ceiling(workers: &crate::models::WorkersConfig) {
+    GLOBAL_VALIDATION_CEILING_SECS.store(
+        workers.effective_validation_max_timeout_secs() as u32,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn global_validation_ceiling() -> u32 {
+    GLOBAL_VALIDATION_CEILING_SECS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The global ceiling alone, for a scope that names no project.
+pub fn global_validation_ceiling_secs() -> u64 {
+    u64::from(global_validation_ceiling())
+}
+
+/// The ceiling for a command run in `worktree`: its project's own value, else
+/// the global one.
+pub fn validation_ceiling_for(worktree: &Path) -> u64 {
+    let worktree = key_of(worktree);
+    let project = owning_checkout(&worktree).and_then(|checkout| {
+        let snapshot = SNAPSHOT.read().unwrap_or_else(|e| e.into_inner());
+        snapshot
+            .projects
+            .get(&key_of(&checkout))
+            .and_then(|config| config.validation_max_timeout_secs)
+    });
+    crate::models::resolve_validation_ceiling(global_validation_ceiling(), project)
+}
+
+/// The ceiling of the project registered at `project_path`.
+pub fn validation_ceiling_for_project(project_path: &Path) -> u64 {
+    let snapshot = SNAPSHOT.read().unwrap_or_else(|e| e.into_inner());
+    let project = snapshot
+        .projects
+        .get(&key_of(project_path))
+        .and_then(|config| config.validation_max_timeout_secs);
+    crate::models::resolve_validation_ceiling(global_validation_ceiling(), project)
+}
+
+/// The highest ceiling any scope may hold: what an intake that does not know
+/// the project accepts (the run holds the project to its own).
+pub fn intake_validation_ceiling() -> u64 {
+    let snapshot = SNAPSHOT.read().unwrap_or_else(|e| e.into_inner());
+    let highest = snapshot
+        .projects
+        .values()
+        .filter_map(|config| config.validation_max_timeout_secs)
+        .fold(global_validation_ceiling(), u32::max);
+    crate::models::resolve_validation_ceiling(highest, None)
 }
 
 /// The registered project that owns `path`: the one whose checkout, or one of

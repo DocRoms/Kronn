@@ -4733,7 +4733,7 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              subdirectory with the tool's own option: `pnpm --dir frontend exec tsc -b \
              --pretty false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` \
              (there is no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n\
-             • `timeout_secs` defaults to 600 and is capped at 1800.\n\n\
+             • `timeout_secs` defaults to 600; its cap is 1800 unless the owner raised it.\n\n\
              **Default gates** — the CI lint gate is EXACTLY `cargo fmt --check` and `cargo \
              clippy --all-targets -- -D warnings` (never `--lib` or `--lib --tests`, which skip \
              `tests/`); the worker must report each exit code in its delivery. From the worktree \

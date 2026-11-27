@@ -127,6 +127,11 @@ pub struct WorkersConfig {
     /// behind them, so it cannot bound the machine load on its own.
     #[serde(default = "default_workers_max_concurrent_task_workers")]
     pub max_concurrent_task_workers: u32,
+    /// KT-2129 — the longest, in seconds, a task validation, an integration gate
+    /// or a workflow Exec command may run (60 to 14400); a project may set its
+    /// own. Runs of the same project are cut at it.
+    #[serde(default = "default_workers_validation_max_timeout_secs")]
+    pub validation_max_timeout_secs: u32,
     /// KT-1525 — a workflow step output above this many KB is shown as a
     /// « heavy output » warning in the run view and on the workflow card.
     /// The run itself is never refused.
@@ -185,6 +190,7 @@ impl Default for WorkersConfig {
             review_rounds_unlimited: false,
             background_priority: true,
             max_concurrent_task_workers: DEFAULT_MAX_CONCURRENT_TASK_WORKERS,
+            validation_max_timeout_secs: DEFAULT_VALIDATION_MAX_TIMEOUT_SECS,
             heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
             bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
             bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
@@ -312,6 +318,10 @@ fn default_workers_rate_limit_wait_max_min() -> u32 {
     DEFAULT_RATE_LIMIT_WAIT_MAX_MIN
 }
 
+fn default_workers_validation_max_timeout_secs() -> u32 {
+    DEFAULT_VALIDATION_MAX_TIMEOUT_SECS
+}
+
 fn default_workers_max_concurrent_task_workers() -> u32 {
     DEFAULT_MAX_CONCURRENT_TASK_WORKERS
 }
@@ -333,6 +343,12 @@ impl WorkersConfig {
     pub fn effective_max_concurrent_task_workers(&self) -> usize {
         self.max_concurrent_task_workers
             .clamp(1, MAX_CONCURRENT_TASK_WORKERS_LIMIT) as usize
+    }
+
+    /// The global validation ceiling in seconds, inside the hard bounds whatever
+    /// a hand-edited `config.toml` holds.
+    pub fn effective_validation_max_timeout_secs(&self) -> u64 {
+        resolve_validation_ceiling(self.validation_max_timeout_secs, None)
     }
 
     /// `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` for a Claude task
@@ -383,6 +399,19 @@ impl WorkersConfig {
                  on the project card (Lane warm-up), not in Settings > Workers"
                     .to_string(),
             );
+        }
+        if self.lane_warm.validation_max_timeout_secs.is_some() {
+            return Err(
+                "lane_warm.validation_max_timeout_secs is a project's own setting: set the \
+                 global one as validation_max_timeout_secs"
+                    .to_string(),
+            );
+        }
+        if let Some(problem) = validation_ceiling_problem(
+            "validation_max_timeout_secs",
+            self.validation_max_timeout_secs,
+        ) {
+            return Err(problem);
         }
         if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
             return Err(format!(
@@ -478,6 +507,47 @@ pub struct LaneWarmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub validation_executables: Option<Vec<String>>,
+    /// KT-2129 — the longest, in seconds, one validation or Exec command of this
+    /// project may run; unset follows Settings > Workers. A project's own
+    /// setting: the global value lives in `WorkersConfig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub validation_max_timeout_secs: Option<u32>,
+}
+
+/// KT-2129 — the ceiling a validation or Exec command may be given, in seconds.
+pub const DEFAULT_VALIDATION_MAX_TIMEOUT_SECS: u32 = 1_800;
+pub const MIN_VALIDATION_MAX_TIMEOUT_SECS: u32 = 60;
+/// Hard upper bound (4 h): a hung command must still end.
+pub const MAX_VALIDATION_MAX_TIMEOUT_SECS: u32 = 14_400;
+
+/// Why `value` cannot be a validation ceiling, or `None` when it can.
+pub fn validation_ceiling_problem(field: &str, value: u32) -> Option<String> {
+    (!(MIN_VALIDATION_MAX_TIMEOUT_SECS..=MAX_VALIDATION_MAX_TIMEOUT_SECS).contains(&value)).then(
+        || {
+            format!(
+                "{field} must be between {MIN_VALIDATION_MAX_TIMEOUT_SECS} and \
+                 {MAX_VALIDATION_MAX_TIMEOUT_SECS} seconds (got {value})"
+            )
+        },
+    )
+}
+
+/// The ceiling in force: the project's own value, else the global one, each
+/// kept inside the hard bounds whatever a hand-edited file holds.
+pub fn resolve_validation_ceiling(global: u32, project: Option<u32>) -> u64 {
+    u64::from(project.unwrap_or(global).clamp(
+        MIN_VALIDATION_MAX_TIMEOUT_SECS,
+        MAX_VALIDATION_MAX_TIMEOUT_SECS,
+    ))
+}
+
+/// Where a refused or exceeded ceiling is raised.
+pub fn validation_ceiling_hint(ceiling: u64) -> String {
+    format!(
+        "the ceiling is {ceiling}s (raise it in Settings > Workers, or in the project's \
+         settings; at most {MAX_VALIDATION_MAX_TIMEOUT_SECS}s)"
+    )
 }
 
 /// KT-1742 — default bound of a lane's first build, in minutes (measured: the
@@ -615,6 +685,11 @@ impl LaneWarmConfig {
                             normalize_lane_root(dir)
                         )
                     })?;
+            }
+        }
+        if let Some(secs) = self.validation_max_timeout_secs {
+            if let Some(problem) = validation_ceiling_problem("validation_max_timeout_secs", secs) {
+                return Err(problem);
             }
         }
         if let Some(entries) = &self.validation_executables {

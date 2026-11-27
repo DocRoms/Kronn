@@ -1487,6 +1487,10 @@ const fr: TranslationDict = {
   'config.workers.heavyOutputCurrent': 'Actuel : {0} Ko',
   'config.workers.heavyOutputHint': 'La sortie d\'un step de workflow au-delà de cette taille est signalée « sortie lourde » dans la vue du run et sur la carte du workflow, avec le nom du step. Le run n\'est jamais refusé.',
   'config.workers.heavyOutputInvalid': 'Saisissez un nombre entier de Ko entre {0} et {1}.',
+  'config.workers.validationCeiling': 'Durée maximale d\'une validation ou d\'une commande Exec (secondes)',
+  'config.workers.validationCeilingCurrent': 'Actuel : {0} s',
+  'config.workers.validationCeilingHint': 'Une validation de tâche, une porte d\'intégration ou une étape Exec de workflow est arrêtée après ce nombre de secondes, et un délai supérieur est refusé. Défaut 1800 (30 min), au plus {0} (4 h). Un projet peut fixer le sien dans ses réglages ; une validation arrêtée à la limite est signalée comme un dépassement de délai, pas comme un échec de la livraison.',
+  'config.workers.validationCeilingInvalid': 'Saisissez un nombre entier de secondes entre {0} et {1}.',
   'config.workers.shellTimeouts': 'Limites des commandes shell (workers Claude)',
   'config.workers.shellTimeoutsHint': 'Claude Code arrête une commande shell à 10 minutes, et un build de test à froid dure plus : le compilateur est tué et le worker perd son tour. Kronn donne lui-même ces limites à chaque worker Claude, quel que soit le shell depuis lequel Kronn a été lancé.',
   'config.workers.bashDefault': 'Par défaut, par commande (min)',
@@ -7951,6 +7955,9 @@ Termine par [SIGNAL: OK].`,
   'laneWarm.timeoutHelp': 'Défaut {0}. Ce champ l’emporte sur la variable KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS de l’hôte, qui ne sert que s’il est vide.',
   'laneWarm.timeoutEnvNotice': 'Défini aussi par la variable KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS (= {0} min) : utilisée seulement si ce champ est vide.',
   'laneWarm.timeoutInvalid': 'Entre {0} et {1} minutes.',
+  'laneWarm.validationCeiling': 'Durée maximale d\'une validation ou d\'une commande Exec (secondes)',
+  'laneWarm.validationCeilingHelp': 'Laissez vide pour suivre Paramètres > Workers. Entre {0} et {1} secondes. Une validation de tâche, une porte d\'intégration ou une étape Exec de workflow de ce projet est arrêtée après ce délai.',
+  'laneWarm.validationCeilingInvalid': 'Entre {0} et {1} secondes.',
 };
 
 export default fr;

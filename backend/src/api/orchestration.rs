@@ -125,15 +125,36 @@ pub enum ProvisionError {
 pub fn validate_new_validation_specs(
     validations: &[crate::models::ValidationSpec],
 ) -> Result<(), String> {
-    let max_timeout = crate::core::quick_exec::MAX_TIMEOUT_SECS;
+    // The project is not known at every intake, so the highest ceiling any scope
+    // holds is accepted here; the run clamps to the project's own (KT-2129).
+    validate_new_validation_specs_under(
+        validations,
+        crate::core::task_worker_lane_settings::intake_validation_ceiling(),
+    )
+}
+
+/// [`validate_new_validation_specs`] under an explicit ceiling, in seconds.
+pub fn validate_new_validation_specs_under(
+    validations: &[crate::models::ValidationSpec],
+    max_timeout: u64,
+) -> Result<(), String> {
+    if let Some(bad) = validations
+        .iter()
+        .find(|spec| spec.command.trim().is_empty() || spec.timeout_secs == Some(0))
+    {
+        return Err(format!(
+            "command must be non-empty and timeout_secs at least 1 (got {})",
+            serde_json::to_string(bad).unwrap_or_default()
+        ));
+    }
     if let Some(bad) = validations.iter().find(|spec| {
-        spec.command.trim().is_empty()
-            || spec
-                .timeout_secs
-                .is_some_and(|timeout| timeout == 0 || u64::from(timeout) > max_timeout)
+        spec.timeout_secs
+            .is_some_and(|t| u64::from(t) > max_timeout)
     }) {
         return Err(format!(
-            "command must be non-empty and timeout_secs must be between 1 and {max_timeout} (got {})",
+            "timeout_secs above {}: {} (got {})",
+            max_timeout,
+            crate::models::validation_ceiling_hint(max_timeout),
             serde_json::to_string(bad).unwrap_or_default()
         ));
     }
@@ -7513,7 +7534,7 @@ pub async fn checkpoint(
 }
 
 /// Why the integration handed an approved delivery back.
-struct ReworkReport {
+pub struct ReworkReport {
     /// One line naming the cause; it is also the `SentBack` reason.
     reason: String,
     /// The validation that went red, when that is the cause.
@@ -7528,7 +7549,7 @@ impl ReworkReport {
         }
     }
 
-    fn validation(failure: ValidationFailure) -> Self {
+    pub fn validation(failure: ValidationFailure) -> Self {
         Self {
             reason: format!("validation failed: {}", failure.command),
             failure: Some(failure),
@@ -7574,19 +7595,39 @@ pub fn fenced_output(output: &str, lang: RoomLang) -> String {
 
 /// The evidence block both messages carry: the command, how it ended and what it
 /// printed, or the bare cause when no validation is involved (a merge conflict).
-fn rework_evidence(report: &ReworkReport, lang: RoomLang) -> String {
+pub fn rework_evidence(report: &ReworkReport, lang: RoomLang) -> String {
     let Some(failure) = &report.failure else {
         return format!("**{}** {}", lang.pick("Cause :", "Cause:"), report.reason);
     };
+    let timeout = failure
+        .exit_code
+        .is_none()
+        .then(|| parse_timeout_marker(&failure.output))
+        .flatten();
     let code = failure
         .exit_code
         .map(|code| code.to_string())
-        .unwrap_or_else(|| {
-            lang.pick(
-                "aucun (le processus n'a pas abouti)",
-                "none (the process did not complete)",
-            )
-            .to_string()
+        .unwrap_or_else(|| match timeout {
+            Some((limit, ceiling)) => match lang {
+                RoomLang::Fr => format!(
+                    "aucun : arrêtée par la limite de temps après {limit} s (plafond \
+                     {ceiling} s, réglage : Paramètres > Workers ou les réglages du projet). \
+                     Ce n'est pas un échec de la livraison : `task_exec_resume` relance la \
+                     même validation sur le même candidat."
+                ),
+                RoomLang::En => format!(
+                    "none: stopped by the time limit after {limit}s (ceiling {ceiling}s, \
+                     setting: Settings > Workers or the project's settings). This is not a \
+                     fault of the delivery: `task_exec_resume` reruns the same validation on \
+                     the same candidate."
+                ),
+            },
+            None => lang
+                .pick(
+                    "aucun (le processus n'a pas abouti)",
+                    "none (the process did not complete)",
+                )
+                .to_string(),
         });
     let output = if failure.output.trim().is_empty() {
         lang.pick(
@@ -8851,6 +8892,32 @@ pub async fn run_one_validation_checked(
     .await
 }
 
+const TIMEOUT_MARKER_PREFIX: &str = "[kronn: validation timed out";
+
+/// First line of a validation summary the limit stopped.
+pub fn timeout_marker(limit: u64, ceiling: u64) -> String {
+    format!("{TIMEOUT_MARKER_PREFIX} after {limit}s, ceiling {ceiling}s]")
+}
+
+/// A command's own output that opens like Kronn's marker is not one: it is shifted
+/// so it can never be read as the timeout verdict.
+fn unspoofed(output: String) -> String {
+    if output.starts_with(TIMEOUT_MARKER_PREFIX) {
+        format!("[output] {output}")
+    } else {
+        output
+    }
+}
+
+/// `(limit, ceiling)` of a validation the limit stopped, read from its output.
+pub fn parse_timeout_marker(output: &str) -> Option<(u64, u64)> {
+    let first = output.lines().next()?.strip_prefix(TIMEOUT_MARKER_PREFIX)?;
+    let rest = first.strip_prefix(" after ")?;
+    let (limit, rest) = rest.split_once("s, ceiling ")?;
+    let ceiling = rest.strip_suffix("s]")?;
+    Some((limit.parse().ok()?, ceiling.parse().ok()?))
+}
+
 /// The runner seam is deliberately narrower than the validation contract: it
 /// receives only an already-validated literal argv. Production always calls
 /// Quick Exec above; tests use this seam to prove a headroom refusal cannot
@@ -8876,17 +8943,19 @@ where
         return (None, 0, format!("refused: {reason}"));
     }
     use crate::core::quick_exec;
+    // KT-2129: the owner's ceiling for the project this tree belongs to.
+    let ceiling = crate::core::task_worker_lane_settings::validation_ceiling_for(cwd);
     let requested_timeout = spec.timeout_secs.map(u64::from);
-    let effective_timeout =
-        requested_timeout.map(|timeout| timeout.min(quick_exec::MAX_TIMEOUT_SECS));
-    let legacy_timeout_notice = requested_timeout
-        .filter(|timeout| *timeout > quick_exec::MAX_TIMEOUT_SECS)
-        .map(|timeout| {
-            format!(
-                "legacy validation timeout {timeout}s clamped to {}s",
-                quick_exec::MAX_TIMEOUT_SECS
-            )
-        });
+    let effective_timeout = requested_timeout.map(|timeout| timeout.min(ceiling));
+    let legacy_timeout_notice =
+        requested_timeout
+            .filter(|timeout| *timeout > ceiling)
+            .map(|timeout| {
+                format!(
+                    "validation timeout {timeout}s clamped to {ceiling}s: {}",
+                    crate::models::validation_ceiling_hint(ceiling)
+                )
+            });
     let argv: Vec<String> = parts.map(str::to_string).collect();
     let summariser = quick_exec::Summariser::for_command(binary, &argv);
     let quick = quick_exec::QuickExecSpec {
@@ -8902,19 +8971,41 @@ where
     // KT-1751: what the project of this tree lists for its validations.
     let project_executables =
         crate::core::task_worker_lane_settings::validation_executables_for(cwd);
-    let validated =
-        match quick_exec::validate_with(&quick, &[cwd.to_path_buf()], &project_executables) {
-            Ok(v) => v,
-            // A refused command is a failed validation, never a silent skip.
-            Err(rejection) => return (None, 0, format!("refused: {rejection}")),
-        };
-    let (code, duration, summary) = match run(validated).await {
-        Ok(result) => (result.exit_code, result.duration_ms as i64, result.summary),
-        Err(e) => (None, 0, format!("validation could not run: {e}")),
+    let validated = match quick_exec::validate_with_ceiling(
+        &quick,
+        &[cwd.to_path_buf()],
+        &project_executables,
+        ceiling,
+    ) {
+        Ok(v) => v,
+        // A refused command is a failed validation, never a silent skip.
+        Err(rejection) => return (None, 0, format!("refused: {rejection}")),
     };
-    let summary = match legacy_timeout_notice {
-        Some(notice) => format!("{notice}\n{summary}"),
-        None => summary,
+    let limit = validated.timeout_secs();
+    let notice = legacy_timeout_notice.map(|notice| format!("{notice}\n"));
+    let notice = notice.as_deref().unwrap_or("");
+    let (code, duration, summary) = match run(validated).await {
+        Ok(result) => {
+            // KT-2129: only Quick Exec's own timed-out status writes the marker, and it
+            // goes first, ahead of the clamp notice and of anything the command printed.
+            let timed_out = result.status == quick_exec::QuickExecStatus::TimedOut;
+            let body = if timed_out {
+                result.summary
+            } else {
+                unspoofed(result.summary)
+            };
+            let head = if timed_out {
+                format!("{}\n", timeout_marker(limit, ceiling))
+            } else {
+                String::new()
+            };
+            (
+                result.exit_code,
+                result.duration_ms as i64,
+                format!("{head}{notice}{body}"),
+            )
+        }
+        Err(e) => (None, 0, format!("{notice}validation could not run: {e}")),
     };
     (code, duration, summary)
 }

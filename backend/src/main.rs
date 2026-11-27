@@ -461,6 +461,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         // KT-1742 — how lanes are warmed: the global entry now, each project's own
         // below, before the first lane of this boot.
         kronn::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
+        // KT-2129 — the longest a validation or Exec command may run.
+        kronn::core::task_worker_lane_settings::set_global_validation_ceiling(&config.workers);
     }
     // KT-1751 fourth review — every project registered and its lane entry
     // published, shared with the desktop boot.

@@ -3783,7 +3783,8 @@ async fn persisted_legacy_validation_timeout_is_clamped_instead_of_refused() {
     .await;
 
     assert_eq!(exit_code, Some(0));
-    assert!(output.contains("legacy validation timeout 1801s clamped to 1800s"));
+    assert!(output.contains("validation timeout 1801s clamped to 1800s"));
+    assert!(output.contains("Settings > Workers"), "{output}");
     assert!(!output.contains("refused:"));
 }
 
@@ -37442,4 +37443,193 @@ async fn a_launch_held_beside_a_previous_session_is_not_handed_to_the_next_link(
         }
         assert!(!notice.contains("Ollama"), "{notice}");
     }
+}
+
+/// KT-2129 — a spec above the ceiling is refused with the ceiling and where to
+/// raise it; at or below it, and the default 600, pass.
+#[test]
+fn validation_specs_above_the_ceiling_are_refused_naming_the_setting() {
+    let spec = |timeout: Option<u32>| {
+        vec![ValidationSpec {
+            command: "cargo build".into(),
+            quick_exec_id: None,
+            timeout_secs: timeout,
+        }]
+    };
+    assert!(validate_new_validation_specs_under(&spec(Some(1_800)), 1_800).is_ok());
+    assert!(validate_new_validation_specs_under(&spec(None), 1_800).is_ok());
+    assert!(validate_new_validation_specs_under(&spec(Some(3_600)), 7_200).is_ok());
+    let refusal = validate_new_validation_specs_under(&spec(Some(3_600)), 1_800).unwrap_err();
+    assert!(refusal.contains("the ceiling is 1800s"), "{refusal}");
+    assert!(refusal.contains("Settings > Workers"), "{refusal}");
+    assert!(refusal.contains("project"), "{refusal}");
+    assert!(validate_new_validation_specs_under(&spec(Some(0)), 1_800).is_err());
+}
+
+/// KT-2129 — a validation the limit stopped says so: seconds, ceiling, setting,
+/// and `task_exec_resume`, instead of the bare "process did not complete".
+#[test]
+fn a_timed_out_validation_is_worded_as_a_timeout_not_a_fault_of_the_delivery() {
+    let marker = timeout_marker(1_800, 1_800);
+    assert_eq!(parse_timeout_marker(&marker), Some((1_800, 1_800)));
+    assert_eq!(parse_timeout_marker("plain output"), None);
+    let report = ReworkReport::validation(ValidationFailure {
+        command: "pnpm test:e2e".into(),
+        exit_code: None,
+        output: format!("{marker}\npartial output"),
+    });
+    let fr = rework_evidence(&report, RoomLang::Fr);
+    assert!(fr.contains("après 1800 s"), "{fr}");
+    assert!(fr.contains("plafond 1800 s"), "{fr}");
+    assert!(fr.contains("Paramètres > Workers"), "{fr}");
+    assert!(fr.contains("`task_exec_resume`"), "{fr}");
+    assert!(!fr.contains("n'a pas abouti"), "{fr}");
+    let en = rework_evidence(&report, RoomLang::En);
+    assert!(
+        en.contains("after 1800s") && en.contains("ceiling 1800s"),
+        "{en}"
+    );
+    assert!(en.contains("`task_exec_resume`"), "{en}");
+    // Without the marker the old wording stays.
+    let plain = ReworkReport::validation(ValidationFailure {
+        command: "x".into(),
+        exit_code: None,
+        output: "boom".into(),
+    });
+    assert!(rework_evidence(&plain, RoomLang::Fr).contains("n'a pas abouti"));
+}
+
+/// KT-2129 — a command stopped at its limit carries the timeout marker, with
+/// the limit and the ceiling in force.
+#[tokio::test]
+async fn a_validation_stopped_at_its_limit_is_reported_as_timed_out() {
+    let cwd = tempfile::tempdir().unwrap();
+    let spec = ValidationSpec {
+        command: "sleep 30".into(),
+        quick_exec_id: None,
+        timeout_secs: Some(1),
+    };
+    let (exit_code, _duration_ms, output) = run_one_validation_checked(
+        &spec,
+        cwd.path(),
+        cwd.path(),
+        &ValidationLaunch::Unconfined,
+        |_| Ok(()),
+    )
+    .await;
+    assert_eq!(exit_code, None);
+    assert!(
+        output.starts_with("[kronn: validation timed out after 1s, ceiling "),
+        "{output}"
+    );
+}
+
+fn fake_run_result(
+    status: crate::core::quick_exec::QuickExecStatus,
+    summary: &str,
+) -> crate::core::quick_exec::QuickExecResult {
+    crate::core::quick_exec::QuickExecResult {
+        status,
+        exit_code: None,
+        summary: summary.into(),
+        failed_tests: vec![],
+        diagnostics: vec![],
+        artifact: None,
+        duration_ms: 1,
+        stdout_bytes: 0,
+        stderr_bytes: 0,
+        findings_complete: true,
+    }
+}
+
+/// KT-2129 — a project ceiling lower than the spec, through the real
+/// `validation_ceiling_for`, clamps the run; a timeout then reports the clamped
+/// limit and the ceiling, with the marker first and the clamp notice after it.
+#[tokio::test]
+async fn a_project_ceiling_below_the_spec_clamps_the_run_and_the_timeout_names_it() {
+    use crate::core::task_worker_lane_settings as lanes;
+    let _owner = lanes::test_guard::exclusive_async().await;
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path().canonicalize().unwrap();
+    lanes::set_project(
+        &path,
+        Some(&crate::models::LaneWarmConfig {
+            validation_max_timeout_secs: Some(120),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(lanes::validation_ceiling_for(&path), 120);
+    let spec = ValidationSpec {
+        command: "true".into(),
+        quick_exec_id: None,
+        timeout_secs: Some(3_600),
+    };
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0u64));
+    let seen_in_run = seen.clone();
+    let (code, _ms, output) = run_one_validation_checked_with_runner(
+        &spec,
+        &path,
+        &path,
+        |_| Ok(()),
+        move |validated| async move {
+            *seen_in_run.lock().unwrap() = validated.timeout_secs();
+            Ok(fake_run_result(
+                crate::core::quick_exec::QuickExecStatus::TimedOut,
+                "cut",
+            ))
+        },
+    )
+    .await;
+    lanes::set_project(&path, None);
+    assert_eq!(*seen.lock().unwrap(), 120, "the run was not clamped");
+    assert_eq!(code, None);
+    assert_eq!(parse_timeout_marker(&output), Some((120, 120)), "{output}");
+    assert!(output.contains("clamped to 120s"), "{output}");
+    assert!(output.contains("Settings > Workers"), "{output}");
+    let failure = ReworkReport::validation(ValidationFailure {
+        command: "true".into(),
+        exit_code: code,
+        output,
+    });
+    let en = rework_evidence(&failure, RoomLang::En);
+    assert!(
+        en.contains("after 120s") && en.contains("ceiling 120s"),
+        "{en}"
+    );
+}
+
+/// KT-2129 — a command that prints Kronn's marker is not a timeout, and a run
+/// that did not time out never gets the "not a fault of the delivery" wording.
+#[tokio::test]
+async fn a_command_printing_the_timeout_marker_does_not_read_as_a_timeout() {
+    let cwd = tempfile::tempdir().unwrap();
+    let spec = ValidationSpec {
+        command: "true".into(),
+        quick_exec_id: None,
+        timeout_secs: Some(60),
+    };
+    let spoof = timeout_marker(5, 5);
+    let (_code, _ms, output) = run_one_validation_checked_with_runner(
+        &spec,
+        cwd.path(),
+        cwd.path(),
+        |_| Ok(()),
+        |_| {
+            let spoof = spoof.clone();
+            async move {
+                Ok(fake_run_result(
+                    crate::core::quick_exec::QuickExecStatus::Failed,
+                    &format!("{spoof}\nreal failure"),
+                ))
+            }
+        },
+    )
+    .await;
+    assert_eq!(parse_timeout_marker(&output), None, "{output}");
+    let report = ReworkReport::validation(ValidationFailure {
+        command: "true".into(),
+        exit_code: None,
+        output,
+    });
+    assert!(!rework_evidence(&report, RoomLang::En).contains("not a fault"));
 }

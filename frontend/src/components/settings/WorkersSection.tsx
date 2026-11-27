@@ -49,6 +49,9 @@ import {
   parseManagedRoots,
   validManagedRoots,
 } from '../../lib/managedWorktreeRoots';
+import {
+  DEFAULT_VALIDATION_CEILING_SECS, MAX_VALIDATION_CEILING_SECS, MIN_VALIDATION_CEILING_SECS, validCeiling,
+} from '../../lib/validationCeiling';
 import { LaneWarmFields } from '../LaneWarmFields';
 import {
   EMPTY_LANE_WARM_DRAFT, configOf, draftOf, draftProblem, sameDraft,
@@ -66,6 +69,7 @@ export function WorkersSection({ t }: Props) {
   const [unlimited, setUnlimited] = useState(false);
   const [background, setBackground] = useState(true);
   const [taskWorkers, setTaskWorkers] = useState(String(DEFAULT_TASK_WORKERS));
+  const [ceiling, setCeiling] = useState(String(DEFAULT_VALIDATION_CEILING_SECS));
   const [heavyKb, setHeavyKb] = useState(String(DEFAULT_HEAVY_OUTPUT_KB));
   const [bashDefault, setBashDefault] = useState(String(DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
   const [bashMax, setBashMax] = useState(String(DEFAULT_BASH_MAX_TIMEOUT_MIN));
@@ -105,6 +109,7 @@ export function WorkersSection({ t }: Props) {
         // A server that predates the switch leaves it on, as the server's own default does.
         setBackground(value.background_priority !== false);
         setTaskWorkers(String(value.max_concurrent_task_workers));
+        setCeiling(String(value.validation_max_timeout_secs ?? DEFAULT_VALIDATION_CEILING_SECS));
         setHeavyKb(String(value.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
         setBashDefault(String(value.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
         setBashMax(String(value.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
@@ -147,7 +152,8 @@ export function WorkersSection({ t }: Props) {
   const savedRoots = saved?.managed_worktree_roots ?? [];
   const rootsUnchanged = rootList.length === savedRoots.length
     && rootList.every((root, index) => root === savedRoots[index]);
-  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validJunk
+  const validGlobalCeiling = validCeiling(ceiling);
+  const valid = (unlimited || validCount) && validWorkerCap && validGlobalCeiling && validHeavy && validBash && validJunk
     && !halfCommit && validRoots && validLaneWarm;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
@@ -156,6 +162,7 @@ export function WorkersSection({ t }: Props) {
   const unchanged = roundsUnchanged
     && rootsUnchanged
     && saved !== null && workerCap === saved.max_concurrent_task_workers
+    && Number(ceiling) === (saved.validation_max_timeout_secs ?? DEFAULT_VALIDATION_CEILING_SECS)
     && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)
     && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
     && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN)
@@ -173,6 +180,7 @@ export function WorkersSection({ t }: Props) {
         review_rounds_unlimited: unlimited,
         background_priority: background,
         max_concurrent_task_workers: workerCap,
+        validation_max_timeout_secs: Number(ceiling),
         heavy_output_kb: heavy,
         bash_default_timeout_min: bashDefaultMin,
         bash_max_timeout_min: bashMaxMin,
@@ -184,13 +192,14 @@ export function WorkersSection({ t }: Props) {
         managed_worktree_roots: rootList,
         // Validation executables are a project's own setting (KT-1751): the global
         // entry never carries them, so a stale one is dropped, not refused.
-        lane_warm: configOf({ ...laneWarm, executablesText: '' }, saved.lane_warm),
+        lane_warm: configOf({ ...laneWarm, executablesText: '', validationCeiling: '' }, saved.lane_warm),
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
       setUnlimited(next.review_rounds_unlimited);
       setBackground(next.background_priority !== false);
       setTaskWorkers(String(next.max_concurrent_task_workers));
+      setCeiling(String(next.validation_max_timeout_secs ?? DEFAULT_VALIDATION_CEILING_SECS));
       setHeavyKb(String(next.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
       setBashDefault(String(next.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
       setBashMax(String(next.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
@@ -313,6 +322,35 @@ export function WorkersSection({ t }: Props) {
         {!validWorkerCap && (
           <p role="alert" className="default-docs-dir-error" data-testid="workers-cap-invalid">
             {t('config.workers.maxConcurrentInvalid', MIN_TASK_WORKERS, MAX_TASK_WORKERS)}
+          </p>
+        )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.validationCeiling')}</span>
+          <span className="text-base font-semibold text-accent" style={{ marginLeft: 'auto' }} data-testid="workers-ceiling-current">
+            {saved === null ? '…' : t('config.workers.validationCeilingCurrent', saved.validation_max_timeout_secs ?? DEFAULT_VALIDATION_CEILING_SECS)}
+          </span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-ceiling-hint">
+          {t('config.workers.validationCeilingHint', MAX_VALIDATION_CEILING_SECS)}
+        </p>
+        <div className="flex-row gap-3">
+          <input
+            type="number"
+            className="set-input set-input-sm"
+            min={MIN_VALIDATION_CEILING_SECS}
+            max={MAX_VALIDATION_CEILING_SECS}
+            aria-label={t('config.workers.validationCeiling')}
+            value={ceiling}
+            disabled={saved === null}
+            onChange={event => setCeiling(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-ceiling-input"
+          />
+        </div>
+        {!validGlobalCeiling && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-ceiling-invalid">
+            {t('config.workers.validationCeilingInvalid', MIN_VALIDATION_CEILING_SECS, MAX_VALIDATION_CEILING_SECS)}
           </p>
         )}
 

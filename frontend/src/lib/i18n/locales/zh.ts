@@ -1481,6 +1481,10 @@ const zh: TranslationDict = {
   "config.workers.heavyOutputCurrent": "当前：{0} KB",
   "config.workers.heavyOutputHint": "工作流步骤的输出超过此大小时，会在运行视图和工作流卡片中标注“输出过大”并显示步骤名称。运行本身不会被拒绝。",
   "config.workers.heavyOutputInvalid": "请输入 {0} 到 {1} 之间的整数（KB）。",
+  "config.workers.validationCeiling": "验证或 Exec 命令的最长时间（秒）",
+  "config.workers.validationCeilingCurrent": "当前：{0} 秒",
+  "config.workers.validationCeilingHint": "任务验证、集成关卡或工作流 Exec 步骤在此秒数后被停止，超出的超时值将被拒绝。默认 1800（30 分钟），最多 {0}（4 小时）。项目可在其设置中指定自己的值；在上限处被停止的验证会被报告为超时，而不是交付失败。",
+  "config.workers.validationCeilingInvalid": "请输入 {0} 到 {1} 之间的整数秒数。",
   "config.workers.shellTimeouts": "Shell 命令时限（Claude 任务 worker）",
   "config.workers.shellTimeoutsHint": "Claude Code 会在 10 分钟时中止 shell 命令，而冷启动的测试构建耗时更长：编译器被终止，worker 丢失本轮。Kronn 会自行为每个 Claude 任务 worker 设置这些时限，与启动 Kronn 的 shell 无关。",
   "config.workers.bashDefault": "每条命令的默认时限（分钟）",
@@ -7728,6 +7732,9 @@ const zh: TranslationDict = {
   "laneWarm.timeoutHelp": "默认 {0}。此字段优先于主机上的 KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS 变量，只有此字段为空时才使用该变量。",
   "laneWarm.timeoutEnvNotice": "同时由变量 KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS 设置（= {0} 分钟）：仅在此字段为空时使用。",
   "laneWarm.timeoutInvalid": "介于 {0} 和 {1} 分钟之间。",
+  "laneWarm.validationCeiling": "验证或 Exec 命令的最长时间（秒）",
+  "laneWarm.validationCeilingHelp": "留空则沿用设置 > Workers。介于 {0} 和 {1} 秒之间。此项目的任务验证、集成关卡或工作流 Exec 步骤将在此时间后被停止。",
+  "laneWarm.validationCeilingInvalid": "介于 {0} 和 {1} 秒之间。",
 };
 
 export default zh;

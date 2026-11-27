@@ -20,7 +20,8 @@
 //!   4. **Workdir locked** to `work_dir` (the run's workspace). No
 //!      `cd /` possible from inside the step.
 //!   5. **Timeout-bounded** via `tokio::time::timeout`. Default
-//!      300s, hard-capped at 1800s by the API validator.
+//!      300s, held to the owner's validation ceiling (1800s unless raised;
+//!      Settings > Workers or the project's settings, at most 14400s).
 //!   6. **stdout/stderr streamed and bounded** to ~100 KB each (2 MiB when
 //!      a `PublishPageData` step reads the step) so a runaway step can't blow
 //!      up the DB row; a truncated stream is flagged in the envelope.
@@ -458,6 +459,47 @@ async fn execute_exec_step_inner(
     github_env: &[(String, String)],
     carrying_repository: Option<&str>,
 ) -> StepOutcome {
+    // KT-2129: the ceiling of the project the run's tree belongs to, else the global one.
+    let ceiling =
+        crate::core::task_worker_lane_settings::validation_ceiling_for(Path::new(work_dir));
+    execute_exec_step_under(
+        step,
+        workflow_allowlist,
+        work_dir,
+        ctx,
+        output,
+        github_env,
+        carrying_repository,
+        ceiling,
+    )
+    .await
+}
+
+/// The step's timeout held to `ceiling`, and the output line saying so when the
+/// stored value was above it (a lowered setting, an import, an old row).
+fn clamped_timeout(requested: Option<u32>, ceiling: u64) -> (u64, String) {
+    let wanted = requested.map(u64::from).unwrap_or(DEFAULT_TIMEOUT_SECS);
+    if wanted <= ceiling {
+        return (wanted, String::new());
+    }
+    let notice = format!(
+        "[kronn: exec timeout {wanted}s clamped to {ceiling}s: {}]\n",
+        crate::models::validation_ceiling_hint(ceiling)
+    );
+    (ceiling, notice)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_exec_step_under(
+    step: &WorkflowStep,
+    workflow_allowlist: &[String],
+    work_dir: &str,
+    ctx: &TemplateContext,
+    output: OutputPolicy,
+    github_env: &[(String, String)],
+    carrying_repository: Option<&str>,
+    ceiling: u64,
+) -> StepOutcome {
     let start = Instant::now();
     let output_limit_bytes = output.limit.clamp(1, MAX_PUBLISH_OUTPUT_BYTES);
     // The step's only credential is the project's GitHub token: never let an
@@ -582,10 +624,7 @@ async fn execute_exec_step_inner(
         return fail(step, start, refusal);
     }
 
-    let timeout_secs = step
-        .exec_timeout_secs
-        .map(u64::from)
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let (timeout_secs, clamp_notice) = clamped_timeout(step.exec_timeout_secs, ceiling);
 
     // ── 0.8.2 — Setup phase (worktree dep install) ──
     // When `exec_setup_command` is set, run it FIRST. Same allowlist +
@@ -594,7 +633,7 @@ async fn execute_exec_step_inner(
     // message so the operator can fix the install without thinking it's
     // the main command's fault. Output is prepended to the main command's
     // output for traceability.
-    let mut setup_output_prefix = String::new();
+    let mut setup_output_prefix = clamp_notice.clone();
     if let Some(setup_cmd) = step
         .exec_setup_command
         .as_deref()
@@ -832,7 +871,7 @@ async fn execute_exec_step_inner(
                 step,
                 start,
                 format!(
-                    "Exec step `{}`: timed out after {}s (shared setup+main budget {}s).",
+                    "{clamp_notice}Exec step `{}`: timed out after {}s (shared setup+main budget {}s).",
                     step.name, main_timeout_secs, timeout_secs
                 ),
             );
@@ -2816,6 +2855,65 @@ mod tests {
         .await;
         assert_eq!(refused.result.status, RunStatus::Failed);
         assert!(refused.result.output.contains("no home project"));
+    }
+
+    /// KT-2129 — a step stored above the ceiling is stopped at the ceiling and
+    /// the output says which ceiling and which setting.
+    #[cfg(unix)] // runs POSIX utilities (sleep) that Windows lacks as programs
+    #[tokio::test]
+    async fn a_step_stored_above_the_ceiling_is_stopped_at_it_with_a_clamp_line() {
+        let step = exec_step("e2e", Some("sleep"), vec!["30"], Some(7_200));
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = execute_exec_step_under(
+            &step,
+            &["sleep".to_string()],
+            dir.path().to_str().unwrap(),
+            &TemplateContext::new(),
+            OutputPolicy::plain(MAX_OUTPUT_BYTES),
+            &[],
+            None,
+            1,
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        let out = &outcome.result.output;
+        assert!(out.contains("timed out after 1s"), "{out}");
+        assert!(out.contains("exec timeout 7200s clamped to 1s"), "{out}");
+        assert!(out.contains("Settings > Workers"), "{out}");
+    }
+
+    #[test]
+    fn the_exec_timeout_is_held_to_the_ceiling_in_force() {
+        assert_eq!(clamped_timeout(Some(600), 1_800), (600, String::new()));
+        assert_eq!(clamped_timeout(None, 1_800), (300, String::new()));
+        // The default never outruns a low ceiling.
+        assert_eq!(clamped_timeout(None, 60).0, 60);
+        // An old row above the hard bound is held too.
+        let (secs, notice) = clamped_timeout(Some(99_999), 14_400);
+        assert_eq!(secs, 14_400);
+        assert!(notice.contains("clamped to 14400s"), "{notice}");
+    }
+
+    /// The ceiling a run resolves is its project's, through the real lookup.
+    #[tokio::test]
+    async fn the_run_resolves_the_ceiling_of_the_project_of_its_tree() {
+        use crate::core::task_worker_lane_settings as lanes;
+        let _owner = lanes::test_guard::exclusive_async().await;
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().canonicalize().unwrap();
+        lanes::set_project(
+            &path,
+            Some(&crate::models::LaneWarmConfig {
+                validation_max_timeout_secs: Some(600),
+                ..Default::default()
+            }),
+        );
+        let ceiling = lanes::validation_ceiling_for(&path);
+        lanes::set_project(&path, None);
+        assert_eq!(ceiling, 600);
+        let (secs, notice) = clamped_timeout(Some(7_200), ceiling);
+        assert_eq!(secs, 600);
+        assert!(notice.contains("clamped to 600s"), "{notice}");
     }
 }
 

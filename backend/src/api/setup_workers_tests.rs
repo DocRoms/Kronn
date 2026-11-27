@@ -632,3 +632,69 @@ fn managed_worktree_roots_are_validated_absolute_paths() {
         vec!["/srv/ok".to_string()]
     );
 }
+
+/// KT-2129 — the ceiling is project over global over default, inside [60, 14400].
+#[test]
+fn the_validation_ceiling_resolves_project_over_global_over_default_within_bounds() {
+    use crate::models::{resolve_validation_ceiling, LaneWarmConfig};
+    assert_eq!(WorkersConfig::default().validation_max_timeout_secs, 1_800);
+    assert_eq!(resolve_validation_ceiling(1_800, None), 1_800);
+    assert_eq!(resolve_validation_ceiling(3_600, None), 3_600);
+    assert_eq!(resolve_validation_ceiling(3_600, Some(7_200)), 7_200);
+    // A hand-edited file never escapes the bounds.
+    assert_eq!(resolve_validation_ceiling(10, None), 60);
+    assert_eq!(resolve_validation_ceiling(1_800, Some(99_999)), 14_400);
+    assert_eq!(
+        WorkersConfig {
+            validation_max_timeout_secs: 99_999,
+            ..Default::default()
+        }
+        .effective_validation_max_timeout_secs(),
+        14_400
+    );
+
+    for (secs, valid) in [
+        (0, false),
+        (59, false),
+        (60, true),
+        (14_400, true),
+        (14_401, false),
+    ] {
+        let global = WorkersConfig {
+            validation_max_timeout_secs: secs,
+            ..Default::default()
+        };
+        assert_eq!(global.validate().is_ok(), valid, "global {secs}");
+        let project = LaneWarmConfig {
+            validation_max_timeout_secs: Some(secs),
+            ..Default::default()
+        };
+        assert_eq!(project.validate().is_ok(), valid, "project {secs}");
+    }
+    let message = WorkersConfig {
+        validation_max_timeout_secs: 14_401,
+        ..Default::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(message.contains("between 60 and 14400"), "{message}");
+
+    // The project's own value never rides on the global entry.
+    let misplaced = WorkersConfig {
+        lane_warm: LaneWarmConfig {
+            validation_max_timeout_secs: Some(3_600),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(misplaced.validate().is_err());
+}
+
+/// KT-2129 — a config.toml written before the setting loads with the 30 min default.
+#[test]
+fn an_older_config_loads_the_default_validation_ceiling() {
+    let old: WorkersConfig = toml::from_str("default_max_review_rounds = 3\n").unwrap();
+    assert_eq!(old.validation_max_timeout_secs, 1_800);
+    let set: WorkersConfig = toml::from_str("validation_max_timeout_secs = 5400\n").unwrap();
+    assert_eq!(set.effective_validation_max_timeout_secs(), 5_400);
+}

@@ -61,3 +61,44 @@ the same road (`recovery_reason` `total_duration_timeout`): one alert, the
 execution stays `AwaitingReview`, and the provider run is not cancelled so a
 `request_changes` can still wake the worker. Any other state keeps the generic
 `Escalated` / `await_human` handling.
+
+## Validation and Exec time limit (KT-2129)
+
+A task validation (prepare and run), an integration gate and a workflow Exec
+step share one ceiling for the time a single command may run.
+
+| Level | Where | Default |
+|---|---|---|
+| Global | Settings > Workers, `[workers] validation_max_timeout_secs` in `config.toml` | 1800 s (30 min) |
+| Project | the project's lane warm-up card, `workspace.lane_warm.validation_max_timeout_secs` | the global value |
+
+The project value wins over the global one. Both are bounded to 60..14400 s
+(4 h); a value outside is refused when saved, and a hand-edited file is clamped
+to the bounds. A spec that gives no timeout still runs for 600 s (or the ceiling
+when lower).
+
+- `timeout_secs` of a validation above the ceiling is refused at launch, swap and
+  campaign creation, naming the ceiling and where to raise it. Those intakes do
+  not always know the project, so they accept the highest ceiling any scope
+  holds; the run clamps to the project's own and says so in its output.
+- `exec_timeout_secs` of an Exec step above the ceiling of the workflow's project
+  (else the global one) is refused when the workflow is saved. Import and
+  definition checks that carry no project use the highest ceiling.
+- A validation stopped at its limit starts its output with
+  `[kronn: validation timed out after Ns, ceiling Ms]`. The integration notice
+  then reads "stopped by the time limit" instead of "the process did not
+  complete", names the ceiling and the setting, and tells the principal that
+  `task_exec_resume` reruns the same validation on the same candidate. The
+  delivery is still sent back to the worker as before.
+- A workflow Exec step is also held to the ceiling when it runs (the project of
+  its tree, else the global one): a step stored higher is cut at the ceiling and
+  its output starts with a `clamped to` line naming the ceiling and the setting.
+- Saved Quick Execs and CollectApiData sources keep their own 1..1800 s bound and
+  do not follow this setting.
+
+The silent-worker clock above never counts a validation Kronn runs: it expires
+`Working` rows only, and a validation runs in `Integrating`, `Validating` or
+`Applying`. A command the worker itself runs (a CLI's shell tool) is seen only
+through its dispatch's `tool_activity` phase, for up to
+`KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h); a worker without that phase (a joined
+CLI) is not seen.

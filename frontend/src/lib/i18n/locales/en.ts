@@ -1487,6 +1487,10 @@ const en: TranslationDict = {
   'config.workers.heavyOutputCurrent': 'Current: {0} KB',
   'config.workers.heavyOutputHint': 'A workflow step output above this size is flagged « heavy output » in the run view and on the workflow card, with the step\'s name. The run is never refused.',
   'config.workers.heavyOutputInvalid': 'Enter a whole number of KB from {0} to {1}.',
+  'config.workers.validationCeiling': 'Longest validation or Exec command (seconds)',
+  'config.workers.validationCeilingCurrent': 'Current: {0} s',
+  'config.workers.validationCeilingHint': 'A task validation, an integration gate or a workflow Exec step is stopped after this many seconds, and a timeout above it is refused. Default 1800 (30 min), at most {0} (4 h). A project may set its own in its settings; a validation stopped at the limit is reported as a timed-out run, not as a failure of the delivery.',
+  'config.workers.validationCeilingInvalid': 'Enter a whole number of seconds from {0} to {1}.',
   'config.workers.shellTimeouts': 'Shell command limits (Claude task workers)',
   'config.workers.shellTimeoutsHint': 'Claude Code stops a shell command at 10 minutes, and a cold test build takes longer: the compiler is killed and the worker loses its turn. Kronn gives every Claude task worker these limits itself, whatever the shell Kronn was started from.',
   'config.workers.bashDefault': 'Default per command (min)',
@@ -7938,6 +7942,9 @@ End with [SIGNAL: OK].`,
   'laneWarm.timeoutHelp': 'Default {0}. This field wins over the host’s KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS variable, which is only used when it is empty.',
   'laneWarm.timeoutEnvNotice': 'Also set by the KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS variable (= {0} min): used only when this field is empty.',
   'laneWarm.timeoutInvalid': 'Between {0} and {1} minutes.',
+  'laneWarm.validationCeiling': 'Longest validation or Exec command (seconds)',
+  'laneWarm.validationCeilingHelp': 'Leave empty to follow Settings > Workers. Between {0} and {1} seconds. A task validation, an integration gate or a workflow Exec step of this project is stopped after it.',
+  'laneWarm.validationCeilingInvalid': 'Between {0} and {1} seconds.',
 };
 
 export default en;

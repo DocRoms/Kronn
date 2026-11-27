@@ -696,7 +696,7 @@ Output envelope: `{ data: { items: [{input, status, response?, error?, http_stat
 |-------|------|-------------|
 | `exec_command` | string | Binary name (must match a `Workflow.exec_allowlist` entry exactly — bare name, no path, no shell metas) |
 | `exec_args` | array of string | Argv elements. Templates `{{steps.X}}` are rendered, but the result is a literal argv string — no shell interpretation, except in the inline code of `bash -c` / `python3 -c` / `node -e` (attached forms too), where a placeholder is refused: pass it as a later argument |
-| `exec_timeout_secs` | number | Default 300, hard-capped at 1800 by validator |
+| `exec_timeout_secs` | number | Default 300, capped at 1800 unless the owner raised the project or global ceiling (max 14400) |
 
 ### Fields specific to `Gate`
 

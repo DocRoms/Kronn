@@ -8370,3 +8370,43 @@ fn pending_decision_cards_for_task_reads_the_task_ref_of_the_payload() {
         ["other-room"]
     );
 }
+
+/// KT-2129 — a validation Kronn runs (`Integrating`/`Validating`/`Applying`) can
+/// outlast the silent-worker clock: that clock only ever expires a `Working` row.
+#[test]
+fn a_kronn_run_validation_never_trips_the_silent_worker_clock() {
+    let conn = setup();
+    let past = (Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+    for (idx, status) in ["Integrating", "Validating", "Applying"]
+        .into_iter()
+        .enumerate()
+    {
+        let task = format!("t-validating-{idx}");
+        seed_task(&conn, &task, 2300 + idx as i64);
+        let execution = launch_single_task(
+            &conn,
+            &LaunchSingleTaskInput::new(&task, DISC),
+            &backend_actor(),
+        )
+        .unwrap()
+        .execution;
+        conn.execute(
+            "UPDATE task_executions SET status = ?2 WHERE id = ?1",
+            params![execution.id, status],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_execution_recovery (task_execution_id, recovery_action, \
+                 recovery_reason, last_activity_at, total_deadline_at, activity_deadline_at, \
+                 review_deadline_at, human_wait_started_at, assignment_generation, pending, updated_at) \
+             VALUES (?1, 'resume_worker', 'clock fixture', ?2, NULL, ?2, NULL, NULL, 0, 0, ?2)",
+            params![execution.id, past],
+        )
+        .unwrap();
+    }
+    let expired = expired_execution_timeouts(&conn, Utc::now()).unwrap();
+    assert!(
+        expired.is_empty(),
+        "a validation outlasting the activity clock was reported silent: {expired:?}"
+    );
+}

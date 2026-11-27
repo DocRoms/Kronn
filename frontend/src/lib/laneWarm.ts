@@ -4,6 +4,7 @@
 // override. A field left on its default is simply absent from the stored entry:
 // « detected » for the global one, « inherit » for a project.
 import type { LaneWarmConfig } from '../types/generated';
+import { validCeiling } from './validationCeiling';
 
 /** Default bound of a lane's first build, in minutes (server-side default). */
 export const DEFAULT_FIRST_BUILD_TIMEOUT_MIN = 60;
@@ -26,6 +27,8 @@ export interface LaneWarmDraft {
   rootsText: string;
   /** KT-1751 — executables the project's validations may run, one per line (a project's own). */
   executablesText: string;
+  /** KT-2129 — seconds a validation or Exec command may run; blank = follow Settings > Workers (a project's own). */
+  validationCeiling: string;
 }
 
 export const EMPTY_LANE_WARM_DRAFT: LaneWarmDraft = {
@@ -36,6 +39,7 @@ export const EMPTY_LANE_WARM_DRAFT: LaneWarmDraft = {
   timeout: '',
   rootsText: '',
   executablesText: '',
+  validationCeiling: '',
 };
 
 export function draftOf(config: LaneWarmConfig | null | undefined): LaneWarmDraft {
@@ -53,6 +57,7 @@ export function draftOf(config: LaneWarmConfig | null | undefined): LaneWarmDraf
       : String(config.first_build_timeout_min),
     rootsText: (config.rust_roots ?? []).join('\n'),
     executablesText: (config.validation_executables ?? []).join('\n'),
+    validationCeiling: config.validation_max_timeout_secs == null ? '' : String(config.validation_max_timeout_secs),
   };
 }
 
@@ -88,12 +93,13 @@ export function executableLines(text: string): string[] {
 }
 
 /** The first problem of a draft, as the part of the form it is in. */
-export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' | 'executables' | null {
+export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' | 'executables' | 'ceiling' | null {
   const raw = draft.timeout.trim();
   if (raw !== '') {
     const minutes = Number(raw);
     if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_FIRST_BUILD_TIMEOUT_MIN) return 'timeout';
   }
+  if (draft.validationCeiling.trim() !== '' && !validCeiling(draft.validationCeiling.trim())) return 'ceiling';
   if (draft.envMode === 'custom') {
     const entries = envLines(draft.envText);
     if (entries.length === 0) return 'env';
@@ -113,7 +119,7 @@ export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' 
 /** The fields the form has an input for; everything else of a stored entry is carried through. */
 const FORM_FIELDS: ReadonlySet<string> = new Set([
   'seed_alignment', 'compiler_env', 'first_build_command', 'first_build_timeout_min', 'rust_roots',
-  'validation_executables',
+  'validation_executables', 'validation_max_timeout_secs',
 ]);
 
 /**
@@ -141,6 +147,8 @@ export function configOf(draft: LaneWarmDraft, stored?: LaneWarmConfig | null): 
   if (roots.length > 0) config.rust_roots = roots;
   const executables = executableLines(draft.executablesText);
   if (executables.length > 0) config.validation_executables = executables;
+  const ceiling = draft.validationCeiling.trim();
+  if (ceiling !== '') config.validation_max_timeout_secs = Number(ceiling);
   return config;
 }
 
@@ -151,5 +159,6 @@ export function sameDraft(a: LaneWarmDraft, b: LaneWarmDraft): boolean {
     && a.command.trim() === b.command.trim()
     && a.timeout.trim() === b.timeout.trim()
     && rootLines(a.rootsText).join('\n') === rootLines(b.rootsText).join('\n')
-    && executableLines(a.executablesText).join('\n') === executableLines(b.executablesText).join('\n');
+    && executableLines(a.executablesText).join('\n') === executableLines(b.executablesText).join('\n')
+    && a.validationCeiling.trim() === b.validationCeiling.trim();
 }

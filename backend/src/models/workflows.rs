@@ -1086,7 +1086,8 @@ pub struct WorkflowStep {
     pub exec_args: Vec<String>,
 
     /// Per-step timeout in seconds. Defaults to 300s (5 min) if unset.
-    /// Hard-capped at 1800s (30 min) at validate time.
+    /// Held to the validation ceiling (1800s unless the owner raised it, at most
+    /// 14400s) at validate time and again at run time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_timeout_secs: Option<u32>,
 

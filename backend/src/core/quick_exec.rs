@@ -47,7 +47,8 @@ pub const MAX_FAILED_TEST_NAME_BYTES: usize = 300;
 pub const MAX_DIAGNOSTICS: usize = 50;
 pub const MAX_ARGV: usize = 64;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
-pub const MAX_TIMEOUT_SECS: u64 = 1_800;
+/// Built-in ceiling; the owner's setting (KT-2129) replaces it per run.
+pub const MAX_TIMEOUT_SECS: u64 = crate::models::DEFAULT_VALIDATION_MAX_TIMEOUT_SECS as u64;
 
 /// How long to wait for the stream readers after the child is gone. A grandchild
 /// holding the pipe open must not hang the caller.
@@ -92,6 +93,13 @@ pub struct QuickExecSpec {
     pub stdin: Option<String>,
     /// Which extractor turns the streams into a summary.
     pub summariser: Summariser,
+}
+
+impl ValidatedSpec {
+    /// The limit this run will be cut at.
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
+    }
 }
 
 /// A spec that has passed validation. Constructed only by [`validate`], so a
@@ -205,6 +213,16 @@ pub fn validate_with(
     allowed_roots: &[PathBuf],
     extra: &[String],
 ) -> Result<ValidatedSpec, Rejection> {
+    validate_with_ceiling(spec, allowed_roots, extra, MAX_TIMEOUT_SECS)
+}
+
+/// [`validate_with`] under the owner's timeout ceiling (KT-2129).
+pub fn validate_with_ceiling(
+    spec: &QuickExecSpec,
+    allowed_roots: &[PathBuf],
+    extra: &[String],
+    ceiling_secs: u64,
+) -> Result<ValidatedSpec, Rejection> {
     let binary = spec.binary.trim();
     check_binary_with(binary, ALLOWED_BINARIES, extra)?;
 
@@ -225,15 +243,16 @@ pub fn validate_with(
     let cwd = validate_cwd(&spec.cwd, allowed_roots)?;
 
     let timeout_secs = match spec.timeout_secs {
-        None => DEFAULT_TIMEOUT_SECS,
+        None => DEFAULT_TIMEOUT_SECS.min(ceiling_secs),
         Some(0) => {
             return Err(Rejection(
                 "a timeout of 0 would kill the command instantly".into(),
             ))
         }
-        Some(value) if value > MAX_TIMEOUT_SECS => {
+        Some(value) if value > ceiling_secs => {
             return Err(Rejection(format!(
-                "timeout {value}s exceeds the cap of {MAX_TIMEOUT_SECS}s"
+                "timeout {value}s exceeds {}",
+                crate::models::validation_ceiling_hint(ceiling_secs)
             )))
         }
         Some(value) => value,

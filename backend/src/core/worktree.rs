@@ -5337,6 +5337,8 @@ fn apply_config(config: &crate::models::AppConfig) {
     crate::core::commit_policy::set_global_settings(&config.workers.commit);
     // KT-1742 — Settings > Workers: how every project's lane is warmed.
     crate::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
+    // KT-2129 — Settings > Workers: the longest a validation or Exec command may run.
+    crate::core::task_worker_lane_settings::set_global_validation_ceiling(&config.workers);
 }
 inventory::submit! { crate::core::uplink::ConfigApplied(apply_config) }
 
