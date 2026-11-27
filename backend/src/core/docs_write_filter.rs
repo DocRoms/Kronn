@@ -356,6 +356,20 @@ fn is_public_template(name: &str) -> bool {
         .any(|suffix| name.ends_with(suffix))
 }
 
+/// A key that declares an address (`URLS_BASE`, `ATLASSIAN_URL`, `DB_HOST`)
+/// and nothing secret: only its value may be read as a host. A dotted
+/// password (`DB_PASSWORD=S3cr3tPass.Prod-2024`) has the shape of a host,
+/// so the shape alone never exempts a value.
+fn names_an_address(key: &str) -> bool {
+    let key = key.trim().to_ascii_uppercase();
+    ["URL", "HOST", "DOMAIN", "BASE", "ENDPOINT"]
+        .iter()
+        .any(|w| key.contains(w))
+        && !["PASS", "SECRET", "TOKEN", "KEY", "AUTH", "CRED"]
+            .iter()
+            .any(|w| key.contains(w))
+}
+
 /// A value that only names a host (`www.example.com`,
 /// `https://acme.atlassian.net/`, `api.example.com:8443`) is an address a
 /// document cites, not a secret. A user, a path or a query keeps it tracked.
@@ -587,9 +601,9 @@ pub fn scan_sensitive_files(worktree: &Path) -> SensitiveSubstrings {
                     continue;
                 }
                 // KEY=VALUE — keep VALUE.
-                if let Some((_k, v)) = trimmed.split_once('=') {
+                if let Some((k, v)) = trimmed.split_once('=') {
                     let v = v.trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
-                    if is_bare_host(v) {
+                    if names_an_address(k) && is_bare_host(v) {
                         continue;
                     }
                     if v.len() >= BLOOM_MIN_SUBSTRING_LEN {
@@ -1577,7 +1591,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(
             tmp.path().join(".env"),
-            "URLS_BASE=www.example.com\nATLASSIAN_URL=\"https://acme.atlassian.net/\"\nSTATSD=metrics.internal:8125\nDB_PASSWORD=actuallySecretValue123\nBROKER=https://bot:hunter2hunter2@mq.example.com\n",
+            "URLS_BASE=www.example.com\nATLASSIAN_URL=\"https://acme.atlassian.net/\"\nSTATSD_HOST=metrics.internal:8125\nDB_PASSWORD=actuallySecretValue123\nDB_PASS=S3cr3tPass.Prod-2024\nBROKER=https://bot:hunter2hunter2@mq.example.com\nAPI_KEY_HOST=k3y.material.example42\n",
         )
         .unwrap();
         std::fs::write(
@@ -1585,12 +1599,26 @@ mod tests {
             "JIRA_USERNAME=your.name@example.com\nJIRA_API_TOKEN=your-api-token-here\n",
         )
         .unwrap();
+        for (name, line) in [
+            (".env.sample", "SAMPLE_SETTING=sample-value-for-docs\n"),
+            (".env.dist", "DIST_SETTING=dist-value-for-the-docs\n"),
+            (
+                "credentials.template",
+                "TEMPLATE_SETTING=template-value-for-docs\n",
+            ),
+        ] {
+            std::fs::write(tmp.path().join(name), line).unwrap();
+        }
         let subs = scan_sensitive_files(tmp.path());
         let cited = "The site runs on www.example.com, tickets on https://acme.atlassian.net/, \
-                     metrics go to metrics.internal:8125. Set JIRA_API_TOKEN=your-api-token-here.";
+                     metrics go to metrics.internal:8125. Set JIRA_API_TOKEN=your-api-token-here, \
+                     SAMPLE_SETTING=sample-value-for-docs, DIST_SETTING=dist-value-for-the-docs \
+                     and TEMPLATE_SETTING=template-value-for-docs.";
         assert_eq!(check_docs_content(cited, &subs), Ok(()));
         for leak in [
             "The password is actuallySecretValue123.",
+            "The database password is S3cr3tPass.Prod-2024 for now.",
+            "Its key reads k3y.material.example42 today.",
             "Broker: https://bot:hunter2hunter2@mq.example.com",
         ] {
             assert!(
@@ -1600,6 +1628,29 @@ mod tests {
                 ),
                 "{leak}"
             );
+        }
+    }
+
+    #[test]
+    fn names_an_address_reads_the_key() {
+        for key in [
+            "URLS_BASE",
+            "URLS_BASE_AWS",
+            "ATLASSIAN_URL",
+            " db_host ",
+            "API_ENDPOINT",
+        ] {
+            assert!(names_an_address(key), "{key}");
+        }
+        for key in [
+            "DB_PASSWORD",
+            "SECRET_URL",
+            "TOKEN_ENDPOINT",
+            "API_KEY_HOST",
+            "PASSPHRASE",
+            "NAME",
+        ] {
+            assert!(!names_an_address(key), "{key}");
         }
     }
 
@@ -1619,6 +1670,9 @@ mod tests {
             "https://example.com/hooks/abc",
             "example.com?token=abc",
             "-bad.example.com",
+            "bad-.example.com",
+            "example.com:123456",
+            "example.com:",
             "localhost",
             "",
         ] {
