@@ -7790,6 +7790,122 @@ fn a_dod_edit_leaves_an_execution_already_awaiting_review_on_its_snapshot() {
     );
 }
 
+/// KT-2125 — the report's (adopted, note) for one live execution of a task.
+fn dod_note_for(conn: &Connection, task_id: &str, exec_id: &str) -> (bool, String) {
+    let report = crate::db::orchestration::dod_adoption_report(conn, task_id).unwrap();
+    let entry = report
+        .iter()
+        .find(|entry| entry["execution_id"] == exec_id)
+        .expect("the live execution is reported");
+    (
+        entry["adopted"].as_bool().unwrap(),
+        entry["note"].as_str().unwrap().to_string(),
+    )
+}
+
+#[test]
+fn dod_adoption_note_says_adopted_when_the_snapshot_is_the_current_dod() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-note-adopted", 1410);
+
+    let (adopted, note) = dod_note_for(&conn, "t-note-adopted", &execution.id);
+    assert!(adopted, "{note}");
+    assert!(note.starts_with("adopted:"), "{note}");
+}
+
+#[test]
+fn dod_adoption_note_without_a_snapshot_says_to_cancel_and_relaunch() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-note-nosnap", 1411);
+    conn.execute(
+        "UPDATE task_executions SET worker_dod_ids_json = NULL WHERE id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    set_task_dod(&conn, "t-note-nosnap", dod_request(&["edited"]));
+
+    let (adopted, note) = dod_note_for(&conn, "t-note-nosnap", &execution.id);
+    assert!(!adopted);
+    assert!(
+        note.contains("cancel it and launch a fresh execution"),
+        "{note}"
+    );
+}
+
+#[test]
+fn dod_adoption_note_under_review_names_request_changes_and_the_approve_rule() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-note-review", 1412);
+    conn.execute(
+        "UPDATE task_executions SET status = 'AwaitingReview' WHERE id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    set_task_dod(&conn, "t-note-review", dod_request(&["brand new"]));
+
+    let (adopted, note) = dod_note_for(&conn, "t-note-review", &execution.id);
+    assert!(!adopted);
+    assert!(note.contains("request_changes"), "{note}");
+    assert!(note.contains("dod_verifications"), "{note}");
+    assert!(!note.contains("refused"), "{note}");
+}
+
+/// The DB only lets a hold record `Provisioning` or `Applying` as its origin, so the
+/// note reads the hold through to that origin rather than saying "no origin".
+#[test]
+fn dod_adoption_note_for_a_hold_reads_through_to_its_origin_status() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-note-held", 1413);
+    conn.execute(
+        "UPDATE task_executions SET status = 'Blocked', blocked_from_status = 'Applying' \
+         WHERE id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    set_task_dod(&conn, "t-note-held", dod_request(&["brand new"]));
+
+    let (adopted, note) = dod_note_for(&conn, "t-note-held", &execution.id);
+    assert!(!adopted);
+    assert!(note.contains("can no longer adopt"), "{note}");
+    assert!(!note.contains("no recorded origin"), "{note}");
+}
+
+#[test]
+fn dod_adoption_note_for_an_interrupted_worker_names_reassign_not_resume() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-note-interrupted", 1414);
+    conn.execute(
+        "UPDATE task_executions SET status = 'Interrupted', interrupted_from_status = 'Working' \
+         WHERE id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    set_task_dod(&conn, "t-note-interrupted", dod_request(&["brand new"]));
+
+    let (adopted, note) = dod_note_for(&conn, "t-note-interrupted", &execution.id);
+    assert!(!adopted);
+    assert!(note.contains("task_exec_reassign adopts"), "{note}");
+    assert!(note.contains("task_exec_resume keeps"), "{note}");
+}
+
+#[test]
+fn dod_adoption_note_past_delivery_says_it_can_no_longer_adopt() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-note-integrating", 1415);
+    conn.execute(
+        "UPDATE task_executions SET status = 'Integrating' WHERE id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    set_task_dod(&conn, "t-note-integrating", dod_request(&["brand new"]));
+
+    let (adopted, note) = dod_note_for(&conn, "t-note-integrating", &execution.id);
+    assert!(!adopted);
+    assert!(note.contains("Integrating"), "{note}");
+    assert!(note.contains("can no longer adopt"), "{note}");
+    assert!(note.contains("fresh execution"), "{note}");
+}
+
 #[test]
 fn reassigning_an_execution_whose_dod_drifted_re_adopts_the_current_dod() {
     let conn = setup();

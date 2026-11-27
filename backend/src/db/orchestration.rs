@@ -5435,6 +5435,31 @@ pub fn commit_review_checkpoint(
                 return Ok(ReviewCheckpointOutcome::Escalated);
             }
 
+            // (2c') KT-2125 — the rework works to the task's CURRENT Definition of Done. A DoD
+            // edit made while this delivery was under review (a missing item, a live check)
+            // is adopted here, in the same transaction as the findings that name it: the
+            // rework brief lists it, and the next delivery is not refused for it.
+            let task_id: String = tx.query_row(
+                "SELECT task_id FROM task_executions WHERE id = ?1",
+                params![input.exec_id],
+                |r| r.get(0),
+            )?;
+            if let Some(task) = crate::db::planning::get_task(&tx, &task_id)? {
+                let dod_ids = task
+                    .definition_of_done
+                    .iter()
+                    .map(|item| item.id.clone())
+                    .collect::<Vec<_>>();
+                readopt_dod_snapshot(
+                    &tx,
+                    input.exec_id,
+                    &dod_ids,
+                    false,
+                    "review_request_changes",
+                    input.actor,
+                )?;
+            }
+
             // (2c) Below the cap: hand the findings to the worker in the CHILD. A joined CLI
             // wakes through wait_for_peer (zero dispatch); a native worker needs a fresh,
             // attempt-scoped durable dispatch in this same checkpoint.
@@ -7629,6 +7654,99 @@ pub fn adopt_task_dod_into_live_executions(
         adopted.push(exec_id);
     }
     Ok(adopted)
+}
+
+/// KT-2125 — for each live (non-terminal) execution of a task, whether it works to
+/// the task's current Definition of Done, read from durable state. A DoD edit
+/// answers with this, so the principal knows which execution adopted it and which
+/// did not (and why). Ids are launch-time snapshots, compared in order.
+pub fn dod_adoption_report(conn: &Connection, task_ref: &str) -> Result<Vec<serde_json::Value>> {
+    let Some(task) = crate::db::planning::get_task(conn, task_ref)? else {
+        return Ok(Vec::new());
+    };
+    let current = task
+        .definition_of_done
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    let execution_ids = conn
+        .prepare("SELECT id FROM task_executions WHERE task_id = ?1")?
+        .query_map(params![task.summary.id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut report = Vec::new();
+    for exec_id in execution_ids {
+        let Some(execution) = get_task_execution(conn, &exec_id)? else {
+            continue;
+        };
+        if execution.status.is_terminal() {
+            continue;
+        }
+        let adopted = execution.worker_dod_ids.as_deref() == Some(current.as_slice());
+        let note = dod_adoption_note(&execution, adopted);
+        report.push(serde_json::json!({
+            "execution_id": exec_id,
+            "status": execution.status,
+            "adopted": adopted,
+            "note": note,
+        }));
+    }
+    Ok(report)
+}
+
+/// KT-2125 — the action a principal takes for one live execution, read from the
+/// status it is in. A `Blocked` hold reads as the status it was taken from, as
+/// `awaits_a_delivery` does. Each branch names only what the code does: a
+/// `request_changes` adopts (checkpoint), a `task_exec_reassign` adopts
+/// (`reassign_execution_worker_keeping_origin`), a `task_exec_resume` does not.
+fn dod_adoption_note(execution: &TaskExecution, adopted: bool) -> String {
+    use TaskExecutionStatus::*;
+    if adopted {
+        return "adopted: this execution works to the current Definition of Done".to_string();
+    }
+    if execution.worker_dod_ids.is_none() {
+        return "not adopted: no launch-time snapshot; cancel it and launch a fresh execution"
+            .to_string();
+    }
+    let status = match execution.status {
+        Blocked => execution.blocked_from_status,
+        status => Some(status),
+    };
+    match status {
+        Some(AwaitingReview) => "not adopted yet: the delivery under review keeps its launch-time \
+            Definition of Done. request_changes adopts the current one and lists its items in the \
+            rework brief. Approve checks the current items: each needs a principal \
+            dod_verifications entry, and a missing or unmet one blocks approve"
+            .to_string(),
+        Some(Interrupted) => match execution.interrupted_from_status {
+            Some(Working | ChangesRequested) => "not adopted: this execution is interrupted; \
+                task_exec_reassign adopts the current Definition of Done (task_exec_resume keeps \
+                the launch-time one)"
+                .to_string(),
+            _ => "not adopted: this execution is interrupted from a status that cannot be \
+                reassigned; cancel it and launch a fresh execution, which adopts the current \
+                Definition of Done"
+                .to_string(),
+        },
+        Some(Working | ChangesRequested) => "not adopted: this execution still owes its delivery \
+            against the launch-time Definition of Done; task_exec_reassign adopts the current one"
+            .to_string(),
+        Some(Escalated) => "not adopted: this execution is escalated; task_exec_reassign adopts \
+            the current Definition of Done, unless its recovery action refuses the reassignment"
+            .to_string(),
+        Some(Pending | Provisioning) => "not adopted: this execution has not started its worker \
+            yet; cancel it and launch a fresh execution, which adopts the current Definition of Done"
+            .to_string(),
+        Some(
+            status @ (Approved | Validating | Applying | Integrating | Done | Failed | Cancelled),
+        ) => format!(
+            "not adopted: this execution is {}, past its delivery, and can no longer adopt a \
+             Definition of Done; a worker that must deliver the new items needs a fresh execution",
+            status.as_str()
+        ),
+        Some(Blocked) | None => "not adopted: this execution is held with no recorded origin \
+            status; check again once the hold is resolved"
+            .to_string(),
+    }
 }
 
 /// What the worker must know once the DoD it was launched with is replaced.

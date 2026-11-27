@@ -1084,7 +1084,7 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "task_update",
-                "description": "Patch one Planning task by KT reference or UUID. Only supplied fields change.",
+                "description": "Patch one Planning task by KT reference or UUID. Only supplied fields change. A `definition_of_done` edit answers with `dod_adoption`: per live execution, whether it adopted the new Definition of Done (an execution under review keeps its launch-time one until request_changes adopts the current one).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2537,13 +2537,30 @@ impl ToolExecutor for KronnToolExecutor {
                         return fail(call, format!("invalid task_update fields: {error}"))
                     }
                 };
+                let edits_dod = call.arguments.get("definition_of_done").is_some();
+                let report_for = task_id.clone();
                 let Json(res) = crate::api::planning::update_task(
                     State(self.state.clone()),
                     Path(task_id),
                     Json(request),
                 )
                 .await;
-                unwrap_api_compact_task(call, res.success, res.data, res.error)
+                let mut outcome = unwrap_api_compact_task(call, res.success, res.data, res.error);
+                // KT-2125 — a DoD edit says, per live execution, whether it adopted it.
+                if outcome.ok && edits_dod {
+                    let report = self
+                        .state
+                        .db
+                        .with_read_conn(move |conn| {
+                            crate::db::orchestration::dod_adoption_report(conn, &report_for)
+                        })
+                        .await;
+                    outcome.content["dod_adoption"] = match report {
+                        Ok(report) => serde_json::Value::Array(report),
+                        Err(error) => json!({ "error": error.to_string() }),
+                    };
+                }
+                outcome
             }
             "task_update_dod" => {
                 let (Some(task_id), Some(dod_id)) = (

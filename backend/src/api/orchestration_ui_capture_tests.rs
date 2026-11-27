@@ -74,7 +74,7 @@ fn a_request_changes_hand_back_asks_to_retake_the_captures_of_a_changed_screen()
             comment: Some("Fix the header".into()),
             findings: vec![],
         };
-        let message = build_review_findings_message("exec-1", 1, &decision, "child", lang);
+        let message = build_review_findings_message("exec-1", 1, &decision, "child", &[], lang);
         let retake = match lang {
             RoomLang::Fr => "reprends les captures concernées depuis le nouveau HEAD",
             RoomLang::En => "retake the affected captures from the new HEAD",
