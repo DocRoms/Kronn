@@ -6,6 +6,7 @@ import {
   loadLocale,
   setUILocale as persistLocale,
   t,
+  tPlural,
 } from './i18n';
 import { config as configApi } from './api';
 
@@ -13,12 +14,15 @@ interface I18nContextValue {
   locale: UILocale;
   setLocale: (l: UILocale) => void;
   t: (key: string, ...args: (string | number)[]) => string;
+  /** Countable label: `<key>.one` / `<key>.other`, count as `{0}` (docs/conventions/ui-text.md). */
+  tp: (key: string, count: number, ...args: (string | number)[]) => string;
 }
 
 const I18nContext = createContext<I18nContextValue>({
   locale: 'fr',
   setLocale: () => {},
   t: (key) => key,
+  tp: (key) => key,
 });
 
 export function I18nProvider({ children }: { children: ReactNode }) {
@@ -77,8 +81,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     return t(locale, key, ...args);
   }, [locale]);
 
+  const translatePlural = useCallback((key: string, count: number, ...args: (string | number)[]) => {
+    return tPlural(locale, key, count, ...args);
+  }, [locale]);
+
   return (
-    <I18nContext.Provider value={{ locale, setLocale, t: translate }}>
+    <I18nContext.Provider value={{ locale, setLocale, t: translate, tp: translatePlural }}>
       {children}
     </I18nContext.Provider>
   );

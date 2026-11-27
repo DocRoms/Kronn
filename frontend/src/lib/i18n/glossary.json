@@ -1,0 +1,205 @@
+{
+  "version": 1,
+  "about": "UI glossary (KT-1879): one term per concept and per locale, the French register, and the plural convention. Checked by frontend/scripts/i18n-terms.mjs against terms-baseline.json. Rules: docs/conventions/ui-text.md. 'decided' is 'owner <date>' for an owner decision; 'proposed' means the most used term of the 2026-11-21 count, open to the owner.",
+  "matching": "Each synonym is a case-insensitive regular expression matched as a whole word (a letter, digit, '_', '-', '/' or '.' next to it means it is part of another word, a path or an identifier; in zh only Latin letters count). Inline code, fenced code, {{templates}} and URLs are ignored. An 'allow' entry is literal and case-sensitive: a match that overlaps it is not reported.",
+  "register": {
+    "fr": {
+      "use": "vous",
+      "decided": "owner 2026-11-18",
+      "forbidden": ["tu", "te", "toi", "t(?=['’])", "ton", "ta", "tes", "tiens?", "tiennes?"],
+      "allow": ["le ton", "Le ton", "un ton", "du ton", "ce ton", "même ton"]
+    }
+  },
+  "plural": {
+    "forms": ["one", "other"],
+    "function": "tPlural(locale, key, count, ...args) in frontend/src/lib/i18n.ts, tp(key, count, ...args) from useT(); the form comes from pluralForm() in frontend/src/lib/i18n/plural.ts",
+    "replaces": ["'(s)' in a label", "a {1} argument the caller fills with 's'", "key pairs ending in Plural, One or Many chosen with === 1 or > 1"]
+  },
+  "concepts": [
+    {
+      "id": "discussion",
+      "meaning": "A Kronn conversation between the user and agents (the Discussions tab).",
+      "decided": "proposed",
+      "terms": { "en": "discussion", "fr": "discussion", "es": "discusión", "zh": "讨论" },
+      "synonyms": {
+        "en": ["conversations?", "rooms?"],
+        "fr": ["conversations?", "rooms?"],
+        "es": ["conversaci(?:ón|ones)", "rooms?", "salas?"],
+        "zh": ["对话", "会话", "房间"]
+      },
+      "allow": { "zh": ["对话框"] }
+    },
+    {
+      "id": "main-agent",
+      "meaning": "The agent that owns a discussion and answers when nobody is named.",
+      "decided": "owner 2026-11-20",
+      "terms": { "en": "main agent", "fr": "agent principal", "es": "agente principal", "zh": "主代理" },
+      "synonyms": {
+        "en": ["discussion agents?", "primary agents?"],
+        "fr": ["agents? de discussion", "agents? de la discussion", "agents? d['’]une discussion"],
+        "es": ["agentes? de discusión", "agentes? de la discusión"],
+        "zh": ["讨论代理", "主智能体"]
+      }
+    },
+    {
+      "id": "agent",
+      "meaning": "An AI agent (Claude Code, Codex, an HTTP agent…).",
+      "decided": "proposed",
+      "terms": { "en": "agent", "fr": "agent", "es": "agente", "zh": "代理" },
+      "synonyms": { "en": [], "fr": [], "es": [], "zh": ["智能体"] }
+    },
+    {
+      "id": "task",
+      "meaning": "A Kronn planning task; the tab that lists them is named after it.",
+      "decided": "owner 2026-11-18 (tab « Tâches »)",
+      "terms": { "en": "task", "fr": "tâche", "es": "tarea", "zh": "任务" },
+      "synonyms": {
+        "en": ["planning"],
+        "fr": ["planification"],
+        "es": ["planificaci(?:ón|ones)"],
+        "zh": ["规划"]
+      }
+    },
+    {
+      "id": "settings",
+      "meaning": "The values a user adjusts, and the tab that holds them.",
+      "decided": "owner 2026-11-18 (tab « Réglages »)",
+      "terms": { "en": "settings", "fr": "réglages", "es": "ajustes", "zh": "设置" },
+      "synonyms": {
+        "en": ["configs?", "configurations?"],
+        "fr": ["configs?", "configurations?"],
+        "es": ["configs?", "configuraci(?:ón|ones)"],
+        "zh": ["配置"]
+      }
+    },
+    {
+      "id": "quick-action",
+      "meaning": "One family of reusable actions with two types: API (formerly Quick API) and CLI (formerly Quick Exec).",
+      "decided": "owner 2026-11-18",
+      "terms": { "en": "quick action", "fr": "action rapide", "es": "acción rápida", "zh": "快捷操作" },
+      "types": { "api": "API", "cli": "CLI" },
+      "synonyms": {
+        "en": ["Quick APIs?", "Quick Execs?"],
+        "fr": ["Quick APIs?", "Quick Execs?"],
+        "es": ["Quick APIs?", "Quick Execs?"],
+        "zh": ["Quick APIs?", "Quick Execs?"]
+      }
+    },
+    {
+      "id": "workflow",
+      "meaning": "A multi-step pipeline. The tab « Automatisation » keeps its name: written with a capital, it is allowed.",
+      "decided": "proposed",
+      "terms": { "en": "workflow", "fr": "workflow", "es": "workflow", "zh": "工作流" },
+      "synonyms": {
+        "en": ["automations?"],
+        "fr": ["automatisations?"],
+        "es": ["automatizaci(?:ón|ones)", "flujos? de trabajo"],
+        "zh": []
+      },
+      "allow": { "en": ["Automation"], "fr": ["Automatisation"], "es": ["Automatización"] }
+    },
+    {
+      "id": "run",
+      "meaning": "One execution of a workflow, a quick action or an audit. zh 执行 and 启动 are verbs as often as nouns: not checked.",
+      "decided": "proposed",
+      "terms": { "en": "run", "fr": "run", "es": "ejecución", "zh": "运行" },
+      "synonyms": {
+        "en": ["executions?"],
+        "fr": ["exécutions?", "lancements?"],
+        "es": ["runs?", "lanzamientos?"],
+        "zh": []
+      }
+    },
+    {
+      "id": "plugin",
+      "meaning": "An integration configured in the Plugins tab (an MCP server, an API, a CLI wrapper). MCP stays the name of the protocol and of a server.",
+      "decided": "proposed",
+      "terms": { "en": "plugin", "fr": "plugin", "es": "plugin", "zh": "插件" },
+      "synonyms": {
+        "en": ["MCPs?"],
+        "fr": ["MCPs?"],
+        "es": ["MCPs?"],
+        "zh": ["MCPs?"]
+      },
+      "allow": {
+        "en": ["MCP server", "MCP protocol", "MCP kronn-internal", "kronn-internal MCP", "via MCP"],
+        "fr": ["serveur MCP", "serveurs MCP", "protocole MCP", "MCP kronn-internal", "via MCP"],
+        "es": ["servidor MCP", "servidores MCP", "protocolo MCP", "MCP kronn-internal", "vía MCP", "via MCP"],
+        "zh": ["MCP 服务器", "MCP 协议", "MCP kronn-internal", "kronn-internal MCP", "通过 MCP"]
+      }
+    },
+    {
+      "id": "worktree",
+      "meaning": "The isolated git checkout an agent or a task works in.",
+      "decided": "proposed",
+      "terms": { "en": "worktree", "fr": "worktree", "es": "worktree", "zh": "工作树" },
+      "synonyms": {
+        "en": ["workspaces?"],
+        "fr": ["espaces? de travail"],
+        "es": ["espacios? de trabajo"],
+        "zh": ["worktrees?", "工作区"]
+      },
+      "allow": { "zh": ["git worktree"] }
+    },
+    {
+      "id": "token",
+      "meaning": "A model token (usage, cost) or an access token. zh writes 令牌 for an access token and 'token' for usage: not checked until the two are split.",
+      "decided": "proposed",
+      "terms": { "en": "token", "fr": "token", "es": "token", "zh": "令牌" },
+      "synonyms": { "en": [], "fr": ["jetons?"], "es": [], "zh": [] }
+    },
+    {
+      "id": "repository",
+      "meaning": "A git repository.",
+      "decided": "proposed",
+      "terms": { "en": "repository", "fr": "dépôt", "es": "repositorio", "zh": "仓库" },
+      "synonyms": {
+        "en": ["repos?"],
+        "fr": ["repos?"],
+        "es": ["repos?"],
+        "zh": ["repos?"]
+      }
+    },
+    {
+      "id": "step",
+      "meaning": "One step of a workflow or an audit.",
+      "decided": "proposed",
+      "terms": { "en": "step", "fr": "étape", "es": "paso", "zh": "步骤" },
+      "synonyms": { "en": [], "fr": ["steps?"], "es": ["steps?"], "zh": ["steps?"] }
+    },
+    {
+      "id": "credentials",
+      "meaning": "Secrets that authenticate a plugin or an agent (keys, tokens, passwords).",
+      "decided": "proposed",
+      "terms": { "en": "credentials", "fr": "identifiants", "es": "credenciales", "zh": "凭据" },
+      "synonyms": { "en": [], "fr": ["credentials?"], "es": [], "zh": ["凭证"] }
+    },
+    {
+      "id": "provider",
+      "meaning": "The company or service behind a model or an API.",
+      "decided": "proposed",
+      "terms": { "en": "provider", "fr": "fournisseur", "es": "proveedor", "zh": "提供商" },
+      "synonyms": { "en": [], "fr": ["providers?"], "es": ["providers?"], "zh": ["提供方"] }
+    }
+  ],
+  "homonyms": [
+    {
+      "word": "principal",
+      "status": "proposed, owner to settle; the labels are not rewritten in KT-1879 and the check does not enforce these yet",
+      "uses": [
+        {
+          "id": "reviewing-agent",
+          "meaning": "The agent that delegates a task to a worker and reviews its delivery.",
+          "keys": ["orch.approveEvidence", "wiz.roomIdHint"],
+          "proposal": { "en": "reviewing agent", "fr": "agent relecteur", "es": "agente revisor", "zh": "审查代理" }
+        },
+        {
+          "id": "step-agent",
+          "meaning": "In a shadow comparison, the step's own agent (and its run) against its shadows.",
+          "keys": ["wf.shadow.*", "wf.branchMap.principal"],
+          "proposal": { "en": "step agent", "fr": "agent de l’étape", "es": "agente del paso", "zh": "步骤代理" }
+        }
+      ]
+    }
+  ]
+}

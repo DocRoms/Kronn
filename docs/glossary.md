@@ -2,6 +2,10 @@
 
 Project-specific terms. For deep dives, follow the linked `docs/architecture/` files.
 
+The words the **UI** uses for these concepts, per locale (one term each, the
+French « vous », plurals), are in `frontend/src/lib/i18n/glossary.json`; see
+[conventions/ui-text.md](conventions/ui-text.md).
+
 ---
 
 ## Architecture / stack
