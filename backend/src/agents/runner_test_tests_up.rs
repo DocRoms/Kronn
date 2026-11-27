@@ -2181,6 +2181,94 @@ fn an_operator_can_move_the_generation_cap_or_remove_it() {
     );
 }
 
+#[test]
+fn a_tool_free_step_gets_a_budget_for_a_long_answer() {
+    // KT-2123 — a short prompt with no tools got a quarter of a prompt-sized
+    // window (~1k tokens), and one HTML game was cut at 3.5k characters.
+    let mut body = build_ollama_chat_body(
+        "qwen3.8:27b",
+        "skill: mini-game-html",
+        "Un jeu d'esquive.",
+        None,
+        16_384,
+        None,
+    );
+    assert!(body["tools"].is_null(), "the step declares no tools");
+    fit_ollama_num_ctx(&mut body, 16_384);
+    let num_ctx = body["options"]["num_ctx"].as_u64().unwrap();
+    let num_predict = body["options"]["num_predict"].as_i64().unwrap() as u64;
+    assert!(
+        num_predict >= 6_144,
+        "a whole HTML page needs 6-12k output tokens, got {num_predict}"
+    );
+    assert!(num_predict < num_ctx, "{num_predict} of {num_ctx}");
+}
+
+#[test]
+fn a_tool_request_keeps_the_short_reply_budget() {
+    let catalogue =
+        crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+    let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 16_384, None);
+    body["tools"] = serde_json::Value::Array(catalogue);
+    fit_ollama_num_ctx(&mut body, 16_384);
+    let num_ctx = body["options"]["num_ctx"].as_u64().unwrap();
+    let num_predict = body["options"]["num_predict"].as_i64().unwrap() as u64;
+    assert_eq!(
+        num_predict,
+        num_ctx / 4,
+        "a call or summary stays quarter-sized"
+    );
+}
+
+#[tokio::test]
+async fn a_length_stop_is_a_cut_answer_not_a_success() {
+    // Captured from a local Ollama: a reply capped by num_predict ends with
+    // done_reason "length". The partial text must not pass as a finished step.
+    let (tx, _rx) = tokio::sync::mpsc::channel::<String>(16);
+    let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (mut got_done, mut got_error) = (false, false);
+    forward_ollama_line(
+        r#"{"message":{"role":"assistant","content":"<style>body{"},"done":false}"#,
+        &tx,
+        &stderr,
+        &mut got_done,
+        &mut got_error,
+        2048,
+    )
+    .await;
+    forward_ollama_line(
+        r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"length","prompt_eval_count":23,"eval_count":24}"#,
+        &tx,
+        &stderr,
+        &mut got_done,
+        &mut got_error,
+        2048,
+    )
+    .await;
+    assert!(got_done, "the stream did end");
+    assert!(got_error, "a length stop must fail the step, not pass it");
+    let lines = stderr.lock().unwrap().join("\n");
+    assert!(lines.contains("finish_reason: length"), "{lines}");
+    assert!(lines.contains("the answer is cut"), "{lines}");
+}
+
+#[tokio::test]
+async fn a_natural_stop_stays_a_success() {
+    let (tx, _rx) = tokio::sync::mpsc::channel::<String>(16);
+    let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (mut got_done, mut got_error) = (false, false);
+    forward_ollama_line(
+        r#"{"message":{"role":"assistant","content":"</html>"},"done":true,"done_reason":"stop","prompt_eval_count":5,"eval_count":9}"#,
+        &tx,
+        &stderr,
+        &mut got_done,
+        &mut got_error,
+        2048,
+    )
+    .await;
+    assert!(got_done && !got_error, "a stop is the normal end");
+}
+
 /// The control token was for runtimes that had no `think` flag. A server
 /// that honours the flag must not also be paying for the token.
 #[test]
@@ -3695,7 +3783,9 @@ fn resize_num_ctx_grows_the_output_budget_with_the_window() {
     let num_ctx = body["options"]["num_ctx"].as_u64().unwrap();
     let num_predict = body["options"]["num_predict"].as_i64().unwrap();
     assert!(num_predict > first, "{first} -> {num_predict}");
-    assert_eq!(Some(num_predict), num_predict_for(num_ctx, None));
+    // No tools here, so the reply is the answer: its budget is the room the
+    // window leaves after the history (KT-2123), not a quarter of the window.
+    assert!(num_predict < num_ctx as i64, "{num_predict} of {num_ctx}");
 }
 
 #[test]
