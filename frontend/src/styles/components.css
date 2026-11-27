@@ -656,11 +656,11 @@ select.input option {
   background: var(--kr-error);
 }
 
+/* KT-1936 — a floating layer in document.body: ParticipantDetailsLayer sets
+   its fixed place under the chip, inside the window (useAnchoredStyle). */
 .disc-participant-details {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 5px);
-  left: 0;
+  z-index: var(--kr-z-popover);
+  box-sizing: border-box;
   width: min(320px, calc(100vw - 32px));
   padding: 10px;
   border: 1px solid var(--kr-border);
@@ -683,11 +683,38 @@ select.input option {
   gap: 8px;
 }
 
+/* KT-1936 review round 3 — the full-size identity is wider than the layer
+   (a long alias, a long model id, the longest role label): it shrinks inside
+   the header instead of pushing the close button out of the layer. */
 .disc-participant-details > header > strong {
+  flex: 1 1 auto;
+  min-width: 0;
   gap: 5px;
 }
 
+/* The identity wraps rather than overflows: the name, the model and the role
+   chip keep their whole width when they fit on a line, go to the next one when
+   they do not, and only a part wider than the whole layer is cut — the model
+   with an ellipsis (its full id is in the tooltip, the layer's name and the
+   model row below), the name and the role chip by wrapping their words. */
+.disc-participant-details .disc-participant-details-identity {
+  flex-wrap: wrap;
+  row-gap: var(--kr-space-1);
+}
+
+.disc-participant-details .disc-participant-details-identity .ui-agent-identity-name,
+.disc-participant-details .disc-participant-details-identity .ui-agent-identity-role {
+  flex-shrink: 1;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The close button never shrinks and stays at the top of the header when the
+   identity takes two lines: always inside the layer, always reachable. */
 .disc-participant-details > header > button {
+  flex-shrink: 0;
+  align-self: flex-start;
   display: inline-flex;
   padding: 3px;
   border: 0;

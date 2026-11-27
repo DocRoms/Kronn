@@ -7,7 +7,7 @@ import type {
   AgentType,
   ModelTiersConfig,
 } from '../types/generated';
-import { AGENT_LABELS, AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
+import { AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Pencil, ShieldCheck, Zap, Rocket,
@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
+import { HeaderScrollLine } from './HeaderScrollLine';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { DiscussionScopeChip } from './DiscussionScope';
 import { TrustBadge } from './TrustLevel';
@@ -25,6 +26,7 @@ import { DiscInviteButton } from './DiscInviteButton';
 import { DiscussionIdPill } from './DiscussionIdPill';
 import { DetailHeaderShell } from './DetailHeaderShell';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { lastReplyModel as lastReplyModelOf } from '../lib/agentModelResolution';
 import type { AgentSwitchTarget } from './AgentSwitchPicker';
 import { ContextHelp } from './ContextHelp';
 import type { ExternalApiConnectionView } from '../lib/api';
@@ -120,18 +122,12 @@ export function ChatHeader({
   // model, the header names the one the agent last replied with, else "default
   // model of <agent>"; never the role or the tier alone.
   const currentTier = discussion.tier ?? 'default';
-  const lastReplyModel = useMemo(() => {
-    for (let index = discussion.messages.length - 1; index >= 0; index--) {
-      const message = discussion.messages[index];
-      if (message.role !== 'Agent' || message.agent_type !== discussion.agent) continue;
-      if (message.model_tier && message.model_tier !== currentTier) continue;
-      const model = message.model?.trim();
-      if (model) return model;
-    }
-    return null;
-  }, [discussion.messages, discussion.agent, currentTier]);
-  const headerModelFallback = lastReplyModel
-    ?? t('disc.defaultModelOf', externalConnection?.display_name ?? AGENT_LABELS[discussion.agent] ?? discussion.agent);
+  const lastReplyModel = useMemo(
+    () => lastReplyModelOf(discussion.messages, discussion.agent, currentTier),
+    [discussion.messages, discussion.agent, currentTier],
+  );
+  // Nothing recorded: the picker writes the explicit « default model of <agent> » state.
+  const headerModelFallback = lastReplyModel ?? undefined;
 
   const installedAgentsList = agents.filter(isUsable);
   const nativeAgentDisabled = nativeAgentMode?.discussionId === discussion.id
@@ -288,10 +284,12 @@ export function ChatHeader({
           onInvited={() => setParticipantsRefresh(n => n + 1)}
         />
       }
-      sub={<>
+      sub={<HeaderScrollLine>
         {/* First position, as the row's subject: whether this discussion
             answers by itself is the thing that changes what everything else
-            on the row means. */}
+            on the row means. KT-1936 — the whole line scrolls sideways when it
+            does not fit (owner option A): the main agent stays first and
+            readable, the « +N » counter is pinned at the line's right end. */}
         <span className="disc-native-agent-control">
           {nativeAgentDisabled ? (
             <button
@@ -390,6 +388,7 @@ export function ChatHeader({
           discId={discussion.id}
           t={t}
           refreshKey={participantsRefresh}
+          mainAgent={discussion.agent}
         />
         {/* KT-1270 — never folded away: what the room reaches beyond its project. */}
         <DiscussionScopeChip
@@ -400,7 +399,7 @@ export function ChatHeader({
         />
         {/* KT-1492 — never folded away: the trust level in force for this room. */}
         <TrustBadge target={{ scope: 'room', id: discussion.id }} />
-      </>}
+      </HeaderScrollLine>}
       // Before the pair, same baseline: « Détails » stays the rightmost control.
       status={<LearningsBadge t={t} toast={toast} />}
       buttonsProps={{ 'data-tour-id': 'disc-output-controls' }}

@@ -358,7 +358,7 @@ describe('CustomApiAiHelper — agent switch', () => {
     await openChat({ installedAgents: ['ClaudeCode', 'Codex', 'GeminiCli'] });
     // KT-1885 — the shared agent picker; the « agent default » entry keeps the agent's own tier.
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'mcp.custom.helper.switchAgent' }));
+      fireEvent.click(screen.getByRole('button', { name: /^mcp\.custom\.helper\.switchAgent( — |$)/ }));
     });
     createMock.mockClear();
     fireEvent.click(screen.getByRole('menuitem', { name: 'Gemini CLI · disc.defaultAgentModel' }));
@@ -494,9 +494,9 @@ describe('CustomApiAiHelper — kept conversation (KT-1111)', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
     });
-    const trigger = screen.getByRole('button', { name: 'mcp.custom.helper.switchAgent' });
+    const trigger = screen.getByRole('button', { name: /^mcp\.custom\.helper\.switchAgent( — |$)/ });
     await waitFor(() => expect(trigger).toHaveTextContent('Team proxy'));
-    expect(trigger.querySelector('.kr-agent-switch-current-tier')).toHaveAttribute('data-tier', 'economy');
+    expect(trigger.querySelector('.ui-agent-identity-tier')).toHaveAttribute('data-tier', 'economy');
     await act(async () => { fireEvent.click(trigger); });
     expect(await screen.findByRole('menuitem', { name: 'Team proxy · disc.tier.economy' })).toBeDisabled();
     expect(createMock).not.toHaveBeenCalled();

@@ -61,7 +61,6 @@
   ],
   "offScale": {
     "components/AgentSwitchPicker.css": {
-      "font-size": 2,
       "breakpoint": 1
     },
     "components/AiDocViewer.css": {
@@ -89,7 +88,7 @@
     "components/BatchComparePanel.css": {
       "colour": 1,
       "radius": 3,
-      "font-size": 2,
+      "font-size": 1,
       "breakpoint": 1
     },
     "components/CollectionShell.css": {

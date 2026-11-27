@@ -25,7 +25,7 @@ function config(reasoning: string | null): ModelTiersConfig {
 async function show(configured: string | null = null) {
   render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode']} currentTier="default"
     modelTiers={config(configured)} onSelectionChange={vi.fn()} title="Choose" ariaLabel="Choose" />);
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
 }
 
 beforeEach(() => {
@@ -41,7 +41,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     const select = vi.fn();
     render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode']}
       currentTier={null} onSelectionChange={select} title="Choose" ariaLabel="Choose" />);
-    fireEvent.click(screen.getByRole('button', { name: 'Choose' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: /Claude Code.*reasoning/ }));
     expect(select).toHaveBeenCalledWith('ClaudeCode', 'reasoning');
   });
@@ -88,7 +88,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     render(<AgentSwitchPicker currentAgent="LiteLlm" availableAgents={['LiteLlm']} currentTier="default"
       currentConnectionId="team-a" availableTargets={[{ agent: 'LiteLlm', connectionId: 'team-a', label: 'Team A' }]}
       modelTiers={tiers} onTargetSelectionChange={vi.fn()} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     await waitFor(() => expect(list).toHaveBeenCalled());
     expect(screen.getByRole('menuitem', { name: /Team A.*reasoning/ }))
       .toHaveAttribute('title', 'reasoning · Default agent model');
@@ -111,7 +111,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     await screen.findByText('modelCatalog.provenance.live');
     fireEvent.keyDown(document, { key: 'Escape' });
     list.mockRejectedValue(new Error('offline'));
-    fireEvent.click(screen.getByRole('button', { name: 'Choose' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ }));
     expect(await screen.findByText('modelCatalog.loadError')).toBeInTheDocument();
     expect(screen.getByText('modelCatalog.provenance.cached')).toBeInTheDocument();
     expect(screen.queryByText('modelCatalog.provenance.live')).not.toBeInTheDocument();
@@ -121,7 +121,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode']} currentTier="default"
       currentModel="saved-explicit-model" modelTiers={config('operator-choice')}
       onSelectionChange={vi.fn()} title="Choose" ariaLabel="Choose" />);
-    const trigger = screen.getByRole('button', { name: 'Choose' });
+    const trigger = screen.getByRole('button', { name: /^Choose( — |$)/ });
     expect(trigger).toHaveAttribute('title', 'Choose · default · saved-explicit-model');
     await act(async () => { fireEvent.click(trigger); });
     expect(screen.getByRole('menuitem', { name: /Claude Code.*default/ }).getAttribute('title'))
@@ -141,7 +141,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
       availableTargets={[{ agent: 'Codex' }, { agent: 'Custom', connectionId: 'team-a', label: 'Équipe A' },
         { agent: 'Custom', connectionId: 'team-b', label: 'Équipe B' }]}
       onTargetSelectionChange={select} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     const search = screen.getByRole('searchbox', { name: 'agentPicker.search' });
     expect(search).toHaveFocus();
     for (const query of ['CAFE', 'vendor/model-rare', 'team-a', 'equipe a']) {
@@ -172,7 +172,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     expect(screen.queryAllByRole('menuitem')).toHaveLength(0);
     expect(screen.getByRole('status')).toHaveTextContent('agentPicker.noMatch');
     fireEvent.keyDown(document, { key: 'Escape' });
-    const trigger = screen.getByRole('button', { name: 'Choose' });
+    const trigger = screen.getByRole('button', { name: /^Choose( — |$)/ });
     expect(trigger).toHaveFocus();
     await act(async () => { fireEvent.click(trigger); });
     expect(screen.getByRole('searchbox', { name: 'agentPicker.search' })).toHaveValue('');
@@ -187,7 +187,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     }] });
     render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode', 'Codex']}
       currentTier="default" onSelectionChange={select} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     const search = screen.getByRole('searchbox', { name: 'agentPicker.search' });
     fireEvent.keyDown(search, { key: 'ArrowDown' });
     const first = screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ });
@@ -200,7 +200,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     fireEvent.keyDown(first, { key: 'ArrowUp' });
     expect(search).toHaveFocus();
     fireEvent.keyDown(search, { key: 'Escape' });
-    expect(screen.getByRole('button', { name: 'Choose' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Choose( — |$)/ })).toHaveFocus();
     expect(select).not.toHaveBeenCalled();
   });
 
@@ -220,7 +220,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
   it('provides search in the simple agent-only picker too', async () => {
     render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode', 'Codex']}
       onChange={vi.fn()} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'codex' } });
     expect(screen.getAllByRole('menuitem')).toHaveLength(1);
     expect(screen.getByRole('menuitem', { name: 'Codex' })).toBeInTheDocument();
@@ -232,10 +232,10 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
       <AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode', 'Codex']}
         onChange={vi.fn()} title="Choose" ariaLabel="Choose" />
     </div>);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     fireEvent.keyDown(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'Choose' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Choose' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Choose( — |$)/ })).toHaveFocus();
     expect(parentKey).not.toHaveBeenCalled();
   });
 
@@ -245,14 +245,14 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
       availableTargets={[{ agent: 'Codex' }, { agent: 'Custom', connectionId: 'team-a', label: 'Équipe A' },
         { agent: 'Custom', connectionId: 'team-b', label: 'Équipe B' }]}
       onTargetSelectionChange={select} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'team-b' } });
     const option = screen.getByRole('menuitem', { name: /Équipe B.*reasoning/ });
     await act(async () => { fireEvent.click(option); fireEvent.click(option); });
     expect(select).toHaveBeenCalledTimes(1);
     expect(select).toHaveBeenCalledWith({ agent: 'Custom', connectionId: 'team-b', label: 'Équipe B' }, 'reasoning');
     expect(screen.queryByRole('dialog', { name: 'Choose' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Choose' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Choose( — |$)/ })).toHaveFocus();
   });
 });
 

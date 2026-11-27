@@ -175,7 +175,7 @@ const configs = tseslint.config(
   // components/ui is where Dialog, Drawer and ConfirmDialog are built.
   {
     files: [UI_FOLDER],
-    rules: { 'ui-guards/no-adhoc-dialog': 'off' },
+    rules: { 'ui-guards/no-adhoc-dialog': 'off', 'ui-guards/no-adhoc-agent-identity': 'off' },
   },
 );
 

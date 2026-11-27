@@ -4830,10 +4830,12 @@ describe('DiscussionsPage', () => {
     // The button carries the configured agent under its canonical mention plus its
     // role, so the same identity reads the same way here, in the composer and in
     // the participant list.
-    const switchBtn = screen.getByRole('button', { name: "Changer d'agent ou de mode IA" });
+    const switchBtn = screen.getByRole('button', { name: /^Changer d'agent ou de mode IA( — |$)/ });
     expect(switchBtn).toBeTruthy();
     expect(switchBtn?.textContent).toContain('@claude');
     expect(switchBtn?.textContent).toContain('agent principal');
+    // KT-1936 — the accessible name says the action, then the identity.
+    expect(switchBtn.getAttribute('aria-label')).toMatch(/^Changer d'agent ou de mode IA — @claude · .+ · agent principal$/);
   });
 
   // ─── Global discussion search entry point ────────────────────────────
@@ -4912,7 +4914,7 @@ describe('DiscussionsPage', () => {
     );
 
     // Click the agent switch button
-    const switchBtn = screen.getByRole('button', { name: "Changer d'agent ou de mode IA" });
+    const switchBtn = screen.getByRole('button', { name: /^Changer d'agent ou de mode IA( — |$)/ });
     expect(switchBtn).toBeTruthy();
     await act(async () => { fireEvent.click(switchBtn); });
 

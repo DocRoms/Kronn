@@ -49,10 +49,10 @@ alone does not establish a user-visible duration.
 1. The active transcript is rendered as the complete `activeDiscussion.messages`
    collection inside one scrolling container; this code does not window or
    paginate visible message rows.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:4651-4671#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3893-3913#transcriptElements]
    Each normal item creates a
    `MessageBubble`; tool groups create `ToolCallsGroup`.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:4045-4104#MessageBubble]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:4081-4140#MessageBubble]
 2. Before mapping rows, the page filters notes, projects messages into
    conversation order and builds lookup maps, memoized per transcript change;
    the memoized element list then makes several more passes to calculate
@@ -68,39 +68,39 @@ alone does not establish a user-visible duration.
 4. A `MessageBubble` passes normal text through `MessageBody`, which splits
    injected context and sends the content to `ReactMarkdown` with
    `remark-gfm` and `remark-emoji`.
-   [src: file: frontend/src/components/MessageBubble.tsx:2301-2349#MessageBody]
+   [src: file: frontend/src/components/MessageBubble.tsx:2308-2356#MessageBody]
    [src: file: frontend/src/components/MessageBubble.tsx:2252-2265#ReactMarkdown]
    Each message first renders as plain text and upgrades to Markdown once it is
    near the viewport or the browser is idle, so every message is still parsed.
-   [src: file: frontend/src/components/MessageBubble.tsx:2202-2234#canDefer]
+   [src: file: frontend/src/components/MessageBubble.tsx:2209-2241#canDefer]
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
-   [src: file: frontend/src/components/MessageBubble.tsx:2008-2015#MAX_MARKDOWN_CHARS]
+   [src: file: frontend/src/components/MessageBubble.tsx:2013-2020#MAX_MARKDOWN_CHARS]
 5. The active-detail change also triggers an effect that filters the complete
    array to mark the discussion seen.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1959-1973#markDiscussionSeen]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1991-2005#markDiscussionSeen]
    The code-count refresh
    effect is similarly keyed to the message-array length.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2123-2150#setPendingFilesCount]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2155-2182#setPendingFilesCount]
 
 ### Scrolling and streaming
 
 1. On initial settling of a loaded discussion, `scrollToBottomSettled` writes
    `scrollTop = scrollHeight` on animation frames for up to 700 ms; the effect
    is reached after a non-empty message list loads.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2028-2067#bottomSettleRafRef]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2099-2113#lastSettledDiscIdRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2052-2091#bottomSettleRafRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2131-2145#lastSettledDiscIdRef]
 2. For streaming content while stuck to the bottom, the page calls
    `scrollIntoView` no more often than once per 250 ms.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2075-2085#lastScrollRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2025-2040#lastScrollRef]
 3. Incoming stream chunks are buffered and flush at most once per animation
    frame into the discussion streaming map.
    [src: file: frontend/src/hooks/useRafBatchedStream.ts:20-49#useRafBatchedStream]
    The active streaming text is
    deferred before being passed to the streaming reply renderer.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1559#deferredStreamingText]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3960-3968#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1589-1595#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1589-1597#deferredStreamingText]
 
 ## Findings and priorities
 

@@ -6,8 +6,9 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AGENT_COLORS, ALL_AGENT_TYPES, agentTextColor } from '../../lib/constants';
 import {
-  auditRepo, checkBaseline, DARK_THEMES, focusRingRemovals, forcedTextInInlineStyles, forcedTextOnTokenBackground,
+  AGENT_TEXT_TOKENS, auditRepo, checkBaseline, DARK_THEMES, focusRingRemovals, forcedTextInInlineStyles, forcedTextOnTokenBackground,
   loadBaseline, measureTextContrast, parseThemes, SEMANTIC_STATUS_TOKENS, STATUS_TOKENS, TEXT_TOKENS,
   undeclaredCustomProperties,
 } from '../themeAudit';
@@ -77,6 +78,37 @@ describe('theme contrast', () => {
       rows.find(r => r.theme === theme && r.text === text && r.background === bg)!.ratio;
     expect(at('gotham', '--kr-text-muted', '--kr-bg-elevated')).toBeCloseTo(4.02, 2);
     expect(at('matrix', '--kr-text-ghost', '--kr-bg-base')).toBeCloseTo(2.15, 2);
+  });
+
+  // KT-1936 — an agent's name is written in its colour (AgentIdentity, mention
+  // chips, pickers): every default colour written as text holds 4.5:1 on every
+  // opaque surface of every theme, with no baseline cell.
+  it('holds every default agent colour written as text to 4.5:1 in every theme', () => {
+    const tokens = [...ALL_AGENT_TYPES.map(a => agentTextColor(a)), agentTextColor('unknown')]
+      .map(v => /^var\((--kr-agent-[a-z]+-text)\)$/.exec(v)?.[1]);
+    expect(tokens.every(Boolean), tokens.join(', ')).toBe(true);
+    const measured = [...AGENT_TEXT_TOKENS, '--kr-agent-nvidia-text'];
+    for (const token of tokens) expect(measured).toContain(token);
+    for (const theme of ['arcade', 'dark', 'euronews', 'gotham', 'light', 'matrix', 'sakura']) {
+      for (const token of measured) {
+        const rows = AUDIT.contrast.filter(r => r.theme === theme && r.text === token);
+        expect(rows.length, `${theme} ${token}`).toBeGreaterThanOrEqual(5);
+        for (const r of rows) expect(r.ratio, `${theme} ${token} on ${r.background}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    expect(loadBaseline(SRC).contrast.filter(k => k.includes('--kr-agent-'))).toEqual([]);
+  });
+
+  it('would have refused the brand colours as text (Codex on light, OpenCode on dark)', () => {
+    const brand = (theme: string, colour: string) => {
+      const css = TOKENS.replace(/(:root \{[\s\S]*?)--kr-agent-claude-text:[^;]+;/, `$1--kr-agent-claude-text: ${colour};`)
+        .replace(/(:root\[data-theme="euronews"\] \{[\s\S]*?--kr-agent-claude-text:)[^;]+;/, `$1 ${colour};`);
+      return measureTextContrast(parseThemes(css))
+        .filter(r => r.theme === theme && r.text === '--kr-agent-claude-text')
+        .reduce((min, r) => Math.min(min, r.ratio), 99);
+    };
+    expect(brand('light', AGENT_COLORS.Codex)).toBeLessThan(4.5);
+    expect(brand('dark', AGENT_COLORS.OpenCode)).toBeLessThan(4.5);
   });
 
   it('holds the focus ring colour to 3:1 on every surface of every theme', () => {

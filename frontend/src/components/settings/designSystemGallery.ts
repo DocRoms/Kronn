@@ -49,6 +49,8 @@ export const UI_GALLERY_COMPONENTS: readonly GalleryComponent[] = [
   // KT-2004 — the log and diff viewers, each in a wide and a narrow container.
   component('logViewer', 'LogViewer'),
   component('diffViewer', 'DiffViewer'),
+  // KT-1936 — an agent's name, model and role, the same on every surface.
+  component('agentIdentity', 'AgentIdentity'),
 ];
 
 /** KT-1885 — shared components built on those controls, shown after them:

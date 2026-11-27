@@ -76,3 +76,18 @@ holds the same 4.5:1 as the added and removed text.
   `StatusBadge` writes its label in `--kr-text-primary` and leaves the status
   colour to the dot, the border and the tint
   `[src: file: frontend/src/components/ui/StatusBadge.test.tsx:40]`.
+- **Agent names as text (KT-1936):** most agent brand colours fall under
+  4.5:1 as text on some surface of some theme (Codex 2.75:1 on light,
+  OpenCode 2.28:1 on dark). Each default agent has a text token,
+  `--kr-agent-<agent>-text` (`claude`, `codex`, `opencode`, `vibe`,
+  `gemini`, `kiro`, `copilot`, `ollama`, `litellm`, `nvidia`, and
+  `fallback` for an unknown agent): the dark values in `:root`, the light
+  themes' in their shared block. `agentTextColor()` writes them; the brand
+  colour stays on dots, borders and icons, and a colour the user configured
+  is left as it is. `themeAudit` measures them at 4.5:1 on every opaque
+  surface of the seven themes, with no baseline cell.
+  `[src: file: frontend/src/styles/tokens.css:89]`
+  `[src: file: frontend/src/styles/tokens.css:523]`
+  `[src: file: frontend/src/styles/themeAudit.ts:41#AGENT_TEXT_TOKENS]`
+  `[src: file: frontend/src/lib/constants.ts:216#agentTextColor]`
+  `[src: file: frontend/src/styles/__tests__/themeContrast.test.ts:86]`

@@ -7,9 +7,6 @@
         "conversations?": 36,
         "rooms?": 22
       },
-      "main-agent": {
-        "discussion agents?": 8
-      },
       "plugin": {
         "MCPs?": 60
       },
@@ -44,11 +41,6 @@
       "discussion": {
         "conversations?": 40,
         "rooms?": 18
-      },
-      "main-agent": {
-        "agents? d['’]une discussion": 1,
-        "agents? de discussion": 7,
-        "agents? de la discussion": 2
       },
       "plugin": {
         "MCPs?": 61
@@ -100,13 +92,9 @@
     },
     "es": {
       "discussion": {
-        "conversaci(?:ón|ones)": 136,
+        "conversaci(?:ón|ones)": 133,
         "rooms?": 2,
         "salas?": 19
-      },
-      "main-agent": {
-        "agentes? de discusión": 1,
-        "agentes? de la discusión": 5
       },
       "plugin": {
         "MCPs?": 65
@@ -142,19 +130,15 @@
     },
     "zh": {
       "agent": {
-        "智能体": 186
+        "智能体": 185
       },
       "credentials": {
         "凭证": 10
       },
       "discussion": {
-        "会话": 37,
+        "会话": 28,
         "对话": 61,
         "房间": 20
-      },
-      "main-agent": {
-        "主智能体": 1,
-        "讨论代理": 8
       },
       "plugin": {
         "MCPs?": 55
@@ -262,11 +246,6 @@
       "disc.inviteHandoffFullHint": ["1fb8d949","term:discussion:rooms?"],
       "disc.launchAgentNowHint": ["b86dd7b3","term:discussion:rooms?"],
       "disc.modelErrorSummary": ["90fb7f1b","term:settings:configs?"],
-      "disc.nativeAgentDisable": ["38e80cd9","term:main-agent:discussion agents?"],
-      "disc.nativeAgentDisabled": ["d0714c78","term:main-agent:discussion agents?"],
-      "disc.nativeAgentDisabledToast": ["d4973dff","term:main-agent:discussion agents?"],
-      "disc.nativeAgentEnable": ["e4978d2c","term:main-agent:discussion agents?"],
-      "disc.nativeAgentEnabledToast": ["437d5520","term:main-agent:discussion agents?"],
       "disc.portability.exportHint": ["95c9edfe","term:discussion:conversations?"],
       "disc.rtkWarnLink": ["2cd6676e","term:settings:configs?"],
       "disc.scopeAllTitle": ["6069528a","term:discussion:rooms?"],
@@ -461,14 +440,11 @@
       "run.kind.quick_api": ["461b652c","term:quick-action:Quick APIs?"],
       "run.kind.quick_exec": ["1c1e7f9d","term:quick-action:Quick Execs?"],
       "settings.bioInfoCli": ["1e4571c1","term:plugin:MCPs?"],
-      "settings.bioInfoInjection": ["a0473663","term:main-agent:discussion agents?"],
       "settings.clHint": ["45ff47ee","term:plugin:MCPs?"],
       "settings.discussionNotesHint": ["7a31284a","term:discussion:conversations?"],
       "settings.disk.confirmStalled": ["4f2ef8f9","term:run:executions?"],
       "settings.globalContextInfoCli": ["3fd04d0b","term:plugin:MCPs?"],
-      "settings.globalContextInfoInjection": ["ffc17426","term:main-agent:discussion agents?"],
       "settings.globalTimeout": ["48993ffe","term:run:executions?"],
-      "settings.identityContextHint": ["01b861f7","term:main-agent:discussion agents?"],
       "settings.recovery.hint": ["8ce25bc4","term:settings:configs?"],
       "settings.sourcingScopeExternal": ["9dffbdc6","term:plugin:MCPs?"],
       "settings.timeoutMismatchWarning": ["e2cd9f8a","term:run:executions?"],
@@ -769,16 +745,10 @@
       "disc.inviteTokenHint": ["15bc1dd4","term:token:jetons?"],
       "disc.launchAgentNowHint": ["9802dbca","register:fr:tu","register:fr:ton"],
       "disc.modelErrorSummary": ["48fa03ab","term:settings:configs?"],
-      "disc.nativeAgentDisable": ["af835552","term:main-agent:agents? de discussion"],
-      "disc.nativeAgentDisabled": ["f3c8f511","term:main-agent:agents? de discussion"],
-      "disc.nativeAgentDisabledToast": ["4f1d9d89","term:main-agent:agents? de discussion"],
-      "disc.nativeAgentEnable": ["c3f91d9b","term:main-agent:agents? de discussion"],
-      "disc.nativeAgentEnabledToast": ["8197c75b","term:main-agent:agents? de discussion"],
       "disc.partialPendingNotice": ["1bc77c90","register:fr:ton"],
       "disc.portability.exportHint": ["2ec78032","term:discussion:conversations?"],
       "disc.question.commentSent": ["a5b5b788","register:fr:ta"],
       "disc.question.freeTextPlaceholder": ["8f481ba5","register:fr:tes"],
-      "disc.routingImplicit": ["e6dbc7d2","term:main-agent:agents? de la discussion"],
       "disc.rtkWarnLink": ["a3b5789a","term:settings:configs?"],
       "disc.running": ["f1993a64","term:run:exécutions?"],
       "disc.scopeAllTitle": ["dbe1b4b2","term:discussion:rooms?"],
@@ -1037,7 +1007,6 @@
       "runProgress.phase.preparing": ["6b2bb6e2","term:run:lancements?"],
       "settings.ahExplainEnforce": ["6062cb00","term:step:steps?"],
       "settings.bioInfoCli": ["b3a5e6ac","term:step:steps?"],
-      "settings.bioInfoInjection": ["2e177efe","term:main-agent:agents? de la discussion","term:main-agent:agents? d['’]une discussion"],
       "settings.clHint": ["ee19bfc3","term:plugin:MCPs?"],
       "settings.debugModeHint": ["bc21ee2b","term:settings:configs?"],
       "settings.debugReportHint": ["efe8ec43","register:fr:tu"],
@@ -1052,9 +1021,7 @@
       "settings.exposePlainBlocked": ["aae097f0","register:fr:tu"],
       "settings.exposeSecurityNote": ["330e8784","register:fr:ton"],
       "settings.globalContextInfoCli": ["c7797c8f","term:step:steps?"],
-      "settings.globalContextInfoInjection": ["c9baff80","term:main-agent:agents? de discussion"],
       "settings.globalTimeout": ["e26535b0","term:run:exécutions?"],
-      "settings.identityContextHint": ["5dbde846","term:main-agent:agents? de discussion"],
       "settings.recovery.authToken": ["5ba6893e","term:token:jetons?"],
       "settings.recovery.hint": ["32d020cd","term:settings:configs?"],
       "settings.timeoutMismatchWarning": ["4057ca06","term:run:exécutions?"],
@@ -1582,18 +1549,12 @@
       "disc.media.unavailable": ["28b08cd1","term:discussion:conversaci(?:ón|ones)"],
       "disc.modelErrorSummary": ["6d295b3d","term:settings:configs?"],
       "disc.multiAgentCollaborationSettings": ["47b39764","term:settings:configuraci(?:ón|ones)"],
-      "disc.nativeAgentDisable": ["03950479","term:main-agent:agentes? de la discusión"],
-      "disc.nativeAgentDisabled": ["8c7fb87e","term:main-agent:agentes? de discusión"],
-      "disc.nativeAgentDisabledToast": ["8254ba45","term:main-agent:agentes? de la discusión"],
-      "disc.nativeAgentEnable": ["88329e58","term:main-agent:agentes? de la discusión"],
-      "disc.nativeAgentEnabledToast": ["341a1354","term:main-agent:agentes? de la discusión"],
       "disc.portability.exportHint": ["a3129246","term:discussion:conversaci(?:ón|ones)"],
       "disc.promptComposerHint": ["06ac77c0","term:discussion:conversaci(?:ón|ones)"],
       "disc.realtimeReconnecting": ["2edc1a35","term:discussion:conversaci(?:ón|ones)"],
       "disc.routingActiveAgents": ["4cdd3fa8","term:discussion:conversaci(?:ón|ones)"],
       "disc.routingHelpDefault": ["3d816eb8","term:discussion:conversaci(?:ón|ones)"],
       "disc.routingHelpDiscussionAgent": ["5217a8bb","term:discussion:conversaci(?:ón|ones)"],
-      "disc.routingImplicit": ["2bf882df","term:main-agent:agentes? de la discusión"],
       "disc.routingNativeTier": ["375c6362","term:discussion:conversaci(?:ón|ones)"],
       "disc.rtkWarnLink": ["c7d24e74","term:settings:configs?"],
       "disc.scopeAllTitle": ["f05a90f4","term:discussion:salas?","term:settings:configuraci(?:ón|ones)"],
@@ -1812,15 +1773,12 @@
       "runProgress.phase.preparing": ["2c3e4192","term:run:lanzamientos?"],
       "settings.bioHint": ["00d88494","term:discussion:conversaci(?:ón|ones)"],
       "settings.bioInfoCli": ["0be2b2a8","term:discussion:conversaci(?:ón|ones)","term:plugin:MCPs?","term:step:steps?"],
-      "settings.bioInfoInjection": ["43fbfc8a","term:discussion:conversaci(?:ón|ones)"],
       "settings.clHint": ["1172c8db","term:plugin:MCPs?"],
       "settings.discussionNotesHint": ["48c1384f","term:discussion:conversaci(?:ón|ones)"],
       "settings.disk.launchMin": ["54039500","term:run:lanzamientos?"],
       "settings.disk.pressure": ["590bed29","term:run:lanzamientos?"],
       "settings.globalContextInfoCli": ["e6163e5a","term:plugin:MCPs?","term:step:steps?"],
-      "settings.globalContextInfoInjection": ["ee485508","term:discussion:conversaci(?:ón|ones)"],
       "settings.globalTimeoutHint": ["e6dee71f","term:run:runs?"],
-      "settings.identityContextHint": ["dc79ec05","term:discussion:conversaci(?:ón|ones)"],
       "settings.identityProfileHint": ["11184d66","term:discussion:conversaci(?:ón|ones)"],
       "settings.identityVisibleInDiscussions": ["7b13eed8","term:discussion:conversaci(?:ón|ones)"],
       "settings.recovery.hint": ["05059431","term:settings:configs?"],
@@ -2194,7 +2152,6 @@
       "contacts.joinSuccess": ["ff94b7c8","term:discussion:对话"],
       "contextHelp.discussion.intro": ["7f05333c","term:discussion:对话"],
       "contextHelp.discussion.mainAgent": ["b585775f","term:settings:配置"],
-      "contextHelp.discussion.participants": ["6d19b3d3","term:discussion:会话"],
       "contextHelp.planning.discussions": ["9b136018","term:task:规划"],
       "contextHelp.planning.intro": ["7ca0244a","term:task:规划"],
       "contextHelp.planning.orchestration": ["dc7b7fce","term:worktree:worktrees?"],
@@ -2203,7 +2160,6 @@
       "contextHelp.plugins.mcp": ["f7d18f27","term:settings:配置","term:plugin:MCPs?"],
       "contextHelp.project.resources": ["103c7e67","term:plugin:MCPs?"],
       "debate.header": ["5162a860","term:agent:智能体"],
-      "debate.instructions": ["1e6044dd","term:main-agent:主智能体","term:agent:智能体"],
       "debate.launch": ["16af7f28","term:agent:智能体"],
       "debate.title": ["b30e9476","term:agent:智能体"],
       "decisionPicker.defaultShort": ["349b4f36","term:settings:配置"],
@@ -2249,19 +2205,12 @@
       "disc.modelErrorSummary": ["ddbf50fa","term:agent:智能体","term:settings:配置"],
       "disc.mosaic.upstream": ["c11e530d","term:provider:提供方"],
       "disc.multiAgentIndependentTitle": ["2e7b9a56","term:agent:智能体"],
-      "disc.nativeAgentDisable": ["83208e2f","term:main-agent:讨论代理"],
-      "disc.nativeAgentDisabled": ["69f25c25","term:main-agent:讨论代理"],
-      "disc.nativeAgentDisabledToast": ["ed467454","term:main-agent:讨论代理"],
-      "disc.nativeAgentEnable": ["4866d15c","term:main-agent:讨论代理"],
-      "disc.nativeAgentEnabledToast": ["b74303fc","term:main-agent:讨论代理"],
       "disc.noMcps": ["474532ea","term:settings:配置"],
       "disc.parallelLaunchCount": ["5db9d36e","term:agent:智能体"],
       "disc.portability.exportHint": ["51bbee7d","term:discussion:对话"],
       "disc.question.commentHint": ["56e55042","term:agent:智能体"],
       "disc.question.declineHint": ["286aa8bc","term:agent:智能体"],
-      "disc.routingCliModelManaged": ["4c7b85ee","term:discussion:会话"],
       "disc.routingDisabledAgent": ["6fe6b92e","term:settings:配置"],
-      "disc.routingHelpCli": ["942f652f","term:discussion:会话"],
       "disc.routingHelpDefault": ["601bd421","term:settings:配置"],
       "disc.routingHelpDefaultDisabled": ["42b5b5dc","term:settings:配置"],
       "disc.routingHelpDiscussionAgent": ["8c51db49","term:settings:配置"],
@@ -2289,7 +2238,6 @@
       "disc.session.reason.session_expired": ["13695d71","term:discussion:对话"],
       "disc.session.reason.store_unavailable": ["eb3d7db4","term:discussion:对话"],
       "disc.session.resumedHint": ["220730e9","term:discussion:对话","term:agent:智能体"],
-      "disc.session.title": ["0820a8df","term:discussion:会话"],
       "disc.session.unlinkFailed": ["f4b9664a","term:discussion:会话"],
       "disc.session.unlinked": ["12e00fa5","term:discussion:会话"],
       "disc.source.boundHint": ["ccb0639e","term:discussion:会话"],
@@ -2349,7 +2297,6 @@
       "mcp.contextForAgentHint": ["ac237fe1","term:agent:智能体"],
       "mcp.createHostScopeHint": ["ee292616","term:settings:配置"],
       "mcp.credentials.cliOptionalHint": ["4b723038","term:discussion:会话"],
-      "mcp.credentials.notStored": ["c897b2fa","term:discussion:会话"],
       "mcp.custom.auth.hint": ["8540ed5e","term:credentials:凭证"],
       "mcp.custom.auth.tokenExchange.bodyTemplateHint": ["b5f8e67f","term:credentials:凭证"],
       "mcp.custom.endpoints.populatedHint": ["f1e8eefc","term:plugin:MCPs?","term:credentials:凭证"],
@@ -2554,15 +2501,12 @@
       "readiness.title": ["9a455e32","term:agent:智能体"],
       "runProgress.phase.initializing": ["8f8479d9","term:discussion:会话"],
       "runProgress.phase.opening_session": ["d9dcb26c","term:discussion:会话"],
-      "settings.bioInfoInjection": ["2a4a03a0","term:main-agent:讨论代理"],
       "settings.clHint": ["f76a508d","term:plugin:MCPs?"],
       "settings.discussionNotesHint": ["e310b16a","term:discussion:对话"],
       "settings.disk.confirmStalled": ["8cad8042","term:worktree:worktrees?"],
       "settings.disk.hint": ["17c1cd9a","term:worktree:worktrees?"],
       "settings.disk.kind.worktree": ["2be5ff28","term:worktree:worktrees?"],
       "settings.disk.orphanRule": ["420960c0","term:worktree:worktrees?"],
-      "settings.globalContextInfoInjection": ["f2695612","term:main-agent:讨论代理"],
-      "settings.identityContextHint": ["5c3e9e42","term:main-agent:讨论代理"],
       "settings.recovery.configured": ["df327292","term:settings:配置"],
       "settings.recovery.hint": ["69573fe4","term:settings:配置"],
       "settings.recovery.nudge": ["334bbfce","term:settings:配置"],
@@ -2582,8 +2526,6 @@
       "techDebt.talk.placeholderNone": ["25dc7245","term:agent:智能体"],
       "techDebt.talk.sending": ["01b79697","term:agent:智能体"],
       "techDebt.talkCount": ["55eb75a0","term:agent:智能体"],
-      "telemetryCoverage.empty": ["0312f015","term:discussion:会话"],
-      "telemetryCoverage.intro": ["b2cab574","term:discussion:会话"],
       "telemetryCoverage.note": ["7a1dfaba","term:discussion:会话"],
       "telemetryCoverage.sessions": ["3354a170","term:discussion:会话"],
       "telemetryCoverage.unknownHint": ["918efe01","term:discussion:会话"],
@@ -2601,7 +2543,7 @@
       "templateMerge.untracked.desc": ["36b0cfec","term:worktree:worktrees?"],
       "tour.addPlugin.agentNote": ["4e306ed7","term:settings:配置","term:plugin:MCPs?"],
       "tour.addPlugin.desc": ["8b519eb4","term:settings:配置","term:plugin:MCPs?"],
-      "tour.agentsConfig.desc": ["ef1ea5bc","term:discussion:对话","term:discussion:会话","term:settings:配置"],
+      "tour.agentsConfig.desc": ["ef1ea5bc","term:discussion:对话","term:settings:配置"],
       "tour.automationAi.agentNote": ["881c3688","term:settings:配置","term:quick-action:Quick APIs?","term:quick-action:Quick Execs?"],
       "tour.automationAi.desc": ["fd592aa0","term:discussion:对话","term:quick-action:Quick APIs?","term:quick-action:Quick Execs?"],
       "tour.automationLibrary.desc": ["5d0f8fd5","term:quick-action:Quick APIs?","term:quick-action:Quick Execs?"],
@@ -2624,7 +2566,6 @@
       "tour.globalSearch.desc": ["b807645a","term:discussion:对话"],
       "tour.group.discussions": ["55990b0b","term:discussion:对话"],
       "tour.importantMessages.agentNote": ["661d5f9d","term:discussion:会话"],
-      "tour.mentions.desc": ["c2a945cc","term:discussion:会话"],
       "tour.mentions.title": ["ce03ee38","term:discussion:对话"],
       "tour.navPlanning.desc": ["d248e623","term:discussion:对话","term:task:规划"],
       "tour.navigation.desc": ["045b183f","term:discussion:对话","term:task:规划"],

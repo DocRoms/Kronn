@@ -66,6 +66,9 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
 import { useSustainedFlag } from '../hooks/useSustainedFlag';
+import { ActivityAgentIdentity } from '../components/ActivityAgentIdentity';
+import type { AgentIdentityModel, AgentIdentityRole } from '../components/ui/agentIdentityKinds';
+import { discussionAgentModel } from '../lib/agentModelResolution';
 import { AGENT_LABELS, agentColor, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isRoomAgentDisabled, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
@@ -137,6 +140,10 @@ function newClientMessageId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** KT-1936 — a one-off agent's reply: its mode is not known before the reply
+ *  names its model. */
+const ONE_OFF_REPLY_MODEL: AgentIdentityModel = { kind: 'providerDefault' };
+
 function PendingAgentReplyBubble({
   replyId,
   discussionId,
@@ -147,7 +154,11 @@ function PendingAgentReplyBubble({
   lastError,
   stopping,
   onStop,
+  role,
+  model,
 }: {
+  role?: AgentIdentityRole;
+  model: AgentIdentityModel;
   replyId: string;
   discussionId: string;
   replyIds: ReplyIds;
@@ -173,8 +184,8 @@ function PendingAgentReplyBubble({
         data-testid={`failed-agent-${agent}`}
       >
         <div className="disc-msg-bubble" data-role="agent">
-          <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent) }}>
-            <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
+          <div className="disc-msg-agent-label" data-testid="activity-agent-identity">
+            <ActivityAgentIdentity agent={agent} role={role} model={model} />
           </div>
           <div className="disc-failed-agent">
             <AlertTriangle size={11} />
@@ -197,9 +208,9 @@ function PendingAgentReplyBubble({
       aria-live={run ? undefined : 'polite'}
     >
       <div className="disc-msg-bubble" data-role="agent">
-        <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent) }}>
-          <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
-          <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
+        <div className="disc-msg-agent-label" data-testid="activity-agent-identity">
+          <ActivityAgentIdentity agent={agent} role={role} model={model} />
+          <Loader2 size={12} aria-hidden="true" style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
         </div>
         <div className="disc-pending-agent-status">
           <div className="disc-streaming-waiting">
@@ -243,7 +254,11 @@ function StreamingAgentReplyBubble({
   recoveryLabel,
   agentLabel,
   waitingUpstream,
+  role,
+  model,
 }: {
+  role?: AgentIdentityRole;
+  model: AgentIdentityModel;
   replyId: string;
   discussionId: string;
   replyIds: ReplyIds;
@@ -274,9 +289,9 @@ function StreamingAgentReplyBubble({
       aria-live={run ? undefined : 'polite'}
     >
       <div className="disc-msg-bubble" data-role="agent">
-        <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent), justifyContent: 'space-between' }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <Cpu size={10} /> {displayAgent}
+        <div className="disc-msg-agent-label" data-testid="activity-agent-identity" style={{ justifyContent: 'space-between' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+            <ActivityAgentIdentity agent={agent} label={displayAgent} role={role} model={model} />
             {recovering
               ? <AlertTriangle size={10} style={{ marginLeft: 4 }} />
               : <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />}
@@ -1220,6 +1235,27 @@ export function DiscussionsPage({
   const activeExternalConnection = activeDiscussion
     ? externalConnectionForDiscussion(activeDiscussion, externalConnections)
     : null;
+  // KT-1936 — the main agent's model, resolved as the header resolves it
+  // (exact model, the mode's model, the last reply, else « default model »):
+  // the activity bubbles and the list row never contradict the header.
+  const familyModelTiers = agentAccess?.model_tiers ?? null;
+  const activeAgentModel = useMemo<AgentIdentityModel>(
+    () => activeDiscussion
+      ? discussionAgentModel(activeDiscussion, { familyTiers: familyModelTiers, connection: activeExternalConnection })
+      : ONE_OFF_REPLY_MODEL,
+    [activeDiscussion, familyModelTiers, activeExternalConnection],
+  );
+  const sidebarAgentModels = useMemo(() => {
+    const detailedById = new Map<string, LoadedDiscussion>();
+    Object.values(loadedDiscussions).forEach(discussion => detailedById.set(discussion.id, discussion));
+    return Object.fromEntries(allDiscussions.map(discussion => {
+      const detailed = detailedById.get(discussion.id) ?? discussion;
+      return [discussion.id, discussionAgentModel(detailed, {
+        familyTiers: familyModelTiers,
+        connection: externalConnectionForDiscussion(detailed, externalConnections),
+      })];
+    }));
+  }, [allDiscussions, loadedDiscussions, familyModelTiers, externalConnections]);
   const sidebarAgentLabels = useMemo(() => {
     const detailedById = new Map<string, LoadedDiscussion>();
     Object.values(loadedDiscussions).forEach(discussion => detailedById.set(discussion.id, discussion));
@@ -3983,6 +4019,8 @@ export function DiscussionsPage({
                           : null
                     }
                     agentLabel={recoveryAgentLabel}
+                    role={reply.agent === activeDiscussion.agent ? 'main' : 'oneOff'}
+                    model={reply.agent === activeDiscussion.agent ? activeAgentModel : ONE_OFF_REPLY_MODEL}
                     />
                 )
               : (
@@ -3997,6 +4035,8 @@ export function DiscussionsPage({
                     lastError={reply.lastError}
                     stopping={stoppingDispatchIds.has(reply.id)}
                     onStop={() => { void handleStopDispatch(reply.id); }}
+                    role={reply.agent === activeDiscussion.agent ? 'main' : 'oneOff'}
+                    model={reply.agent === activeDiscussion.agent ? activeAgentModel : ONE_OFF_REPLY_MODEL}
                   />
                 )
           ));
@@ -4159,7 +4199,7 @@ export function DiscussionsPage({
             </Fragment>
           );
         });
-  }, [activeContextFiles, activeDiscussion, activeExternalConnection, agentLogs, attachmentsByMessageId, inertMentionsByMessage,
+  }, [activeAgentModel, activeContextFiles, activeDiscussion, activeExternalConnection, agentLogs, attachmentsByMessageId, inertMentionsByMessage,
     chainableQPs, copiedMsgId, deferredStreamingText, deletingMessageIds, discussionActionsByMessageId,
     durablePartial, editingMsgId, editingText, expandedSummaryMsgId, externalConnectionAliases,
     globalSearchTarget, handleDiscussionActionChanged, handleMsgCopy, handleMsgDelete, handleMsgEditCancel,
@@ -4188,6 +4228,7 @@ export function DiscussionsPage({
         <DiscussionSidebar
           discussions={allDiscussions}
           agentLabels={sidebarAgentLabels}
+          agentModels={sidebarAgentModels}
           projects={projects}
           activeId={activeDiscussionId}
           sendingMap={sendingMap}

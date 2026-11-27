@@ -135,8 +135,8 @@ like any other.
   `[src: file: frontend/src/main.tsx:53-58#useTransitions]`
   `[src: file: frontend/src/routes/DiscussionsRoute.tsx:31-46#addressed]`
   `[src: file: frontend/src/routes/DiscussionsRoute.tsx:92#addressToken]`
-  `[src: file: frontend/src/pages/DiscussionsPage.tsx:376-380#addressToken]`
-  `[src: file: frontend/src/pages/DiscussionsPage.tsx:2343-2352#addressToken]`
+  `[src: file: frontend/src/pages/DiscussionsPage.tsx:391-395#addressToken]`
+  `[src: file: frontend/src/pages/DiscussionsPage.tsx:2375-2384#addressToken]`
 - **Open in a new tab** — anything that opens a view with an address opens it
   in a new tab on Ctrl/Cmd/Shift-click or a middle click, and in this tab on a
   plain click. The dashboard tabs, the run-card links and an Artifact's
@@ -398,7 +398,7 @@ readable while new events use `[kronn:agent-error]`.
 rendered in its source turn with an explicit queued/running state and a compact
 Stop action. The action addresses the dispatch id, not the discussion or the
 agent type, so cancelling an older response preserves later responses from the
-same agent. `[src: file: frontend/src/pages/DiscussionsPage.tsx:195-217#disc-pending-agent-stop]`
+same agent. `[src: file: frontend/src/pages/DiscussionsPage.tsx:206-228#disc-pending-agent-stop]`
 `[src: file: backend/src/api/discussions/messaging.rs:1592-1682#stop_agent_dispatch]`
 
 **Message deletion and authorship:** deleting an individual discussion message
@@ -443,9 +443,9 @@ for dots, borders and tinted surfaces. Text labels use `agentTextColor`; NVIDIA
 therefore keeps its `#76B900` brand accent while using a WCAG-AA companion green
 adapted to light and dark themes in aliases, message attribution, comparisons,
 workflow summaries and the shared agent selector.
-`[src: file: frontend/src/lib/constants.ts:190-206#agentTextColor]`
+`[src: file: frontend/src/lib/constants.ts:207-223#agentTextColor]`
 `[src: file: frontend/src/styles/tokens.css:82-84#kr-agent-nvidia-text]`
-`[src: file: frontend/src/styles/tokens.css:372-373#kr-agent-nvidia-text]`
+`[src: file: frontend/src/styles/tokens.css:386-387#kr-agent-nvidia-text]`
 
 **Quick Prompt Compare details:** a completed or live Compare opens a dedicated
 multi-column workspace whose columns can be reordered without losing their

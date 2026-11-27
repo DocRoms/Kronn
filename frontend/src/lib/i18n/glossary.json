@@ -27,7 +27,7 @@
         "es": ["conversaci(?:ón|ones)", "rooms?", "salas?"],
         "zh": ["对话", "会话", "房间"]
       },
-      "allow": { "zh": ["对话框"] }
+      "allow": { "zh": ["对话框", "CLI 会话"] }
     },
     {
       "id": "main-agent",

@@ -44,6 +44,7 @@ fails if a component lacks one of the three.
 | `KeyValueList` | A `dl`; `items` (`label`, `value`, `mono`, `copyable`, `copyText`, `truncate`), `layout` grid / inline. | the copy buttons |
 | `StatTile`, `StatGrid` | `label`, `value` (null: "—" and `unknownReason`), `unit`, `icon`, `hint`, `delta` (`text`, `direction`, `tone`), `loading`, `onClick` (a button) with `selected` (`aria-pressed`), `size` md / lg. `StatGrid` (`label` names the group) wraps its tiles by its own width. | native, when a button |
 | `ProgressBar` | Required `label` (`hideLabel`); `value`, `max`, `valueText`; no value is indeterminate; `tone` accent / success / warning / danger / info; `size` sm / md. Stacked: `segments` (`id`, `label`, `value`, `tone`), `max`, `legend`. | — |
+| `AgentIdentity` | An agent named the same way everywhere (KT-1936): `name` in its `color` (`agentTextColor`), `model` (a concrete id or an unknown state, always written), `role` as a neutral `StatusBadge`, optional `tier` icon, `size` full / inline / compact, `truncateModel` (17 characters). See below. | none: inline markup, it sits inside the caller's button |
 | `ListHeader`, `DetailHeader`, `TabHeader`, `SectionHeader`, `DrawerHeader`, `CardHeader` | One header per kind, one heading each at a fixed level (h1; h2 for detail, drawer, card; h3 for tab, section), slots `leading` / `title` / `meta` / `status` / `description` / `actions`, `compact`; `DrawerHeader` adds `onClose` + `closeLabel` (the last control), `titleId` names a drawer or a card. Which goes where: [header-kinds.md](header-kinds.md). | native |
 
 `Menu` and `Tooltip` render into `document.body` at a fixed position
@@ -336,7 +337,7 @@ Escape closes one layer, the innermost first
   scroll there; no padding on the containers), with sample data whose
   numbers are written with `Intl.NumberFormat` in the interface's locale;
   the test is `DesignSystemDataComponents.test.tsx`.
-  `[src: file: frontend/src/components/settings/DesignSystemComponents.tsx:726#WideAndNarrow]`
+  `[src: file: frontend/src/components/settings/DesignSystemComponents.tsx:807-811#WideAndNarrow]`
 - **A size container needs a width of its own.** Inline-size containment
   ignores the content, so a `Table` or `KeyValueList` placed as a flex item
   with no width or flex-basis collapses to 0 px and vanishes. In the gallery
@@ -392,7 +393,125 @@ the four locales; the gallery test fails if a component of the folder is
 missing. A shared component built on those controls (the agent picker,
 KT-1885) goes in `SHARED_GALLERY_COMPONENTS`, shown after them.
 `[src: file: frontend/src/components/settings/designSystemGallery.ts:19#UI_GALLERY_COMPONENTS]`
-`[src: file: frontend/src/components/settings/designSystemGallery.ts:56#SHARED_GALLERY_COMPONENTS]`
+`[src: file: frontend/src/components/settings/designSystemGallery.ts:56-58#SHARED_GALLERY_COMPONENTS]`
+
+## AgentIdentity: an agent, its model and its role (KT-1936)
+
+Wherever an agent is named, its model is written next to it; the role (who
+the agent is in the discussion) is a separate chip and never replaces the
+model. One component does it, on every surface: the discussion header (the
+picker's trigger, its static form too), the message header, the activity
+bubbles (pending, streaming, failed), the workflow-step bubble and message,
+the participant chips and their details, and the discussion list rows.
+`[src: file: frontend/src/components/ui/AgentIdentity.tsx:44#AgentIdentity]`
+
+- **Order:** icon, name, model, tier icon, role chip. Its text is « name ·
+  model · role », so the button around it reads the same.
+- **The model** is the secondary text role, the code face, never under the
+  12 px floor. With no concrete id it writes one of three states, never a
+  blank or a tier name: « model not declared » (a joined CLI session that
+  declared none), « model not recorded » (a legacy message), « default model »
+  (a model nobody can name yet: the provider's default before the first
+  reply; the workflow step, which reports none). The agent is not repeated in
+  that state: its name is written just before it. `agentModel(id, fallback)`
+  picks.
+  `[src: file: frontend/src/components/ui/agentIdentityKinds.ts:40#agentModel]`
+- **Which model a discussion's agent runs** is resolved one way for the
+  header's picker trigger, the discussion list row and the activity bubbles
+  (pending, streaming, failed), so the three never disagree: the exact model
+  the discussion holds, else the model its mode points to (the family's mode
+  models in Settings, or the HTTP connection's own), else the model of the
+  agent's last reply on that mode, else « default model ». None of them reads
+  the catalogue, which the picker loads only when it opens: their text does
+  not change when the list opens.
+  `[src: file: frontend/src/lib/agentModelResolution.ts:76#discussionAgentModel]`
+  `[src: file: frontend/src/lib/agentModelResolution.ts:30#resolveIdentityModel]`
+- **The roles:** main agent, one-off agent, CLI session, workflow step
+  (`ui.agentIdentity.role.*`); `roleLabel` writes another word in the chip
+  (the picker's caller, the guided-tour demo).
+- **Sizes:** full (the participant details), inline (everything else),
+  compact (the discussion list row: the model and the role leave the screen
+  and stay in the accessible name, the row's title has them too).
+- **Cut model:** `truncateModel` (the picker trigger, the participant chip)
+  cuts the id past 17 characters with an ellipsis; the full id stays in the
+  DOM, so in the accessible name, and the caller writes it in its tooltip with
+  `agentIdentityText()`. A button that names itself with `aria-label` (which
+  replaces its text) writes its action, then that same identity: the picker
+  trigger reads « Changer d'agent ou de mode IA — @opencode ·
+  opencode-go/kimi-k3.1-pro · Avancé · agent principal », the mode or
+  « Personnalisé » in the place of the tier.
+  `[src: file: frontend/src/components/ui/agentIdentityKinds.ts:37#AGENT_IDENTITY_MODEL_MAX_CHARS]`
+  `[src: file: frontend/src/components/ui/agentIdentityKinds.ts:74#agentIdentityText]`
+  `[src: file: frontend/src/components/AgentSwitchPicker.tsx:1400#identityText]`
+- **Colour:** the name takes `agentTextColor()`, a text-safe token per agent
+  (`--kr-agent-<agent>-text`) that holds 4.5:1 on every surface of every
+  theme; the brand colour (`agentColor()`) stays on dots, borders and icons;
+  a colour the user configured is written as it is. See
+  [design-tokens.md](design-tokens.md), Contrast.
+- **Lint:** `ui-guards/no-adhoc-agent-identity` refuses an element written
+  in an agent's colour that also writes a model or a role
+  ([ui-lint-guards.md](ui-lint-guards.md)).
+
+**The participants strip** (`ParticipantsStrip`, owner decisions
+2026-11-20): each chip is a button that opens the participant's details,
+with its presence state, its icon and `AgentIdentity` (the model cut past 17
+characters); the main agent first. One line that scrolls sideways, never
+wrapped: while chips are past its right edge the edge fades and a « +N »
+counter (the chips not in view) opens the full list, whose rows open a
+participant's details. The same on a wide screen when the chips do not fit.
+The role comes from the participant: a workflow step, the main agent (a
+native participant of the discussion's own agent), a one-off agent (another
+native one) or a joined CLI session.
+
+- **The full list** is a floating layer built like `Menu`: a portal into
+  `document.body` placed by `useAnchoredStyle` (`ui/anchor.ts`), so the
+  header's clipping ancestors cannot cut it and it stays inside the window.
+  Focus moves to its first row on open, the arrows move between rows, Escape
+  closes it and gives focus back to the counter, a press outside closes it.
+  The counter's name is a plural form (`tp('disc.participantsMore', n)`),
+  right for one participant and for several.
+- **In the room header** (review round 2, option A of the owner's mockup),
+  the whole agent line is ONE line that scrolls sideways
+  (`HeaderScrollLine`): the main agent's trigger first, then its on/off
+  toggle, the participant chips, the scope and the trust chips. The « +N »
+  counter is pinned at the line's right end, outside what scrolls (the strip
+  portals it into the line's end slot, through `headerScrollLineContext`), and
+  counts the chips not fully inside the line, on either side. The right edge
+  fades while the line can scroll further right. A plain mouse wheel scrolls
+  it sideways; a focused control is scrolled into view by the browser. The
+  header keeps its height and nothing wraps.
+- **The trigger's floor** in that line: its name whole, its mode icon, its
+  role chip whole, and its model no shorter than 8 characters before the
+  ellipsis (`9ch`; an unknown state follows the same rule). Above the floor the
+  model gives way first: its `max-width` is `clamp(9ch, 100cqw - 18rem, 17ch)`,
+  the line being the size container. What the floor does not fit, the line
+  scrolls (`pages/DiscussionsPage.css`, `components/HeaderScrollLine.css`;
+  held by `components/ui/stylesheets.test.ts`).
+- **The participant details** opened by a chip are a floating layer too
+  (`ParticipantDetailsLayer`: portal and `useAnchoredStyle` under the chip),
+  because the scrolling line would clip a layer absolute inside it. A row of
+  the full list scrolls its chip into view before opening its details.
+- **One keyboard and pointer contract for both layers** (review round 3):
+  in `document.body` a layer is not next to its control in the Tab order, so
+  the full list and the participant details share `useAnchoredLayer`
+  (`components/ui/useAnchoredLayer.ts`, on top of `useDialogFocus`): focus
+  moves to the layer's first control once it is placed, Tab and Shift+Tab stay
+  between its controls, Escape closes it and gives focus back to the control
+  that opened it (the counter, the chip), a press outside that control and the
+  layer closes it. A new anchored layer of this kind uses the same hook.
+- **The details header** is a flex row: the full-size identity shrinks
+  (`min-width: 0`) and wraps rather than overflows, the model is the part cut
+  with an ellipsis (its full id stays in the header's tooltip, the layer's
+  accessible name and the « declared model » row), and the close button never
+  shrinks, so it stays inside the 320px layer at every width
+  (`styles/components.css`, held by `components/ui/stylesheets.test.ts`).
+`[src: file: frontend/src/components/ui/useAnchoredLayer.ts:31#useAnchoredLayer]`
+`[src: file: frontend/src/components/ParticipantsStrip.tsx:48#ParticipantsStrip]`
+`[src: file: frontend/src/components/HeaderScrollLine.tsx:27#HeaderScrollLine]`
+`[src: file: frontend/src/lib/stripOverflow.ts:5#measureStripOverflow]`
+`[src: file: frontend/src/lib/stripOverflow.ts:15#measureChipsOutOfView]`
+`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:110#participantRole]`
+`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:172#ParticipantDetailsLayer]`
 
 ## The one agent picker
 
@@ -400,10 +519,12 @@ Every place that chooses an agent uses `AgentSwitchPicker` (KT-1885); its
 modes are props, not copies: the trigger `variant` (`chip`, `compact`,
 `field`), `multiple` (several targets, the list stays open) and `exactModel`
 (an agent and a model id, the catalogue's or one typed in the search, or
-« = principal », with the principal's own model greyed).
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:418#variant]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:441#multiple]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:452#exactModel]`
+« = principal », with the principal's own model greyed) and `customModel`
+(KT-1994: the full list of a discussion, see below).
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:499#variant]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:522#multiple]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:533#exactModel]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:541#customModel]`
 Its popover is in `<body>` on the popover layer, above every dialog, and opens
 on its search field. It is placed from its rendered size, measured on open,
 when the search or the catalogue changes it, and on resize: it stays inside
@@ -417,13 +538,13 @@ new discussion's prompt field: `100%` in its `min(...)`, no floor), so the
 column that clips it (`.disc-messages-col`, overflow hidden) never cuts a
 tier: in a narrow column it takes the anchor's width and the three tier
 columns hold down to 368 px.
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:592#place]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:607#place]`
 Availability always goes through
 `AgentAvailabilityBadge` (`unavailable` and `disabled` block the choice,
 `needs-full-access` and `not-listed` only warn, `catalog` is the neutral
 « Détecté », « Cache à revérifier », « Configuration migrée »).
 `[src: file: frontend/src/lib/agentAvailability.ts:14#AgentAvailabilityState]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:129#AgentAvailabilityBadge]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:144#AgentAvailabilityBadge]`
 
 **The grouped list (disposition A, KT-1994)** is the popover of every picker
 that chooses a mode (the discussion header, the new-discussion form, workflow
@@ -452,6 +573,56 @@ else the launch verdict's, else what the catalogue says of its models). Nothing
 is cut with an ellipsis: text wraps (a Recents row only keeps its agent's name
 on one line and ellipsizes its model).
 
+**The agent band (KT-2010).** The header is a band of its own, the full width
+of the list: an opaque `--kr-bg-raised` surface (rows scroll under it, so it
+cannot be a translucent tint), the name in the primary text role one step
+larger (`--kr-type-md`) and semibold, the kind, the state badge and the count
+in the tertiary role at 12 px; a state badge keeps the panel colour under its
+tint, so it reads as it does on any other row. The band sticks to the top of
+the list while its own rows scroll under it (the next agent's band pushes it
+out), so the agent of the rows in view is always written. Its padding is the
+rows', so the dot and the rows keep today's left edge (no extra indent that
+would cut model ids at 400 px). A row that takes the focus (arrows, Home, End,
+Tab, a click) is scrolled to just below its band, never left under it, and
+unfolding « Autres modèles » puts the control right under the band. Both
+measure the band's height (`stickyHeaderHeight`). Band text holds 4.5:1 in
+every theme (`agentPickerContrast.test.ts`).
+`[src: file: frontend/src/components/AgentSwitchPicker.css:455]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:737#stickyHeaderHeight]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:812#keepFocusClearOfHeader]`
+
+**Free models (KT-2010).** The catalogue entry carries no price, so the
+model's own words decide, and providers spell it several ways (owner's
+catalogue, 2026-11-22): OpenRouter's variants end with `:free` and its router
+is `openrouter/free`, OpenCode's free models end with `-free`
+(`opencode-go/beam-free`), and one OpenCode model says it in its display name
+only ("OpenCode Zen/Union Alpha Free"). A model is free when its id's last word
+is `free` (the trimmed id, case-insensitive, is `free` or ends with `free`
+right after `:`, `-`, `_` or `/`; `freedom-1`, `vendor/freeze`, `carefree` and
+`model-free-preview` are not), or, where the row has a catalogue entry, when
+its display name's last word is `free`, bare or in parentheses ("… Alpha
+Free", "… (free)"). The mode rows, the other models and the custom row read
+their entry; a recent row reads its group's entry for that id when the
+catalogue lists it, and the id alone otherwise. Such a model carries a small
+neutral-positive chip « Gratuit » / "Free" / « Gratis » / « 免费 »
+(`agentPicker.freeBadge`) right after its id, on every row of the list that
+shows it: the mode rows, the other models, the custom model and the recents.
+One function decides, `isFreeModel` (with `isFreeDisplayName` for the name),
+for any agent or connection (a proxy listing the same ids gets the badge too,
+not only a connection named OpenRouter or OpenCode). The word ends the row's accessible name (« OpenRouter · Éco ·
+Gratuit »), and the search finds free models by that word in the interface
+language as well as by `free`. The chip is `--kr-success-bg` with the
+secondary text role (4.5:1 on a row at rest, hovered and current in every
+theme). The trigger is unchanged: it already writes the full id. If a provider
+later states prices in its listing, that fact moves to the catalogue entry
+server-side.
+`[src: file: frontend/src/lib/freeModel.ts:35#isFreeModel]`
+`[src: file: frontend/src/lib/freeModel.ts:25#isFreeDisplayName]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:57#FreeModelBadge]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:67#withFreeName]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:71#freeSearchTerms]`
+`[src: file: frontend/src/components/AgentSwitchPicker.css:614]`
+
 With a search text, a mode row is shown only when the text hits the agent's
 name, that row's model (id or display name) or the mode's name; other models
 are filtered by id or display name; an agent with no visible row is not
@@ -459,9 +630,9 @@ listed, and when nothing matches one line says so. The fold controls are
 hidden while searching. The trigger writes the model id the configuration
 names (or the custom model), whether or not the catalogue is loaded: its text
 never changes when the list opens; the display name goes to its title.
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:756#AgentModelList]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:57#modeModelId]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:864]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:782#AgentModelList]`
+`[src: file: frontend/src/lib/modelCatalogSelection.ts:58-64#modeModelId]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:911]`
 
 With `customModel` (the discussion header and the new-discussion form) and in
 the exact-model mode, each agent's other models (the catalogue's models no
@@ -482,8 +653,8 @@ a custom choice as `model` and a mode as `tier` alone, which clears the model
 server-side (KT-1993, [discussion-agent-routing](../architecture/discussion-agent-routing.md));
 a refusal is shown next to the entry and the previous choice stays: the picker
 trims, it never re-validates.
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:50#OTHER_MODELS_RENDER_LIMIT]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:1304-1305#selectModel]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:74-78#OTHER_MODELS_RENDER_LIMIT]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:1376-1377#selectModel]`
 `[src: file: frontend/src/components/ChatHeader.tsx:334]`
 `[src: file: frontend/src/pages/DiscussionsPage.tsx:2469]`
 
@@ -512,9 +683,9 @@ their gaps (584 px), the row's gap and padding (24 px) and an agent column of
 at least 140 px; at 760 px that column gets 142 px. Narrower, the tiers go
 under the agent in three equal columns. The @ menu offers no other model and
 no exact model: nothing exists server-side for a one-off call.
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:196#AgentPickerTierChoices]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:179#showModel]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:188#tierRowState]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:211#AgentPickerTierChoices]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:194#showModel]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:198-203#tierRowState]`
 `[src: file: frontend/src/lib/agentAvailability.ts:62#sharedTierState]`
 `[src: file: frontend/src/lib/agentAvailability.ts:82#rowAvailability]`
 
@@ -527,8 +698,8 @@ height is then measured from its anchored edge to that area's far edge, minus
 `--kr-space-2`, and it scrolls inside. The composer's boundary is the message
 list (`composerMentionBoundary`), so the menu never slides under the
 discussion header or a banner.
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:295#AgentPickerPalette]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:314#boundary]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:304-310#AgentPickerPalette]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:329#boundary]`
 `[src: file: frontend/src/lib/agentPickerPalette.ts:21#agentPaletteFieldAria]`
 `[src: file: frontend/src/lib/agentPickerPalette.ts:11#composerMentionBoundary]`
 The API assistants go through `AssistantAgentPicker` (installed agents,

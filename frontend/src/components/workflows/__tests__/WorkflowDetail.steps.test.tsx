@@ -480,7 +480,7 @@ describe('WorkflowDetail — focused steps pipeline', () => {
     });
 
     const trigger = container.querySelector<HTMLButtonElement>(
-      '.wf-steps-pipeline [aria-label="wf.stepAgentSwitchLabel"]',
+      '.wf-steps-pipeline [aria-label^="wf.stepAgentSwitchLabel"]',
     );
     expect(trigger).not.toBeNull();
     expect(trigger).toHaveClass('kr-agent-switch-btn');
@@ -508,7 +508,7 @@ describe('WorkflowDetail — focused steps pipeline', () => {
       ],
       onChangeStepAgent,
     });
-    const trigger = container.querySelector<HTMLButtonElement>('.wf-steps-pipeline [aria-label="wf.stepAgentSwitchLabel"]');
+    const trigger = container.querySelector<HTMLButtonElement>('.wf-steps-pipeline [aria-label^="wf.stepAgentSwitchLabel"]');
     expect(trigger).toHaveTextContent('Team One');
     expect(trigger).toHaveAttribute('title', expect.stringContaining('saved-model'));
     fireEvent.click(trigger!);
@@ -532,7 +532,7 @@ describe('WorkflowDetail — focused steps pipeline', () => {
     };
     const { container, rerender } = renderDetail(mixedSteps, { ...props, agentAccess: access(false) });
     fireEvent.click(container.querySelector<HTMLButtonElement>(
-      '.wf-steps-pipeline [aria-label="wf.stepAgentSwitchLabel"]',
+      '.wf-steps-pipeline [aria-label^="wf.stepAgentSwitchLabel"]',
     )!);
     const copilotRow = () => screen.getByRole('group', { name: 'GitHub Copilot' });
     expect(copilotRow()).toContainElement(screen.getByTestId('agent-needs-full-access'));

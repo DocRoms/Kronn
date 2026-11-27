@@ -1,6 +1,9 @@
 .kr-agent-switch-static {
-  color: var(--kr-text-faint);
-  font-size: var(--kr-fs-xs);
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-type-sm);
   font-weight: 600;
 }
 
@@ -8,22 +11,31 @@
   position: relative;
   display: inline-flex;
   min-width: 0;
+  max-width: 100%;
 }
 
+/* KT-1936 — the trigger's text is AgentIdentity, at the 12px floor. The border
+   takes the agent's brand colour (--agent-switch-tone, set inline): a brand
+   colour stays on borders, the name is written in its text-safe token. */
 .kr-agent-switch-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--kr-space-1);
+  min-width: 0;
   max-width: 100%;
-  padding: 2px 6px;
-  border: 1px solid currentColor;
+  padding: 2px var(--kr-space-1);
+  border: 1px solid var(--agent-switch-tone, var(--kr-border));
   border-radius: var(--kr-r-sm);
-  color: var(--kr-text-faint);
+  color: var(--kr-text-secondary);
   background: transparent;
   font-family: inherit;
-  font-size: var(--kr-fs-xs);
-  font-weight: 700;
+  font-size: var(--kr-type-sm);
+  font-weight: 600;
   cursor: pointer;
+}
+
+.kr-agent-switch-btn > svg {
+  flex-shrink: 0;
 }
 
 .kr-agent-switch-btn:hover,
@@ -36,34 +48,38 @@
   opacity: 0.65;
 }
 
-.kr-agent-switch-suffix {
-  color: var(--kr-text-tertiary);
-  font-weight: 500;
+/* The identity shrinks first: its model is cut with an ellipsis (17
+   characters at most), the full id stays in the button's title and name.
+   KT-1936 — on a row too narrow for the whole trigger (the room header at
+   400 and 768 px) the model gives way first (its shrink weight dwarfs the
+   others'); the name and the role chip give way only once the model is gone. */
+.kr-agent-switch-identity {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
-/* The agent's role, as its own label: never in place of the model. */
-.kr-agent-switch-role {
-  padding: 0 5px;
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-sm);
-  color: var(--kr-text-tertiary);
-  background: var(--kr-bg-subtle);
-  font-weight: 500;
-  white-space: nowrap;
+.kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-model {
+  flex-shrink: 1000;
 }
 
-.kr-agent-switch-static .kr-agent-switch-role {
-  margin-left: 4px;
+.kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-name,
+.kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-role {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
+/* The exact-model trigger's mode icon (the shadow editor). */
 .kr-agent-switch-current-tier {
   display: inline-grid;
+  flex-shrink: 0;
   place-items: center;
-  width: 15px;
-  height: 15px;
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
   border-radius: 50%;
   background: var(--kr-bg-subtle);
-  font-size: 9px;
+  font-size: var(--kr-type-sm);
 }
 
 .kr-agent-switch-name {
@@ -100,10 +116,10 @@
 }
 
 .kr-agent-switch[data-compact='true'] .kr-agent-switch-btn {
-  gap: 3px;
+  gap: var(--kr-space-1);
   padding: 0;
   border: 0;
-  font-size: 9.5px;
+  font-size: var(--kr-type-sm);
   line-height: 1.1;
 }
 
@@ -161,7 +177,7 @@
   color: var(--kr-text-secondary);
   background: transparent;
   font-family: inherit;
-  font-size: var(--kr-fs-xs);
+  font-size: var(--kr-type-sm);
   text-align: left;
   cursor: pointer;
 }
@@ -414,8 +430,6 @@
   display: flex;
   flex-direction: column;
   margin-top: var(--kr-space-1);
-  padding-top: var(--kr-space-1);
-  border-top: 1px solid var(--kr-border-subtle);
 }
 
 .kr-agent-switch-group-block .kr-agent-switch-group {
@@ -431,11 +445,45 @@
   width: min(440px, calc(100vw - 2 * var(--kr-space-2)));
 }
 
-/* An agent's header: dot and name, its kind, ONE state badge, its model count. */
+/* An agent's header: dot and name, its kind, ONE state badge, its model count.
+   KT-2010 — a band on its own opaque surface, the full width of the list,
+   that sticks to the top of the list while its own rows scroll under it: the
+   agent of the rows in view is always written. Its padding is the rows', so
+   the dot lines up with them as before. The name is the primary role, one
+   step larger and semibold; the kind, the badge and the count stay tertiary.
+   A focused row is scrolled clear of it (`stickyHeaderHeight`). */
 .kr-agent-switch-group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   flex-wrap: wrap;
   gap: 0 var(--kr-space-2);
   padding: var(--kr-space-1) var(--kr-space-2);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-tertiary);
+  font-weight: 500;
+}
+
+.kr-agent-switch-group-block .kr-agent-switch-group-name {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-type-md);
+  font-weight: 600;
+}
+
+/* On the band, a state badge keeps the panel under its tint: it reads as it
+   does on any other row of the picker. */
+.kr-agent-switch-group-header > .kr-agent-switch-badge {
+  background: linear-gradient(var(--kr-warning-bg), var(--kr-warning-bg)), var(--kr-bg-elevated);
+}
+
+.kr-agent-switch-group-header > .kr-agent-switch-badge[data-state='unavailable'],
+.kr-agent-switch-group-header > .kr-agent-switch-badge[data-state='disabled'] {
+  background: linear-gradient(rgba(var(--kr-danger-rgb), 0.12), rgba(var(--kr-danger-rgb), 0.12)), var(--kr-bg-elevated);
+}
+
+.kr-agent-switch-group-header > .kr-agent-switch-badge[data-state='catalog'] {
+  background: linear-gradient(var(--kr-bg-subtle), var(--kr-bg-subtle)), var(--kr-bg-elevated);
 }
 
 .kr-agent-switch-kind,
@@ -558,6 +606,25 @@
 
 .kr-agent-switch-mode[data-main='true'] {
   color: var(--kr-text-faint);
+}
+
+/* KT-2010 — « Gratuit » / "Free" after the id of a free model: a small
+   neutral-positive chip (a green tint, the secondary text role), on every row
+   that shows the model. */
+.kr-agent-switch-free-badge {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0 var(--kr-space-1);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.4);
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-success-bg);
+  color: var(--kr-text-secondary);
+  font-family: inherit;
+  font-size: var(--kr-type-sm);
+  font-style: normal;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
 }
 
 /* « Autres modèles »: one control per agent, under its modes. */

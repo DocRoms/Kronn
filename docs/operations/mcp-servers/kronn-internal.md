@@ -1193,7 +1193,7 @@ summaries, and `workflow_run_get` truncates step outputs. `task_list`,
 
 Every discussion message exposes the same `#xxxxxxxx` header pill as discussions
 and workflows; clicking it copies the full stable message UUID.
-[src: file: frontend/src/components/MessageBubble.tsx:505-514#copyMessageId] [src: file: frontend/src/components/MessageBubble.tsx:999-1010#messageShortLabel]
+[src: file: frontend/src/components/MessageBubble.tsx:512-521#copyMessageId] [src: file: frontend/src/components/MessageBubble.tsx:205-216#messageShortLabel]
 `disc_get_message` accepts that UUID, the compact `MSG-xxxxxxxx` reference
 returned by the API, or the existing positive/negative `idx`. Pass `before`
 and/or `after` (0–10) to retrieve only the nearby messages needed for context:

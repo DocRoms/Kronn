@@ -64,7 +64,7 @@ function declsFor(block: string, selector: string): string {
 describe('components/ui stylesheets', () => {
   it('finds the stylesheets, so the checks below are not vacuous', () => {
     expect(CSS.map(c => c.file).sort()).toEqual([
-      'Button.css', 'CardHeader.css', 'ConfirmDialog.css', 'CopyButton.css', 'DetailHeader.css', 'Dialog.css',
+      'AgentIdentity.css', 'Button.css', 'CardHeader.css', 'ConfirmDialog.css', 'CopyButton.css', 'DetailHeader.css', 'Dialog.css',
       'DiffViewer.css', 'Drawer.css', 'DrawerHeader.css', 'EmptyState.css', 'Field.css', 'FormFooter.css', 'IconButton.css',
       'KeyValueList.css', 'ListHeader.css', 'LoadingState.css', 'LogViewer.css', 'Menu.css', 'Notice.css', 'ProgressBar.css',
       'SearchField.css', 'SectionHeader.css', 'Select.css', 'StatTile.css', 'StatusBadge.css', 'Switch.css',
@@ -183,7 +183,7 @@ describe('components/ui stylesheets', () => {
   it('gives every component its stylesheet and its test, next to it', () => {
     const components = files.filter(f => /^[A-Z]\w+\.tsx$/.test(f) && !f.endsWith('.test.tsx'));
     expect(components.sort()).toEqual([
-      'Button.tsx', 'CardHeader.tsx', 'ConfirmDialog.tsx', 'CopyButton.tsx', 'DetailHeader.tsx', 'Dialog.tsx',
+      'AgentIdentity.tsx', 'Button.tsx', 'CardHeader.tsx', 'ConfirmDialog.tsx', 'CopyButton.tsx', 'DetailHeader.tsx', 'Dialog.tsx',
       'DiffViewer.tsx', 'Drawer.tsx', 'DrawerHeader.tsx', 'EmptyState.tsx', 'Field.tsx', 'FormFooter.tsx', 'IconButton.tsx',
       'KeyValueList.tsx', 'ListHeader.tsx', 'LoadingState.tsx', 'LogViewer.tsx', 'Menu.tsx', 'Notice.tsx', 'ProgressBar.tsx',
       'SearchField.tsx', 'SectionHeader.tsx', 'Select.tsx', 'StatTile.tsx', 'StatusBadge.tsx', 'Switch.tsx',
@@ -194,5 +194,105 @@ describe('components/ui stylesheets', () => {
       expect(files, `${name} stylesheet`).toContain(`${name}.css`);
       expect(files, `${name} test`).toContain(`${name}.test.tsx`);
     }
+  });
+
+  // KT-1936 review, finding 1, then round 2 — at 400 and 768 px the room
+  // header's agent row first held a 388px trigger in a 310 / 358px row (the
+  // participants off-screen), then a trigger squeezed to 89px with not one
+  // letter of its name. Owner option A: the whole agent line scrolls
+  // sideways, the « +N » counter pinned outside it; the trigger has a floor
+  // (name and role chip whole, model at least 8 characters before the
+  // ellipsis) and above it the model gives way first.
+  it('scrolls the room header\'s agent line sideways and holds the trigger\'s floor', () => {
+    const read = (path: string) => readFileSync(join(SRC, path), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const page = read('pages/DiscussionsPage.css');
+    const line = read('components/HeaderScrollLine.css');
+    const strip = read('components/ParticipantsStrip.css');
+    const decls = (text: string, selector: string) => new Map(
+      declsFor(text, selector).split(';').map(d => d.trim()).filter(Boolean)
+        .map(d => [d.slice(0, d.indexOf(':')).trim(), d.slice(d.indexOf(':') + 1).trim()] as const),
+    );
+
+    // The line: it fits its row, its scroller scrolls sideways only, with no
+    // scrollbar, and keeps the header's height (the focus rings' room is
+    // given back by a negative margin).
+    const lineBox = decls(line, '.kr-header-line');
+    expect(lineBox.get('min-width')).toBe('0');
+    expect(lineBox.get('container-type')).toBe('inline-size');
+    const scroller = decls(line, '.kr-header-line-scroller');
+    expect(scroller.get('min-width')).toBe('0');
+    expect(scroller.get('overflow-x')).toBe('auto');
+    expect(scroller.get('overflow-y')).toBe('hidden');
+    expect(scroller.get('scrollbar-width')).toBe('none');
+    expect(scroller.get('margin-block')).toBe(`calc(-1 * ${scroller.get('padding-block')})`);
+    // Its content at its own width, on one line: nothing wraps, nothing shrinks.
+    const track = decls(line, '.kr-header-line-track');
+    expect(track.get('flex-wrap')).toBe('nowrap');
+    expect(track.get('width')).toBe('max-content');
+    expect(decls(line, '.kr-header-line-track > *').get('flex')).toBe('0 0 auto');
+    // The fade while it scrolls further right; the end slot never shrinks.
+    expect(decls(line, '.kr-header-line[data-fade-end] .kr-header-line-scroller').get('mask-image'))
+      .toContain('transparent');
+    expect(decls(line, '.kr-header-line-end').get('flex')).toBe('0 0 auto');
+    // The strip does not scroll by itself on the line.
+    expect(decls(line, '.kr-header-line .kr-participants-strip-list').get('overflow')).toBe('visible');
+
+    // The trigger's floor: no part of the chain shrinks or is capped …
+    for (const part of ['.disc-native-agent-control', '.kr-agent-switch', '.kr-agent-switch-btn', '.kr-agent-switch-identity']) {
+      const rule = decls(page, `.kr-header-line ${part}`);
+      expect(rule.get('flex-shrink'), part).toBe('0');
+      expect(rule.get('max-width'), part).toBe('none');
+    }
+    // … the name and the role chip are whole …
+    const trigger = '.kr-header-line .kr-agent-switch-identity.ui-agent-identity';
+    for (const part of ['name', 'role']) {
+      const rule = decls(page, `${trigger} .ui-agent-identity-${part}`);
+      expect(rule.get('flex-shrink'), part).toBe('0');
+      expect(rule.get('overflow'), part).toBe('visible');
+    }
+    // … and the model is 9ch at least (8 characters and the ellipsis), 17 at
+    // most, between the two following the line's width.
+    const model = decls(page, `${trigger} .ui-agent-identity-model`);
+    expect(model.get('max-width')).toMatch(/^clamp\(9ch, 100cqw - [^,]+, 17ch\)$/);
+    expect(model.get('flex-shrink')).toBe('0');
+    expect(decls(page, '.disc-native-agent-toggle').get('flex-shrink')).toBe('0');
+
+    // The counter never shrinks; the full list is a fixed layer, not absolute in the row.
+    expect(decls(strip, '.kr-participants-strip-more').get('flex-shrink')).toBe('0');
+    expect(decls(strip, '.kr-participants-strip-all').get('position')).toBeUndefined();
+  });
+
+  // KT-1936 review round 3 — the participant details layer (320px) took a
+  // full-size identity wider than itself: the close button was pushed out of
+  // the layer (at 400px, out of the window). Its header is a flex row whose
+  // identity shrinks and wraps, and whose close button never shrinks.
+  it('keeps the participant details\' close button inside the layer', () => {
+    const css = readFileSync(join(SRC, 'styles/components.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const decls = (selector: string) => new Map(
+      declsFor(css, selector).split(';').map(d => d.trim()).filter(Boolean)
+        .map(d => [d.slice(0, d.indexOf(':')).trim(), d.slice(d.indexOf(':') + 1).trim()] as const),
+    );
+    const header = decls('.disc-participant-details > header');
+    expect(header.get('display')).toBe('flex');
+    expect(header.get('flex-wrap') ?? 'nowrap').toBe('nowrap');
+    // The identity's box can shrink below its content …
+    const identityBox = decls('.disc-participant-details > header > strong');
+    expect(identityBox.get('min-width')).toBe('0');
+    expect(identityBox.get('flex')).toBe('1 1 auto');
+    // … and wraps rather than overflows; the name and the role chip may break
+    // only when one of them alone is wider than the layer.
+    const identity = decls('.disc-participant-details .disc-participant-details-identity');
+    expect(identity.get('flex-wrap')).toBe('wrap');
+    for (const part of ['name', 'role']) {
+      const rule = decls(`.disc-participant-details .disc-participant-details-identity .ui-agent-identity-${part}`);
+      expect(rule.get('min-width'), part).toBe('0');
+      expect(rule.get('white-space'), part).toBe('normal');
+    }
+    // The model keeps its ellipsis (AgentIdentity.css).
+    const model = declsFor(CSS.find(c => c.file === 'AgentIdentity.css')!.text, '.ui-agent-identity-model');
+    expect(model).toContain('min-width: 0');
+    expect(model).toContain('text-overflow: ellipsis');
+    // The button never shrinks.
+    expect(decls('.disc-participant-details > header > button').get('flex-shrink')).toBe('0');
   });
 });

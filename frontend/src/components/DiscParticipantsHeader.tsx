@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
+import { useAnchoredLayer } from './ui/useAnchoredLayer';
+import { createPortal } from 'react-dom';
 import { discussions as discussionsApi } from '../lib/api';
 import {
   honestPresenceState,
@@ -10,7 +12,12 @@ import {
 import type { HonestPresenceState } from '../lib/discPresence';
 import { Loader2, X } from 'lucide-react';
 import { CopyIdPill } from './CopyIdPill';
-import { AGENT_MENTIONS } from '../lib/constants';
+import { AGENT_MENTIONS, agentTextColor } from '../lib/constants';
+import { useT } from '../lib/I18nContext';
+import { AgentIdentity } from './ui/AgentIdentity';
+import { Tooltip } from './ui/Tooltip';
+import { agentIdentityText, agentModel, agentModelText, type AgentIdentityModel, type AgentIdentityRole } from './ui/agentIdentityKinds';
+import { ParticipantsStrip } from './ParticipantsStrip';
 
 /// 0.8.6 phase 2 — discussion participants header.
 ///
@@ -36,6 +43,9 @@ export interface DiscParticipantsHeaderProps {
   /** Bumped by the invite button so a fresh peer appears without waiting out
    *  the 5s poll. */
   refreshKey?: number;
+  /** The discussion's own agent: its native participant is the main agent,
+   *  shown first; another native agent is a one-off agent. */
+  mainAgent?: string;
 }
 
 // Light shape of the wire response (mirrors the Rust struct in
@@ -91,6 +101,27 @@ const AGENT_ICON: Record<string, string> = {
 
 const iconFor = (agentType: string) => AGENT_ICON[agentType] ?? '👤';
 
+/** A participant Kronn wakes itself (no CLI session of its own). */
+const isNative = (p: ParticipantRow) => p.wake_mode === 'native_dispatch'
+  || p.role === 'native_resume' || p.role === 'obligation';
+
+/** KT-1936 — the participant's role chip: a workflow step, the main agent, a
+ *  one-off agent Kronn wakes, or a joined CLI session. */
+function participantRole(p: ParticipantRow, mainAgent?: string): AgentIdentityRole {
+  if (p.workflow_step) return 'workflowStep';
+  if (isNative(p)) return mainAgent && p.agent_type === mainAgent ? 'main' : 'oneOff';
+  return 'cli';
+}
+
+/** The model a participant declared, else « model not declared » for a joined
+ *  CLI session and « default model of <agent> » for a native one. */
+function participantModel(p: ParticipantRow): AgentIdentityModel {
+  return agentModel(p.model, isNative(p) || p.workflow_step ? 'providerDefault' : 'notDeclared');
+}
+
+const mentionOf = (agentType: string) =>
+  AGENT_MENTIONS.find(mention => mention.type === agentType)?.trigger ?? agentType;
+
 function resumeCommandFor(
   agentType: string,
   conversationId?: string | null,
@@ -127,10 +158,50 @@ function presenceLabel(
   return t('disc.presenceDormantMinutes', Math.ceil(delay / 60));
 }
 
-export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscParticipantsHeaderProps) {
+/**
+ * KT-1936 review round 2 — a participant's details, a floating layer in
+ * document.body under its chip: the header's agent line scrolls sideways, and
+ * a layer absolute inside it was clipped. Keyed by participant, so another
+ * chip places it again.
+ *
+ * Review round 3 — in document.body it is not next to its chip in the Tab
+ * order: `useAnchoredLayer` (shared with the « +N » list) moves focus into it
+ * on open, keeps Tab between its controls, closes it on Escape with focus back
+ * on the chip, and on a press outside.
+ */
+function ParticipantDetailsLayer({ anchorRef, onClose, children, ...props }: {
+  anchorRef: RefObject<HTMLElement | null>;
+  onClose: () => void;
+  children: ReactNode;
+  id: string;
+  'aria-label': string;
+}) {
+  const { ref, style } = useAnchoredLayer<HTMLElement>({
+    anchorRef, open: true, placement: 'bottom', align: 'start', onClose,
+  });
+  return createPortal(
+    <section
+      ref={ref}
+      className="disc-participant-details"
+      role="dialog"
+      data-testid="disc-participant-details"
+      style={style}
+      {...props}
+    >
+      {children}
+    </section>,
+    document.body,
+  );
+}
+
+export function DiscParticipantsHeader({ discId, t, refreshKey = 0, mainAgent }: DiscParticipantsHeaderProps) {
+  // AgentIdentity's own words (roles, unknown models) come from the locale.
+  const { t: tUi, tp } = useT();
   const [participants, setParticipants] = useState<ParticipantRow[]>([]);
   const [awayAfterMs, setAwayAfterMs] = useState(DEFAULT_AWAY_AFTER_MS);
   const [selectedParticipantId, setSelectedParticipantId] = useState<number | null>(null);
+  // The selected participant's chip: where its details layer is anchored.
+  const selectedChipRef = useRef<HTMLButtonElement | null>(null);
 
   const applyParticipants = useCallback((list: ParticipantRow[]) => {
     setParticipants(list);
@@ -205,20 +276,30 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
     && !selectedParticipant.workflow_step
     ? resumeCommandFor(selectedParticipant.agent_type, selectedParticipant.conversation_id)
     : null;
-  const selectedDisplayName = selectedParticipant
-    ? AGENT_MENTIONS.find(mention => mention.type === selectedParticipant.agent_type)?.trigger
-      ?? selectedParticipant.agent_type
+  const selectedDisplayName = selectedParticipant ? mentionOf(selectedParticipant.agent_type) : null;
+  // The main agent first; the others keep the server's order.
+  const ordered = [...participants].sort((a, b) =>
+    Number(participantRole(b, mainAgent) === 'main') - Number(participantRole(a, mainAgent) === 'main'));
+  const identityOf = (p: ParticipantRow) => ({
+    name: mentionOf(p.agent_type),
+    model: participantModel(p),
+    role: participantRole(p, mainAgent),
+  });
+  const selectedIdentityLabel = selectedParticipant
+    ? agentIdentityText(identityOf(selectedParticipant), tUi)
     : null;
 
   return (
     <div className="disc-participants-row" data-testid="disc-participants-row">
-      <div className="disc-participants-list">
-        {participants.length === 0 && (
+      <ParticipantsStrip
+        moreLabel={total => tp('disc.participantsMore', total)}
+        allLabel={t('disc.participantsAll')}
+        empty={(
           <span className="disc-participants-empty">
             {t('disc.participantsEmpty')}
           </span>
         )}
-        {participants.map(p => {
+        entries={ordered.map(p => {
           const presence = honestPresenceState(
             p.presence_state,
             p.status,
@@ -230,10 +311,21 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
           const label = presenceLabel(p, presence, t);
           const readLive = p.read_live ?? presence === 'listening';
           const writeState = p.write_state ?? 'unknown';
-          return (
+          const identity = identityOf(p);
+          // The full model id: the chip cuts it past 17 characters.
+          const identityLabel = agentIdentityText(identity, tUi);
+          const open = () => setSelectedParticipantId(current => current === p.id ? null : p.id);
+          const chip = (
+            <Tooltip
+              content={[
+                identityLabel,
+                label,
+                p.workflow_step ? `${p.workflow_step.workflow_name} › ${p.workflow_step.step_name}` : null,
+              ].filter(Boolean).join(' — ')}
+            >
             <button
+              ref={selectedParticipantId === p.id ? selectedChipRef : undefined}
               type="button"
-              key={p.id}
               className="disc-participant-chip"
               data-status={p.status}
               data-role={p.role}
@@ -245,16 +337,8 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
               aria-expanded={selectedParticipantId === p.id}
               aria-haspopup="dialog"
               aria-controls={selectedParticipantId === p.id ? `disc-participant-details-${p.id}` : undefined}
-              aria-label={t(
-                'disc.participantDetails',
-                AGENT_MENTIONS.find(mention => mention.type === p.agent_type)?.trigger
-                  ?? p.agent_type,
-              )}
-              onClick={() => setSelectedParticipantId(current => current === p.id ? null : p.id)}
-              title={[
-                `${p.agent_type} (${p.role}) — ${label}`,
-                p.model ? t('disc.modelDeclaredAtJoin', p.model) : null,
-              ].filter(Boolean).join(' · ')}
+              aria-label={t('disc.participantDetails', identityLabel)}
+              onClick={open}
             >
               {presence === 'running' ? (
                 <Loader2
@@ -269,11 +353,15 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
                   data-presence={presence}
                 />
               )}
-              <span aria-hidden>{iconFor(p.agent_type)}</span>
-              <span className="disc-participant-name">
-                {AGENT_MENTIONS.find(mention => mention.type === p.agent_type)?.trigger
-                  ?? p.agent_type}
-              </span>
+              {/* KT-1936 — state, agent icon, name, model (cut past 17
+               *  characters), role, at 12 px (owner mockup 2026-11-20). */}
+              <AgentIdentity
+                className="disc-participant-identity"
+                icon={iconFor(p.agent_type)}
+                {...identity}
+                color={agentTextColor(p.agent_type)}
+                truncateModel
+              />
               {p.workflow_step && (
                 <span className="disc-participant-workflow" data-testid="workflow-step-participant">
                   {p.workflow_step.workflow_name} › {p.workflow_step.step_name}
@@ -283,19 +371,39 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
                 <span className="disc-participant-write-failed-dot" aria-label={t('disc.writeFailed')} />
               )}
             </button>
+            </Tooltip>
           );
+          return {
+            key: p.id,
+            chip,
+            row: <AgentIdentity icon={iconFor(p.agent_type)} {...identity} color={agentTextColor(p.agent_type)} />,
+            onSelect: () => setSelectedParticipantId(p.id),
+          };
         })}
-      </div>
+      />
       {selectedParticipant && selectedDisplayName && selectedPresenceLabel && (
-          <section
+          <ParticipantDetailsLayer
+            key={selectedParticipant.id}
+            anchorRef={selectedChipRef}
+            onClose={() => setSelectedParticipantId(null)}
             id={`disc-participant-details-${selectedParticipant.id}`}
-            className="disc-participant-details"
-            role="dialog"
-            aria-label={t('disc.participantDetails', selectedDisplayName)}
-            data-testid="disc-participant-details"
+            // The full identity: the header cuts the model when it is long.
+            aria-label={t('disc.participantDetails', selectedIdentityLabel ?? selectedDisplayName)}
           >
+            {/* Review round 3 — a flex row: the identity shrinks (the model
+             *  first, then it wraps), the close button never does, so it stays
+             *  inside the layer. The full model id is in the tooltip, the
+             *  layer's name and the model row below. */}
             <header>
-              <strong><span aria-hidden>{iconFor(selectedParticipant.agent_type)}</span> {selectedDisplayName}</strong>
+              <strong title={selectedIdentityLabel ?? undefined}>
+                <AgentIdentity
+                  className="disc-participant-details-identity"
+                  size="full"
+                  icon={iconFor(selectedParticipant.agent_type)}
+                  {...identityOf(selectedParticipant)}
+                  color={agentTextColor(selectedParticipant.agent_type)}
+                />
+              </strong>
               <button
                 type="button"
                 onClick={() => setSelectedParticipantId(null)}
@@ -305,7 +413,6 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
               </button>
             </header>
             <div className="disc-participant-details-meta">
-              <span>{selectedParticipant.workflow_step ? t('disc.targetDiscussionAgent') : selectedParticipant.role}</span>
               <span>{selectedParticipant.workflow_step
                 ? t('disc.workflowStepAgent')
                 : selectedParticipant.wake_mode === 'native_dispatch'
@@ -317,12 +424,12 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
                 <dt>{t('disc.participantStatus')}</dt>
                 <dd>{selectedPresenceLabel}</dd>
               </div>
-              {selectedParticipant.model && (
-                <div>
-                  <dt>{t('disc.participantModel')}</dt>
-                  <dd className="disc-participant-model">{selectedParticipant.model}</dd>
-                </div>
-              )}
+              <div>
+                <dt>{t('disc.participantModel')}</dt>
+                <dd className="disc-participant-model" data-state={participantModel(selectedParticipant).kind}>
+                  {agentModelText(participantModel(selectedParticipant), tUi)}
+                </dd>
+              </div>
               {selectedParticipant.workflow_step && (
                 <>
                   <div>
@@ -363,7 +470,7 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
                 className="disc-participant-resume"
               />
             )}
-          </section>
+          </ParticipantDetailsLayer>
       )}
 
     </div>

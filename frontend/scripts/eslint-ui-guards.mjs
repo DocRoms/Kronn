@@ -15,6 +15,7 @@
  *   - no-adhoc-dialog            role="dialog"/"alertdialog", aria-modal or <dialog> outside components/ui
  *   - no-foreign-page-stylesheet a page or a component importing the stylesheet of another page
  *   - no-off-scale-style         an inline font size, radius or colour outside the tokens, a breakpoint outside BREAKPOINTS
+ *   - no-adhoc-agent-identity    an agent name in its colour written next to a model or a role, outside AgentIdentity (KT-1936)
  *
  * See docs/conventions/ui-lint-guards.md.
  */
@@ -391,6 +392,90 @@ const noOffScaleStyle = {
   },
 };
 
+// ── no-adhoc-agent-identity (KT-1936) ─────────────────────────────────────
+
+/** A call that gives an agent's colour: `agentTextColor(…)`, `agentColor(…)`. */
+const AGENT_COLOUR_CALLS = new Set(['agentTextColor', 'agentColor']);
+/** A property or a variable that holds a model. */
+const MODEL_NAME = /^(?:model|model_tier|modelTier|currentModel|suffix)$|Model$/;
+/** A translation key that names a role. */
+const ROLE_KEY = /^(?:disc\.target(?:DiscussionAgent|PunctualAgent|Cli|Native)|ui\.agentIdentity\.role\.)/;
+
+function isAgentColourCall(node) {
+  return node?.type === 'CallExpression' && node.callee.type === 'Identifier' && AGENT_COLOUR_CALLS.has(node.callee.name);
+}
+
+/** `style={{ color: agentTextColor(…) }}` (or `agentColor`) on the element. */
+function writesInAgentColour(opening) {
+  const style = findAttr(opening, 'style');
+  const e = style?.value?.type === 'JSXExpressionContainer' ? style.value.expression : null;
+  if (e?.type !== 'ObjectExpression') return false;
+  return e.properties.some(p => p.type === 'Property' && !p.computed
+    && (p.key.name ?? p.key.value) === 'color' && isAgentColourCall(p.value));
+}
+
+/** The first expression under `node` that writes a model or a role, skipping
+ *  AgentIdentity itself (the one place allowed to put them together). */
+function findModelOrRole(node, seen = new Set()) {
+  if (!node || typeof node !== 'object' || seen.has(node)) return null;
+  seen.add(node);
+  if (node.type === 'JSXElement' && elementName(node.openingElement) === 'AgentIdentity') return null;
+  if (node.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier' && MODEL_NAME.test(node.property.name)) return node;
+  if (node.type === 'Identifier' && MODEL_NAME.test(node.name)) return node;
+  if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 't') {
+    const key = node.arguments[0];
+    if (key?.type === 'Literal' && typeof key.value === 'string' && ROLE_KEY.test(key.value)) return node;
+  }
+  for (const [k, value] of Object.entries(node)) {
+    if (k === 'parent' || k === 'loc' || k === 'range') continue;
+    const children = Array.isArray(value) ? value : [value];
+    for (const child of children) {
+      if (child && typeof child.type === 'string') {
+        const hit = findModelOrRole(child, seen);
+        if (hit) return hit;
+      }
+    }
+  }
+  return null;
+}
+
+/** The nearest JSX element or fragment holding `node` as one of its
+ *  children, through the expressions between them (`{cond && <span/>}`,
+ *  `{a ? <b/> : <c/>}`); null past a function or an attribute. */
+function jsxContainerOf(node) {
+  let current = node.parent;
+  while (current) {
+    if (current.type === 'JSXElement' || current.type === 'JSXFragment') return current;
+    if (!['JSXExpressionContainer', 'LogicalExpression', 'ConditionalExpression'].includes(current.type)) return null;
+    current = current.parent;
+  }
+  return null;
+}
+
+const noAdhocAgentIdentity = {
+  meta: {
+    type: 'problem',
+    docs: { description: 'An agent named with its model or its role is written with AgentIdentity (components/ui).' },
+    schema: [],
+    messages: {
+      identity: `An agent name in its colour is written next to a model or a role here: render AgentIdentity (components/ui), which writes the name, the model or its unknown state, and the role the same way everywhere (KT-1936). ${DOC}`,
+    },
+  },
+  create(context) {
+    return {
+      JSXElement(node) {
+        if (!writesInAgentColour(node.openingElement)) return;
+        // Inside the coloured element: `<span style={…}>{name}<i>{model}</i></span>`.
+        // Next to it, in the same parent: `<div><span style={…}>{name}</span><i>{model}</i></div>`.
+        const container = jsxContainerOf(node);
+        const hit = findModelOrRole({ type: 'Children', children: node.children })
+          ?? (container ? findModelOrRole({ type: 'Children', children: container.children }, new Set([node])) : null);
+        if (hit) context.report({ node: node.openingElement, messageId: 'identity' });
+      },
+    };
+  },
+};
+
 export default {
   meta: { name: 'ui-guards', version: '1.0.0' },
   rules: {
@@ -399,5 +484,6 @@ export default {
     'no-adhoc-dialog': noAdhocDialog,
     'no-foreign-page-stylesheet': noForeignPageStylesheet,
     'no-off-scale-style': noOffScaleStyle,
+    'no-adhoc-agent-identity': noAdhocAgentIdentity,
   },
 };

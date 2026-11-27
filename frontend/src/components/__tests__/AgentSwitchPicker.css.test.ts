@@ -311,3 +311,52 @@ describe('AgentSwitchPicker.css — the rules this lot adds stay on the tokens (
     expect(declaration(rule(PICKER, '.kr-agent-switch-badge'), 'font-size')).toBe('var(--kr-type-sm)');
   });
 });
+
+// KT-2010 — the agent header is a band that stays at the top of the list
+// while its rows scroll, and a free model carries a small badge.
+describe('AgentSwitchPicker.css — the agent band and the « Free » badge (KT-2010)', () => {
+  it('the header is a band on its own opaque surface that sticks to the top of the list, over its rows', () => {
+    const body = rule(PICKER, '.kr-agent-switch-group-header');
+    expect(declaration(body, 'position')).toBe('sticky');
+    expect(declaration(body, 'top')).toBe('0');
+    // A local layer over the rows that scroll under it (no global --kr-z-* layer needed).
+    expect(declaration(body, 'z-index')).toBe('1');
+    // Opaque: the rows that scroll under it never show through.
+    expect(declaration(body, 'background')).toBe('var(--kr-bg-raised)');
+    expect(declaration(body, 'color')).toBe('var(--kr-text-tertiary)');
+    // The rows' own padding: the dot lines up with them, no extra indent.
+    expect(declaration(body, 'padding')).toBe('var(--kr-space-1) var(--kr-space-2)');
+    expect(declaration(rule(PICKER, '.kr-agent-switch-mode'), 'padding')).toBe('var(--kr-space-1) var(--kr-space-2)');
+    // The band separates two agents: no thin rule above each block any more.
+    expect(declaration(rule(PICKER, '.kr-agent-switch-group-block'), 'border-top')).toBeUndefined();
+  });
+
+  it('the name is the primary role, one step larger than the rows and semibold; the kind and count stay tertiary at 12 px', () => {
+    const name = rule(PICKER, '.kr-agent-switch-group-block .kr-agent-switch-group-name');
+    expect(declaration(name, 'color')).toBe('var(--kr-text-primary)');
+    expect(declaration(name, 'font-size')).toBe('var(--kr-type-md)');
+    expect(declaration(name, 'font-weight')).toBe('600');
+    expect(declaration(rule(PICKER, '.kr-agent-switch-mode'), 'font-size')).toBe('var(--kr-type-sm)');
+    const meta = rule(PICKER, '.kr-agent-switch-kind,\n.kr-agent-switch-model-count');
+    expect(declaration(meta, 'color')).toBe('var(--kr-text-tertiary)');
+    expect(declaration(meta, 'font-size')).toBe('var(--kr-type-sm)');
+  });
+
+  it('on the band a state badge keeps the panel under its tint, so it reads as on any other row', () => {
+    expect(declaration(rule(PICKER, '.kr-agent-switch-group-header > .kr-agent-switch-badge'), 'background'))
+      .toBe('linear-gradient(var(--kr-warning-bg), var(--kr-warning-bg)), var(--kr-bg-elevated)');
+    expect(declaration(rule(PICKER, ".kr-agent-switch-group-header > .kr-agent-switch-badge[data-state='catalog']"), 'background'))
+      .toBe('linear-gradient(var(--kr-bg-subtle), var(--kr-bg-subtle)), var(--kr-bg-elevated)');
+  });
+
+  it('the « Free » badge is a 12 px chip on the tokens: a green tint, the secondary text role, never wrapped', () => {
+    const body = rule(PICKER, '.kr-agent-switch-free-badge');
+    expect(declaration(body, 'font-size')).toBe('var(--kr-type-sm)');
+    expect(declaration(body, 'background')).toBe('var(--kr-success-bg)');
+    expect(declaration(body, 'color')).toBe('var(--kr-text-secondary)');
+    expect(declaration(body, 'white-space')).toBe('nowrap');
+    expect(declaration(body, 'flex')).toBe('0 0 auto');
+    // Upright on the italic typed-id row too.
+    expect(declaration(body, 'font-style')).toBe('normal');
+  });
+});

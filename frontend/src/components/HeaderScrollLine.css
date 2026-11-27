@@ -1,0 +1,73 @@
+/* KT-1936 review round 2 — the room header's agent line: one line that
+   scrolls sideways (owner decision 2026-11-20, option A). The scroller holds
+   the trigger, the participant chips, the scope and the trust chips; the end
+   slot, pinned outside it, holds the « +N » counter. */
+
+.kr-header-line {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--kr-space-1);
+  min-width: 0;
+  /* What the trigger's model reads to give way first (cqw, AgentSwitchPicker
+     rules in DiscussionsPage.css): the width of the line itself. */
+  container-type: inline-size;
+}
+
+.kr-header-line-scroller {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Room for the focus rings above and below, without changing the height. */
+  padding-block: var(--kr-space-1);
+  margin-block: calc(-1 * var(--kr-space-1));
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+
+.kr-header-line-scroller::-webkit-scrollbar {
+  display: none;
+}
+
+/* Its content at its own width, never wrapped: what does not fit scrolls. */
+.kr-header-line-track {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--kr-space-2);
+  width: max-content;
+  white-space: nowrap;
+}
+
+.kr-header-line-track > * {
+  flex: 0 0 auto;
+}
+
+/* The right edge fades while something lies past it, as the strip's does. */
+.kr-header-line[data-fade-end] .kr-header-line-scroller {
+  mask-image: linear-gradient(to right, var(--kr-bg-base) calc(100% - var(--kr-space-6)), transparent);
+}
+
+.kr-header-line-end {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.kr-header-line-end:empty {
+  display: none;
+}
+
+/* The strip does not scroll by itself on the line: the line does. */
+.kr-header-line .disc-participants-row,
+.kr-header-line .kr-participants-strip {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: none;
+}
+
+.kr-header-line .kr-participants-strip-list {
+  flex: 0 0 auto;
+  overflow: visible;
+}

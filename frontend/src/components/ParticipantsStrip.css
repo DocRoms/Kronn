@@ -1,0 +1,102 @@
+/* KT-1936 — the participants on one line that scrolls sideways: the right
+   edge fades while chips are past it, the « +N » counter opens the full list.
+   The list keeps its own rules (.disc-participants-list: nowrap, overflow-x). */
+
+.kr-participants-strip {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--kr-space-1);
+  min-width: 0;
+}
+
+.kr-participants-strip-list {
+  position: relative;
+}
+
+.kr-participants-strip[data-fade-end] .kr-participants-strip-list {
+  mask-image: linear-gradient(to right, var(--kr-bg-base) calc(100% - var(--kr-space-6)), transparent);
+}
+
+.kr-participants-strip-item {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.kr-participants-strip-more {
+  flex-shrink: 0;
+  min-height: var(--kr-space-6);
+  padding: 0 var(--kr-space-2);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+  font-family: inherit;
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-semibold);
+  cursor: pointer;
+}
+
+.kr-participants-strip-more:hover,
+.kr-participants-strip-more[aria-expanded="true"] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+
+/* A floating layer in document.body: `useAnchoredStyle` sets its fixed place
+   under the counter, inside the window (as Menu), so no clipping ancestor
+   cuts it. */
+.kr-participants-strip-all {
+  z-index: var(--kr-z-popover);
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(var(--kr-overlay-w-sm), calc(100vw - 2 * var(--kr-space-2)));
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: var(--kr-space-1);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-surface);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+}
+
+.kr-participants-strip-all ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kr-participants-strip-all button {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  width: 100%;
+  min-height: var(--kr-control-h-sm);
+  padding: var(--kr-space-1) var(--kr-space-2);
+  border: 0;
+  border-radius: var(--kr-radius-control);
+  background: transparent;
+  color: var(--kr-text-primary);
+  font-family: inherit;
+  font-size: var(--kr-type-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kr-participants-strip-all button:hover,
+.kr-participants-strip-all button:focus-visible {
+  background: var(--kr-bg-hover);
+}
+
+.kr-participants-strip-all button:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
+}
+
+@media (pointer: coarse) {
+  .kr-participants-strip-more,
+  .kr-participants-strip-all button {
+    min-height: var(--kr-control-h-touch);
+  }
+}

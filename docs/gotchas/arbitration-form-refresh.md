@@ -53,8 +53,8 @@ include the discussion, message and fence identity, so changing the question
 does not transfer the previous draft.
 `[src: file: frontend/src/components/MessageBubble.tsx:2060-2076#MarkdownRenderContext]`
 `[src: file: frontend/src/components/MessageBubble.tsx:2086-2158#MarkdownPre]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2159-2164#discussionMdComponents]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2199-2201#renderContext]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2165-2170#discussionMdComponents]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2205-2207#renderContext]`
 
 Seven product regressions cover question-store refresh, same-reference and
 repeated equivalent sources, changing citation verdicts in paragraphs/lists,

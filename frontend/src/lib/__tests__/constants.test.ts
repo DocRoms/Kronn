@@ -218,7 +218,18 @@ describe('constants', () => {
 
     it('preserves explicit mention colour overrides', () => {
       expect(agentTextColor('Nvidia', { Nvidia: '#123abc' })).toBe('#123abc');
-      expect(agentTextColor('Codex')).toBe('#10a37f');
+      expect(agentTextColor('Codex')).toBe('var(--kr-agent-codex-text)');
+      expect(agentTextColor('Codex', { Codex: '#123abc' })).toBe('#123abc');
+    });
+  });
+
+  describe('agentTextColor() — KT-1936', () => {
+    it('writes every default agent through its text token, an unknown one through the fallback', () => {
+      for (const agent of ALL_AGENT_TYPES) {
+        expect(agentTextColor(agent)).toMatch(/^var\(--kr-agent-[a-z]+-text\)$/);
+      }
+      expect(agentTextColor('Unknown')).toBe('var(--kr-agent-fallback-text)');
+      expect(agentTextColor(null)).toBe('var(--kr-agent-fallback-text)');
     });
   });
 

@@ -20,8 +20,13 @@ See also [design-tokens.md](design-tokens.md) for the scales and
 | Off-scale stylesheet values | `pnpm lint:theme` | A `font-size`, radius, colour or `@media` width outside the scales, in a `.css` file | `frontend/src/styles/themeAuditBaseline.json` (counts per file and kind) |
 | Status colours in every theme | `pnpm lint:theme` | A status colour (`--kr-success`…, `--kr-status-*`) under 4.5:1 on a surface, in any theme, light ones included | same file (`contrast` cells) |
 | No warning in `components/ui` | ESLint | Every rule that warns elsewhere is an error under `src/components/ui/**` | none: the folder has no warning |
+| `ui-guards/no-adhoc-agent-identity` (KT-1936) | ESLint | An element written in an agent's colour (`style.color` from `agentTextColor()` / `agentColor()`) whose content, or whose siblings (the other children of its nearest JSX parent, through a `cond &&` or a `? :`), also write a model (a `.model`, `model_tier`, `*Model` expression) or a role (`t('disc.target…')`, `t('ui.agentIdentity.role.…')`): render `AgentIdentity` | none: no violation when it came in; off in `components/ui` |
+| Agent colours as text (KT-1936) | `pnpm lint:theme` | A `--kr-agent-<agent>-text` token under 4.5:1 on a surface, in any theme | none: no cell is allowed under its floor |
 
 `[src: file: frontend/scripts/eslint-ui-guards.mjs:111]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:455#noAdhocAgentIdentity]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:445#jsxContainerOf]`
+`[src: file: frontend/src/lib/__tests__/uiGuardsLint.test.ts:144]`
 `[src: file: frontend/scripts/eslint-ui-guards.mjs:183]`
 `[src: file: frontend/scripts/eslint-ui-guards.mjs:245]`
 `[src: file: frontend/scripts/eslint-ui-guards.mjs:279]`
@@ -81,6 +86,32 @@ See also [design-tokens.md](design-tokens.md) for the scales and
   off scale: the token is not read.
   `[src: file: frontend/src/styles/themeAudit.ts:321]`
   `[src: file: frontend/src/styles/themeAudit.ts:373]`
+- **Ad-hoc agent identity (KT-1936):** the "name" is an element whose inline
+  `style.color` is `agentTextColor(…)` or `agentColor(…)`; "next to" is its own
+  content and its siblings, the other children of its nearest JSX parent
+  (through `{cond && …}` and `{a ? … : …}`), searched to any depth, skipping
+  `AgentIdentity`. Two hand-made headers were found when the siblings came in
+  (2026-11-22) and migrated: the compare column header (`BatchComparePanel`,
+  now `AgentIdentity` with its « recorded » / « unknown » provenance note
+  below) and the message header (`MessageBubble`, whose agent colour sat on
+  the whole header row, the footer's tier among its siblings: the colour now
+  sits on the identity's line only).
+  What it still cannot see:
+  - a name coloured otherwise: a class (`.my-agent-name { color: … }`), a CSS
+    variable set inline (`--agent-tone`), a colour from another helper
+    (`externalAgentColor`, a user's mention colour read directly), or a name
+    that is not coloured at all;
+  - a model or a role further away than the parent: a sibling of the
+    parent, another component the parent renders (`<ModelLine />` is not
+    opened), a `.map()` callback's markup returned from a function defined
+    elsewhere;
+  - a model or a role that does not look like one: a variable not named
+    `model`, `model_tier`, `currentModel`, `suffix` or `…Model` (`id`,
+    `label`), a role written as literal text or through another key than
+    `disc.target…` / `ui.agentIdentity.role.…`;
+  - a string built for a `title` or an `aria-label` (« name · model »): the
+    guard reads JSX children, not attributes.
+  `[src: file: frontend/scripts/eslint-ui-guards.mjs:400]`
 
 ## Measured before blocking (2026-11-22, base 428316a53)
 
@@ -118,14 +149,17 @@ the export button only renders once a plugin is configured
 `[src: file: frontend/src/components/plugins/PluginToolbar.tsx:112]`.
 
 The principal measured the open surfaces on 2026-11-22 on a fresh sandbox
-backend (`scripts/e2e-sandbox-backend.sh`). Two hold existing serious debt,
-frozen in the baseline:
+backend (`scripts/e2e-sandbox-backend.sh`). Two held existing serious debt,
+frozen in the baseline. KT-1936 removed the second one, `Workflows › quick
+prompt form` (color-contrast on `.kr-agent-switch-name`, the picker trigger's
+agent name at 10 px in the brand colour): the trigger now renders
+`AgentIdentity` at 12 px through `agentTextColor`, whose token holds 4.5:1 in
+every theme. The one entry left:
 
 | Surface | Rule | Nodes | Where | Leaves the baseline |
 |---|---|---|---|---|
 | Plugins › add plugin form | color-contrast | 12 | `.mcp-cat-pill-count` of the category pills, `.mcp-origin-badge.mcp-origin-official` of the registry cards, and others | the fix ticket the principal opens |
 | Plugins › add plugin form | scrollable-region-focusable | 1 | `.mcp-registry-grid` | the same ticket |
-| Workflows › quick prompt form | color-contrast | 1 | `.kr-agent-switch-name`: the agent picker trigger writes its name at 10 px (`--kr-fs-xs`) in the agent colour | KT-1936, which replaces that trigger markup |
 
 The same scan of the quick prompt form also reported button-name (critical) on
 the form's icon-only close button. It was fixed in the code instead

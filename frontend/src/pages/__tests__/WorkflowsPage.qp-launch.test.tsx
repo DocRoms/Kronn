@@ -691,7 +691,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       .closest('.qp-compare-target')
       ?.querySelector<HTMLButtonElement>('.kr-agent-switch-btn');
     await waitFor(() => expect(
-      refreshedPicker()?.querySelector('.kr-agent-switch-current-tier')?.getAttribute('data-tier'),
+      refreshedPicker()?.querySelector('.ui-agent-identity-tier')?.getAttribute('data-tier'),
     ).toBe('reasoning'));
 
     // The connection owns its own configuration: switching to a tier it

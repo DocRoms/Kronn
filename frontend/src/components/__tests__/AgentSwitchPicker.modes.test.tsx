@@ -53,7 +53,7 @@ const MODES = {
 } as const;
 
 async function open() {
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Agent' })); });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Agent( — |$)/ })); });
   return screen.getByRole('dialog', { name: 'Agent' });
 }
 
@@ -72,7 +72,7 @@ describe('AgentSwitchPicker — above any dialog, on its search field (KT-1885)'
     fireEvent.keyDown(within(popover).getByRole('searchbox'), { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'Agent' })).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Agent' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Agent( — |$)/ })).toHaveFocus();
   });
 
   it('stacks its popover on the popover layer, above every overlay layer', () => {
@@ -135,7 +135,7 @@ describe('AgentSwitchPicker — the modes (KT-1885)', () => {
         multiple={{ selected: [{ agent: 'ClaudeCode' }], onToggle, summary: selected => `${selected.length} chosen` }}
         title="Agent" ariaLabel="Agent" />,
     );
-    expect(screen.getByRole('button', { name: 'Agent' })).toHaveTextContent('1 chosen');
+    expect(screen.getByRole('button', { name: /^Agent( — |$)/ })).toHaveTextContent('1 chosen');
     const popover = await open();
     expect(within(popover).getByRole('menuitemcheckbox', { name: /Claude Code/ })).toHaveAttribute('aria-checked', 'true');
     fireEvent.click(within(popover).getByRole('menuitemcheckbox', { name: /Codex/ }));
@@ -176,7 +176,7 @@ describe('AgentSwitchPicker — review fixes (KT-1885)', () => {
           multiple={{ selected, onToggle: vi.fn() }} title="Agent" ariaLabel="Agent" />
       </I18nProvider>,
     );
-    expect(screen.getByRole('button', { name: 'Agent' })).toHaveTextContent(new RegExp(`^${text}$`));
+    expect(screen.getByRole('button', { name: /^Agent( — |$)/ })).toHaveTextContent(new RegExp(`^${text}$`));
   });
 
   // KT-1994 review, point 1a — the typed id is one entry at the end of the

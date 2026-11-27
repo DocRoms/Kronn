@@ -415,8 +415,8 @@ inline `style={{ }}` objects alike.
 `dark`, `arcade`, `gotham` and `matrix`, re-measures the text axe leaves undecided behind
 gradients or pseudo-elements, and walks keyboard focus. It answers every non-GET
 with 503 and stubs the WebSocket, so it may run read-only against a live backend.
-`[src: file: frontend/src/styles/themeAudit.ts:46-51#textFloor]` `[src: file: frontend/src/styles/themeAudit.ts:184-199#measureTextContrast]` `[src: file: frontend/src/styles/themeAudit.ts:212-225#undefinedTokenUsages]`
-`[src: file: frontend/src/styles/themeAudit.ts:230-246#forcedTextOnTokenBackground]` `[src: file: frontend/src/styles/themeAudit.ts:248-274#forcedTextInInlineStyles]` `[src: file: frontend/src/styles/themeAudit.ts:291-308#undeclaredCustomProperties]`
+`[src: file: frontend/src/styles/themeAudit.ts:54-59#textFloor]` `[src: file: frontend/src/styles/themeAudit.ts:192-207#measureTextContrast]` `[src: file: frontend/src/styles/themeAudit.ts:220-233#undefinedTokenUsages]`
+`[src: file: frontend/src/styles/themeAudit.ts:238-254#forcedTextOnTokenBackground]` `[src: file: frontend/src/styles/themeAudit.ts:256-282#forcedTextInInlineStyles]` `[src: file: frontend/src/styles/themeAudit.ts:299-316#undeclaredCustomProperties]`
 `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:40-71#readOnly]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:73-76#REMEASURED]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:279-317#proposedAction]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:323-339#focusStops]`
 
 When a disposable backend runs in a container, run browser specs with local

@@ -295,7 +295,7 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
     expect(chip).not.toBeNull();
     expect(chip?.dataset.agent).toBe('Codex');
     expect(chip?.textContent).toBe('@codex · agent ponctuel');
-    expect(chip?.style.color).toBe('#10a37f');
+    expect(chip?.style.color).toBe('var(--kr-agent-codex-text)');
     expect(screen.getByText('vérifie ce patch')).toBeInTheDocument();
   });
 
@@ -591,7 +591,10 @@ describe('MessageBubble — @user carries the real human identity', () => {
       return element;
     });
     expect(chip).not.toBeNull();
-    expect(rendered.container.querySelector<HTMLElement>('.disc-msg-agent-label')?.style.color)
+    // KT-1936 — the colour sits on the identity's line, and on the name itself.
+    expect(rendered.container.querySelector<HTMLElement>('.disc-msg-agent-label > .flex-row')?.style.color)
+      .toBe('#123abc');
+    expect(rendered.container.querySelector<HTMLElement>('.disc-msg-agent-label .ui-agent-identity-name')?.style.color)
       .toBe('#123abc');
   });
 });
@@ -603,7 +606,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
       { defaultAgent: 'Custom', defaultAgentAlias: '@openrouter' },
     );
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      '@openrouter · disc.targetDiscussionAgent',
+      '@openrouter · modèle non enregistré · agent principal',
     );
     expect(container.querySelector('.disc-msg-agent-label')).not.toHaveTextContent('Custom');
   });
@@ -611,7 +614,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
   it('renders a non-default native responder as a punctual agent', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent', agent_type: 'Codex' }));
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      '@codex · disc.targetPunctualAgent',
+      '@codex · modèle non enregistré · agent ponctuel',
     );
     expect(container.querySelector<HTMLElement>('.disc-msg-bubble')?.style.borderLeftColor)
       .toBeTruthy();
@@ -623,7 +626,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
       { defaultAgent: 'Vibe' },
     );
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      '@vibe · disc.targetDiscussionAgent',
+      '@vibe · modèle non enregistré · agent principal',
     );
   });
 
@@ -632,11 +635,35 @@ describe('MessageBubble — agent label + copy buttons', () => {
       makeMessage({ role: 'Agent', agent_type: 'Codex', source_msg_id: 'live-cli-1' }),
     );
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      '@codex · disc.targetCli',
+      '@codex · modèle non enregistré · session CLI',
     );
   });
 
-  it('renders a workflow-step response as a discussion agent and never as a CLI ordinal', () => {
+  // KT-1936 — the message header renders AgentIdentity: the concrete model
+  // per message, else « model not recorded », never the tier name.
+  it('writes the concrete model of the message next to the agent, then the role chip', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', agent_type: 'ClaudeCode', model: 'claude-opus-4-5', model_tier: 'reasoning' }),
+    );
+    const label = container.querySelector('.disc-msg-agent-label')!;
+    expect(label.querySelector('.ui-agent-identity')).not.toBeNull();
+    expect(label.querySelector('[data-testid="agent-identity-model"]')).toHaveTextContent(/^claude-opus-4-5$/);
+    expect(label.querySelector('[data-testid="agent-identity-model"]')).toHaveAttribute('data-state', 'id');
+    expect(label.querySelector('.ui-agent-identity-tier')).toHaveAttribute('data-tier', 'reasoning');
+    expect(label.querySelector('.ui-agent-identity-role')).toHaveTextContent('agent principal');
+  });
+
+  it('says « model not recorded » on a legacy message instead of the tier name', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', agent_type: 'ClaudeCode', model: null, model_tier: 'economy' }),
+    );
+    const model = container.querySelector('.disc-msg-agent-label [data-testid="agent-identity-model"]');
+    expect(model).toHaveAttribute('data-state', 'notRecorded');
+    expect(model).toHaveTextContent('modèle non enregistré');
+    expect(model).not.toHaveTextContent('economy');
+  });
+
+  it('renders a workflow-step response with the workflow step role and never as a CLI ordinal', () => {
     const { container } = renderBubble(
       makeMessage({
         role: 'Agent',
@@ -655,7 +682,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
       },
     );
     const label = container.querySelector('.disc-msg-agent-label');
-    expect(label).toHaveTextContent('@codex · disc.targetDiscussionAgent');
+    expect(label).toHaveTextContent('@codex · modèle non enregistré · étape de workflow');
     expect(label).toHaveTextContent('Implementation › Orchestrate');
     expect(label).not.toHaveTextContent('CLI 3');
   });
@@ -669,7 +696,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
       }),
     );
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      'disc.tourDemoAuthor · disc.tourDemoKind',
+      'disc.tourDemoAuthor · modèle non enregistré · disc.tourDemoKind',
     );
     expect(container.querySelector('.disc-msg-agent-label')).not.toHaveTextContent('@claude');
   });

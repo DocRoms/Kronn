@@ -138,6 +138,46 @@ describe('ui-guards/no-off-scale-style', () => {
   });
 });
 
+// KT-1936 — an agent is named with its model and its role by AgentIdentity
+// only: an element written in an agent's colour that also writes a model or a
+// role is the ad-hoc markup each surface used to build.
+describe('ui-guards/no-adhoc-agent-identity', () => {
+  const rule = 'ui-guards/no-adhoc-agent-identity';
+  const head = "import { agentTextColor, agentColor } from '../lib/constants';\nimport { AgentIdentity } from './ui/AgentIdentity';";
+  it.each([
+    ['a name and the message model', wrap("<div style={{ color: agentTextColor('Codex') }}>@codex <span>· {msg.model}</span></div>", head)],
+    ['a name and a tier', wrap("<span style={{ color: agentColor(a) }}>{name} · {msg.model_tier}</span>", head)],
+    ['a name and a role label', wrap("<div style={{ color: agentTextColor(a), gap: 4 }}>{name}<span> · {t('disc.targetDiscussionAgent')}</span></div>", head)],
+    ['a name and a model variable', wrap("<strong style={{ color: agentTextColor(a) }}>{label} · {currentModel}</strong>", head)],
+    // KT-1936 review, finding 5 — the model or the role as a SIBLING of the coloured name.
+    ['a model next to the coloured name, in the same parent', wrap("<div><span style={{ color: agentTextColor(m.agent) }}>{m.agent}</span><i>{m.model}</i></div>", head)],
+    ['a role next to the coloured name, in a fragment', wrap("<><strong style={{ color: agentColor(a) }}>{name}</strong><small>{t('ui.agentIdentity.role.cli')}</small></>", head)],
+    ['a coloured name behind a condition, its model next to it', wrap("<p>{show && <span style={{ color: agentTextColor(a) }}>{name}</span>}<em>{p.declaredModel}</em></p>", head)],
+  ])('fails on %s', async (_name, code) => {
+    expect(await guard(rule, code)).toEqual([2]);
+  });
+
+  it.each([
+    ['AgentIdentity inside the coloured label', wrap("<div style={{ color: agentTextColor(a) }}><AgentIdentity name={n} model={{ kind: 'id', id: msg.model }} role='main' /></div>", head)],
+    ['a name alone in its colour', wrap("<span style={{ color: agentTextColor(a) }}>{label}</span>", head)],
+    ['a model next to a name not in an agent colour', wrap("<span>{label} · {msg.model}</span>", head)],
+    ['AgentIdentity next to a coloured name in the same parent', wrap("<div><span style={{ color: agentTextColor(a) }}>{label}</span><AgentIdentity name={n} model={{ kind: 'id', id: msg.model }} /></div>", head)],
+    ['a coloured name whose siblings write no model and no role', wrap("<div><span style={{ color: agentTextColor(a) }}>{label}</span><time>{when}</time></div>", head)],
+    ['a model in the parent of the parent: the heuristic stops at the parent', wrap("<section><div><span style={{ color: agentTextColor(a) }}>{label}</span></div><footer>{msg.model}</footer></section>", head)],
+  ])('leaves alone %s', async (_name, code) => {
+    expect(await guard(rule, code)).toEqual([]);
+  });
+
+  it('is off in components/ui, where AgentIdentity is built', async () => {
+    const code = wrap("<span style={{ color: agentTextColor(a) }}>{name} · {model}</span>", head);
+    expect(await guard(rule, code, 'src/components/ui/Example.tsx')).toEqual([]);
+  });
+
+  it('finds no ad-hoc agent identity in the app, and has no baseline', () => {
+    expect(Object.values(BASELINE).some(r => r[rule])).toBe(false);
+  });
+});
+
 describe('the baseline of the guards (eslint-suppressions.json)', () => {
   it('records the guards on files that exist, the fourteen DiscussionsPage.css imports among them', () => {
     const imports: string[] = [];

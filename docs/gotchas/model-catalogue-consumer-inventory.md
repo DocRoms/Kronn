@@ -45,14 +45,14 @@ disables unavailable choices, and displays provenance/check time/diagnostics.
 An expired or failed live snapshot renders as cached without changing the
 stored model's availability or operator metadata. Opening a mention/picker
 reads a snapshot once; typing filters locally, without provider discovery.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:64-75#AGENT_RUNTIME_TARGETS]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:77-88#AGENT_RUNTIME_TARGETS]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:103-106#catalogModelProvenance]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 
 | Surface | Shared path and source |
 |---|---|
-| Discussion creation and header | `AgentSwitchPicker`. [src: file: frontend/src/components/NewDiscussionForm.tsx:1251#AgentSwitchPicker] [src: file: frontend/src/components/ChatHeader.tsx:313#AgentSwitchPicker] The project audit selector is not on this path: its tier buttons show the model configured in settings (or on the named connection), read without the catalogue. [src: file: frontend/src/components/AuditTimeline.tsx:522-527#tierModel] |
+| Discussion creation and header | `AgentSwitchPicker`. [src: file: frontend/src/components/NewDiscussionForm.tsx:1251#AgentSwitchPicker] [src: file: frontend/src/components/ChatHeader.tsx:311#AgentSwitchPicker] The project audit selector is not on this path: its tier buttons show the model configured in settings (or on the named connection), read without the catalogue. [src: file: frontend/src/components/AuditTimeline.tsx:522-527#tierModel] |
 | Chat and creation mentions | Shared catalogue resolver/search and the agent picker's palette and tier choices (`AgentPickerPalette`, `AgentPickerTierChoices`, KT-1885); keyboard traversal skips unavailable tiers while preserving exact joined-CLI identity. [src: file: frontend/src/components/ChatInput.tsx:741-751#mentionTierResolution] [src: file: frontend/src/components/NewDiscussionForm.tsx:206-207#targetTierResolution] [src: file: frontend/src/lib/mentionTierSelection.ts:6-16#nextMentionTierIndex] |
 | QP and workflow authoring, including compensation and review | `AgentSwitchPicker` plus `ModelCatalogPicker`/`SearchableSelect` where a model or reasoning override is editable. [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:246#AgentSwitchPicker] [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:312#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:336#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4560#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4624#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1395#AgentSwitchPicker] [src: file: frontend/src/pages/WorkflowsPage.tsx:3369#AgentSwitchPicker] [src: file: frontend/src/components/AgentCompareSelector.tsx:85#AgentSwitchPicker] |
 | Planning launch/reassignment | The same agent and model controls, without clearing unrelated execution policy/history. [src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker] [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1189-1206#AgentSwitchPicker] |

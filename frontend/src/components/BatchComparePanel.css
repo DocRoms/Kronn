@@ -454,15 +454,6 @@
   color: var(--kr-text-secondary);
   font: 600 var(--kr-fs-2xs) var(--kr-font-mono);
 }
-.disc-compare-tier { font-size: 12px; }
-.disc-compare-model {
-  max-width: 190px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--kr-text-secondary);
-  font: var(--kr-fs-2xs) var(--kr-font-mono);
-}
 .disc-compare-metrics {
   grid-column: 1 / -1;
   display: grid;

@@ -82,6 +82,20 @@
   /* NVIDIA #76B900 stays the brand/accent colour. This lighter companion is
      reserved for small text on dark surfaces (11:1 on --kr-bg-surface). */
   --kr-agent-nvidia-text: #a8df55;
+  /* KT-1936 — the other agents' names as text. Their brand colours (kept by
+     agentColor() for dots, borders and icons) fall under 4.5:1 on some
+     surface of some theme; these companions hold 4.5:1 on every opaque
+     surface of every dark theme. The light themes override them below. */
+  --kr-agent-claude-text: #da8669;
+  --kr-agent-codex-text: #2faf90;
+  --kr-agent-opencode-text: #af87f4;
+  --kr-agent-vibe-text: #ff7a14;
+  --kr-agent-gemini-text: #669cf6;
+  --kr-agent-kiro-text: #9f8cff;
+  --kr-agent-copilot-text: #67ac74;
+  --kr-agent-ollama-text: #60a5fa;
+  --kr-agent-litellm-text: #14b8a6;
+  --kr-agent-fallback-text: #ab8af9;
   --kr-cancelled: #a0a0a0;
   --kr-text-on-accent: #000000;
   --kr-text-on-dark: #ffffff;
@@ -504,6 +518,18 @@
   --kr-diff-added-text: #166534;
   --kr-diff-removed-text: #991b1b;
   --kr-diff-changed-text: #854d0e;
+  /* KT-1936 — agent names as text: the brand colour darkened to 4.5:1 on
+     every opaque surface of the three light themes. */
+  --kr-agent-claude-text: #9f553b;
+  --kr-agent-codex-text: #0c775d;
+  --kr-agent-opencode-text: #7c3aed;
+  --kr-agent-vibe-text: #ad4c00;
+  --kr-agent-gemini-text: #3366bc;
+  --kr-agent-kiro-text: #6952d9;
+  --kr-agent-copilot-text: #207931;
+  --kr-agent-ollama-text: #3e6ba2;
+  --kr-agent-litellm-text: #0d766a;
+  --kr-agent-fallback-text: #764ed1;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

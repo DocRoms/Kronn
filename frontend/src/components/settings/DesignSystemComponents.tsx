@@ -40,6 +40,10 @@ import { OVERLAY_WIDTHS } from '../../styles/designTokens';
 import { GALLERY_COMPONENTS, componentAnchor } from './designSystemGallery';
 import { useT } from '../../lib/I18nContext';
 import { AgentSwitchPicker, type AgentAvailability, type AgentSwitchTarget } from '../AgentSwitchPicker';
+import { AgentIdentity } from '../ui/AgentIdentity';
+import { AGENT_IDENTITY_UNKNOWN_STATES, agentIdentityText, type AgentIdentityModel, type AgentIdentityRole } from '../ui/agentIdentityKinds';
+import { ParticipantsStrip } from '../ParticipantsStrip';
+import { agentTextColor } from '../../lib/constants';
 import type { AgentType, ModelTier, ShadowAgent } from '../../types/generated';
 
 type T = (key: string, ...args: (string | number)[]) => string;
@@ -737,6 +741,65 @@ function AgentSwitchPickerDemo({ t }: { t: T }) {
   );
 }
 
+/** KT-1936 — sample identities: product names and model ids, the same in every locale. */
+const DEMO_IDENTITIES: readonly { agent: AgentType; name: string; model: AgentIdentityModel; role: AgentIdentityRole; tier?: ModelTier }[] = [
+  { agent: 'ClaudeCode', name: '@claude', model: { kind: 'id', id: 'claude-opus-4-5-20251101' }, role: 'main', tier: 'reasoning' },
+  { agent: 'Codex', name: '@codex', model: { kind: 'id', id: 'gpt-5.5-codex' }, role: 'oneOff' },
+  { agent: 'GeminiCli', name: '@gemini-cli', model: { kind: 'notDeclared' }, role: 'cli' },
+  { agent: 'Kiro', name: '@kiro', model: { kind: 'id', id: 'auto' }, role: 'workflowStep' },
+  { agent: 'Ollama', name: '@ollama', model: { kind: 'providerDefault' }, role: 'oneOff' },
+];
+
+function AgentIdentityDemo({ t }: { t: T }) {
+  const { tp } = useT();
+  const [main, codex] = DEMO_IDENTITIES;
+  const identity = (d: typeof main, extra: Partial<Parameters<typeof AgentIdentity>[0]> = {}) => (
+    <AgentIdentity name={d.name} color={agentTextColor(d.agent)} model={d.model} role={d.role} tier={d.tier}
+      tierLabel={d.tier ? t(`disc.tier.${d.tier}`) : undefined} {...extra} />
+  );
+  const unknownModels: Record<string, string> = { notDeclared: '@gemini-cli', notRecorded: '@codex', providerDefault: '@ollama' };
+  return (
+    <>
+      <Row label={t('designSystem.demo.identity.full')}>{identity(main, { size: 'full' })}</Row>
+      <Row label={t('designSystem.demo.identity.inline')}>
+        {identity(main)}
+        {identity(codex)}
+      </Row>
+      <Row label={t('designSystem.demo.identity.compact')}>
+        <span title={agentIdentityText({ name: codex.name, model: codex.model }, t)}>{identity(codex, { size: 'compact', role: null })}</span>
+      </Row>
+      <Row label={t('designSystem.demo.identity.unknown')}>
+        {AGENT_IDENTITY_UNKNOWN_STATES.map(state => (
+          <AgentIdentity key={state} name={unknownModels[state]}            color={agentTextColor(state === 'notDeclared' ? 'GeminiCli' : state === 'notRecorded' ? 'Codex' : 'Ollama')}
+            model={{ kind: state }} role={state === 'notDeclared' ? 'cli' : 'oneOff'} />
+        ))}
+      </Row>
+      <Row label={t('designSystem.demo.identity.strip')}>
+        <div className="ds-demo-identity-strip">
+          <ParticipantsStrip
+            moreLabel={total => tp('disc.participantsMore', total)}
+            allLabel={t('disc.participantsAll')}
+            entries={DEMO_IDENTITIES.map(d => ({
+              key: d.name,
+              chip: (
+                <Tooltip content={agentIdentityText({ name: d.name, model: d.model, role: d.role }, t)}>
+                  <button type="button" className="disc-participant-chip"
+                    aria-label={t('disc.participantDetails', agentIdentityText({ name: d.name, model: d.model, role: d.role }, t))}>
+                    <span aria-hidden className="disc-participant-presence-dot" data-presence="listening" />
+                    {identity(d, { truncateModel: true, tier: undefined })}
+                  </button>
+                </Tooltip>
+              ),
+              row: identity(d, { tier: undefined }),
+              onSelect: () => {},
+            }))}
+          />
+        </div>
+      </Row>
+    </>
+  );
+}
+
 /** One narrow demo: what it shows, and the form it shows when there are
  *  several (the Table's cards and sideways scroll). */
 interface NarrowDemo { id: string; form?: string; node: ReactNode }
@@ -1213,6 +1276,7 @@ const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   progressBar: ProgressBarDemo,
   logViewer: LogViewerDemo,
   diffViewer: DiffViewerDemo,
+  agentIdentity: AgentIdentityDemo,
   agentSwitchPicker: AgentSwitchPickerDemo,
 };
 

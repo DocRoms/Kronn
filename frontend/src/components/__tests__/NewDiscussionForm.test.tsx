@@ -418,7 +418,7 @@ describe('NewDiscussionForm — creation flow layout', () => {
     );
 
     const picker = await screen.findByTestId('new-disc-agent-picker');
-    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', {
       name: 'Codex · disc.tier.reasoning',
     }));
@@ -453,11 +453,11 @@ describe('NewDiscussionForm — creation flow layout', () => {
 
     const picker = await screen.findByTestId('new-disc-agent-picker');
     // The typed id is offered for the current agent: Codex first.
-    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.economy' }));
     });
-    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
     fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'gpt-5.5-codex-max' } });
     const free = document.querySelectorAll<HTMLElement>('[data-kind="free"]');
     expect(free).toHaveLength(1);
@@ -471,7 +471,7 @@ describe('NewDiscussionForm — creation flow layout', () => {
       expect.objectContaining({ agent: 'Codex', model: 'gpt-5.5-codex-max' }),
     ));
 
-    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.economy' }));
     });
@@ -497,7 +497,7 @@ describe('NewDiscussionForm — creation flow layout', () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', {
       name: 'OpenCode · disc.tier.reasoning',
     }));
@@ -1365,7 +1365,7 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
     await act(async () => { fireEvent.click(advancedToggle); });
 
     await waitFor(() => {
-      const currentTier = document.querySelector('.kr-agent-switch-current-tier') as HTMLElement;
+      const currentTier = document.querySelector('.ui-agent-identity-tier') as HTMLElement;
       expect(currentTier).toBeTruthy();
       expect(currentTier.getAttribute('data-tier')).toBe('reasoning');
     });
@@ -1406,7 +1406,7 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
     await act(async () => { fireEvent.click(advancedToggle); });
 
     await waitFor(() => {
-      const currentTier = document.querySelector('.kr-agent-switch-current-tier') as HTMLElement;
+      const currentTier = document.querySelector('.ui-agent-identity-tier') as HTMLElement;
       expect(currentTier.getAttribute('data-tier')).toBe('default');
     });
   });

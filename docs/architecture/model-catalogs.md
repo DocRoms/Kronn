@@ -95,7 +95,7 @@ a project's own config — typically a local Ollama — was offered to every run
 that project and appeared in no selector. This, not a filter or a cache, is why
 models were missing: the Config UI applies no filter to what the catalogue
 holds (`catalogModelOptions`).
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
 
 OpenCode discovery now runs in two kinds of directory at once, inside the
 single 20 s discovery bound: the neutral one, and every registered project that
@@ -171,7 +171,7 @@ palette) the composer's @ menu (KT-1885). It reads the shared snapshot, shows
 provenance, and leaves known unavailable choices visible but disabled. Settings
 exposes refresh plus manual create/update/delete, including chat/image/video
 capabilities and reasoning modes.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1210#useModelCatalogSnapshot]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1263#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/agentAvailability.ts:23-33#tierAvailability]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:182-211#createManual]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:212-229#deleteManual]

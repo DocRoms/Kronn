@@ -366,7 +366,7 @@ describe('ApiCallAiHelper — minimize / restore / close', () => {
 describe('ApiCallAiHelper — agent switch', () => {
   const openPicker = async () => {
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'wf.apicall.helper.switchAgent' }));
+      fireEvent.click(screen.getByRole('button', { name: /^wf\.apicall\.helper\.switchAgent( — |$)/ }));
     });
   };
 
@@ -375,7 +375,7 @@ describe('ApiCallAiHelper — agent switch', () => {
     expect(createMock.mock.calls[0][0]).toEqual(expect.objectContaining({ agent: 'ClaudeCode' }));
     expect(createMock.mock.calls[0][0]).not.toHaveProperty('tier');
     expect(createMock.mock.calls[0][0]).not.toHaveProperty('connection_id');
-    expect(screen.getByRole('button', { name: 'wf.apicall.helper.switchAgent' })).toHaveTextContent('Claude Code');
+    expect(screen.getByRole('button', { name: /^wf\.apicall\.helper\.switchAgent( — |$)/ })).toHaveTextContent('Claude Code');
   });
 
   it('opens the shared picker on its search field; switching agents keeps the old disc + creates a new one', async () => {
@@ -499,9 +499,9 @@ describe('ApiCallAiHelper — resume (KT-1111)', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
     });
-    const trigger = screen.getByRole('button', { name: 'wf.apicall.helper.switchAgent' });
+    const trigger = screen.getByRole('button', { name: /^wf\.apicall\.helper\.switchAgent( — |$)/ });
     await waitFor(() => expect(trigger).toHaveTextContent('Team proxy'));
-    expect(trigger.querySelector('.kr-agent-switch-current-tier')).toHaveAttribute('data-tier', 'reasoning');
+    expect(trigger.querySelector('.ui-agent-identity-tier')).toHaveAttribute('data-tier', 'reasoning');
     await act(async () => { fireEvent.click(trigger); });
     // The choice in effect is the current one: choosing it again starts nothing.
     const current = await screen.findByRole('menuitem', { name: 'Team proxy · disc.tier.reasoning' });

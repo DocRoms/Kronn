@@ -50,6 +50,19 @@ export function resolveCatalogTier(
 
 export type ResolvedCatalogTier = ReturnType<typeof resolveCatalogTier>;
 
+/**
+ * KT-1994 — the model id a mode runs: what the catalogue resolves for it (a
+ * replacement first), else the backend's launch verdict for that tier
+ * (`effective_model`, else `requested_model`). Empty when nothing declares one.
+ */
+export function modeModelId(resolution: ResolvedCatalogTier | null | undefined, tier: ModelTier | null): string {
+  if (!resolution || tier === null) return '';
+  const id = resolution.replacement || resolution.entry?.model_id || resolution.configured;
+  if (id) return id;
+  const verdict = resolution.view?.tier_verdicts?.find(candidate => candidate.tier === tier);
+  return verdict?.effective_model || verdict?.requested_model || '';
+}
+
 /** Search the displayed target and its already-resolved identities; never refresh or select. */
 export function matchesCatalogSearch(query: string, terms: Array<string | null | undefined>): boolean {
   const normalize = (value: string) => value.normalize('NFKD').replace(/\p{Diacritic}/gu, '').toLowerCase();

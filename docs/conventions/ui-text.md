@@ -31,7 +31,7 @@ and checks new labels against them. Pairs with
 | 2026-11-18 | French says « vous » everywhere. |
 | 2026-11-18 | The tabs are named « Tâches » (en/es/zh: task, tarea, 任务) and « Réglages » (settings, ajustes, 设置). |
 | 2026-11-18 | Quick API and Quick Exec are two types, API and CLI, of one family: quick actions (« actions rapides »). |
-| 2026-11-20 | The agent that owns a discussion is the « agent principal » / main agent / agente principal / 主代理. « agent de discussion », « agent de la discussion » and their en/es/zh forms are synonyms the check reports. |
+| 2026-11-20 | The agent that owns a discussion is the « agent principal » / main agent / agente principal / 主代理. « agent de discussion », « agent de la discussion » and their en/es/zh forms are synonyms the check reports. KT-1936 rewrote every label that used them; none is left in the baseline. |
 
 Every other concept is marked `"decided": "proposed"`: its term is the most
 used one in the count of 2026-11-21, open to the owner. Changing one is a
@@ -61,7 +61,8 @@ enforce these yet.
 - **Allowed phrases:** a concept's `allow` list holds literal, case-sensitive
   phrases; a match that overlaps one is not reported. The tab names
   « Automatisation », « Automation », « Automatización » and « serveur MCP »,
-  « MCP kronn-internal »… are there.
+  « MCP kronn-internal »… are there, and « CLI 会话 » (a CLI session, not a
+  discussion; KT-1936).
   `[src: file: frontend/scripts/i18n-terms.mjs:128#findViolations]`
 
 It fails only on a label that is **new**, **touched** (its text changed and it

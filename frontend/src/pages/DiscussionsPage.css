@@ -2009,12 +2009,36 @@ button.disc-contact-open {
   white-space: nowrap;
 }
 
-/* The chip strip shares row 2 with the agent control and the details toggle,
-   so it takes the space those two leave and scrolls inside it. */
-.disc-chat-header-sub > .disc-participants-row {
-  flex: 1 1 auto;
-  min-width: 0;
-  width: auto;
+/* KT-1936 review round 2 — the room header's agent line is ONE line that
+   scrolls sideways (HeaderScrollLine): the main agent's trigger first, then
+   its toggle, the participant chips, the scope and the trust chips; the
+   « +N » counter is pinned at its right end, outside what scrolls.
+
+   The trigger has a floor it never goes under: its name whole, its mode icon,
+   its role chip whole, and its model cut no shorter than 8 characters before
+   the ellipsis (9ch with it; an unknown state follows the same rule). Above
+   that floor the model gives way first: its width follows the line's (cqw,
+   the line is the container), from 17 characters on a wide line down to the
+   floor on a narrow one. What the floor does not fit, the line scrolls. */
+.kr-header-line .disc-native-agent-control,
+.kr-header-line .kr-agent-switch,
+.kr-header-line .kr-agent-switch-static,
+.kr-header-line .kr-agent-switch-btn,
+.kr-header-line .kr-agent-switch-identity,
+.kr-header-line .kr-agent-switch-custom {
+  flex-shrink: 0;
+  max-width: none;
+}
+
+.kr-header-line .kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-name,
+.kr-header-line .kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-role {
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.kr-header-line .kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-model {
+  flex-shrink: 0;
+  max-width: clamp(9ch, 100cqw - 18rem, 17ch);
 }
 
 /* 0.8.5 — short disc-id pill in ChatHeader. Click → copy full UUID
@@ -2272,9 +2296,10 @@ button.disc-contact-open {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  /* Visible, not scrollable: the participant popover opens downwards out of
-     this row, and an `overflow` here clipped it. The chip strip does its own
-     scrolling instead. */
+  /* Visible, not scrollable: the row itself never clips. In the room header
+     its content is a HeaderScrollLine, which does the scrolling, and every
+     layer opened from it (participant details, +N list, picker) is a floating
+     layer in document.body (KT-1936). */
   overflow: visible;
   white-space: nowrap;
 }
@@ -2350,6 +2375,7 @@ button.disc-contact-open {
 
 .disc-native-agent-toggle {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   width: 20px;

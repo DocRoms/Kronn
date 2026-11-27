@@ -36,6 +36,14 @@ export const SEMANTIC_STATUS_TOKENS = [
   '--kr-status-success', '--kr-status-warning', '--kr-status-danger', '--kr-status-info', '--kr-status-neutral',
 ] as const;
 
+/** KT-1936 — the agents' names written as text (`agentTextColor`), measured
+ *  at 4.5:1 on the ramp of every theme with no baseline. */
+export const AGENT_TEXT_TOKENS = [
+  '--kr-agent-claude-text', '--kr-agent-codex-text', '--kr-agent-opencode-text', '--kr-agent-vibe-text',
+  '--kr-agent-gemini-text', '--kr-agent-kiro-text', '--kr-agent-copilot-text', '--kr-agent-ollama-text',
+  '--kr-agent-litellm-text', '--kr-agent-fallback-text',
+] as const;
+
 /** The global `:focus-visible` ring colour: non-text, so 3:1 (WCAG 1.4.11). */
 export const FOCUS_RING_TOKEN = '--kr-accent-ink';
 
@@ -188,7 +196,7 @@ export function measureTextContrast(themes: Map<string, ThemeTokens>): ContrastR
   const rows: ContrastRow[] = [];
   for (const [theme, tokens] of themes) {
     const pairs: Array<[string, number, boolean]> = TEXT_TOKENS.map(t => [t, textFloor(theme, t), true]);
-    pairs.push(...[...STATUS_TOKENS, ...SEMANTIC_STATUS_TOKENS].map(t => [t, 4.5, false] as [string, number, boolean]));
+    pairs.push(...[...STATUS_TOKENS, ...SEMANTIC_STATUS_TOKENS, ...AGENT_TEXT_TOKENS].map(t => [t, 4.5, false] as [string, number, boolean]));
     pairs.push([FOCUS_RING_TOKEN, 3, false]);
     for (const [text, floor, withHover] of pairs) {
       const fg = themeColor(tokens, text);

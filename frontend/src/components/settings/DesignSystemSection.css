@@ -268,6 +268,17 @@
   max-width: calc(var(--kr-space-8) * 8);
 }
 
+/* KT-1936 — a participants strip narrower than its chips: it scrolls
+   sideways, its right edge fades and « +N » opens the full list. */
+.ds-demo-identity-strip {
+  display: flex;
+  position: relative;
+  width: min(100%, calc(var(--kr-space-8) * 10));
+  padding: var(--kr-space-1);
+  border: 1px dashed var(--kr-border);
+  border-radius: var(--kr-radius-control);
+}
+
 /* KT-1881 — the content of the Dialog and Drawer demos. */
 .ds-demo-field {
   display: flex;

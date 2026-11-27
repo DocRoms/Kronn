@@ -41,7 +41,7 @@ changing the CLI account; no account, token or credential is copied into the
 catalogue. CLI aliases can change their resolution; the special `default`
 choice is labelled accordingly and is never automatically assigned to a tier.
 The same warning is shown in the Settings catalogue table, not just in pickers.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
 [src: file: backend/src/db/model_catalog.rs:585-730#reconcile_listing]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:447-449#cliDefault]
 

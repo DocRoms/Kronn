@@ -2771,7 +2771,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     }
     await waitFor(() => expect(screen.getByDisplayValue('prnum')).toBeInTheDocument());
 
-    const agentTierPicker = screen.getAllByRole('button', { name: 'Agent et mode IA' })[0];
+    const agentTierPicker = screen.getAllByRole('button', { name: /^Agent et mode IA( — |$)/ })[0];
     expect(agentTierPicker).toHaveTextContent('🎯');
     fireEvent.click(agentTierPicker);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Claude Code · Avancé' }));

@@ -10,8 +10,8 @@ and preserves an unknown configured model as a disabled, explicitly labelled
 option. Cache provenance never becomes a live discovery merely because the
 snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:103-106#catalogModelProvenance]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:892-917#renderSelect]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
@@ -115,8 +115,8 @@ namespace. HTTP tiers may fall back to their own configured default, unlike
 CLI tiers. No embedded model list participates in the display helper anymore.
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:12-49#resolveCatalogTier]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:77-88#catalogTierEntry]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1219-1229#resolvedTier]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:90-101#catalogTierEntry]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1276-1286#resolvedTier]
 
 The shared picker keeps an unavailable configured entry disabled. A failed
 snapshot read reports the error and retains previous data as cached, not live.
@@ -126,10 +126,10 @@ clears its old override when choosing a new agent/tier. A discussion's exact
 model (KT-1993) is no tier override: the header passes it as `customModel` and
 the picker shows it as « Personnalisé » unless it is the current mode's own
 model (KT-1994).
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/ChatHeader.tsx:334#customModel]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:103-106#catalogModelProvenance]
+[src: file: frontend/src/components/ChatHeader.tsx:332#customModel]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1717-1748#changeQuickPromptAgent]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3375-3376#currentModel]
 
@@ -148,9 +148,9 @@ without rewriting the selected identity. Typing never selects a target or
 refetches the catalogue. An unknown configured ID remains searchable, and a
 known unavailable choice remains disabled; accessible descriptions retain the
 model, provenance and unavailable state after filtering.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:53-62#matchesCatalogSearch]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1250-1256#visibleChoices]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1192-1227#tierOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:66-75#matchesCatalogSearch]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1326-1332#visibleChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1250-1285#tierOptions]
 
 The search field is outside the menu, within a portalled non-modal dialog.
 Arrow keys move among enabled choices; Home/End retain their caret behavior in
@@ -158,14 +158,14 @@ search and navigate choices when an option has focus. Escape inside the picker
 does not propagate to its parent form. Closing with Escape or completing an
 asynchronous selection restores trigger focus. Reopening clears the query,
 an empty result is explicit, and the popup's height is bounded by the viewport.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1211-1236#navigateChoices]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:591-600#place]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:586-591#restoreFocusRef]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1363-1370#setQuery]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1380-1399#createPortal]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1268-1293#navigateChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:602-611#place]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:597-602#restoreFocusRef]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1443-1450#setQuery]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1454-1473#createPortal]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:167-204#reports]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:228-255#closes]
-[src: file: frontend/src/components/__tests__/AgentSwitchPicker.accessibility.test.tsx:40-76#repositions]
+[src: file: frontend/src/components/__tests__/AgentSwitchPicker.accessibility.test.tsx:95-131#repositions]
 
 These are component regressions, not a new browser layout qualification.
 The remaining KT-531 review covers the final cross-surface inventory. Comparison
@@ -183,8 +183,8 @@ accessible even when an alias is displayed. Failed reloads retain stale data
 and an explicit error; typing within an open palette does not refetch.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:12-49#resolveCatalogTier]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:196-198#AgentPickerTierChoices]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:105#lastChecked]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:211-213#AgentPickerTierChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:120#lastChecked]
 [src: file: frontend/src/components/ChatInput.tsx:518#useModelCatalogSnapshot]
 [src: file: frontend/src/components/ChatInput.tsx:741-751#mentionTierResolution]
 [src: file: frontend/src/components/NewDiscussionForm.tsx:205#useModelCatalogSnapshot]
@@ -217,7 +217,7 @@ unavailable models remain visible and disabled; unknown configured IDs stay
 explicitly unverified. A joined CLI's results never inherit a native catalogue
 tier. Canonical alias prefixes rank before additional substring matches, so
 typing `@co` still highlights Codex before a Claude Code substring result.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:53-62#matchesCatalogSearch]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:66-75#matchesCatalogSearch]
 [src: file: frontend/src/components/ChatInput.tsx:752-769#mentionMatchesQuery]
 [src: file: frontend/src/components/NewDiscussionForm.tsx:239-242#matchingMentionTargets]
 [src: file: frontend/src/lib/mention-autocomplete.ts:7-10#mentionMatchRank]

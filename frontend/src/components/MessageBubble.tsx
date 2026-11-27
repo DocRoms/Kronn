@@ -38,9 +38,11 @@ import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, SessionContinuity, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity } from '../types/generated';
+import type { DiscussionMessage, SessionContinuity, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity, ModelTier } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
+import { AgentIdentity } from './ui/AgentIdentity';
+import { agentModel, type AgentIdentityRole } from './ui/agentIdentityKinds';
 import { externalAgentColor } from '../lib/externalAgentIdentity';
 import { gravatarUrl } from '../lib/gravatar';
 import {
@@ -447,15 +449,18 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const externalAgentBorderColor = agentType === 'Custom'
     ? externalAgentColor(defaultAgentAlias)
     : null;
-  const agentIdentityLabel = isTourDemo
-    ? t('disc.tourDemoKind')
-    : workflowStep
-      ? t('disc.targetDiscussionAgent')
-      : msg.source_msg_id
-        ? t('disc.targetCli')
-        : agentType === defaultAgent
-          ? t('disc.targetDiscussionAgent')
-          : t('disc.targetPunctualAgent');
+  // KT-1936 — the role, its own chip next to the model: a workflow step, a
+  // joined CLI session, the main agent or a one-off agent.
+  const messageTier: ModelTier | null = msg.model_tier && msg.model_tier in MODEL_TIER_ICONS
+    ? msg.model_tier as ModelTier
+    : null;
+  const agentIdentityRole: AgentIdentityRole = workflowStep
+    ? 'workflowStep'
+    : msg.source_msg_id
+      ? 'cli'
+      : agentType === defaultAgent
+        ? 'main'
+        : 'oneOff';
   const replyAuthor = useMemo(() => {
     if (!replyTarget) return '';
     if (replyTarget.agent_type) {
@@ -837,15 +842,27 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               </div>
             )}
             {msg.role === 'Agent' && (
-              <div className="disc-msg-agent-label" style={{ color: agentTextColor(agentType, mentionColors), justifyContent: 'space-between' }}>
-                <span className="flex-row gap-2">
+              <div className="disc-msg-agent-label" style={{ justifyContent: 'space-between' }}>
+                {/* The agent colour on the identity's line only (its workflow,
+                 *  CLI and session notes), not on the whole header row. */}
+                <span className="flex-row gap-2" style={{ color: agentTextColor(agentType, mentionColors) }}>
                   {/* "<agent>[ · <model>][ · <owner>]" — answers WHO + WHAT at a
                    *  glance. model_tier is present on local agent messages; a
                    *  federated agent reply also carries its owner's pseudo
                    *  (handle_incoming_chat_message) so "ClaudeCode · reasoning · Romu"
                    *  reads as "Romu's ClaudeCode on the other instance". */}
-                  <Cpu size={10} /> {agentTrigger}
-                  <span className="disc-msg-agent-kind"> · {agentIdentityLabel}</span>
+                  {/* KT-1936 — name, model (or « model not recorded »: never the
+                   *  tier name), its mode's icon and its role, one component. */}
+                  <AgentIdentity
+                    icon={<Cpu size={12} />}
+                    name={agentTrigger}
+                    color={agentTextColor(agentType, mentionColors)}
+                    model={agentModel(msg.model, 'notRecorded')}
+                    role={agentIdentityRole}
+                    roleLabel={isTourDemo ? t('disc.tourDemoKind') : undefined}
+                    tier={messageTier}
+                    tierLabel={messageTier ? t(`disc.tier.${messageTier}`) : undefined}
+                  />
                   {/* KT-247 — stable per-provider CLI ordinal, so two joined
                    *  Claude Code (or two Codex) are distinguishable in the
                    *  timeline. Matches the `@claude-cli-2` room alias. */}
@@ -865,18 +882,6 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                       title={`Session ${agentTrigger}-cli${msg.author_cli_ordinal > 1 ? `-${msg.author_cli_ordinal}` : ''}`}
                     >
                       {' '}· CLI{msg.author_cli_ordinal > 1 ? ` ${msg.author_cli_ordinal}` : ''}
-                    </span>
-                  )}
-                  {/* Prefer the CONCRETE model ("qwen3:32b", "sonnet") — a disc can
-                   *  switch models mid-thread, so this is per-message. Fall back to
-                   *  the tier when the model wasn't recorded (legacy rows / a
-                   *  provider-default run with no explicit flag). */}
-                  {(msg.model || msg.model_tier) && (
-                    <span
-                      style={{ opacity: 0.6, fontWeight: 400 }}
-                      title={msg.model ? `Modèle : ${msg.model}` : `Palier : ${msg.model_tier}`}
-                    >
-                      · {msg.model ?? msg.model_tier}
                     </span>
                   )}
                   {/* KT-1202 — whether this turn continued the agent's conversation. */}
