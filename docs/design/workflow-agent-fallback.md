@@ -249,7 +249,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 
 | Current spawn path | What it covers |
 |---|---|
-| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4753-4796#native_http_tools] |
+| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4756-4799#native_http_tools] |
 | Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:629-725#ToolFreeSummary] |
 | Debate participants | Starts every participant/round independently. [src: file: backend/src/api/discussions/orchestration.rs:803-1020#start_agent_with_config] |
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:966-1123#synthesis_external_http] |
