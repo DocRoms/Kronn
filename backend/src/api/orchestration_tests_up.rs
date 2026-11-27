@@ -28610,6 +28610,241 @@ async fn a_total_duration_timeout_leaves_the_delivery_approvable() {
     }
 }
 
+/// KT-2125 — a DoD item added while the delivery is under review is not left for
+/// the delivery to refuse: request_changes adopts the current DoD, and the rework
+/// brief lists every item the next delivery must evidence, the new one included.
+#[tokio::test]
+async fn request_changes_adopts_a_dod_item_added_while_the_delivery_was_under_review() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_parent, child_id, exec_id, _head, _path) =
+        delivered_awaiting_review(&db, repo.path()).await;
+    let task_id = exec_of(&db, &exec_id).await.task_id;
+    let launched = exec_of(&db, &exec_id).await.worker_dod_ids.unwrap();
+
+    // What `task_update` writes while the delivery is under review.
+    let owned_task = task_id.clone();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "INSERT INTO planning_task_dod_items \
+                 (id, task_id, sentence, completed, position, created_at, updated_at) \
+                 VALUES ('late-item', ?1, 'added during review', 0, 99, \
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [&owned_task],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // Still under review, the launch-time snapshot is kept (KT-1291).
+    assert_eq!(
+        exec_of(&db, &exec_id).await.worker_dod_ids.as_ref(),
+        Some(&launched)
+    );
+
+    let outcome = decide_review(
+        &db,
+        &exec_id,
+        &review_request_changes("Ajoute le cas manquant"),
+        "ClaudeCode",
+        "sess-b",
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, ReviewOutcome::Reviewed { .. }),
+        "the review is recorded, not refused"
+    );
+
+    let after = exec_of(&db, &exec_id).await;
+    let adopted = after.worker_dod_ids.clone().unwrap();
+    assert_eq!(
+        adopted.len(),
+        launched.len() + 1,
+        "the rework adopts the DoD"
+    );
+    assert!(adopted.contains(&"late-item".to_string()));
+    let brief = discussion_contents(&db, &child_id)
+        .await
+        .into_iter()
+        .find(|content| content.contains("Ajoute le cas manquant"))
+        .expect("the rework brief is posted in the child");
+    assert!(brief.contains("added during review"), "{brief}");
+    assert!(
+        brief.contains(&format!("exactement {}", adopted.len())),
+        "{brief}"
+    );
+}
+
+/// KT-2125 — a DoD edit answers, per live execution, whether it adopted the change.
+/// Under review the answer is "not yet"; the request_changes that follows adopts it.
+#[tokio::test]
+async fn a_dod_edit_reports_which_live_execution_adopted_it() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_parent, _child_id, exec_id, _head, _path) =
+        delivered_awaiting_review(&db, repo.path()).await;
+    let task_id = exec_of(&db, &exec_id).await.task_id;
+
+    let owned_task = task_id.clone();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "INSERT INTO planning_task_dod_items \
+                 (id, task_id, sentence, completed, position, created_at, updated_at) \
+                 VALUES ('late-item', ?1, 'added during review', 0, 99, \
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [&owned_task],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let report_task = task_id.clone();
+    let report = db
+        .with_read_conn(move |conn| {
+            crate::db::orchestration::dod_adoption_report(conn, &report_task)
+        })
+        .await
+        .unwrap();
+    let entry = report
+        .iter()
+        .find(|entry| entry["execution_id"] == exec_id.as_str())
+        .expect("the live execution is reported");
+    assert_eq!(entry["adopted"], false);
+    assert!(
+        entry["note"].as_str().unwrap().contains("request_changes"),
+        "{entry}"
+    );
+
+    decide_review(
+        &db,
+        &exec_id,
+        &review_request_changes("Ajoute le cas manquant"),
+        "ClaudeCode",
+        "sess-b",
+    )
+    .await
+    .unwrap();
+    let report = db
+        .with_read_conn(move |conn| crate::db::orchestration::dod_adoption_report(conn, &task_id))
+        .await
+        .unwrap();
+    assert!(
+        report
+            .iter()
+            .filter(|entry| entry["execution_id"] == exec_id.as_str())
+            .all(|entry| entry["adopted"] == true),
+        "{report:?}"
+    );
+}
+
+/// KT-2125 — the 2026-11-27 sequence, replayed: a native worker delivers, the
+/// principal adds two DoD items while that delivery is under review and sends it
+/// back, the rework delivers, and the delivery is judged against the six items. It
+/// ends in AwaitingReview: no refusal, no Interrupted, no reassignment.
+#[tokio::test]
+async fn the_2026_11_27_dod_sequence_ends_in_review_with_every_added_item_evidenced() {
+    let repo = init_repo();
+    let db = Database::open_in_memory().unwrap();
+    let (_parent, child_id, exec_id, _head, _path) =
+        delivered_awaiting_review(&db, repo.path()).await;
+    let e = exec_id.clone();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE task_executions SET worker_target_kind = 'agent', \
+                     worker_cli_session_id = NULL, worker_agent_type = 'Ollama' WHERE id = ?1",
+            [&e],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let launched = exec_of(&db, &exec_id).await.worker_dod_ids.unwrap();
+    let task_id = exec_of(&db, &exec_id).await.task_id;
+
+    // Two items added with `task_update` while the delivery is under review.
+    let owned_task = task_id.clone();
+    db.with_conn(move |conn| {
+        for (id, sentence, position) in [
+            ("late-a", "first item added during review", 98),
+            ("late-b", "second item added during review", 99),
+        ] {
+            conn.execute(
+                "INSERT INTO planning_task_dod_items \
+                     (id, task_id, sentence, completed, position, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, 0, ?4, \
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![id, owned_task, sentence, position],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let outcome = decide_review(
+        &db,
+        &exec_id,
+        &review_request_changes("Traite les deux points ajoutés"),
+        "ClaudeCode",
+        "sess-b",
+    )
+    .await
+    .unwrap();
+    let execution = match outcome {
+        ReviewOutcome::Reviewed {
+            verdict: ReviewVerdict::RequestChanges,
+            execution,
+        } => execution,
+        other => panic!("expected the rework, got {other:?}"),
+    };
+    assert_eq!(execution.status, TaskExecutionStatus::Working);
+    assert_eq!(
+        execution.worker_dod_ids.as_ref().map(Vec::len),
+        Some(launched.len() + 2),
+        "the rework adopted the two added items"
+    );
+    let dispatch_id = execution.dispatch_job_id.expect("rework dispatch attached");
+    let dispatch_for_lookup = dispatch_id.clone();
+    let trigger_message_id = db
+        .with_conn(move |conn| {
+            Ok(crate::db::agent_dispatch::get(conn, &dispatch_for_lookup)?
+                .context("rework dispatch vanished")?
+                .trigger_message_id)
+        })
+        .await
+        .unwrap();
+
+    let manifest = projected_manifest_for_execution(&db, &exec_id).await;
+    let delivered = deliver_native_worker_manifest(
+        &db,
+        &exec_id,
+        NativeExecutionCaller {
+            discussion_id: &child_id,
+            agent_type: &AgentType::Ollama,
+            source_message_id: Some(&trigger_message_id),
+            alias: "Ollama",
+            actor_session_id: Some("native-rework-dod-sequence"),
+        },
+        &dispatch_id,
+        &manifest,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(delivered, DeliverOutcome::Delivered { .. }),
+        "the rework delivery is accepted: {delivered:?}"
+    );
+
+    let after = exec_of(&db, &exec_id).await;
+    assert_eq!(after.status, TaskExecutionStatus::AwaitingReview);
+    let evidenced = serde_json::from_str::<serde_json::Value>(&manifest).unwrap()["dod_status"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default();
+    assert_eq!(evidenced, launched.len() + 2, "every item is evidenced");
+}
+
 /// KT-1293 — same, for request_changes after the total-duration timeout.
 #[tokio::test]
 async fn a_total_duration_timeout_still_lets_the_principal_request_changes() {

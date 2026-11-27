@@ -11139,8 +11139,14 @@ async fn decide_authorized_review(
 
             // (a) findings → the worker in the child (DoD-4).
             let lang = room_lang(db, &exec.parent_discussion_id).await;
-            let mut findings_msg =
-                build_review_findings_message(&exec.id, exec.attempt_no, &decision, &child, lang);
+            let mut findings_msg = build_review_findings_message(
+                &exec.id,
+                exec.attempt_no,
+                &decision,
+                &child,
+                &task.definition_of_done,
+                lang,
+            );
             if let Some(reanchored) = reanchored.as_ref() {
                 findings_msg
                     .content
@@ -11724,6 +11730,7 @@ fn build_review_findings_message(
     attempt_no: u32,
     decision: &ReviewDecisionV1,
     _child_discussion_id: &str,
+    dod: &[PlanningDodItem],
     lang: RoomLang,
 ) -> DiscussionMessage {
     let comment = decision.comment.as_deref().unwrap_or("").trim();
@@ -11748,7 +11755,7 @@ fn build_review_findings_message(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let content = match lang {
+    let mut content = match lang {
         RoomLang::Fr => {
             let comment = if comment.is_empty() {
                 "_(voir les points ci-dessous)_"
@@ -11780,6 +11787,27 @@ fn build_review_findings_message(
             )
         }
     };
+    // KT-2125 — the items the next delivery must evidence, the current DoD (a
+    // request_changes adopts it), in the order `dod_status` takes them.
+    if !dod.is_empty() {
+        let items = dod
+            .iter()
+            .enumerate()
+            .map(|(position, item)| format!("{}. {}", position + 1, item.sentence))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let count = dod.len();
+        content.push_str(&match lang {
+            RoomLang::Fr => format!(
+                "\n\n## Definition of Done à livrer\n\nTon prochain `task_exec_deliver` doit \
+                 contenir exactement {count} assertion(s) `dod_status`, dans cet ordre :\n\n{items}"
+            ),
+            RoomLang::En => format!(
+                "\n\n## Definition of Done to evidence\n\nYour next `task_exec_deliver` must \
+                 carry exactly {count} `dod_status` assertion(s), in this order:\n\n{items}"
+            ),
+        });
+    }
     orchestrator_message(
         format!("orch-review-findings:{exec_id}:{attempt_no}"),
         content + crate::core::ui_captures::retake_hint(lang),
@@ -20475,8 +20503,23 @@ async fn reoffer_after_review_budget_extension(
         .await?;
     if let Some(review) = review {
         if let Ok(decision) = serde_json::from_str::<ReviewDecisionV1>(&review.decision_json) {
-            let message =
-                build_review_findings_message(&execution.id, attempt, &decision, &child, lang);
+            let task_id = execution.task_id.clone();
+            let dod = state
+                .db
+                .with_conn(move |conn| {
+                    Ok(crate::db::planning::get_task(conn, &task_id)?
+                        .map(|task| task.definition_of_done)
+                        .unwrap_or_default())
+                })
+                .await?;
+            let message = build_review_findings_message(
+                &execution.id,
+                attempt,
+                &decision,
+                &child,
+                &dod,
+                lang,
+            );
             let child_id = child.clone();
             // A message already posted for this attempt is the same findings.
             let _ = state
