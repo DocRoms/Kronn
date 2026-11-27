@@ -1,10 +1,16 @@
-import { useState, type ReactNode } from 'react';
-import { Archive, Copy, Pencil, Plus, Trash2 } from 'lucide-react';
+import { useId, useState, type ReactNode } from 'react';
+import { Archive, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { Button, type ButtonSize, type ButtonVariant } from '../ui/Button';
+import { CardHeader } from '../ui/CardHeader';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { DetailHeader } from '../ui/DetailHeader';
 import { Dialog } from '../ui/Dialog';
 import { Drawer } from '../ui/Drawer';
+import { DrawerHeader } from '../ui/DrawerHeader';
 import { EmptyState } from '../ui/EmptyState';
+import { ListHeader } from '../ui/ListHeader';
+import { SectionHeader } from '../ui/SectionHeader';
+import { TabHeader } from '../ui/TabHeader';
 import { Field } from '../ui/Field';
 import { FormFooter } from '../ui/FormFooter';
 import { IconButton } from '../ui/IconButton';
@@ -491,6 +497,137 @@ function LoadingStateDemo({ t }: { t: T }) {
   );
 }
 
+/** KT-1884 — one header kind in its normal and its compact form, each in a
+ *  frame as wide as the row. A demo header is plain content: it holds no
+ *  screen and covers nothing. The compact row carries a long title, to show
+ *  it ellipsizing while the actions stay on screen. */
+function HeaderRows({ t, render }: { t: T; render: (compact: boolean, id: string) => ReactNode }) {
+  const base = useId();
+  return (
+    <>
+      <Row label={t('designSystem.demo.header.normal')}>
+        <div className="ds-demo-frame ds-demo-header-frame">{render(false, `${base}-normal`)}</div>
+      </Row>
+      <Row label={t('designSystem.demo.header.compact')}>
+        <div className="ds-demo-frame ds-demo-header-frame">{render(true, `${base}-compact`)}</div>
+      </Row>
+    </>
+  );
+}
+
+function headerMenu(t: T): ReactNode {
+  const none = () => {};
+  return (
+    <Menu
+      label={t('designSystem.demo.menuLabel')}
+      size="sm"
+      items={[{ id: 'rename', label: t('designSystem.demo.rename'), icon: <Pencil />, onSelect: none }]}
+      destructiveItem={{ id: 'delete', label: t('designSystem.demo.delete'), icon: <Trash2 />, onSelect: none }}
+    />
+  );
+}
+
+function ListHeaderDemo({ t }: { t: T }) {
+  return (
+    <HeaderRows t={t} render={compact => (
+      <ListHeader
+        compact={compact}
+        title={compact ? t('designSystem.demo.header.longTitle') : t('designSystem.demo.header.listTitle')}
+        description={t('designSystem.demo.header.listCount')}
+        actions={<Button variant="primary" size={compact ? 'sm' : 'md'} icon={<Plus />}>{t('designSystem.demo.header.listAction')}</Button>}
+      />
+    )} />
+  );
+}
+
+function DetailHeaderDemo({ t }: { t: T }) {
+  return (
+    <HeaderRows t={t} render={compact => (
+      <DetailHeader
+        compact={compact}
+        title={compact ? t('designSystem.demo.header.longTitle') : t('designSystem.demo.header.detailTitle')}
+        meta={<code>wf-42</code>}
+        status={<StatusBadge tone="info">{t('designSystem.demo.status.info')}</StatusBadge>}
+        description={t('designSystem.demo.header.detailDescription')}
+        actions={<><Button size="sm">{t('designSystem.demo.header.run')}</Button>{headerMenu(t)}</>}
+      />
+    )} />
+  );
+}
+
+function TabHeaderDemo({ t }: { t: T }) {
+  return (
+    <HeaderRows t={t} render={compact => (
+      <TabHeader
+        compact={compact}
+        title={compact ? t('designSystem.demo.header.longTitle') : t('designSystem.demo.header.tabTitle')}
+        meta={<span>4</span>}
+        actions={<Button size="sm" icon={<Plus />}>{t('designSystem.demo.header.tabAction')}</Button>}
+      />
+    )} />
+  );
+}
+
+function SectionHeaderDemo({ t }: { t: T }) {
+  return (
+    <HeaderRows t={t} render={compact => (
+      <SectionHeader
+        compact={compact}
+        title={compact ? t('designSystem.demo.header.longTitle') : t('designSystem.demo.header.sectionTitle')}
+        description={t('designSystem.demo.header.sectionHint')}
+        actions={<IconButton size="sm" label={t('designSystem.demo.add')} icon={<Plus />} />}
+      />
+    )} />
+  );
+}
+
+function DrawerHeaderDemo({ t }: { t: T }) {
+  const [closed, setClosed] = useState(0);
+  return (
+    <>
+      <HeaderRows t={t} render={(compact, id) => (
+        <div role="group" aria-labelledby={id}>
+          <DrawerHeader
+            compact={compact}
+            titleId={id}
+            title={compact ? t('designSystem.demo.header.longTitle') : t('designSystem.demo.header.drawerTitle')}
+            status={<StatusBadge tone="success">{t('designSystem.demo.header.drawerShared')}</StatusBadge>}
+            description={t('designSystem.demo.header.drawerDescription')}
+            actions={<IconButton size="sm" label={t('designSystem.demo.header.refresh')} icon={<RefreshCw />} />}
+            onClose={() => setClosed(n => n + 1)}
+            closeLabel={t('ui.overlay.close')}
+          />
+        </div>
+      )} />
+      <p className="ds-demo-note" aria-live="polite" data-testid="ds-drawer-header-closed" data-count={closed}>
+        {t('designSystem.demo.header.closeHint')}
+      </p>
+    </>
+  );
+}
+
+function CardHeaderDemo({ t }: { t: T }) {
+  return (
+    <HeaderRows t={t} render={(compact, id) => (
+      <article className="ds-demo-card" aria-labelledby={id}>
+        <CardHeader
+          compact={compact}
+          titleId={id}
+          title={compact ? t('designSystem.demo.header.longTitle') : t('designSystem.demo.header.cardTitle')}
+          status={(
+            <>
+              <StatusBadge tone="success">{t('designSystem.demo.header.cardConnected')}</StatusBadge>
+              {!compact && <StatusBadge tone="warning">{t('designSystem.demo.status.warning')}</StatusBadge>}
+            </>
+          )}
+          description="api.github.com"
+          actions={headerMenu(t)}
+        />
+      </article>
+    )} />
+  );
+}
+
 const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   button: ButtonDemo,
   iconButton: IconButtonDemo,
@@ -509,6 +646,12 @@ const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   notice: NoticeDemo,
   emptyState: EmptyStateDemo,
   loadingState: LoadingStateDemo,
+  listHeader: ListHeaderDemo,
+  detailHeader: DetailHeaderDemo,
+  tabHeader: TabHeaderDemo,
+  sectionHeader: SectionHeaderDemo,
+  drawerHeader: DrawerHeaderDemo,
+  cardHeader: CardHeaderDemo,
 };
 
 /** KT-1880 — each component of components/ui/ under its own heading, with its
@@ -521,7 +664,7 @@ export function DesignSystemComponents({ t }: { t: T }) {
         const anchor = componentAnchor(component.id);
         return (
           <section key={component.id} className="ds-component" data-component={component.id} aria-labelledby={anchor}>
-            <h4 id={anchor} className="ds-component-title" tabIndex={-1}><code>{component.name}</code></h4>
+            <h3 id={anchor} className="ds-component-title" tabIndex={-1}><code>{component.name}</code></h3>
             <p className="ds-caption">{t(component.caption)}</p>
             <div className="ds-demo">{Demo ? <Demo t={t} /> : null}</div>
           </section>

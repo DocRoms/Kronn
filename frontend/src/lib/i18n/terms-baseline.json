@@ -89,7 +89,7 @@
         "planification": 14
       },
       "token": {
-        "jetons?": 62
+        "jetons?": 61
       },
       "workflow": {
         "automatisations?": 22
@@ -733,7 +733,6 @@
       "decisionPicker.stepLabel": ["7db6b920","term:step:steps?"],
       "decisionPicker.title": ["4a45e43d","term:step:steps?"],
       "designSystem.column.token": ["7704665d","term:token:jetons?"],
-      "designSystem.hint": ["3d16c291","term:token:jetons?"],
       "designSystem.link": ["fa730ea2","term:token:jetons?"],
       "designSystem.use.status-success": ["0ead6a7e","term:run:exécutions?"],
       "disc.action.kind.quick_api": ["461b652c","term:quick-action:Quick APIs?"],

@@ -4587,6 +4587,25 @@
   line-height: 1.45;
 }
 
+/* KT-1878 / KT-1987 — the link to the Design system sub-page, under the
+   appearance hint. Here, not in the gallery's stylesheet: Settings no longer
+   loads the gallery. */
+.set-design-system-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  margin-top: var(--kr-space-1);
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.set-design-system-link:hover {
+  text-decoration-thickness: 2px;
+}
+
 .set-preferences-controls-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

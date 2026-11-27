@@ -1,0 +1,12 @@
+/* KT-1884 — card kind: inside the card's padding, so none of its own. */
+.ui-card-header {
+  padding: 0;
+}
+
+.ui-card-header .ui-header-title {
+  font-size: var(--kr-type-lg);
+}
+
+.ui-card-header[data-compact] .ui-header-title {
+  font-size: var(--kr-type-md);
+}

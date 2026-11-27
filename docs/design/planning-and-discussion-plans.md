@@ -115,8 +115,8 @@ The selected view is saved per discussion in session storage. A small spinner
 on in-progress rows reflects Planning status only, not a worker heartbeat; it
 stops animating when reduced motion is requested. Background plan refreshes
 update membership and indicators without resetting the selected view.
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:842-872#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:240-249#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:407-440#filteredAllRelations]`
-`[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:133-138#writePlanOrchestrationState]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:873-903#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:240-249#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:407-440#filteredAllRelations]`
+`[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:134-139#writePlanOrchestrationState]`
 `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:561-565#renderProgress]` `[src: file: frontend/src/components/DiscussionPlanPanel.css:161-178#plan-task-progress]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:163-174#applyPlan]`
 
 Agents may instead emit structured proposals that the UI renders as existing

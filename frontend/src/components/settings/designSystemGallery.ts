@@ -33,6 +33,12 @@ export const GALLERY_COMPONENTS: readonly GalleryComponent[] = [
   component('notice', 'Notice'),
   component('emptyState', 'EmptyState'),
   component('loadingState', 'LoadingState'),
+  component('listHeader', 'ListHeader'),
+  component('detailHeader', 'DetailHeader'),
+  component('tabHeader', 'TabHeader'),
+  component('sectionHeader', 'SectionHeader'),
+  component('drawerHeader', 'DrawerHeader'),
+  component('cardHeader', 'CardHeader'),
 ];
 
 /** Anchor of the tokens part of the page. */

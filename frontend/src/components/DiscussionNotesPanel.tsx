@@ -10,6 +10,7 @@ import { Loader2, NotebookPen, Pencil, Plus, Trash2, X, Check } from 'lucide-rea
 import { config as configApi, discussions as discussionsApi } from '../lib/api';
 import type { DiscussionNote } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
+import { SidePanelHeaderSlot } from './SidePanelHeaderSlot';
 import './DiscussionNotesPanel.css';
 
 export interface DiscussionNotesPanelProps {
@@ -168,18 +169,23 @@ export function DiscussionNotesPanel({
 
   return (
     <section className="disc-notes-panel" data-testid="disc-notes-panel">
-      <header className="disc-notes-panel-head">
-        <span className="disc-notes-panel-title">
-          <NotebookPen size={14} aria-hidden="true" />
-          {t('disc.note.panelTitle')}
-          {notes && <em>{loaded?.total ?? notes.length}</em>}
-        </span>
-        {onClose && (
-          <button type="button" className="set-icon-btn" onClick={onClose} aria-label={t('common.close')}>
-            <X size={13} />
-          </button>
+      <SidePanelHeaderSlot
+        meta={notes ? <span data-testid="disc-notes-count">{loaded?.total ?? notes.length}</span> : undefined}
+        standalone={(
+          <header className="disc-notes-panel-head">
+            <span className="disc-notes-panel-title">
+              <NotebookPen size={14} aria-hidden="true" />
+              {t('disc.note.panelTitle')}
+              {notes && <em>{loaded?.total ?? notes.length}</em>}
+            </span>
+            {onClose && (
+              <button type="button" className="set-icon-btn" onClick={onClose} aria-label={t('common.close')}>
+                <X size={13} />
+              </button>
+            )}
+          </header>
         )}
-      </header>
+      />
 
       {/* Writing and reading in the same place: the old gesture asked the
           author to understand a channel toggle in the composer first. */}

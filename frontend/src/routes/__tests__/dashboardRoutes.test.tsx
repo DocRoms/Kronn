@@ -11,6 +11,7 @@ import type { WorkflowsPage } from '../../pages/WorkflowsPage';
 import type { PagesPage } from '../../pages/PagesPage';
 import type { PlanningPage } from '../../pages/PlanningPage';
 import type { SettingsPage } from '../../pages/SettingsPage';
+import type { DesignSystemPage } from '../../pages/DesignSystemPage';
 import type { McpPage } from '../../pages/McpPage';
 import { withDashboardRoutes } from '../../test/routerWrapper';
 import { navigateAppTab } from '../../lib/live-page-navigation';
@@ -39,6 +40,7 @@ vi.mock('../../pages/WorkflowsPage', () => ({ WorkflowsPage: marker('workflows')
 vi.mock('../../pages/PagesPage', () => ({ PagesPage: marker('pages') }));
 vi.mock('../../pages/McpPage', () => ({ McpPage: marker('mcps') }));
 vi.mock('../../pages/SettingsPage', () => ({ SettingsPage: marker('settings') }));
+vi.mock('../../pages/DesignSystemPage', () => ({ DesignSystemPage: marker('designSystem') }));
 
 const received = {
   projects: () => page.props.projects as ComponentProps<typeof ProjectList>,
@@ -48,6 +50,7 @@ const received = {
   pages: () => page.props.pages as ComponentProps<typeof PagesPage>,
   mcps: () => page.props.mcps as ComponentProps<typeof McpPage>,
   settings: () => page.props.settings as ComponentProps<typeof SettingsPage>,
+  designSystem: () => page.props.designSystem as ComponentProps<typeof DesignSystemPage>,
 };
 
 const emptyOverview: McpOverview = {
@@ -1037,5 +1040,113 @@ describe('Settings route', () => {
       },
     }));
     expect(received.settings().hasConfiguredApi).toBe(false);
+  });
+});
+
+describe('Design system route (KT-1987)', () => {
+  it('is a sub-page of Configuration with its own chunk, not the Settings page', async () => {
+    await open('/config/design-system');
+
+    expect(await screen.findByTestId('designSystem-page')).toBeInTheDocument();
+    expect(screen.queryByTestId('settings-page')).toBeNull();
+    expect(received.designSystem().tab).toBe('tokens');
+    expect(window.location.pathname).toBe('/config/design-system');
+  });
+
+  it('opens from the Settings link, and goes back to the Settings section that holds it', async () => {
+    await open('/config');
+    expect(screen.queryByTestId('designSystem-page')).toBeNull();
+
+    await act(async () => received.settings().onOpenDesignSystem?.());
+    expect(window.location.pathname).toBe('/config/design-system');
+    expect(await screen.findByTestId('designSystem-page')).toBeInTheDocument();
+
+    // The link sits in the appearance section, far down Settings: the way
+    // back opens Settings on that section, not at its top.
+    const anchor = document.createElement('div');
+    anchor.id = 'settings-appearance';
+    anchor.scrollIntoView = vi.fn();
+    document.body.appendChild(anchor);
+    try {
+      await act(async () => received.designSystem().onBack?.());
+      expect(window.location.pathname).toBe('/config');
+      expect(window.location.hash).toBe('#settings-appearance');
+      expect(await screen.findByTestId('settings-page')).toBeInTheDocument();
+      await waitFor(() => expect(anchor.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' }));
+    } finally {
+      anchor.remove();
+    }
+  });
+
+  it('holds its tab in the address: a step Back returns to the other tab', async () => {
+    await open('/config/design-system');
+
+    await act(async () => received.designSystem().onTabChange?.('components'));
+    expect(window.location.pathname).toBe('/config/design-system/components');
+    expect(received.designSystem().tab).toBe('components');
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(window.location.pathname).toBe('/config/design-system'));
+    expect(received.designSystem().tab).toBe('tokens');
+  });
+
+  it.each([
+    ['/config#design-system', '/config/design-system', '', 'tokens'],
+    ['/config#ds-tokens', '/config/design-system', '#ds-tokens', 'tokens'],
+    ['/config#ds-text', '/config/design-system', '#ds-text', 'tokens'],
+    ['/config#ds-components', '/config/design-system/components', '#ds-components', 'components'],
+    ['/config#ds-c-menu', '/config/design-system/components', '#ds-c-menu', 'components'],
+    ['/config#ds-c-confirmDialog', '/config/design-system/components', '#ds-c-confirmDialog', 'components'],
+  ])('lands the old address %s on %s%s, the %s tab', async (from, pathname, hash, tab) => {
+    await open(from);
+
+    expect(await screen.findByTestId('designSystem-page')).toBeInTheDocument();
+    expect(screen.queryByTestId('settings-page')).toBeNull();
+    expect(window.location.pathname).toBe(pathname);
+    expect(window.location.hash).toBe(hash);
+    expect(received.designSystem().tab).toBe(tab);
+  });
+
+  it('replaces the old address, so Back does not bounce on it', async () => {
+    await open('/projects');
+    await act(async () => { window.history.pushState(null, '', '/config#ds-c-menu'); window.dispatchEvent(new PopStateEvent('popstate')); });
+    await waitFor(() => expect(window.location.pathname).toBe('/config/design-system/components'));
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(window.location.pathname).toBe('/projects'));
+  });
+
+  it('keeps the anchors of Configuration itself on Configuration', async () => {
+    await open('/config#settings-server');
+
+    expect(await screen.findByTestId('settings-page')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/config');
+    expect(window.location.hash).toBe('#settings-server');
+  });
+
+  it('brings an entry into view on arrival, on the tab its address names', async () => {
+    const heading = document.createElement('h4');
+    heading.id = 'ds-c-menu';
+    heading.scrollIntoView = vi.fn();
+    document.body.appendChild(heading);
+    try {
+      await open('/config/design-system/components#ds-c-menu');
+      expect(received.designSystem().tab).toBe('components');
+      await waitFor(() => expect(heading.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' }));
+    } finally {
+      heading.remove();
+    }
+  });
+
+  it.each([
+    ['/config/design-system#ds-c-menu', '/config/design-system/components', '#ds-c-menu', 'components'],
+    ['/config/design-system/components#ds-text', '/config/design-system', '#ds-text', 'tokens'],
+    ['/config/design-system/nope', '/config/design-system', '', 'tokens'],
+  ])('sends %s to the tab that shows it: %s%s', async (from, pathname, hash, tab) => {
+    await open(from);
+
+    await waitFor(() => expect(window.location.pathname).toBe(pathname));
+    expect(window.location.hash).toBe(hash);
+    expect(received.designSystem().tab).toBe(tab);
   });
 });

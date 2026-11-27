@@ -14,6 +14,9 @@
   font-weight: 650;
 }
 
+/* The standalone header only: under the title, smaller. Inside the side
+   panel the progress is `.plan-panel-meta`, on the view name's line and in
+   its size, like every other view's meta (SidePanelShell.css, KT-1884). */
 .plan-panel-progress {
   margin-top: 3px;
   color: var(--kr-text-muted);

@@ -1,0 +1,19 @@
+/* KT-1884 — drawer kind: the top of a layer, with its line under it. */
+.ui-drawer-header {
+  min-height: var(--kr-control-h-lg);
+  padding: var(--kr-space-3) var(--kr-space-4);
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+}
+
+.ui-drawer-header .ui-header-title {
+  font-size: var(--kr-type-xl);
+}
+
+.ui-drawer-header[data-compact] {
+  padding: var(--kr-space-2) var(--kr-space-2) var(--kr-space-2) var(--kr-space-3);
+}
+
+.ui-drawer-header[data-compact] .ui-header-title {
+  font-size: var(--kr-type-lg);
+}

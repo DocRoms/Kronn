@@ -18,6 +18,15 @@
   flex: 1;
 }
 
+/* The open file's path, under the side panel's title (KT-1884). */
+.git-header-path {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--kr-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .git-workspace-picker {
   display: grid;
   gap: 4px;

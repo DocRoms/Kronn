@@ -13,12 +13,15 @@ lots (KT-1880 to KT-1886); this lot only defines and shows them.
 - **Typed table:** `frontend/src/styles/designTokens.ts` lists every token of
   a scale with the i18n key of its use line (`designSystem.use.<name>`).
   `[src: file: frontend/src/styles/designTokens.ts:46-128#DESIGN_TOKEN_GROUPS]`
-- **In the app:** Settings → appearance panel → "Design system"
-  (`/config#design-system`), not in the section index. It reads each value
-  with `getComputedStyle` on `<html>` and re-reads it when `data-theme` changes.
-  Since KT-1880 the page also shows the base components, after the tokens,
-  with an index of its headings: see [ui-components.md](ui-components.md).
-  `[src: file: frontend/src/components/settings/DesignSystemSection.tsx:79#DesignSystemSection]`
+- **In the app:** Settings → appearance panel → "Design system", a sub-page
+  of its own since KT-1987 (`/config/design-system`), lazy-loaded, not in the
+  section index. Its Tokens tab reads each value with `getComputedStyle` on
+  `<html>` and re-reads it when `data-theme` changes. Since KT-1880 the page
+  also shows the base components, in a second tab
+  (`/config/design-system/components`), under one index of its headings: see
+  [ui-components.md](ui-components.md).
+  `[src: file: frontend/src/components/settings/DesignSystemTokens.tsx:63#DesignSystemTokens]`
+  `[src: file: frontend/src/pages/DesignSystemPage.tsx:39#DesignSystemPage]`
 
 ## The scales
 

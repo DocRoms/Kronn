@@ -1,0 +1,18 @@
+/* KT-1884 — tab kind: inside the detail's padding, so no side padding. */
+.ui-tab-header {
+  min-height: var(--kr-control-h-md);
+  padding: var(--kr-space-3) 0;
+}
+
+.ui-tab-header .ui-header-title {
+  font-size: var(--kr-type-lg);
+}
+
+.ui-tab-header[data-compact] {
+  min-height: var(--kr-control-h-sm);
+  padding: var(--kr-space-2) 0;
+}
+
+.ui-tab-header[data-compact] .ui-header-title {
+  font-size: var(--kr-type-md);
+}

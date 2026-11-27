@@ -10,6 +10,7 @@ import {
   Loader2, Check, X, Maximize2, Minimize2,
 } from 'lucide-react';
 import { GitDiffViewer } from './GitDiffViewer';
+import { SidePanelHeaderSlot } from './SidePanelHeaderSlot';
 import type { DiffLine } from '../lib/diff-syntax';
 import type { DiscussionWorkspace } from '../types/generated';
 
@@ -507,45 +508,64 @@ export function GitPanel({
     && workspace.disc_id === discussionId
     && workspace.state === 'attached';
 
+  // The expand toggle is in the header of both views; inside the side panel
+  // it and the refresh go to the actions of the shell's one header, the way
+  // back to its leading zone, on the left of the title (KT-1884).
+  const expandToggle = (testId?: string) => (
+    <button
+      type="button"
+      className="disc-tool-panel-icon"
+      data-testid={testId}
+      onClick={toggleExpanded}
+      title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
+      aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
+      aria-pressed={expanded}
+    >
+      {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+    </button>
+  );
+
   // ─── Diff view ──────────────────────────────────────────────────────────────
   if (diffPath) {
+    const backButton = (
+      <button
+        type="button"
+        className="disc-tool-panel-icon git-back-btn"
+        onClick={() => setDiffPath(null)}
+        aria-label={t('git.back')}
+      >
+        <ChevronLeft size={14} />
+      </button>
+    );
     return (
       <aside
         className="disc-tool-panel git-panel"
         data-expanded={expanded}
         aria-label={t('git.title')}
       >
-        <header className="disc-tool-panel-header git-header">
-          <button
-            className="disc-tool-panel-icon git-back-btn"
-            onClick={() => setDiffPath(null)}
-            aria-label={t('git.back')}
-          >
-            <ChevronLeft size={14} />
-          </button>
-          <span className="disc-tool-panel-title git-header-title">{diffPath}</span>
-          <div className="disc-tool-panel-actions">
-            <button
-              type="button"
-              className="disc-tool-panel-icon"
-              onClick={toggleExpanded}
-              title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
-              aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
-              aria-pressed={expanded}
-            >
-              {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-            </button>
-            {onClose && (
-              <button
-                className="disc-tool-panel-icon git-close-btn"
-                onClick={onClose}
-                aria-label={t('common.close')}
-              >
-                <X size={14} />
-              </button>
-            )}
-          </div>
-        </header>
+        <SidePanelHeaderSlot
+          meta={<span className="git-header-path" title={diffPath}>{diffPath}</span>}
+          leading={backButton}
+          actions={expandToggle()}
+          standalone={(
+            <header className="disc-tool-panel-header git-header">
+              {backButton}
+              <span className="disc-tool-panel-title git-header-title">{diffPath}</span>
+              <div className="disc-tool-panel-actions">
+                {expandToggle()}
+                {onClose && (
+                  <button
+                    className="disc-tool-panel-icon git-close-btn"
+                    onClick={onClose}
+                    aria-label={t('common.close')}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+            </header>
+          )}
+        />
         {expanded && status ? (
           <div className="git-expanded-layout">
             <GitDiffViewer
@@ -599,6 +619,11 @@ export function GitPanel({
   }
 
   // ─── Main view ──────────────────────────────────────────────────────────────
+  const refreshButton = (
+    <button type="button" className="disc-tool-panel-icon git-icon-btn" onClick={fetchStatus} title={t('git.refresh')} aria-label={t('git.refresh')}>
+      <RefreshCw size={12} />
+    </button>
+  );
   return (
     <aside
       className="disc-tool-panel git-panel"
@@ -606,31 +631,24 @@ export function GitPanel({
       aria-label={t('git.title')}
     >
       {/* Header */}
-      <header className="disc-tool-panel-header git-header">
-        <span className="disc-tool-panel-title git-header-title">
-          <GitBranch size={13} style={{ marginRight: 6 }} />
-          {t('git.title')}
-        </span>
-        <div className="disc-tool-panel-actions git-header-actions">
-          <button
-            type="button"
-            className="disc-tool-panel-icon"
-            data-testid="git-expand-toggle"
-            onClick={toggleExpanded}
-            title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
-            aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
-            aria-pressed={expanded}
-          >
-            {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-          </button>
-          <button className="disc-tool-panel-icon git-icon-btn" onClick={fetchStatus} title={t('git.refresh')} aria-label={t('git.refresh')}>
-            <RefreshCw size={12} />
-          </button>
-          {onClose && (
-            <button className="disc-tool-panel-icon git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
-          )}
-        </div>
-      </header>
+      <SidePanelHeaderSlot
+        actions={<>{expandToggle('git-expand-toggle')}{refreshButton}</>}
+        standalone={(
+          <header className="disc-tool-panel-header git-header">
+            <span className="disc-tool-panel-title git-header-title">
+              <GitBranch size={13} style={{ marginRight: 6 }} />
+              {t('git.title')}
+            </span>
+            <div className="disc-tool-panel-actions git-header-actions">
+              {expandToggle('git-expand-toggle')}
+              {refreshButton}
+              {onClose && (
+                <button className="disc-tool-panel-icon git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
+              )}
+            </div>
+          </header>
+        )}
+      />
 
       {discussionId && workspaces.length > 0 && (
         <label className="git-workspace-picker">

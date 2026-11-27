@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_PAGE, PAGE_PATHS, STANDALONE_PATHS, automationEditorFromPath, automationPath, automationTabFromPath, discussionPath, isAppPath, pathToPage,
+  DEFAULT_PAGE, DESIGN_SYSTEM_PATH, DESIGN_SYSTEM_TABS, PAGE_PATHS, STANDALONE_PATHS, automationEditorFromPath,
+  designSystemAnchorTab, designSystemPath, designSystemTabFromSegment, legacyDesignSystemLocation, automationPath, automationTabFromPath, discussionPath, isAppPath, pathToPage,
   livePagePath, planningTaskPath, pluginPath, projectLocation, projectPath, sameAutomationSelection, settingsSectionPath, standalonePagePath, workflowPath, workflowShadowSettingsPath, type AutomationSelection, type DashboardPage,
 } from '../routes';
 
@@ -211,5 +212,48 @@ describe('Configuration sections', () => {
   it('names a section by the hash of the Configuration address', () => {
     expect(settingsSectionPath('settings-server')).toBe('/config#settings-server');
     expect(pathToPage(settingsSectionPath('settings-server').split('#')[0])).toBe('settings');
+  });
+});
+
+describe('design system sub-page (KT-1987)', () => {
+  it('lives under Configuration: the tokens at its root, the components on their segment', () => {
+    expect(DESIGN_SYSTEM_PATH).toBe('/config/design-system');
+    expect(designSystemPath()).toBe('/config/design-system');
+    expect(designSystemPath({ tab: 'components' })).toBe('/config/design-system/components');
+    expect(designSystemPath({ tab: 'components', anchor: 'ds-c-menu' })).toBe('/config/design-system/components#ds-c-menu');
+    expect(designSystemPath({ tab: 'tokens', anchor: 'ds-text' })).toBe('/config/design-system#ds-text');
+    expect(pathToPage(designSystemPath({ tab: 'components' }))).toBe('settings');
+  });
+
+  it('reads the tab back from its segment, and nothing from an unknown one', () => {
+    for (const tab of DESIGN_SYSTEM_TABS) {
+      const segment = designSystemPath({ tab }).slice(DESIGN_SYSTEM_PATH.length + 1) || undefined;
+      expect(designSystemTabFromSegment(segment)).toBe(tab);
+    }
+    expect(designSystemTabFromSegment('tokens-and-more')).toBeNull();
+  });
+
+  it.each([
+    ['design-system', { tab: 'tokens', anchor: null }],
+    ['ds-tokens', { tab: 'tokens', anchor: 'ds-tokens' }],
+    ['ds-colour', { tab: 'tokens', anchor: 'ds-colour' }],
+    ['ds-components', { tab: 'components', anchor: 'ds-components' }],
+    ['ds-c-button', { tab: 'components', anchor: 'ds-c-button' }],
+    ['ds-c-confirmDialog', { tab: 'components', anchor: 'ds-c-confirmDialog' }],
+  ] as const)('lands the old anchor /config#%s on its tab and entry', (anchor, location) => {
+    expect(legacyDesignSystemLocation(anchor)).toEqual(location);
+  });
+
+  it.each([null, '', 'settings-server', 'settings-appearance', 'run-payload-retention', 'design-systems'])(
+    'leaves the anchor %s to Configuration',
+    anchor => {
+      expect(legacyDesignSystemLocation(anchor)).toBeNull();
+    },
+  );
+
+  it('names the tab of an entry anchor', () => {
+    expect(designSystemAnchorTab('ds-c-menu')).toBe('components');
+    expect(designSystemAnchorTab('ds-space')).toBe('tokens');
+    expect(designSystemAnchorTab('settings-server')).toBeNull();
   });
 });

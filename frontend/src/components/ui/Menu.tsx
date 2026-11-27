@@ -34,6 +34,8 @@ export interface MenuProps<L extends string = string> {
   align?: 'start' | 'end';
   size?: ButtonSize;
   variant?: ButtonVariant;
+  /** `data-testid` of the trigger. */
+  triggerTestId?: string;
 }
 
 /** KT-1880 — a menu button (WAI-ARIA menu pattern). Enter, Space or Arrow
@@ -42,7 +44,7 @@ export interface MenuProps<L extends string = string> {
  *  Enter or Space chooses; Escape and Tab close it and give focus back to the
  *  trigger. A click outside closes it. */
 export function Menu<L extends string>({
-  label, items, destructiveItem, icon, showLabel = false, align = 'end', size = 'md', variant = 'ghost',
+  label, items, destructiveItem, icon, showLabel = false, align = 'end', size = 'md', variant = 'ghost', triggerTestId,
 }: MenuProps<L>) {
   const base = useId();
   const triggerId = `${base}-trigger`;
@@ -134,6 +136,7 @@ export function Menu<L extends string>({
     'aria-controls': open ? menuId : undefined,
     onClick: () => (open ? close(false) : openAt('first')),
     onKeyDown: onTriggerKeyDown,
+    'data-testid': triggerTestId,
   };
 
   return (

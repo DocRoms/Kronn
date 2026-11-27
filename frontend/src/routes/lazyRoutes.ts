@@ -11,6 +11,11 @@ export const PagesRoute = lazyPage(() => import('./PagesRoute').then(m => m.Page
 export const PluginsRoute = lazyPage(() => import('./PluginsRoute').then(m => m.PluginsRoute));
 export const SettingsRoute = lazyPage(() => import('./SettingsRoute').then(m => m.SettingsRoute));
 
+// KT-1987 — the design system gallery, a sub-page of Configuration: its own
+// chunk, fetched on its first visit only (never preloaded), so neither
+// Configuration nor the start-up idle preload pulls the gallery in.
+export const DesignSystemRoute = lazyPage(() => import('./DesignSystemRoute').then(m => m.DesignSystemRoute));
+
 export const PRELOADED_ROUTES = [
   ProjectsRoute, DiscussionsRoute, PlanningRoute, WorkflowsRoute, PagesRoute, PluginsRoute, SettingsRoute,
 ];

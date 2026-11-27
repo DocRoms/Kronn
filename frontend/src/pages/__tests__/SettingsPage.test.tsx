@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { I18nProvider } from '../../lib/I18nContext';
 import { TourProvider } from '../../components/tour/TourProvider';
 
@@ -422,15 +425,27 @@ describe('SettingsPage', () => {
     expect(document.querySelector('.set-content > #settings-languages')).toBeNull();
   });
 
-  it('links the appearance settings to the Design system section, absent from the section index', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+  it('links the appearance settings to the Design system sub-page, and no longer renders the gallery (KT-1987)', async () => {
+    const onOpenDesignSystem = vi.fn();
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} onOpenDesignSystem={onOpenDesignSystem} />);
 
-    const link = document.querySelector('[data-kind="appearance"] [data-testid="design-system-link"]');
-    expect(link?.getAttribute('href')).toBe('/config#design-system');
-    expect(link?.textContent).toContain('Design system');
-    expect(document.querySelector('.set-content > #design-system')).toBeTruthy();
-    expect(document.querySelector('#design-system tr[data-token="--kr-type-sm"]')).toBeTruthy();
-    expect(document.querySelector('.set-nav a[href="/config#design-system"]')).toBeNull();
+    const link = document.querySelector('[data-kind="appearance"] [data-testid="design-system-link"]') as HTMLElement;
+    expect(link.getAttribute('href')).toBe('/config/design-system');
+    expect(link.textContent).toContain('Design system');
+    fireEvent.click(link);
+    expect(onOpenDesignSystem).toHaveBeenCalledTimes(1);
+
+    expect(document.getElementById('design-system')).toBeNull();
+    expect(screen.queryByTestId('design-system-page')).toBeNull();
+    expect(document.querySelector('tr[data-token]')).toBeNull();
+    expect(document.querySelector('.ds-index, .ds-component')).toBeNull();
+    expect(document.querySelector('.set-nav a[href*="design-system"]')).toBeNull();
+  });
+
+  it('does not import the gallery: it is a chunk of its own (KT-1987)', () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'SettingsPage.tsx'), 'utf8');
+    expect(source).not.toMatch(/DesignSystem(Section|Page|Tokens|Components)\b/);
+    expect(source).not.toMatch(/designSystemGallery/);
   });
 
   it('explains the output-language scope for launched agents and external CLIs', async () => {

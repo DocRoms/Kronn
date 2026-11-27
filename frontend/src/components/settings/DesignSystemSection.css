@@ -1,27 +1,47 @@
-/* KT-1878 — Settings > Design system. Written with the scales it shows. */
+/* KT-1878 — Settings > Design system. Written with the scales it shows.
+   KT-1987 — a sub-page of its own (/config/design-system); the link to it,
+   in the appearance settings, is styled by SettingsPage.css. */
 
-/* The link to this section from the appearance panel of the preferences. */
-.set-design-system-link {
+.ds-page {
+  min-width: 0;
+}
+
+/* The way back to Settings, in the header's leading slot. */
+.ds-back {
   display: inline-flex;
   align-items: center;
-  gap: var(--kr-space-1);
-  margin-top: var(--kr-space-1);
-  font-size: var(--kr-type-sm);
-  font-weight: var(--kr-weight-medium);
-  color: var(--kr-accent);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  justify-content: center;
+  width: var(--kr-control-h-sm);
+  height: var(--kr-control-h-sm);
+  border-radius: var(--kr-radius-control);
+  color: var(--kr-text-secondary);
+  transition: background-color var(--kr-duration-fast) ease-out;
 }
 
-.set-design-system-link:hover {
-  text-decoration-thickness: 2px;
-}
-
-.ds-title {
-  margin: 0;
-  font-size: var(--kr-type-lg);
-  font-weight: var(--kr-weight-semibold);
+.ds-back:hover,
+.ds-back:focus-visible {
+  background-color: var(--kr-bg-hover-strong);
   color: var(--kr-text-primary);
+}
+
+@media (pointer: coarse) {
+  .ds-back {
+    width: var(--kr-control-h-touch);
+    height: var(--kr-control-h-touch);
+  }
+}
+
+/* The two tabs, Tokens and Components, under the index. */
+.ds-tabs {
+  margin-top: var(--kr-space-5);
+}
+
+.ds-tabs .ds-part {
+  margin-top: 0;
+}
+
+.ds-tabs .ds-part > .ds-group:first-of-type {
+  margin-top: var(--kr-space-4);
 }
 
 .ds-group {
@@ -304,6 +324,27 @@
   background-color: var(--kr-bg-elevated);
   border: 1px solid var(--kr-border-light);
   border-radius: var(--kr-radius-surface);
+}
+
+/* KT-1884 — a header demo takes the whole row and may shrink below its
+   title: the title ellipsizes, the actions stay inside the frame (400px). */
+.ds-demo-header-frame {
+  flex-basis: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ds-demo-header-frame > .ui-tab-header,
+.ds-demo-header-frame > .ui-section-header {
+  padding-inline: var(--kr-space-3);
+}
+
+.ds-demo-header-frame > .ui-section-header {
+  padding-block-start: var(--kr-space-2);
+}
+
+.ds-demo-card {
+  padding: var(--kr-space-3);
 }
 
 .ds-demo-frame > .ui-loading-state[data-size="md"],

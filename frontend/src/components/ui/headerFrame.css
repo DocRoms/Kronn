@@ -1,0 +1,99 @@
+/* KT-1884 — the layout the six header kinds share. Each kind's stylesheet
+   sets its title size, its padding and its line; this one never positions
+   the header: a header is plain content, in the flow of what holds it. */
+.ui-header {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-3);
+  min-width: 0;
+  color: var(--kr-text-primary);
+}
+
+.ui-header-identity {
+  /* Zero basis: a long title ellipsizes, it never pushes the actions out. */
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-2);
+}
+
+.ui-header-leading {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  color: var(--kr-text-secondary);
+}
+
+.ui-header-text {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+}
+
+.ui-header-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-2);
+}
+
+.ui-header-title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  font-weight: var(--kr-weight-semibold);
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-header-meta,
+.ui-header-status {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+}
+
+.ui-header-meta {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-type-sm);
+}
+
+.ui-header-description {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kr-space-1) var(--kr-space-2);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-type-md);
+}
+
+/* Compact: one line that ends with an ellipsis when it does not fit. A block,
+   not a flex box: `text-overflow` acts on the line of a block container, so
+   a plain string and the inline text of its children are cut with « … »
+   instead of mid-letter. Its children are inline, spaced by a margin. */
+.ui-header[data-compact] .ui-header-description {
+  display: block;
+  overflow: hidden;
+  font-size: var(--kr-type-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-header[data-compact] .ui-header-description > * + * {
+  margin-inline-start: var(--kr-space-2);
+}
+
+.ui-header-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+}

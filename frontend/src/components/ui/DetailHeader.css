@@ -1,0 +1,18 @@
+/* KT-1884 — detail kind: one size under the page title, a line under it. */
+.ui-detail-header {
+  min-height: var(--kr-control-h-lg);
+  padding: var(--kr-space-3) var(--kr-space-4);
+  border-bottom: 1px solid var(--kr-border);
+}
+
+.ui-detail-header .ui-header-title {
+  font-size: var(--kr-type-xl);
+}
+
+.ui-detail-header[data-compact] {
+  padding: var(--kr-space-2) var(--kr-space-3);
+}
+
+.ui-detail-header[data-compact] .ui-header-title {
+  font-size: var(--kr-type-lg);
+}

@@ -86,10 +86,9 @@ import { WorkersSection } from '../components/settings/WorkersSection';
 import { RunRetentionBanner, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
 import { AppLink } from '../components/AppLink';
 import { revealWhenSettled } from '../lib/revealWhenSettled';
-import { settingsSectionPath } from '../lib/routes';
+import { designSystemPath, settingsSectionPath } from '../lib/routes';
 import { ContextHelp } from '../components/ContextHelp';
 import { DebugSection } from '../components/settings/DebugSection';
-import { DesignSystemSection, DESIGN_SYSTEM_SECTION_ID } from '../components/settings/DesignSystemSection';
 import { ExternalContentSection, EXTERNAL_CONTENT_SECTION_ID, type EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
 import { UserContextEditor } from '../components/UserContextEditor';
 import { MatrixText } from '../components/MatrixText';
@@ -188,6 +187,8 @@ interface SettingsPageProps {
   /** One of the page's own anchor links was followed (the page has scrolled
    *  there): the address names that anchor. */
   onAnchorFollowed?: (anchorId: string) => void;
+  /** A plain click on the Design system link: its sub-page, in this tab. */
+  onOpenDesignSystem?: () => void;
   /** The anchor an arrival on `/config#<anchor>` brings into view (the route
    *  scrolls to it), renewed by `arrivalToken` on every arrival. */
   arrivalAnchor?: string | null;
@@ -210,6 +211,7 @@ export function SettingsPage({
   embedOriginPrefill = null,
   modelTierTarget = null,
   onAnchorFollowed,
+  onOpenDesignSystem,
   arrivalAnchor = null,
   arrivalToken,
   onModelTierTargetConsumed,
@@ -1383,15 +1385,13 @@ export function SettingsPage({
                 <div>
                   <h3>{t('config.appearance')}</h3>
                   <p>{t('config.appearanceHint')}</p>
-                  {/* KT-1878 — the tokens behind the look, in the current theme. */}
+                  {/* KT-1878 — the tokens behind the look, in the current theme;
+                      KT-1987 — on their own sub-page, loaded on its first visit. */}
                   <AppLink
-                    to={settingsSectionPath(DESIGN_SYSTEM_SECTION_ID)}
+                    to={designSystemPath()}
                     className="set-design-system-link"
                     data-testid="design-system-link"
-                    onNavigate={() => {
-                      document.getElementById(DESIGN_SYSTEM_SECTION_ID)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
-                      onAnchorFollowed?.(DESIGN_SYSTEM_SECTION_ID);
-                    }}
+                    onNavigate={onOpenDesignSystem}
                   >
                     <Palette size={13} aria-hidden="true" />
                     {t('designSystem.link')}
@@ -2208,10 +2208,6 @@ export function SettingsPage({
           </div>
         </div>
       </div>
-
-      {/* KT-1878 — the design tokens, reached from the appearance settings
-          (and its address), not listed in the section index. */}
-      <DesignSystemSection t={t} />
         </div>
       </div>
       <div className="set-footer">

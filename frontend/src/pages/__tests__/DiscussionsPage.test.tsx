@@ -905,6 +905,50 @@ describe('DiscussionsPage', () => {
     }
   });
 
+  it('shows one header above the tabs on every panel, the panel drawing none of its own (KT-1884)', async () => {
+    const discussion = makeListDiscussion('d-one-header', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={{
+          claude_code: { full_access: true },
+        } as unknown as AgentsConfig}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-one-header"
+        {...liftedProps()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
+    const shell = await screen.findByTestId('panel-switcher');
+    const rail = () => shell.querySelector('.side-panel-shell-rail') as HTMLElement;
+    const tabs = within(rail()).getAllByRole('tab');
+    expect(tabs.length).toBeGreaterThanOrEqual(5);
+    for (const tab of tabs) {
+      fireEvent.click(tab);
+      const label = `panel « ${tab.textContent} »`;
+      expect(shell.querySelectorAll('.ui-header'), label).toHaveLength(1);
+      expect(
+        shell.querySelectorAll('.disc-tool-panel-header, .disc-assets-panel-header, .disc-notes-panel-head'),
+        label,
+      ).toHaveLength(0);
+      const header = shell.querySelector('.ui-header') as HTMLElement;
+      expect(within(header).getByRole('heading', { level: 2 }), label).toHaveTextContent(discussion.title);
+      // Above the rail and the panel, and the rail keeps every tab.
+      expect(header.nextElementSibling, label).toHaveClass('side-panel-shell-main');
+      expect(within(rail()).getAllByRole('tab'), label).toHaveLength(tabs.length);
+      expect(within(header).getByTestId('side-panel-menu-btn'), label).toBeInTheDocument();
+    }
+  });
+
   it('keeps the side panel out from under the full-screen mobile sidebar', async () => {
     const mobile = (matches: boolean) => Object.defineProperty(window, 'matchMedia', {
       writable: true,

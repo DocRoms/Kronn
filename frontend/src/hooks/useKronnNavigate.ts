@@ -1,8 +1,10 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router';
 import {
-  PAGE_PATHS, automationPath, discussionComparePath, discussionPath, livePagePath, planningTaskPath, pluginPath, projectPath, settingsSectionPath, workflowPath,
-  type AutomationIntent, type AutomationSelection, type DashboardPage, type DiscussionsIntent, type ProjectLocation,
+  PAGE_PATHS, automationPath, designSystemPath, discussionComparePath, discussionPath, livePagePath, planningTaskPath, pluginPath,
+  projectPath, settingsSectionPath, workflowPath,
+  type AutomationIntent, type AutomationSelection, type DashboardPage, type DesignSystemLocation, type DiscussionsIntent,
+  type ProjectLocation,
   type SettingsIntent,
 } from '../lib/routes';
 
@@ -31,6 +33,8 @@ export interface KronnNavigate {
   toWorkflows: (intent?: AutomationIntent) => void;
   /** Configuration, scrolled to one of its anchors (a section or a field), and what to do there on arrival. */
   toSettingsSection: (sectionId: string, intent?: SettingsIntent, options?: KronnNavigateOptions) => void;
+  /** The design system sub-page of Configuration, on a tab and optionally one of its entries. */
+  toDesignSystem: (location?: DesignSystemLocation, options?: KronnNavigateOptions) => void;
   /** The Plugins page with this config open. */
   toPlugin: (configId: string, options?: KronnNavigateOptions) => void;
   /** The Artifacts page with this Page open. */
@@ -94,6 +98,9 @@ export function useKronnNavigate(): KronnNavigate {
         replace: options?.replace,
         state: Object.keys(state).length > 0 ? state : null,
       });
+    },
+    toDesignSystem: (location, options) => {
+      void navigateRef.current(designSystemPath(location), { replace: options?.replace });
     },
     toPlugin: (configId, options) => {
       void navigateRef.current(pluginPath(configId), { replace: options?.replace });

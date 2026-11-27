@@ -1,9 +1,15 @@
 // One side panel for the discussion and the Artifact pages: full window height
-// (over the top navigation), a vertical rail of named views on its left, the
-// subject's title, a « ⋯ » menu for actions and a close button in its header.
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+// (over the top navigation), a vertical rail of named views on its left, and
+// ONE header above it (KT-1884, a `DrawerHeader`): the view's way back if it
+// has one, the subject's title, the active view's name and meta under it, the
+// view's own actions, a « ⋯ » menu and the close button. A view inside the
+// shell draws no header of its own: it hands its leading control, meta and
+// actions to this one (`SidePanelHeaderSlot`).
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, MutableRefObject, ReactNode } from 'react';
-import { MoreHorizontal, X } from 'lucide-react';
+import { DrawerHeader } from './ui/DrawerHeader';
+import { Menu, type MenuItem } from './ui/Menu';
+import { SidePanelHeaderContext } from './sidePanelHeaderContext';
 import './SidePanelShell.css';
 
 export interface SidePanelRailItem {
@@ -78,9 +84,13 @@ export function SidePanelShell({
   const localRef = useRef<HTMLElement | null>(null);
   const asideRef = panelRef ?? localRef;
   const [reserved, setReserved] = useState(0);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const [leadingTarget, setLeadingTarget] = useState<HTMLElement | null>(null);
+  const [metaTarget, setMetaTarget] = useState<HTMLElement | null>(null);
+  const [actionsTarget, setActionsTarget] = useState<HTMLElement | null>(null);
+  const headerTargets = useMemo(
+    () => ({ leading: leadingTarget, meta: metaTarget, actions: actionsTarget }),
+    [leadingTarget, metaTarget, actionsTarget],
+  );
 
   // The panel floats over the navigation, so a spacer keeps the page content
   // from sliding under it (the panel used to sit in the page's flex row).
@@ -95,33 +105,6 @@ export function SidePanelShell({
     return () => observer.disconnect();
   }, [asideRef]);
 
-  useEffect(() => {
-    if (!menuOpen) return undefined;
-    const onPointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (menuRef.current?.contains(target) || menuButtonRef.current?.contains(target)) return;
-      setMenuOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      // Closes the menu only, not the panel behind it.
-      event.preventDefault();
-      event.stopPropagation();
-      setMenuOpen(false);
-      menuButtonRef.current?.focus();
-    };
-    window.document.addEventListener('mousedown', onPointerDown);
-    window.document.addEventListener('keydown', onKeyDown, true);
-    return () => {
-      window.document.removeEventListener('mousedown', onPointerDown);
-      window.document.removeEventListener('keydown', onKeyDown, true);
-    };
-  }, [menuOpen]);
-
-  useEffect(() => {
-    if (menuOpen) menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
-  }, [menuOpen]);
-
   const onRailKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const current = items.findIndex(item => item.id === activeId);
     let next = -1;
@@ -135,14 +118,17 @@ export function SidePanelShell({
     tabRefs.current[next]?.focus();
   };
 
-  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    event.preventDefault();
-    const buttons = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
-    const index = buttons.indexOf(window.document.activeElement as HTMLButtonElement);
-    const step = event.key === 'ArrowDown' ? 1 : -1;
-    buttons[(index + step + buttons.length) % buttons.length]?.focus();
-  };
+  // The menu is the shared one: it renders in <body>, above the panel and
+  // whatever the active view draws, so its entries are never under a header.
+  const toItem = (action: SidePanelMenuAction): MenuItem => ({
+    id: action.id,
+    label: action.label,
+    icon: action.icon,
+    disabled: action.disabled,
+    onSelect: action.onSelect,
+  });
+  const destructive = menuActions.find(action => action.danger);
+  const activeItem = items.find(item => item.id === activeId);
 
   return (
     <>
@@ -154,65 +140,35 @@ export function SidePanelShell({
         data-testid={testId}
         aria-label={ariaLabel}
       >
-        <header className="side-panel-shell-header">
-          <h2 className="side-panel-shell-title">{title}</h2>
-          <div className="side-panel-shell-actions">
-            {menuActions.length > 0 && menuLabel && (
-              <div className="side-panel-shell-menu-wrap">
-                <button
-                  ref={menuButtonRef}
-                  type="button"
-                  className="side-panel-shell-icon"
-                  aria-label={menuLabel}
-                  title={menuLabel}
-                  aria-haspopup="menu"
-                  aria-expanded={menuOpen}
-                  data-testid="side-panel-menu-btn"
-                  onClick={() => setMenuOpen(open => !open)}
-                >
-                  <MoreHorizontal size={16} />
-                </button>
-                {menuOpen && (
-                  <div
-                    ref={menuRef}
-                    className="side-panel-shell-menu"
-                    role="menu"
-                    aria-label={menuLabel}
-                    onKeyDown={onMenuKeyDown}
-                  >
-                    {menuActions.map(action => (
-                      <button
-                        key={action.id}
-                        type="button"
-                        role="menuitem"
-                        data-action={action.id}
-                        data-danger={action.danger || undefined}
-                        disabled={action.disabled}
-                        onClick={() => {
-                          setMenuOpen(false);
-                          action.onSelect();
-                        }}
-                      >
-                        {action.icon}
-                        <span>{action.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            <button
-              type="button"
-              className="side-panel-shell-icon"
-              onClick={onClose}
-              aria-label={closeLabel}
-              title={closeLabel}
-              data-testid={closeTestId}
-            >
-              <X size={16} />
-            </button>
-          </div>
-        </header>
+        <DrawerHeader
+          compact
+          className="side-panel-shell-header"
+          title={title}
+          leading={<span ref={setLeadingTarget} className="side-panel-shell-view-leading" />}
+          description={(
+            <>
+              {activeItem && <span className="side-panel-shell-view">{activeItem.label}</span>}
+              <span ref={setMetaTarget} className="side-panel-shell-meta" />
+            </>
+          )}
+          actions={(
+            <>
+              <span ref={setActionsTarget} className="side-panel-shell-view-actions" />
+              {menuActions.length > 0 && menuLabel && (
+                <Menu
+                  label={menuLabel}
+                  size="sm"
+                  triggerTestId="side-panel-menu-btn"
+                  items={menuActions.filter(action => action !== destructive).map(toItem)}
+                  destructiveItem={destructive ? toItem(destructive) : undefined}
+                />
+              )}
+            </>
+          )}
+          onClose={onClose}
+          closeLabel={closeLabel}
+          closeTestId={closeTestId}
+        />
         <div className="side-panel-shell-main">
           <div
             className="side-panel-shell-rail"
@@ -255,7 +211,9 @@ export function SidePanelShell({
             role="tabpanel"
             aria-labelledby={`${prefix}${activeId}`}
           >
-            {children}
+            <SidePanelHeaderContext.Provider value={headerTargets}>
+              {children}
+            </SidePanelHeaderContext.Provider>
           </div>
         </div>
       </aside>

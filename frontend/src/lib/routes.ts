@@ -114,6 +114,81 @@ export function embedSettingsPath(origin?: string | null): string {
 }
 
 /**
+ * KT-1987 — the design system, a sub-page of Configuration: the tokens at
+ * `/config/design-system`, the components at `/config/design-system/components`.
+ * An entry of its index is the anchor of its heading, in the hash.
+ */
+export type DesignSystemTab = 'tokens' | 'components';
+
+export const DESIGN_SYSTEM_TABS: readonly DesignSystemTab[] = ['tokens', 'components'];
+
+const DESIGN_SYSTEM_SEGMENT = '/design-system';
+export const DESIGN_SYSTEM_PATH = `${PAGE_PATHS.settings}${DESIGN_SYSTEM_SEGMENT}`;
+/** The route segment of the sub-page, for the route table. */
+export const DESIGN_SYSTEM_ROUTE = `${DESIGN_SYSTEM_SEGMENT}/:designSystemTab?`;
+
+/** The path segment of each tab but the first, which is the sub-page itself. */
+const DESIGN_SYSTEM_TAB_SEGMENTS: Record<Exclude<DesignSystemTab, 'tokens'>, string> = {
+  components: 'components',
+};
+
+/** Where the design system opens: a tab and, optionally, one entry of it. */
+export interface DesignSystemLocation {
+  tab?: DesignSystemTab;
+  /** The id of an entry's heading (`ds-tokens`, `ds-text`, `ds-c-menu`…). */
+  anchor?: string | null;
+}
+
+/** The address of the design system, on a tab and optionally one of its entries. */
+export function designSystemPath({ tab = 'tokens', anchor }: DesignSystemLocation = {}): string {
+  const path = tab === 'tokens' ? DESIGN_SYSTEM_PATH : `${DESIGN_SYSTEM_PATH}/${DESIGN_SYSTEM_TAB_SEGMENTS[tab]}`;
+  return anchor ? `${path}#${encodeURIComponent(anchor)}` : path;
+}
+
+/** The tab a `:designSystemTab` route segment names, or null when it names none. */
+export function designSystemTabFromSegment(segment: string | undefined): DesignSystemTab | null {
+  if (!segment) return 'tokens';
+  const tab = (Object.keys(DESIGN_SYSTEM_TAB_SEGMENTS) as Exclude<DesignSystemTab, 'tokens'>[])
+    .find(candidate => DESIGN_SYSTEM_TAB_SEGMENTS[candidate] === segment);
+  return tab ?? null;
+}
+
+/** The Configuration section that holds the link to the design system. */
+export const SETTINGS_APPEARANCE_SECTION_ID = 'settings-appearance';
+
+/** The anchor `/config#…` named the design system by, before it had its own page. */
+export const DESIGN_SYSTEM_SECTION_ID = 'design-system';
+
+/**
+ * The tab of each anchor of the design system, first match wins: the
+ * components part (`ds-components`) and each component entry (`ds-c-<id>`),
+ * then the tokens part (`ds-tokens`) and each scale (`ds-<scale>`).
+ */
+const DESIGN_SYSTEM_ANCHOR_TABS: readonly (readonly [RegExp, DesignSystemTab])[] = [
+  [/^ds-components$/, 'components'],
+  [/^ds-c-[\w-]+$/, 'components'],
+  [/^ds-[\w-]+$/, 'tokens'],
+];
+
+/** The tab an entry anchor of the design system belongs to, or null when it is not one. */
+export function designSystemAnchorTab(anchor: string): DesignSystemTab | null {
+  return DESIGN_SYSTEM_ANCHOR_TABS.find(([pattern]) => pattern.test(anchor))?.[1] ?? null;
+}
+
+/**
+ * Where an old Configuration anchor of the design system lands now:
+ * `/config#design-system` on the sub-page, `/config#ds-c-menu` on the
+ * Components tab at the Menu entry, `/config#ds-text` on the Tokens tab at
+ * that scale. Null for an anchor of Configuration itself.
+ */
+export function legacyDesignSystemLocation(anchor: string | null | undefined): DesignSystemLocation | null {
+  if (!anchor) return null;
+  if (anchor === DESIGN_SYSTEM_SECTION_ID) return { tab: 'tokens', anchor: null };
+  const tab = designSystemAnchorTab(anchor);
+  return tab ? { tab, anchor } : null;
+}
+
+/**
  * Why a page reports a selection. `change`: the reader's pick, a step Back
  * can undo. `restore`: the page's own adjustment — its first report, or
  * dropping a resource the loaded list does not know — which replaces the

@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
-import { useLocation } from 'react-router';
+import { Navigate, useLocation } from 'react-router';
 import type { EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
 import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { useDashboardContext } from '../lib/dashboardContext';
 import { embedSettingsOrigin } from '../lib/live-page-navigation';
-import { EMBED_SETTINGS_PATH, type SettingsIntent } from '../lib/routes';
+import { EMBED_SETTINGS_PATH, designSystemPath, legacyDesignSystemLocation, type SettingsIntent } from '../lib/routes';
 import { revealWhenSettled } from '../lib/revealWhenSettled';
 import { SettingsPage } from '../pages/SettingsPage';
 import { useLocationIntent } from './useLocationIntent';
@@ -54,10 +54,16 @@ export function SettingsRoute() {
   if (!scrolledByPage) {
     try { arrivalAnchor = decodeURIComponent(hash.slice(1)) || null; } catch { arrivalAnchor = null; }
   }
+  // KT-1987 — the design system left this page for its own sub-page: its old
+  // address (`#design-system`) and the anchors of its entries land there, on
+  // the tab and the entry they name.
+  const designSystem = legacyDesignSystemLocation(arrivalAnchor);
+  if (designSystem) arrivalAnchor = null;
   useEffect(() => {
     if (!arrivalAnchor) return undefined;
     return revealWhenSettled(arrivalAnchor);
   }, [arrivalAnchor, arrival]);
+  if (designSystem) return <Navigate to={designSystemPath(designSystem)} replace />;
   return (
     <SettingsPage
       agents={ctx.agents}
@@ -77,6 +83,7 @@ export function SettingsRoute() {
         setInPageMove({ anchor: anchorId, key: null });
         nav.toSettingsSection(anchorId, {}, { replace: true });
       }}
+      onOpenDesignSystem={() => nav.toDesignSystem()}
       arrivalAnchor={arrivalAnchor}
       arrivalToken={arrival}
       toast={ctx.toast}
