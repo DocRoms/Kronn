@@ -58,14 +58,14 @@ does not make a hidden hard-coded fallback reappear.
   `http:<connection-id>`. NVIDIA capability metadata is read from its model
   records. A saved media slot never invents a capability.
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-109#discover_with_transport]
-[src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
-[src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
-[src: file: backend/src/api/external_api_connections.rs:305-472#probe_models]
-[src: file: backend/src/api/external_api_connections.rs:1407-1437#fetch_capability_catalogue]
-[src: file: backend/src/api/external_api_connections.rs:1439-1451#catalog_declares_modality]
-[src: file: backend/src/api/external_api_connections.rs:1453-1507#catalog_models_from_body]
-[src: file: backend/src/api/external_api_connections.rs:1509-1524#merge_catalog]
-[src: file: backend/src/core/model_catalog/mod.rs:762-777#reconcile_http_catalog]
+[src: file: backend/src/core/model_catalog/codex_discovery.rs:101-127#discover]
+[src: file: backend/src/core/model_catalog/codex_discovery.rs:129-214#run_handshake_and_list]
+[src: file: backend/src/api/external_api_connections.rs:333-500#probe_models]
+[src: file: backend/src/api/external_api_connections.rs:1435-1465#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1467-1479#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:1481-1535#catalog_models_from_body]
+[src: file: backend/src/api/external_api_connections.rs:1537-1552#merge_catalog]
+[src: file: backend/src/core/model_catalog/mod.rs:854-869#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
 
@@ -128,7 +128,7 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5865-5919#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5954-6008#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1948-1957#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1963-1994#select_model]
 
@@ -147,8 +147,8 @@ model still recorded `Available`. The cached provenance and error remain visible
 this is permission to attempt execution, not proof of account access. Missing CLI,
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
-[src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4400-4446#preflight_resolve]
+[src: file: backend/src/core/model_catalog/mod.rs:1288-1324#retained_claude_model]
+[src: file: backend/src/api/discussions/streaming.rs:4459-4505#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:1766-1851#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1360-1413#preflight_workflow_launch]
 
@@ -187,7 +187,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:2006-2036#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:2038-2068#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -212,17 +212,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3753-3928#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3840-4015#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
 [src: file: backend/src/agents/runner.rs:14066-14083#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:14159-14190#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14198-14229#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5243-5271#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5283-5311#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -259,16 +259,16 @@ was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:9-54#UnresolvedQuickPromptEffort]
 [src: file: backend/src/db/sql/176_discussion_effort_snapshots.sql:1-8#discussion_effort_snapshots]
-[src: file: backend/src/api/discussions/crud.rs:653-675#capture]
-[src: file: backend/src/api/discussions/crud.rs:817-825#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/streaming.rs:4316-4369#for_run]
+[src: file: backend/src/api/discussions/crud.rs:675-697#capture]
+[src: file: backend/src/api/discussions/crud.rs:843-851#UnresolvedQuickPromptEffort]
+[src: file: backend/src/api/discussions/streaming.rs:4375-4428#for_run]
 [src: file: backend/src/db/discussion_effort.rs:56-76#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting
 or importing a QP preserves its editable `agent_settings`, while it does not
 reconstruct historic discussion launch overrides.
 [src: file: backend/src/db/discussion_effort.rs:1#Immutable]
-[src: file: backend/src/models/quick.rs:866-876#QuickPromptExportEnvelope]
+[src: file: backend/src/models/quick.rs:875-885#QuickPromptExportEnvelope]
 [src: file: backend/src/api/quick_prompts.rs:394-465#export_qp]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.
@@ -289,7 +289,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:2104-2138#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:2102-2136#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
 [src: file: backend/src/db/model_catalog.rs:1101-1147#reconcile_live_promotes_manual_entry_preserving_overrides]
 [src: file: backend/src/db/model_catalog.rs:1149-1171#reconcile_live_is_idempotent]

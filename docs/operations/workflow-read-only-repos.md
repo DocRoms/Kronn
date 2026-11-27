@@ -48,11 +48,11 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4765-4770#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4813-4815#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4805-4810#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4863-4865#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:1511-1521#apply]
-[src: file: backend/src/agents/runner.rs:14979-14990#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15224-15235#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:15029-15040#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15274-15285#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14840-14859#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14992-15006#is_codex]
+[src: file: backend/src/agents/runner.rs:14880-14899#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:15042-15056#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even

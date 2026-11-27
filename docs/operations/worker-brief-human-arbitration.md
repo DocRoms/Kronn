@@ -26,8 +26,8 @@ them to report any other verified notable fact (progress, a blocker, a result)
 through their actually available output and to explicitly ask the principal to
 relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
-[src: file: backend/src/api/orchestration.rs:13647-13671#parent_milestones]
-[src: file: backend/src/db/orchestration.rs:8500-8544#get_execution_lineage]
+[src: file: backend/src/api/orchestration.rs:13528-13552#parent_milestones]
+[src: file: backend/src/db/orchestration.rs:8406-8450#get_execution_lineage]
 [src: file: backend/src/api/orchestration_tests_up.rs:297-449#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
 [src: file: backend/src/models/orchestration.rs:1384-1397#TaskExecutionLineage]
 

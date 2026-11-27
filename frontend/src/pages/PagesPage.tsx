@@ -55,6 +55,7 @@ import { CollectionProjectTree } from '../components/CollectionProjectTree';
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { useConfirm } from '../components/ui/useConfirm';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { usePersistentSidebarOpen } from '../hooks/usePersistentSidebarOpen';
 import {
@@ -206,6 +207,7 @@ export function PagesPage({
   onNavigateDiscussion,
 }: PagesPageProps) {
   const { locale, t } = useT();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const isMobile = useIsMobile();
   const [initialPageNavigation] = useState(readPageNavigation);
   const [pages, setPages] = useState<LivePage[]>([]);
@@ -868,7 +870,15 @@ export function PagesPage({
 
   // KT-1990 — « Delete the folder »: the run's Artifacts go, the run stays.
   const deleteRunFolder = useAsyncGuard(async (folder: StepArtifactFolder): Promise<boolean> => {
-    if (!window.confirm(t('pages.runFolders.deleteConfirm', folder.artifacts.length, folderLabel(folder, t)))) return false;
+    // KT-1881 — a ConfirmDialog in place of window.confirm.
+    const label = folderLabel(folder, t);
+    const confirmed = await confirm({
+      title: t('pages.runFolders.deleteConfirmTitle', label),
+      message: t('pages.runFolders.deleteConfirm', folder.artifacts.length),
+      confirmLabel: t('pages.runFolders.deleteFolder'),
+      tone: 'danger',
+    });
+    if (!confirmed) return false;
     try {
       await pagesApi.deleteRunFolder(folder.run_id);
       // Cleared before the read: `refresh` reports its own failure in `error`.
@@ -1862,6 +1872,7 @@ export function PagesPage({
         setPages(previous => [...previous, page]);
         void select(page);
       }} />}
+      {confirmDialog}
     </div>
   );
 }

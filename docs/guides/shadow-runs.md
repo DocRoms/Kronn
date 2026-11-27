@@ -85,7 +85,7 @@ Only a person sets shadows: they start extra executions, so an agent's save that
 sets or changes them is refused, and a save that sends the steps back keeps the
 stored ones.
 [src: file: backend/src/api/workflows.rs:2959#AGENT_SHADOW_REFUSAL]
-[src: file: backend/src/workflows/shadow.rs:1111-1113#keep_stored_shadows]
+[src: file: backend/src/workflows/shadow.rs:1115-1117#keep_stored_shadows]
 A save is checked: the ids, the sampling, the overrides, the budgets, and that
 the step is an Agent step that stays inside Kronn.
 [src: file: backend/src/workflows/shadow.rs:960-962#validate]
@@ -241,7 +241,7 @@ a discussion preview holds. The Artifact shows what the execution wrote at that
 time.
 [src: file: backend/src/api/step_artifacts.rs:199-206#redact_agent_output]
 [src: file: backend/src/core/redact.rs:3027-3043#redact_agent_output]
-[src: file: backend/src/db/discussions.rs:2901-2907#mask_agent_output]
+[src: file: backend/src/db/discussions.rs:2911-2917#mask_agent_output]
 It lives in the
 Artifact library like any other, in a folder of its run (see
 [the Artifacts architecture](../architecture/live-pages.md#run-folders-kt-1990)).
@@ -412,7 +412,7 @@ loads and the one each of its shadows tests.
 
 Either way that shadow stops testing it; the other shadows keep theirs. Promotion
 is a person's decision too: the route has no agent access.
-[src: file: backend/src/workflows/shadow.rs:1173#promote]
+[src: file: backend/src/workflows/shadow.rs:1177#promote]
 [src: file: backend/src/api/workflows.rs:2934-2938#promote_shadow]
 
 ## From the workflow-level shadow

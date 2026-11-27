@@ -211,7 +211,7 @@ parent `node_modules`, Python's site-packages) are not covered
 [src: file: backend/src/core/approved_scripts.rs:173-179#copy_dir]
 [src: file: backend/src/core/approved_scripts.rs:181-231#prepare_copy]
 [src: file: backend/src/api/workflows.rs:1701-1773#pin_exec_script_files]
-[src: file: backend/src/workflows/runner.rs:1490-1527#carrying_repository]
+[src: file: backend/src/workflows/runner.rs:1546-1583#carrying_repository]
 [src: file: backend/src/workflows/exec_step.rs:143-189#approved_script_child].
 
 **Implementation note (KT-920, 0.15.0).** Templated step fields read the
@@ -331,7 +331,7 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:4699-4726#rebind_api_configs].
+  already does for API configs [src: file: backend/src/api/workflows.rs:4741-4768#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
   already does [src: file: backend/src/api/artifact_portability/import.rs:378-417#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,

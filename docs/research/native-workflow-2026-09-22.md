@@ -97,7 +97,7 @@ with warnings denied.
 [src: file: backend/scripts/ci/mcp_surface_budget.py:197#CATALOGUE_MAX_BYTES]
 [src: file: backend/scripts/ci/test_mcp_surface_budget.py:40-212#McpSurfaceBudgetTests]
 [src: file: backend/scripts/disc-introspection-mcp.py:9739-9741#call_workflow_step_schema]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:7507-7509#test_step_schema_reads_the_shared_backend_contract]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:7526-7528#test_step_schema_reads_the_shared_backend_contract]
 [src: file: backend/src/api/agent_workflow_tests.rs:23-248#workflow_authoring_creates_a_disabled_draft_and_preserves_omitted_fields]
 [src: file: backend/src/agents/runner_test_tests_up.rs:2474-2654#clamp_trims_the_biggest_tool_result_to_fit_the_cap]
 

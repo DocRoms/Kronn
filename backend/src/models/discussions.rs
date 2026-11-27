@@ -678,7 +678,7 @@ pub struct CreateDiscussionRequest {
     pub assistant: Option<crate::db::assistant_conversations::AssistantContext>,
 }
 
-crate::debug_without_secrets!(CreateDiscussionRequest { project_id, title, agent, connection_id, language, initial_prompt, initial_targets, skill_ids, profile_ids, directive_ids, workspace_mode, base_branch, review_head, review_base, tier, originating_qp_id, no_agent, assistant; masked: launch_variables });
+crate::debug_without_secrets!(CreateDiscussionRequest { project_id, title, agent, connection_id, language, initial_prompt, initial_targets, skill_ids, profile_ids, directive_ids, workspace_mode, base_branch, review_head, review_base, tier, model, originating_qp_id, no_agent, assistant; masked: launch_variables });
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]

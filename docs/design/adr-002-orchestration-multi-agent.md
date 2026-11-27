@@ -419,8 +419,8 @@ The implemented recovery layer makes that decision durable rather than recomputi
 restart. Boot first quiesces due dispatches and moves non-terminal executions to `Interrupted` in the
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
-only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:324-424#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:8738-8809#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:303-403#reconcile_at_boot]`
+`[src: file: backend/src/db/orchestration.rs:8644-8715#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:1629-1800#start_resilience_watchdog]`.
 
@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:16941-17094#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9879-9925#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:17582-17771#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:9537-9844#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:16822-16975#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9786-9832#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:17463-17652#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:9443-9751#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -504,17 +504,17 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   reusing `SharedBudget`, the workflow engine's tree-wide LLM-call quota
   `[src: file: backend/src/workflows/runner.rs:550-568#SharedBudget]`. Once the tokens used by the run's
   sub-discussions reach it, the campaign stops offering new tasks (`token_budget` candidate reason)
-  `[src: file: backend/src/db/orchestration.rs:1895-1900#token_exhausted]`; it does not escalate an
+  `[src: file: backend/src/db/orchestration.rs:1916-1921#token_exhausted]`; it does not escalate an
   execution already running.
 - **Concurrency** — one active TaskExecution per task (a partial-unique index, like the one-primary and
   one-live-session invariants) `[src: file: backend/src/db/sql/127_task_orchestration.sql:207-212#idx_task_executions_one_active_per_task]`.
   Across a parent discussion / OrchestrationRun, a configurable `max_concurrent_executions`, enforced
   when the campaign selects launchable tasks (`remaining_slots`, from the count of non-terminal
-  executions) `[src: file: backend/src/db/orchestration.rs:1789-1806#active_execution_counts]`. The
+  executions) `[src: file: backend/src/db/orchestration.rs:1810-1827#active_execution_counts]`. The
   `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:752-759#group_concurrency_limit]`
   exists for batch fan-out; orchestration dispatches enqueue with `group_id: None`.
 - **Human escalation** — `Escalated` surfaces in the parent discussion, as the workflow Human Gate does
-  with its decide endpoint `[src: file: backend/src/api/workflows.rs:6734-6917#decide_run]`, but the
+  with its decide endpoint `[src: file: backend/src/api/workflows.rs:6776-6959#decide_run]`, but the
   execution's own state machine carries the decision: the user force-approves (→ `Approved`), hands back
   with guidance (→ `Working`) `[src: file: backend/src/models/orchestration.rs:309-309#Escalated]`, or abandons
   (→ `Cancelled`, reachable from any non-terminal state) `[src: file: backend/src/models/orchestration.rs:274-283#can_transition_to]`.

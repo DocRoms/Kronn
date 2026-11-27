@@ -744,7 +744,7 @@
   },
   "src/pages/DiscussionsPage.tsx": {
     "no-restricted-globals": {
-      "count": 4
+      "count": 3
     },
     "ui-guards/no-adhoc-dialog": {
       "count": 1
@@ -815,7 +815,7 @@
   },
   "src/pages/WorkflowsPage.tsx": {
     "no-restricted-globals": {
-      "count": 5
+      "count": 4
     },
     "ui-guards/control-has-name": {
       "count": 6

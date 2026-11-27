@@ -3695,7 +3695,8 @@ describe('DiscussionsPage', () => {
       }
       fireEvent.click(await screen.findByTestId('side-panel-menu-btn'));
       await act(async () => {
-        fireEvent.click(document.querySelector('[role="menuitem"][data-action="delete"]') as HTMLElement);
+        // The panel menu's one destructive item is the delete.
+        fireEvent.click(document.querySelector('[role="menuitem"][data-destructive]') as HTMLElement);
       });
       await waitFor(() => expect(discussionsApi.delete).toHaveBeenCalledTimes(count));
     };

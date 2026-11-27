@@ -2064,7 +2064,7 @@ fn a_key_asked_again_after_a_refusal_opens_a_new_round() {
     assert_eq!(listed.questions[1].state, DiscussionQuestionState::Pending);
     let again = DeclineDiscussionQuestionRequest {
         idempotency_key: "decline-2".into(),
-        reason: None,
+        reason: Some("Not this round either.".into()),
     };
     let declined = decline(&conn, "d", "question:m2:0", &again, "Romu", None).unwrap();
     assert_eq!(declined.state, DiscussionQuestionState::Declined);

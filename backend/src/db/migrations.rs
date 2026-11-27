@@ -1101,8 +1101,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/301_workflow_runs_shadow_tokens.sql"),
     ),
     (
+        // Main and the 0.15.4 UI lot both took 302. Receipts are keyed by name,
+        // so each keeps its name: a database from either line applies the other's.
+        "302_step_execution_artifacts",
+        include_str!("sql/302_step_execution_artifacts.sql"),
+    ),
+    (
         "302_discussion_question_cancelled",
         include_str!("sql/302_discussion_question_cancelled.sql"),
+    ),
+    (
+        "303_step_shadow_main_rows_restart",
+        include_str!("sql/303_step_shadow_main_rows_restart.sql"),
     ),
     (
         "304_task_worker_processes",

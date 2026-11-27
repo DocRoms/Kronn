@@ -104,7 +104,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/scripts/disc-introspection-mcp.py:3532-3541#_PENDING_AWARENESS_ACK_BY_DISC]
 [src: file: backend/scripts/disc-introspection-mcp.py:4041-4058#_ack_pending_read_cursors]
 [src: file: backend/scripts/disc-introspection-mcp.py:4083-4095#_stage_awareness_ack]
-[src: file: backend/src/db/discussion_sessions.rs:450-484#create_session]
+[src: file: backend/src/db/discussion_sessions.rs:462-496#create_session]
 
 ## Queue, restart, and edit/resend
 
@@ -164,13 +164,13 @@ mention that launched nobody is annotated with its reason (already scheduled
 on the root turn, or no marker), computed from `message_targets`.
 [src: file: frontend/src/lib/agentDelegation.ts:62-149#detectDelegation]
 [src: file: backend/src/db/discussions.rs:1789-1833#native_agents_scheduled_for_root_turn]
-[src: file: backend/src/api/discussions/crud.rs:608-620#initial_participants]
+[src: file: backend/src/api/discussions/crud.rs:630-642#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:1032-1036#attach_discussion_participants]
-[src: file: backend/src/api/discussions/streaming.rs:2481-2593#independent_sibling_notice]
-[src: file: backend/src/api/discussions/streaming.rs:2295-2350#discussion_at_dispatch_trigger]
-[src: file: backend/src/api/discussions/streaming.rs:2297-2332#thread_under_trigger]
-[src: file: backend/src/db/discussions.rs:2032-2056#already_scheduled]
+[src: file: backend/src/api/discussions/crud.rs:1094-1098#attach_discussion_participants]
+[src: file: backend/src/api/discussions/streaming.rs:2540-2652#independent_sibling_notice]
+[src: file: backend/src/api/discussions/streaming.rs:2354-2409#discussion_at_dispatch_trigger]
+[src: file: backend/src/api/discussions/streaming.rs:2356-2391#thread_under_trigger]
+[src: file: backend/src/db/discussions.rs:2042-2066#already_scheduled]
 
 ## Joined agent turn (MCP)
 
@@ -189,7 +189,7 @@ receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
 [src: file: backend/src/db/discussions.rs:1570-1589#insert_message_with_targets_and_dispatches]
-[src: file: backend/src/api/disc_invite.rs:1694-1713#addressed_to_caller]
+[src: file: backend/src/api/disc_invite.rs:1711-1730#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
 `message_cli_authors`. This is local routing provenance, not portable transcript
@@ -330,7 +330,7 @@ the model its tier maps to.
   New-discussion `@alias` routing is persisted on the initial user message
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:673-716#replace_message_targets]
+  [src: file: backend/src/api/discussions/crud.rs:695-742#replace_message_targets]
   [src: file: backend/src/api/discussions/runtime.rs:980-999#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.

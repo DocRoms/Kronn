@@ -327,6 +327,11 @@ pub async fn decline(
             ))
         })
         .await;
+    // KT-2122 — a card that held a review holds it while pending, nothing more:
+    // any refusal, with or without a message, releases it.
+    if let Ok(Ok((question, _))) = &result {
+        release_held_reviews(&state, &discussion_id, question).await;
+    }
     match result {
         // The one dispatch a blank refusal can enqueue: the earlier answers of
         // an ended step's message, which waited for this card (KT-1401).
@@ -337,7 +342,6 @@ pub async fn decline(
             (StatusCode::OK, Json(ApiResponse::ok(question)))
         }
         Ok(Ok((question, _))) => {
-            release_held_reviews(&state, &discussion_id, &question).await;
             state.agent_dispatch_notify.notify_one();
             let question = resume_and_reload(&state, &discussion_id, question).await;
             (StatusCode::OK, Json(ApiResponse::ok(question)))
@@ -671,6 +675,7 @@ fn resume_after_elevation(state: &AppState, exec_id: String) {
 
 /// KT-2022 — the card just settled may have been holding a review back since a
 /// restart: propose that review now. A failed wake never fails the answer.
+/// Every way a card leaves `pending` calls it (KT-2122).
 async fn release_held_reviews(
     state: &AppState,
     discussion_id: &str,

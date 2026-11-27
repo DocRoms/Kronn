@@ -113,9 +113,9 @@ and `cancellation` says who and when — not consent, nothing resumes, do not
 advance the affected lot; ask again only if the decision is still needed. A
 sibling card's recap reads « refusée sans message par un humain ». Migration
 302 rebuilt the table to add the state.
-`[src: file: backend/src/db/discussion_questions.rs:1285-1290#is_blank_refusal]`
+`[src: file: backend/src/db/discussion_questions.rs:1519-1524#is_blank_refusal]`
 `[src: file: backend/src/db/discussion_questions.rs:1307-1371#close_without_message]`
-`[src: file: backend/src/db/discussion_questions.rs:1390-1449#relay_earlier_answers]`
+`[src: file: backend/src/db/discussion_questions.rs:1613-1672#relay_earlier_answers]`
 `[src: file: backend/src/api/discussion_questions.rs:288-366#silent]`
 `[src: file: backend/src/db/sql/302_discussion_question_cancelled.sql:1-20#cancelled]`
 
@@ -135,8 +135,8 @@ card silently (see above).
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
 `[src: file: backend/src/lib.rs:2743-2791#decline]`
-`[src: file: backend/src/db/discussion_questions.rs:871-986#publish_human_resolution]`
-`[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
+`[src: file: backend/src/db/discussion_questions.rs:913-1028#publish_human_resolution]`
+`[src: file: backend/src/db/discussion_questions.rs:188-215#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
 A decision, a scope change, a DoD waiver, a blocking alert, an action needed
 from a human or an accepted delivery is published as a `kronn-important` fence,
@@ -592,7 +592,7 @@ the reason and the previous set); nothing is relaunched and earlier validation
 results stay as evidence. It is refused while the execution is Integrating,
 Validating or Applying, once it is Done, Failed or Cancelled, and for an
 execution of a campaign run, whose gates are the campaign's shared policy.
-`[src: file: backend/src/db/orchestration.rs:8159-8252#replace_execution_validations]`
+`[src: file: backend/src/db/orchestration.rs:8065-8158#replace_execution_validations]`
 The swap is a change of `task_exec_reassign` and not a tool of its own because
 every declaration is paid for on every session (`mcp_surface_budget.py`), and
 because that tool is already the principal's amendment of a live execution:
@@ -648,8 +648,8 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:7761-7898#send_back] [src: file: backend/src/api/orchestration.rs:16271-16373#revalidate_sent_back_execution]
-[src: file: backend/src/db/orchestration.rs:5947-6020#reopen_approval_after_rework]
+[src: file: backend/src/api/orchestration.rs:7720-7857#send_back] [src: file: backend/src/api/orchestration.rs:16152-16254#revalidate_sent_back_execution]
+[src: file: backend/src/db/orchestration.rs:5946-6019#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
 review rounds, delivered `head_sha`, last error, the latest candidate's
@@ -667,7 +667,7 @@ A rework starts a new attempt and a relaunched dispatch starts a new process;
 both keep their earlier entries. Only the execution's current dispatch may add
 one, so a replaced worker cannot relabel it. `view: "compact"` carries the
 `session_id` of the latest two. An HTTP worker has no CLI session and lists none.
-[src: file: backend/src/db/orchestration.rs:2714-2788#record_worker_cli_session]
+[src: file: backend/src/db/orchestration.rs:2738-2812#record_worker_cli_session]
 [src: file: backend/src/api/delivery_publication.rs:308-440#ServedModelRecorder]
 
 `task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
@@ -680,8 +680,8 @@ integration refusal, campaign pause, undelivered worker, terminal state)
 address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
-`[src: file: backend/src/api/orchestration.rs:19485-19537#EXEC_WAIT_DEFAULT_SECS]`
-`[src: file: backend/src/db/orchestration.rs:6830-6872#pin_principal_cli_session]`
+`[src: file: backend/src/api/orchestration.rs:19366-19418#EXEC_WAIT_DEFAULT_SECS]`
+`[src: file: backend/src/db/orchestration.rs:6829-6871#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
@@ -764,7 +764,7 @@ reports one precise manual reconnect/recovery action instead.
 `[src: file: backend/scripts/disc-introspection-mcp.py:2903-2975#_restore_reload_handoff]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:11867-11890#_close_inherited_reload_artifact]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:12516-12529#list_changed]`
-`[src: file: backend/scripts/test_disc_introspection_mcp.py:9210-9226#test_reload_is_not_deferred_by_a_detached_full_audit]`
+`[src: file: backend/scripts/test_disc_introspection_mcp.py:9229-9245#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
 The replacement process restores the room and durable read cursor through the
 existing binding files; no invitation token is needed. A changed mtime with
@@ -772,8 +772,8 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4121-4207#_attempt_resume]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11101-11112#_bridge_freshness]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11071-11082#_GUARDED_ORCHESTRATION_TOOLS]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11105-11116#_bridge_freshness]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11075-11086#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -824,8 +824,8 @@ worker schema contains no execution-id field; if a client nevertheless injects
 one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
-`[src: file: backend/src/api/agent_tools.rs:4223-4245#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api_tests_tests_up.rs:7247-7386#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4206-4228#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api_tests_tests_up.rs:7639-7778#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
 two deliberately distinct identity domains. The live
@@ -924,7 +924,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:13932-13982#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2748-2776#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:13972-14022#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2748-2776#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5955-5987#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5985-5998#_spawned_task_worker_mode]`
 
@@ -978,7 +978,7 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: backend/scripts/disc-introspection-mcp.py:12300-12306#first_contact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:12304-12310#first_contact]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:469-474#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:626-756#join_next_steps]`
@@ -986,7 +986,7 @@ catalogue does not pay for a long manual.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4497-4513#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4595-4661#_attach_files_to_appended_message]`
 `[src: file: frontend/src/components/MessageAttachments.tsx:114-299#AttachmentThumb]`
-`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:138-149#filteredFiles] [src: file: frontend/src/components/DiscussionAssetsPanel.tsx:259-275#disc-assets-filters] [src: file: frontend/src/pages/DiscussionsPage.tsx:5651-5663#assets]`
+`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:138-149#filteredFiles] [src: file: frontend/src/components/DiscussionAssetsPanel.tsx:259-275#disc-assets-filters] [src: file: frontend/src/pages/DiscussionsPage.tsx:5409-5421#assets]`
 
 Agent-library catalogs deliberately stay compact:
 `skills_list` / `profiles_list` / `directives_list` omit their potentially long
@@ -1047,14 +1047,14 @@ A recorded arbitration answer does not by itself restart its originating
 workflow: without a declared `resume`, no follow-up run is launched. When
 debugging a failed run, compare its output with the answer timestamps; the
 current decision history does not prove the earlier result incorporated it.
-[src: file: backend/src/db/discussion_questions.rs:1108-1167#claim_resume]
+[src: file: backend/src/db/discussion_questions.rs:1156-1221#claim_resume]
 
 Question `resume` starts a new run of the declared workflow, once per card;
 it does not resume a failed run in place or wait for every other question to
 be resolved. The target workflow must check its remaining decisions and
 domain prerequisites before proceeding. Workflow concurrency limits already
 support atomic admission per launch-variable key, within that workflow.
-[src: file: backend/src/db/discussion_questions.rs:1108-1167#claim_resume]
+[src: file: backend/src/db/discussion_questions.rs:1156-1221#claim_resume]
 [src: file: backend/src/api/discussion_questions.rs:64-135#launch_question_resume]
 [src: file: backend/src/workflows/concurrency.rs:179-217#insert_run_within_limit]
 
@@ -1368,7 +1368,7 @@ an explicit target still takes precedence. Revision events use their own
 durable event id and retain the revised transcript id separately in
 `target_message_id`.
 [src: file: backend/scripts/disc-introspection-mcp.py:4041-4061#_ack_pending_read_cursors] [src: file: backend/scripts/disc-introspection-mcp.py:7237-7254#delivered_message_ids]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:10862-10910#test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:10881-10929#test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor]
 [src: file: backend/src/api/disc_invite.rs:1188-1250#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1295-1303#withheld_by_routing]
 
 Human turns use typed identities. `discussion_agent` means the configured
@@ -1409,7 +1409,7 @@ the other manuals. Native tools read the same registry that the MCP bridge
 fetches through `GET /api/signals/catalog`; the bridge fails explicitly if that
 read fails, rather than substituting a stale local schema.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
-[src: file: backend/scripts/disc-introspection-mcp.py:10861-10872#TOOL_MANUALS]
+[src: file: backend/scripts/disc-introspection-mcp.py:10865-10876#TOOL_MANUALS]
 
 Version 1 describes the `kronn-action` Markdown fence for existing Quick Prompts,
 Quick APIs, Quick Execs and workflows. It includes target-discovery tools, a

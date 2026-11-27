@@ -41,8 +41,8 @@ changing the CLI account; no account, token or credential is copied into the
 catalogue. CLI aliases can change their resolution; the special `default`
 choice is labelled accordingly and is never automatically assigned to a tier.
 The same warning is shown in the Settings catalogue table, not just in pickers.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
-[src: file: backend/src/db/model_catalog.rs:584-729#reconcile_listing]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:132-195#catalogModelOptions]
+[src: file: backend/src/db/model_catalog.rs:597-742#reconcile_listing]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:447-449#cliDefault]
 
 Opening a selector serves its saved snapshot first, then refreshes stale CLI
@@ -64,8 +64,8 @@ error. A successful empty catalogue marks previous live entries unavailable;
 their return restores availability. Manual/migrated aliases and existing
 tiers are not removed merely because the CLI lists a different spelling.
 Refresh does not choose a replacement or write configuration.
-[src: file: backend/src/db/model_catalog.rs:584-729#reconcile_listing]
-[src: file: backend/src/db/model_catalog.rs:732-761#record_refresh_failure]
+[src: file: backend/src/db/model_catalog.rs:597-742#reconcile_listing]
+[src: file: backend/src/db/model_catalog.rs:744-773#record_refresh_failure]
 
 Retaining a catalogue and allowing a launch are distinct decisions. Claude
 preflight tolerates a discovery `Timeout`/`ProviderError` only when the exact

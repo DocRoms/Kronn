@@ -148,7 +148,7 @@ Workflow run when that provenance still exists. A publication that changes no
 dataset at all writes no ledger entry (KT-1819), so the timeline lists data
 updates; the "Synced" time next to it is the Page's `last_published_at`, which
 every successful publication moves, changed or not.
-`[src: file: frontend/src/pages/PagesPage.tsx:904-905#lastRefreshAt]`
+`[src: file: frontend/src/pages/PagesPage.tsx:914-915#lastRefreshAt]`
 Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
@@ -246,8 +246,8 @@ sidebar: the chevron opens it (it opens by itself while it holds the Artifact
 shown, and while the library search holds a query, as the project groups do),
 its « … » menu offers **Open in mosaic** and **Delete the folder**. Its
 count is the rows it lists (search applied, archived Artifacts left out).
-[src: file: frontend/src/components/ArtifactRunFolders.tsx:16-36#ArtifactRunFolders]
-[src: file: frontend/src/components/ArtifactRunFolders.tsx:97#disc-group-count]
+[src: file: frontend/src/components/ArtifactRunFolders.tsx:29-49#ArtifactRunFolders]
+[src: file: frontend/src/components/ArtifactRunFolders.tsx:141#disc-group-count]
 
 **Lifetime.** Deleting one Artifact drops its link (foreign key `ON DELETE
 CASCADE`), and the run view offers the button again. Deleting a run, all the
@@ -256,7 +256,7 @@ transaction as the runs; the confirmations count them apart from the run's
 working files. `DELETE /api/workflows/{id}/runs/{run_id}` deletes only a run of
 workflow `id`: a run of another workflow, or an unknown one, answers `Run not
 found` and nothing is deleted.
-[src: file: backend/src/api/workflows.rs:7376-7402#delete_run]
+[src: file: backend/src/api/workflows.rs:7378-7404#delete_run]
 A link names its run in `run_retention::REFERENCING_COLUMNS`, so retention
 never trims nor deletes such a run.
 [src: file: backend/src/db/step_artifacts.rs:198-207#delete]
@@ -860,7 +860,7 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
 `[src: file: backend/scripts/disc-introspection-mcp.py:10178-10213#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10572-10581#page_update_html]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10576-10585#page_update_html]`
 `[src: file: backend/src/skills/workflow-architect.md:392-399#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
@@ -899,7 +899,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:5337-5339#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:5379-5381#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:131-263#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -947,7 +947,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:5491-5687#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5533-5729#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:81-91#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 

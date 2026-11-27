@@ -398,6 +398,34 @@ fn a_named_connection_cannot_take_part_and_a_blank_model_is_refused() {
     validate_chain(&config, Some(&AgentType::ClaudeCode), None, &[named]).unwrap();
 }
 
+// KT-2030: a step on a named connection may now pass the run preflight; the
+// fallback still never selects `Custom`, even listed as usable, since it
+// knows no connection.
+#[test]
+fn the_fallback_never_selects_a_named_connection_even_when_listed_usable() {
+    let mut config = agents(&[]);
+    config.lite_llm.base_url = Some("http://127.0.0.1:4000".into());
+    let usable = vec![AgentType::ClaudeCode, AgentType::Custom];
+    assert!(!crate::workflows::step_agents::agent_can_launch(
+        &AgentType::Custom,
+        &usable,
+        &config
+    ));
+    let selection = select(
+        &config,
+        &[link(AgentType::Custom)],
+        &AgentType::ClaudeCode,
+        &AgentType::ClaudeCode,
+        &usable,
+        &TurnNeeds::default(),
+        &never_cooling,
+    );
+    assert!(
+        matches!(selection, Selection::Stop { .. }),
+        "Custom must never be chosen: {selection:?}"
+    );
+}
+
 #[test]
 fn the_chain_view_shows_the_gaps_of_each_link_as_warnings() {
     let config = agents(&[(

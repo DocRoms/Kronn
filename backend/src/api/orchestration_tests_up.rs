@@ -35800,6 +35800,25 @@ async fn answer_card(
 
 /// Declines the card `key` of `room` through the HTTP handler.
 async fn decline_card(state: &AppState, room: &str, key: &str) {
+    decline_card_with(
+        state,
+        room,
+        key,
+        Some("Not this way."),
+        crate::db::discussion_questions::DiscussionQuestionState::Declined,
+    )
+    .await;
+}
+
+/// Refuses the card `key` with `reason` (none or blank: closed without a
+/// message, KT-1955) and checks the state it is left in.
+async fn decline_card_with(
+    state: &AppState,
+    room: &str,
+    key: &str,
+    reason: Option<&str>,
+    expected: crate::db::discussion_questions::DiscussionQuestionState,
+) {
     let id = decision_card_id(&state.db, room, key).await;
     let (status, axum::Json(response)) = crate::api::discussion_questions::decline(
         axum::extract::State(state.clone()),
@@ -35807,16 +35826,13 @@ async fn decline_card(state: &AppState, room: &str, key: &str) {
         axum::Json(
             crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
                 idempotency_key: format!("kt2022-decline-{key}"),
-                reason: None,
+                reason: reason.map(str::to_string),
             },
         ),
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{:?}", response.error);
-    assert_eq!(
-        response.data.expect("the declined card").state,
-        crate::db::discussion_questions::DiscussionQuestionState::Declined
-    );
+    assert_eq!(response.data.expect("the declined card").state, expected);
 }
 
 /// A pending decision card about `task_ref` posted in `room` by an agent: the
@@ -35997,6 +36013,39 @@ async fn declining_the_card_that_held_a_review_starts_the_room_agents_review() {
     assert_eq!(job.discussion_id, parent);
     assert_eq!(job.agent_override, Some(AgentType::ClaudeCode));
     assert_eq!(room_active_dispatch_count(&db, &parent).await, 1);
+}
+
+/// KT-2122 — a card closed without a message no longer holds the review: it is
+/// proposed as after any other refusal, though the asker hears nothing.
+#[tokio::test]
+async fn closing_the_card_that_held_a_review_without_a_message_releases_it() {
+    let repo = init_repo();
+    let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+    let state = recovery_test_state(&db);
+    let (parent, _child, exec_id, _head, _path) = delivered_awaiting_review(&db, repo.path()).await;
+    let task_ref = task_reference_of(&db, &exec_id).await;
+    pending_decision_card(&db, &parent, "kt2122-gate", Some(&task_ref)).await;
+    let held = wake_recovered_principal(&db, &exec_id).await.unwrap();
+    assert_eq!(held, "review waits for decision card kt2122-gate");
+
+    decline_card_with(
+        &state,
+        &parent,
+        "kt2122-gate",
+        Some("   "),
+        crate::db::discussion_questions::DiscussionQuestionState::Cancelled,
+    )
+    .await;
+
+    let notice = recovery_review_notice(&db, &exec_id).await;
+    assert!(
+        message_row(&db, &notice).await.is_some(),
+        "the review notice once the card is closed"
+    );
+    assert!(
+        recovery_review_dispatch(&db, &exec_id).await.is_some(),
+        "the room agent's review turn"
+    );
 }
 
 /// KT-2022 — a review held by two cards stays held while one is pending, and

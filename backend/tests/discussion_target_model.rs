@@ -161,15 +161,14 @@ async fn explicit_json_null_clears_a_named_connection_and_its_model() {
 }
 
 #[tokio::test]
-async fn ordinary_edits_same_selection_and_invalid_target_preserve_model_and_history() {
+async fn ordinary_edits_and_invalid_target_preserve_model_and_history_but_a_resent_tier_clears_the_model(
+) {
     let (app, db) = fixture(AgentType::ClaudeCode, None).await;
-    for body in [
-        json!({"title": "Renamed"}),
-        json!({"agent": "ClaudeCode", "tier": "default"}),
-    ] {
-        assert_eq!(patch(&app, body).await["success"], true);
-        assert_eq!(read(&db).await.model.as_deref(), Some("old-provider-model"));
-    }
+    assert_eq!(
+        patch(&app, json!({"title": "Renamed"})).await["success"],
+        true
+    );
+    assert_eq!(read(&db).await.model.as_deref(), Some("old-provider-model"));
     assert_eq!(
         patch(
             &app,
@@ -182,10 +181,25 @@ async fn ordinary_edits_same_selection_and_invalid_target_preserve_model_and_his
     assert_eq!(after.title, "Renamed");
     assert_eq!(after.agent, AgentType::ClaudeCode);
     assert_eq!(after.model.as_deref(), Some("old-provider-model"));
+
+    // KT-1993: a sent tier without a model means leaving the exact model,
+    // even when it is the tier already stored.
+    assert_eq!(
+        patch(&app, json!({"agent": "ClaudeCode", "tier": "default"})).await["success"],
+        true
+    );
+    let after = read(&db).await;
+    assert_eq!(after.title, "Renamed");
+    assert_eq!(after.agent, AgentType::ClaudeCode);
+    assert_eq!(after.tier, ModelTier::Default);
+    assert!(
+        after.model.is_none(),
+        "re-sending the stored tier leaves the exact model (KT-1993)"
+    );
 }
 
 #[tokio::test]
-async fn same_named_agent_and_tier_do_not_implicitly_clear_the_connection() {
+async fn same_named_agent_and_tier_keep_the_connection_and_clear_the_exact_model() {
     let (app, db) = fixture(AgentType::LiteLlm, Some("lite")).await;
     assert_eq!(
         patch(&app, json!({"agent": "LiteLlm", "tier": "default"})).await["success"],
@@ -193,7 +207,10 @@ async fn same_named_agent_and_tier_do_not_implicitly_clear_the_connection() {
     );
     let after = read(&db).await;
     assert_eq!(after.connection_id.as_deref(), Some("lite"));
-    assert_eq!(after.model.as_deref(), Some("old-provider-model"));
+    assert!(
+        after.model.is_none(),
+        "a sent tier leaves the exact model, not the connection (KT-1993)"
+    );
 }
 
 #[tokio::test]

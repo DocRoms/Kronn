@@ -108,7 +108,8 @@
         "fr": ["exécutions?", "lancements?"],
         "es": ["runs?", "lanzamientos?"],
         "zh": []
-      }
+      },
+      "allow": { "en": ["main execution"], "fr": ["exécution principale"] }
     },
     {
       "id": "plugin",

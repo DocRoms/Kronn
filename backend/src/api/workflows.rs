@@ -3733,6 +3733,10 @@ mod step_patch_tests;
 #[path = "workflow_examples_tests.rs"]
 mod examples_tests;
 
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "workflow_connection_pair_tests.rs"]
+mod connection_pair_tests;
+
 #[cfg(test)]
 #[path = "workflows_model_id_guard_tests.rs"]
 mod model_id_guard_tests;

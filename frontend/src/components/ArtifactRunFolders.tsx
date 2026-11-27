@@ -13,6 +13,19 @@ import type { LivePage, StepArtifactFolder, StepArtifactLink } from '../types/ge
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
 
+/** The toggle of the nearest sidebar section on one side of `section`. */
+function siblingSectionToggle(
+  section: Element | null,
+  side: 'nextElementSibling' | 'previousElementSibling',
+): HTMLElement | null {
+  for (let node = section?.[side] ?? null; node; node = node[side]) {
+    if (!node.classList.contains('disc-sidebar-section')) continue;
+    const toggle = node.querySelector<HTMLElement>(':scope > .disc-group-btn');
+    if (toggle) return toggle;
+  }
+  return null;
+}
+
 export function ArtifactRunFolders({
   views,
   selectedId,
@@ -40,6 +53,8 @@ export function ArtifactRunFolders({
   const [menuRunId, setMenuRunId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggers = useRef(new Map<string, HTMLButtonElement>());
+  const headers = useRef(new Map<string, HTMLButtonElement>());
+  const sectionToggle = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!menuRunId) return undefined;
@@ -69,9 +84,34 @@ export function ArtifactRunFolders({
   });
   const total = views.reduce((sum, view) => sum + view.items.length, 0);
 
+  // KT-2033 — the menu item that asked is gone once the question closes, so the
+  // focus comes back to the folders: the folder's « … » when nothing was deleted,
+  // else the next folder's header or the previous one. When the last folder goes,
+  // this section unmounts with it: the focus moves to the toggle of the sidebar
+  // section that followed it, else of the one before it, else to the library's
+  // search field. Those are read before the delete, while this section is there.
+  const deleteFolder = async (folder: StepArtifactFolder) => {
+    const runIds = views.map(view => view.folder.run_id);
+    const index = runIds.indexOf(folder.run_id);
+    const neighbour = runIds[index + 1] ?? runIds[index - 1];
+    const section = sectionToggle.current?.parentElement ?? null;
+    const following = siblingSectionToggle(section, 'nextElementSibling');
+    const preceding = siblingSectionToggle(section, 'previousElementSibling');
+    const search = section?.closest('.collection-shell-sidebar')
+      ?.querySelector<HTMLElement>('.collection-shell-search-input') ?? null;
+    const deleted = await onDeleteFolder(folder).catch(() => false);
+    requestAnimationFrame(() => {
+      const target = !deleted
+        ? triggers.current.get(folder.run_id)
+        : [neighbour ? headers.current.get(neighbour) : undefined, sectionToggle.current, following, preceding, search]
+          .find(node => node?.isConnected);
+      target?.focus();
+    });
+  };
+
   return (
     <div className="disc-sidebar-section live-pages-run-folders" data-expanded={!collapsed} data-testid="artifact-run-folders">
-      <button type="button" className="disc-group-btn" data-no-border="true" onClick={onToggleSection} aria-expanded={!collapsed}>
+      <button type="button" ref={sectionToggle} className="disc-group-btn" data-no-border="true" onClick={onToggleSection} aria-expanded={!collapsed}>
         <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} />
         <FlaskConical size={10} />
         <span>{t('pages.runFolders.title')}</span><span className="disc-group-count">{total}</span>
@@ -85,6 +125,10 @@ export function ArtifactRunFolders({
             <div className="disc-batch-header" data-compact="true">
               <button
                 type="button"
+                ref={node => {
+                  if (node) headers.current.set(folder.run_id, node);
+                  else headers.current.delete(folder.run_id);
+                }}
                 className="disc-group-btn"
                 data-variant="batch"
                 onClick={() => toggle(folder.run_id)}
@@ -135,7 +179,7 @@ export function ArtifactRunFolders({
                       data-testid={`artifact-run-folder-delete-${folder.run_id}`}
                       onClick={() => {
                         setMenuRunId(null);
-                        void onDeleteFolder(folder);
+                        void deleteFolder(folder);
                       }}
                     >
                       <Trash2 size={12} /> <span>{t('pages.runFolders.deleteFolder')}</span>

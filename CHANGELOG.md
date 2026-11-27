@@ -170,6 +170,9 @@ Release notes for 0.9.3 and earlier are available in the
   reason and the reset it announced. A reply Kronn cut at its time or
   inactivity limit is no longer read as a provider refusal that would move
   the worker to a fallback agent.
+  held, then posted as soon as the card leaves its pending state: answered,
+  declined, or closed without a message (KT-2122). A delivery whose joined CLI
+  worker left is still proposed for review.
 - Workers: a worker stopped by the run time limit is reported as such
   (KT-2037). The dispatch error says Kronn stopped the worker, with the minutes
   run, the limit and what was kept, and the principal's room gets a notice of

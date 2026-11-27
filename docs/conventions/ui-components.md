@@ -627,7 +627,7 @@ native one) or a joined CLI session.
 
 Every place that chooses an agent uses `AgentSwitchPicker` (KT-1885); its
 modes are props, not copies: the trigger `variant` (`chip`, `compact`,
-`field`), `multiple` (several targets, the list stays open) and `exactModel`
+`field`), `multiple` (several targets, the list stays open), `exactModel`
 (an agent and a model id, the catalogue's or one typed in the search, or
 « = principal », with the principal's own model greyed) and `customModel`
 (KT-1994: the full list of a discussion, see below).

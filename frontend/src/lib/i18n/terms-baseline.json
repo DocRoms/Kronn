@@ -8,7 +8,7 @@
         "rooms?": 22
       },
       "plugin": {
-        "MCPs?": 60
+        "MCPs?": 59
       },
       "quick-action": {
         "Quick APIs?": 51,
@@ -18,10 +18,10 @@
         "repos?": 30
       },
       "run": {
-        "executions?": 46
+        "executions?": 36
       },
       "settings": {
-        "configs?": 74,
+        "configs?": 73,
         "configurations?": 50
       },
       "task": {
@@ -36,14 +36,14 @@
     },
     "fr": {
       "credentials": {
-        "credentials?": 18
+        "credentials?": 17
       },
       "discussion": {
         "conversations?": 40,
         "rooms?": 18
       },
       "plugin": {
-        "MCPs?": 61
+        "MCPs?": 60
       },
       "provider": {
         "providers?": 1
@@ -67,11 +67,11 @@
         "repos?": 10
       },
       "run": {
-        "exécutions?": 82,
+        "exécutions?": 72,
         "lancements?": 50
       },
       "settings": {
-        "configs?": 73,
+        "configs?": 72,
         "configurations?": 57
       },
       "step": {
@@ -97,7 +97,7 @@
         "salas?": 19
       },
       "plugin": {
-        "MCPs?": 65
+        "MCPs?": 64
       },
       "quick-action": {
         "Quick APIs?": 51,
@@ -108,11 +108,11 @@
       },
       "run": {
         "lanzamientos?": 27,
-        "runs?": 60
+        "runs?": 58
       },
       "settings": {
         "configs?": 54,
-        "configuraci(?:ón|ones)": 81
+        "configuraci(?:ón|ones)": 80
       },
       "step": {
         "steps?": 76
@@ -130,7 +130,7 @@
     },
     "zh": {
       "agent": {
-        "智能体": 182
+        "智能体": 181
       },
       "credentials": {
         "凭证": 10
@@ -141,7 +141,7 @@
         "房间": 20
       },
       "plugin": {
-        "MCPs?": 55
+        "MCPs?": 54
       },
       "provider": {
         "提供方": 19
@@ -151,13 +151,13 @@
         "Quick Execs?": 38
       },
       "settings": {
-        "配置": 206
+        "配置": 205
       },
       "step": {
         "steps?": 1
       },
       "task": {
-        "规划": 24
+        "规划": 23
       },
       "worktree": {
         "worktrees?": 43,
@@ -248,7 +248,6 @@
       "disc.rtkWarnLink": ["2cd6676e","term:settings:configs?"],
       "disc.scopeAllTitle": ["6069528a","term:discussion:rooms?"],
       "disc.scopeAllWriteWarning": ["4d289696","term:discussion:rooms?","term:settings:configs?"],
-      "disc.scopeCodeAllows": ["785556fe","term:settings:configs?","term:plugin:MCPs?"],
       "disc.scopeGeneralHint": ["6e5407b2","term:discussion:rooms?","term:quick-action:Quick APIs?"],
       "disc.scopeGeneralTitle": ["11989948","term:discussion:rooms?"],
       "disc.scopeGeneralWarning": ["6af14953","term:discussion:rooms?","term:settings:configs?","term:quick-action:Quick APIs?"],
@@ -523,24 +522,14 @@
       "wf.scopeHint": ["712e94af","term:task:planning","term:settings:configs?"],
       "wf.shadow.compare.nothingDiffers": ["10f13bb5","term:run:executions?"],
       "wf.shadow.compare.promptWritten": ["94fdd10b","term:run:executions?"],
-      "wf.shadow.compare.sameOutput": ["1e48a584","term:run:executions?"],
       "wf.shadow.compare.stepAria": ["5e32f5c1","term:run:executions?"],
       "wf.shadow.compare.title": ["b9a17ec1","term:run:executions?"],
       "wf.shadow.description": ["0482c540","term:run:executions?"],
-      "wf.shadow.entryTitleOff": ["43e82b8c","term:run:executions?"],
       "wf.shadow.merge.col.execution": ["d991a0f5","term:run:executions?"],
       "wf.shadow.merge.description": ["8a4e2473","term:run:executions?"],
-      "wf.shadow.merge.enable": ["c1d41e0e","term:run:executions?"],
-      "wf.shadow.merge.off": ["3377b43f","term:run:executions?"],
-      "wf.shadow.merge.run.mainStands": ["53fb77e4","term:run:executions?"],
       "wf.shadow.merge.run.vs": ["77a66d01","term:run:executions?"],
       "wf.shadow.merge.tally.alone": ["37d05511","term:run:executions?"],
-      "wf.shadow.merge.title": ["67514dd1","term:run:executions?"],
-      "wf.shadow.merge.which": ["14924745","term:run:executions?"],
-      "wf.shadow.none": ["7c80e7ec","term:run:executions?"],
       "wf.shadow.normalLoads": ["0844ecee","term:run:executions?"],
-      "wf.shadow.sameAsNormal": ["68378231","term:run:executions?"],
-      "wf.shadow.sameVersionWarning": ["91784b35","term:run:executions?"],
       "wf.shadow.sharedWorkdir": ["b5241893","term:discussion:rooms?"],
       "wf.tabQuickApis": ["bc20948d","term:quick-action:Quick APIs?"],
       "wf.tabQuickExecs": ["2eb05adf","term:quick-action:Quick Execs?"],
@@ -751,7 +740,6 @@
       "disc.scopeAllWrite": ["98db95fb","term:task:planification"],
       "disc.scopeAllWriteWarning": ["033a0321","term:discussion:rooms?","term:settings:configs?","term:credentials:credentials?"],
       "disc.scopeApprovePlan": ["93c3bb70","term:task:planification"],
-      "disc.scopeCodeAllows": ["badd1475","term:settings:configs?","term:plugin:MCPs?","term:credentials:credentials?"],
       "disc.scopeGeneralHint": ["26641ca9","term:discussion:rooms?","term:quick-action:Quick APIs?"],
       "disc.scopeGeneralTitle": ["61d5a1a0","term:discussion:rooms?"],
       "disc.scopeGeneralWarning": ["8ede46c6","term:discussion:rooms?","term:settings:configs?","term:quick-action:Quick APIs?","term:credentials:credentials?"],
@@ -1205,31 +1193,21 @@
       "wf.scopeNeedsValidation": ["b3de7513","register:fr:tu"],
       "wf.shadow.compare.nothingDiffers": ["15e58c4c","term:run:exécutions?"],
       "wf.shadow.compare.promptWritten": ["b23692bb","term:run:exécutions?"],
-      "wf.shadow.compare.sameOutput": ["74915049","term:run:exécutions?"],
       "wf.shadow.compare.stepAria": ["34e7f995","term:run:exécutions?"],
       "wf.shadow.compare.title": ["1125d965","term:run:exécutions?"],
       "wf.shadow.description": ["1af19629","term:run:exécutions?"],
       "wf.shadow.entryStepsMany": ["b814cb3e","term:step:steps?"],
       "wf.shadow.entryStepsOne": ["aa5b86f9","term:step:steps?"],
-      "wf.shadow.entryTitleOff": ["88f32763","term:run:exécutions?"],
       "wf.shadow.merge.col.execution": ["8f5b8af1","term:run:exécutions?"],
       "wf.shadow.merge.description": ["88c783aa","term:run:exécutions?"],
-      "wf.shadow.merge.enable": ["8011b921","term:run:exécutions?"],
-      "wf.shadow.merge.off": ["3b92f231","term:run:exécutions?"],
-      "wf.shadow.merge.run.mainStands": ["3e20c9ca","term:run:exécutions?"],
       "wf.shadow.merge.run.vs": ["3739d1e1","term:run:exécutions?"],
       "wf.shadow.merge.tally.alone": ["1fe3cf4f","term:run:exécutions?"],
-      "wf.shadow.merge.title": ["9117c202","term:run:exécutions?"],
-      "wf.shadow.merge.which": ["4afa3635","term:run:exécutions?"],
-      "wf.shadow.none": ["3416810c","term:run:exécutions?"],
       "wf.shadow.normalLoads": ["a4c251e2","term:run:exécutions?"],
       "wf.shadow.rows.helpOne": ["1f467695","term:step:steps?"],
       "wf.shadow.rows.helpResult": ["8d4bbe5d","term:step:steps?"],
       "wf.shadow.rows.mergeTip": ["53cf8e46","term:step:steps?"],
       "wf.shadow.rows.mergeTipLast": ["f358416c","term:step:steps?"],
       "wf.shadow.rows.summaryLast": ["2e65a6c7","term:step:steps?"],
-      "wf.shadow.sameAsNormal": ["317c03cc","term:run:exécutions?"],
-      "wf.shadow.sameVersionWarning": ["fc6afde1","term:run:exécutions?"],
       "wf.shadow.sharedWorkdir": ["5948097b","term:discussion:rooms?"],
       "wf.skipNext": ["9c4b4788","term:step:steps?"],
       "wf.stepAgentChanged": ["9523cfba","term:step:steps?"],
@@ -1555,7 +1533,6 @@
       "disc.scopeAllWrite": ["bf20882f","term:task:planificaci(?:ón|ones)"],
       "disc.scopeAllWriteWarning": ["0808687d","term:discussion:salas?","term:settings:configuraci(?:ón|ones)"],
       "disc.scopeApprovePlan": ["47f10594","term:task:planificaci(?:ón|ones)"],
-      "disc.scopeCodeAllows": ["85ddc639","term:settings:configuraci(?:ón|ones)","term:plugin:MCPs?"],
       "disc.scopeGeneralHint": ["efee8a54","term:discussion:salas?","term:quick-action:Quick APIs?"],
       "disc.scopeGeneralTitle": ["f8d64403","term:discussion:salas?","term:settings:configuraci(?:ón|ones)"],
       "disc.scopeGeneralWarning": ["40b2d32f","term:discussion:salas?","term:settings:configuraci(?:ón|ones)","term:quick-action:Quick APIs?"],
@@ -1852,9 +1829,7 @@
       "wf.apicall.testNeedsProjectLink": ["e59de93e","term:settings:configuraci(?:ón|ones)"],
       "wf.apicall.testVarsHint": ["517d140b","term:settings:configs?"],
       "wf.cancelRunConfirm": ["ddad7da8","term:run:runs?"],
-      "wf.deleteAllRunsConfirm": ["9391e68c","term:run:runs?"],
       "wf.deleteRun": ["83d044a8","term:run:runs?"],
-      "wf.deleteRunConfirm": ["d235dce6","term:run:runs?"],
       "wf.deleteWorkflowConfirm": ["9120d409","term:run:runs?"],
       "wf.gate.safetyApproval": ["2caf3ed0","term:settings:configuraci(?:ón|ones)"],
       "wf.gotoTargetHint": ["83dd09a0","term:step:steps?"],
@@ -2210,7 +2185,6 @@
       "disc.scopeAllWrite": ["aba15d8a","term:task:规划"],
       "disc.scopeAllWriteWarning": ["ddf58873","term:discussion:房间","term:settings:配置"],
       "disc.scopeApprovePlan": ["bb425e17","term:task:规划"],
-      "disc.scopeCodeAllows": ["2707922d","term:agent:智能体","term:task:规划","term:settings:配置","term:plugin:MCPs?"],
       "disc.scopeGeneralHint": ["298265a2","term:discussion:房间","term:quick-action:Quick APIs?"],
       "disc.scopeGeneralTitle": ["cc010db2","term:discussion:房间"],
       "disc.scopeGeneralWarning": ["1f070b2e","term:discussion:房间","term:settings:配置","term:quick-action:Quick APIs?"],

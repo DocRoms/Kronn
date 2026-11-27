@@ -27,7 +27,7 @@ the extend form say so next to the checkbox.
 A campaign's `token_budget` (`NULL` = none; single-task launches have none) is checked, against the tokens
 its executions' messages already consumed, before **every additional worker attempt**, not only when
 picking new tasks. `execution_token_budget_stop` is the one check;
-`[src: file: backend/src/db/orchestration.rs:1843-1849#execution_token_budget_stop]`
+`[src: file: backend/src/db/orchestration.rs:1864-1870#execution_token_budget_stop]`
 three places use it, whatever the round limit (including unlimited):
 
 - **`request_changes`:** inside the review checkpoint transaction. A spent budget parks the execution

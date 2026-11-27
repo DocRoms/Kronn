@@ -8,7 +8,7 @@ exact CLI never accepted the KT-328 control offer, or its re-offer after a
 review round — had no path back to the principal: `task_exec_reassign` failed
 with "Blocked, not a resumable worker state", stranding real work (checkout,
 history, attempts, budget) behind a worker that never showed up.
-[src: file: backend/src/db/orchestration.rs:9606-9631#resumable_worker_state]
+[src: file: backend/src/db/orchestration.rs:9513-9538#resumable_worker_state]
 
 The gate now also accepts a `Blocked` row whose `blocked_reason_code` is
 exactly `AwaitingWorkerAcceptance` — the ONE hold where the worker process
@@ -20,7 +20,7 @@ a review round, so a redirect here can also be reclaiming an attempt with
 real prior review history, not only a brand-new one. Every other `Blocked`
 reason (`WorkerSessionCommittedElsewhere`, or an `Applying`-origin
 infra/dirty-main hold) still falls through to the refusal.
-[src: file: backend/src/db/orchestration.rs:9628-9643#AwaitingWorkerAcceptance]
+[src: file: backend/src/db/orchestration.rs:9535-9550#AwaitingWorkerAcceptance]
 
 Before doing anything else, the function resumes the checkpoint the ADR §3
 state machine actually allows: `Blocked` clears back ONLY to
@@ -36,8 +36,8 @@ acceptance. A second, sequential reassignment call against the same row loses
 the CAS inside that same `transition_execution` and is refused the ordinary
 way ("not a resumable worker state") rather than silently double-applying —
 this is NOT a test of two simultaneous callers racing each other.
-[src: file: backend/src/db/orchestration.rs:9632-9666#Provisioning]
-[src: file: backend/src/db/orchestration.rs:9752#cancel_live_offers_for_execution]
+[src: file: backend/src/db/orchestration.rs:9539-9573#Provisioning]
+[src: file: backend/src/db/orchestration.rs:9659#cancel_live_offers_for_execution]
 
 The caller decides what Provisioning becomes next, exactly like the initial
 launch: a native worker dispatches straight to `Working` (added to the
