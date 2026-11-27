@@ -631,7 +631,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     expect(picker).not.toBeNull();
     await act(async () => { fireEvent.click(picker!); });
     const reasoning = document.querySelector<HTMLButtonElement>(
-      '.kr-agent-switch-tier-row[aria-label="Claude Code"] .kr-agent-switch-tier-option[data-tier="reasoning"]',
+      '.kr-agent-switch-group-block[aria-label="Claude Code"] .kr-agent-switch-mode[data-tier="reasoning"]',
     );
     expect(reasoning).not.toBeNull();
     await act(async () => { fireEvent.click(reasoning!); });
@@ -680,7 +680,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     expect(picker).not.toBeNull();
     await act(async () => { fireEvent.click(picker!); });
     const reasoning = document.querySelector<HTMLButtonElement>(
-      '.kr-agent-switch-tier-row[aria-label="Gateway"] .kr-agent-switch-tier-option[data-tier="reasoning"]',
+      '.kr-agent-switch-group-block[aria-label="Gateway"] .kr-agent-switch-mode[data-tier="reasoning"]',
     );
     expect(reasoning).not.toBeNull();
     await act(async () => { fireEvent.click(reasoning!); });

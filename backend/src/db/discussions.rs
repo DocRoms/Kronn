@@ -1230,6 +1230,16 @@ pub fn update_discussion_connection(
     Ok(affected > 0)
 }
 
+/// Set or clear the exact model pinned to this discussion (KT-1993). `None`
+/// clears it, so the tier applies again.
+pub fn update_discussion_model(conn: &Connection, id: &str, model: Option<&str>) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET model = ?1, updated_at = ?2 WHERE id = ?3",
+        params![model, Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
+}
+
 fn content_with_agent_handoff(content: &str, from: &str, to: &str) -> String {
     format!(
         "<!-- KRONN_AGENT_HANDOFF: {from} -> {to}. Continue from the existing \

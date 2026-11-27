@@ -5463,6 +5463,33 @@ button.disc-contact-open {
   z-index: 10;
 }
 
+/* KT-1885 — the @ menu is the shared agent picker's palette: its rows, tier
+   choices and availability badges; it only keeps its place above the field.
+   Its height is measured (ChatInput's `boundary`): from the composer's top to
+   the message list's top, so it never slides under the header or a banner,
+   and it scrolls inside. This cap only holds until that measure runs. The
+   new discussion form measures its own room against its layout.
+   KT-1994 — its width never exceeds its anchor's (`100%`: the composer, the
+   new discussion's prompt field, both `position: relative`), so it cannot
+   pass the column that clips it (`.disc-messages-col`, overflow hidden);
+   no floor wider than the anchor: the three tier columns hold at 368px. */
+.disc-mention-popover.kr-agent-switch-palette {
+  width: min(520px, 100%, calc(100vw - 2 * var(--kr-space-4)));
+  max-height: calc(100vh - 2 * var(--kr-space-8));
+  overflow-y: auto;
+  background: var(--kr-bg-elevated);
+}
+
+/* KT-1994 — from 768px the menu may take up to 760px when its anchor (the
+   composer, the prompt field) is that wide, so each tier's model id fits on
+   one line beside its agent (the tracks are measured in
+   AgentSwitchPicker.css). */
+@media (min-width: 768px) {
+  .disc-mention-popover.kr-agent-switch-palette {
+    width: min(760px, 100%, calc(100vw - 2 * var(--kr-space-4)));
+  }
+}
+
 .disc-mention-item {
   display: flex;
   align-items: center;
@@ -5475,93 +5502,12 @@ button.disc-contact-open {
   text-align: left;
 }
 
-.disc-mention-main {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-4);
-  min-width: 0;
-  flex: 1;
-  padding: 8px 6px 8px 12px;
-  color: inherit;
-  background: transparent;
-  border: 0;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
 .disc-mention-item[data-highlighted="true"] {
   background: rgba(var(--kr-accent-rgb), 0.1);
 }
 
 .disc-mention-item[data-highlighted="false"] {
   background: transparent;
-}
-
-.disc-mention-item-disabled {
-  gap: var(--kr-sp-4);
-  padding: 8px 12px;
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.disc-mention-tier-choices {
-  display: inline-flex;
-  gap: 2px;
-  padding-right: 8px;
-}
-
-.disc-mention-tier-choice {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-width: 26px;
-  min-height: 24px;
-  padding: 2px;
-  color: var(--kr-text-muted);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--kr-r-md);
-  cursor: pointer;
-}
-
-.disc-mention-catalog-meta {
-  font-size: 8px;
-  line-height: 1.2;
-  max-width: 72px;
-  overflow-wrap: anywhere;
-}
-
-.disc-mention-catalog-meta[data-catalog-warning='true'] {
-  color: var(--kr-warning);
-}
-
-.disc-mention-tier-choice:disabled,
-.disc-mention-main:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.disc-mention-tier-choice:hover,
-.disc-mention-tier-choice:focus-visible {
-  background: var(--kr-bg-subtle);
-  border-color: var(--kr-border-subtle);
-}
-
-.disc-mention-tier-choice[data-current="true"] {
-  background: rgba(var(--kr-accent-rgb), 0.12);
-  border-color: rgba(var(--kr-accent-rgb), 0.3);
-}
-
-/* The tier the user is moving through with Left/Right, as opposed to
-   `data-current` which is the tier already in effect for that row. Both can be
-   visible at once — the reader needs to see where they came from and where they
-   are — so this one is a ring rather than a fill. */
-.disc-mention-tier-choice[data-keyboard-selected="true"] {
-  color: var(--kr-text-primary);
-  border-color: rgba(var(--kr-accent-rgb), 0.85);
-  box-shadow: 0 0 0 1px rgba(var(--kr-accent-rgb), 0.45) inset;
 }
 
 .disc-mention-routing-mode {
@@ -5577,21 +5523,6 @@ button.disc-contact-open {
   border: 1px solid var(--kr-border-faint);
   border-radius: var(--kr-r-pill);
   font-size: var(--kr-fs-sm);
-}
-
-.disc-mention-group {
-  padding: var(--kr-sp-6) var(--kr-sp-12) var(--kr-sp-4);
-  color: var(--kr-text-faint);
-  background: var(--kr-bg-subtle);
-  border-top: 1px solid var(--kr-border-faint);
-  font-size: var(--kr-fs-xs);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.disc-mention-group:first-child {
-  border-top: 0;
 }
 
 .disc-routing-help-content p {

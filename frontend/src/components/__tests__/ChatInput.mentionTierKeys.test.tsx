@@ -92,7 +92,7 @@ function renderInput() {
 function tierButtons(): HTMLElement[] {
   return Array.from(
     document.querySelectorAll<HTMLElement>(
-      '.disc-mention-item[data-highlighted="true"] .disc-mention-tier-choice',
+      '.kr-agent-switch-palette-row[data-highlighted="true"] .kr-agent-switch-tier-option',
     ),
   );
 }
@@ -182,7 +182,7 @@ describe('mention palette — Left/Right pick the tier', () => {
     // Move OFF the first row, the way the user does before choosing a tier.
     fireEvent.keyDown(textarea, { key: 'ArrowDown' });
     fireEvent.keyUp(textarea, { key: 'ArrowDown' });
-    const rowBefore = document.querySelector('.disc-mention-item[data-highlighted="true"] .font-semibold')?.textContent;
+    const rowBefore = document.querySelector('.kr-agent-switch-palette-row[data-highlighted="true"] .kr-agent-switch-palette-label')?.textContent;
     expect(rowBefore).toBe('@codex');
 
     // The reported bug: keyup refreshes the mention query on Left/Right, and that
@@ -192,7 +192,7 @@ describe('mention palette — Left/Right pick the tier', () => {
     fireEvent.keyDown(textarea, { key: 'ArrowRight' });
     fireEvent.keyUp(textarea, { key: 'ArrowRight' });
 
-    const rowAfter = document.querySelector('.disc-mention-item[data-highlighted="true"] .font-semibold')?.textContent;
+    const rowAfter = document.querySelector('.kr-agent-switch-palette-row[data-highlighted="true"] .kr-agent-switch-palette-label')?.textContent;
     expect(rowAfter).toBe('@codex');
     expect(keyboardSelected()).toEqual(['reasoning']);
   });

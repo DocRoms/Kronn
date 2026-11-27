@@ -9,7 +9,7 @@
 //      starter chips that fill the input.
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 
 // Mock the discussions API — every helper interaction goes through it but
 // we don't want to hit a real backend. Each test gets a fresh resolved
@@ -28,6 +28,9 @@ vi.mock('../../lib/api', () => ({
     link: vi.fn().mockResolvedValue(null),
     update: vi.fn().mockResolvedValue(null),
   },
+  // KT-1885 — the shared agent picker lists the external connections and the model catalogue.
+  externalApi: { list: vi.fn().mockResolvedValue([]) },
+  modelCatalogApi: { list: vi.fn().mockResolvedValue({ targets: [] }), refresh: vi.fn().mockResolvedValue(null) },
 }));
 
 import {
@@ -428,24 +431,17 @@ describe('CustomApiAiHelper — render', () => {
     expect(textarea.value).toContain('mcp.custom.helper.starter.curlPrompt');
   });
 
-  it('opens the agent dropdown when clicking the agent trigger', () => {
+  // KT-1885 — the agent chooser is the shared agent picker.
+  it('opens the shared agent picker, on its search field, with every installed agent', async () => {
     renderHelper(['ClaudeCode', 'Codex', 'GeminiCli']);
-    fireEvent.click(screen.getByRole('button', { name: /mcp.custom.helper.trigger/ }));
-    // The header trigger button is named by its visible label (the active
-    // agent). It carries aria-haspopup="listbox" so we can also find it
-    // by role + the active-agent name. Querying by the agent label is
-    // more user-facing than the aria-haspopup attribute.
-    const headerTrigger = screen.getAllByRole('button').find(
-      btn => btn.getAttribute('aria-haspopup') === 'listbox',
-    );
-    expect(headerTrigger).toBeDefined();
-    fireEvent.click(headerTrigger!);
-    expect(screen.getByRole('listbox')).toBeTruthy();
-    // Active agent label appears twice (header trigger + active option),
-    // the other two appear once.
-    expect(screen.getAllByText('Claude Code').length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText('Codex')).toBeTruthy();
-    expect(screen.getByText('Gemini CLI')).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /mcp.custom.helper.trigger/ })); });
+    const headerTrigger = screen.getByRole('button', { name: 'mcp.custom.helper.switchAgent' });
+    expect(headerTrigger).toHaveTextContent('Claude Code');
+    await act(async () => { fireEvent.click(headerTrigger); });
+    expect(screen.getByRole('searchbox')).toHaveFocus();
+    for (const name of ['Claude Code', 'Codex', 'Gemini CLI']) {
+      expect(screen.getByRole('group', { name })).toBeInTheDocument();
+    }
   });
 
   it('shows the form-state context chip at the top of the bubble', () => {

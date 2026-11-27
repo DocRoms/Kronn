@@ -1246,7 +1246,7 @@ other visible timeline message.
 [src: file: backend/src/api/disc_invite.rs:130-132#note_count] [src: file: backend/src/api/disc_invite.rs:439-444#note_count]
 [src: file: backend/src/api/disc_source.rs:1793-1880#disc_load_other]
 [src: file: backend/src/api/discussions/messaging.rs:441-518#MessageChannel]
-[src: file: backend/src/db/discussions.rs:1441-1481#insert_note_message]
+[src: file: backend/src/db/discussions.rs:1452-1492#insert_note_message]
 
 A workflow Agent step receives its rendered `prompt_template` separately from
 the room transcript. A workflow may therefore inject a launch variable into
@@ -1260,7 +1260,7 @@ Discussion creation currently persists an initial `User`/`main` message even
 when `initial_prompt` is empty and `no_agent` is true. An empty opening bubble
 therefore does not prove that a later workflow Agent step received an empty
 prompt; inspect the workflow input separately.
-[src: file: backend/src/api/discussions/crud.rs:554-577#initial_message]
+[src: file: backend/src/api/discussions/crud.rs:566-589#initial_message]
 [src: file: backend/src/api/discussions/crud.rs:630-647]
 
 ## Multi-agent collab — required protocol

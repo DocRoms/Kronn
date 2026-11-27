@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { act } from 'react';
 import { DesignSystemPage } from '../../../pages/DesignSystemPage';
 import { describeViolations, runAxe } from '../../../test/axe';
-import { GALLERY_COMPONENTS } from '../designSystemGallery';
+import { GALLERY_COMPONENTS, UI_GALLERY_COMPONENTS } from '../designSystemGallery';
 import { STATUS_TONES } from '../../ui/statusTones';
 import { HEADER_KINDS, HEADER_LEVELS } from '../../ui/headerKinds';
 import { DESIGN_TOKEN_GROUPS, DESIGN_TOKENS } from '../../../styles/designTokens';
@@ -208,7 +208,7 @@ describe('DesignSystemPage — index and components (KT-1880)', () => {
 
   it('shows every component of components/ui/, under its own heading, in the index order', () => {
     const inFolder = readdirSync(UI_DIR).filter(f => /^[A-Z]\w+\.tsx$/.test(f)).map(f => f.replace('.tsx', ''));
-    expect(GALLERY_COMPONENTS.map(c => c.name).sort()).toEqual(inFolder.sort());
+    expect(UI_GALLERY_COMPONENTS.map(c => c.name).sort()).toEqual(inFolder.sort());
 
     render(<DesignSystemPage t={t} tab="components" />);
     const part = screen.getByRole('region', { name: 'designSystem.components' });

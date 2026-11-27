@@ -93,6 +93,10 @@
 
 /* Agent/model picker: same trigger look as the step's own agent picker. */
 .wf-shadow-picker { display: inline-flex; min-width: 0; }
+/* KT-1885 — a row's picker is as wide as its text, « + Shadow » a small chip:
+   the step routing's full-width picker rule is for its own agent field. */
+.wf-shadow-rows .kr-agent-switch.wf-shadow-picker { width: auto; }
+.wf-shadow-rows .wf-shadow-picker .kr-agent-switch-btn { width: auto; }
 .wf-shadow-picker-btn {
   display: inline-flex;
   align-items: center;
@@ -248,58 +252,6 @@
   font-family: var(--kr-font-mono);
   overflow-wrap: anywhere;
 }
-
-/* The agent/model menu (portaled to the body). */
-.wf-shadow-menu {
-  position: fixed;
-  z-index: calc(var(--kr-z-modal) + 20);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 300px;
-  max-width: calc(100vw - 16px);
-  overflow-y: auto;
-  padding: 4px;
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-md);
-  background: var(--kr-bg-elevated);
-  box-shadow: var(--kr-shadow-lg);
-  font-size: var(--kr-fs-sm);
-}
-.wf-shadow-menu-group { display: flex; flex-direction: column; margin-top: 4px; border-top: 1px solid var(--kr-border-subtle); padding-top: 4px; }
-.wf-shadow-menu-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  color: var(--kr-text-primary);
-  font-size: var(--kr-fs-xs);
-  font-weight: 700;
-}
-.wf-shadow-menu-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.wf-shadow-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 4px 8px 4px 22px;
-  border: 0;
-  border-radius: var(--kr-r-sm);
-  background: transparent;
-  color: var(--kr-text-primary);
-  font: inherit;
-  font-size: var(--kr-fs-xs);
-  text-align: left;
-  cursor: pointer;
-}
-.wf-shadow-menu-item > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.wf-shadow-menu-item:hover:not(:disabled),
-.wf-shadow-menu-item:focus-visible { background: rgba(var(--kr-purple-rgb), 0.12); }
-.wf-shadow-menu-item:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: -2px; }
-.wf-shadow-menu-item[data-current='true'] { color: var(--kr-purple); font-weight: 700; }
-.wf-shadow-menu-item:disabled { color: var(--kr-text-faint); cursor: not-allowed; }
-.wf-shadow-menu > .wf-shadow-menu-item { padding-left: 8px; }
-.wf-shadow-menu-hint { color: var(--kr-text-muted); font-size: var(--kr-fs-2xs); }
 
 /* Branch map: the shadow lines under a doubled step, and its tags. */
 .wf-bm-tag { fill: var(--kr-purple); font-size: 9px; font-weight: 700; }

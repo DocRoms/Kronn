@@ -185,7 +185,7 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '@' } });
     expect(screen.getByText('disc.routingActiveAgents')).toBeInTheDocument();
     expect(screen.getByText('disc.routingAvailableAgents')).toBeInTheDocument();
-    const mentionItems = Array.from(document.querySelectorAll('.disc-mention-item'));
+    const mentionItems = Array.from(document.querySelectorAll('.kr-agent-switch-palette-row'));
     const cliIndex = mentionItems.findIndex(item => item.textContent?.includes('disc.targetCli'));
     const punctualIndex = mentionItems.findIndex(
       item => item.textContent?.includes('disc.targetPunctualAgent'),

@@ -417,6 +417,7 @@ async fn discuss(
         review_head: None,
         review_base: None,
         tier: Default::default(),
+        model: None,
         originating_qp_id: None,
         launch_variables: HashMap::new(),
         no_agent: false,

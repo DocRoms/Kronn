@@ -255,9 +255,10 @@ describe('ChatHeader — shared agent switcher', () => {
     );
 
     fireEvent.click(trigger);
+    // KT-1885 — the tooltip names the model, then the tier's catalogue state.
     expect(screen.getByRole('menuitem', {
       name: 'Codex · disc.tier.reasoning',
-    })).toHaveAttribute('title', 'disc.tier.reasoning · gpt-company-review');
+    }).getAttribute('title')).toMatch(/^disc\.tier\.reasoning · gpt-company-review(?: — |$)/);
   });
 
   /// KT-1935 — the role used to replace the model on the button. Now the
@@ -398,11 +399,74 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(screen.getByRole('button', { name: 'disc.switchAgentAndTier' })).toBeDisabled();
   });
 
-  it('shows a saved discussion model before the catalogue is opened', async () => {
+  // KT-1994 — the discussion's exact model (KT-1993) is « Personnalisé », not the mode's model.
+  it('shows a saved discussion model before the catalogue is opened, as a custom model', async () => {
     renderHeader({ discussion: { ...makeDiscussion(), model: 'explicit-disc-model' } });
     const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
     await waitFor(() => expect(trigger).toBeEnabled());
-    expect(trigger).toHaveAttribute('title', 'disc.switchAgentAndTier · disc.tier.default · explicit-disc-model');
+    expect(trigger).toHaveAttribute('title', 'disc.switchAgentAndTier · agentPicker.custom · explicit-disc-model');
+  });
+
+  describe('a custom model (KT-1994)', () => {
+    beforeEach(() => localStorage.clear());
+
+    // KT-1994 review — the typed id is offered once, for the discussion's agent.
+    it('a typed model id is saved as the discussion’s exact model, with its agent and connection', async () => {
+      const { onAgentSwitch } = renderHeader();
+      const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      fireEvent.click(trigger);
+      fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'claude-next-preview' } });
+      const free = document.querySelectorAll<HTMLElement>('[data-kind="free"]');
+      expect(free).toHaveLength(1);
+      await act(async () => { fireEvent.click(free[0]); });
+      expect(discussionsApi.update).toHaveBeenCalledWith(
+        'disc-agent-switch',
+        { agent: 'ClaudeCode', connection_id: null, model: 'claude-next-preview' },
+      );
+      expect(onAgentSwitch).toHaveBeenCalledWith('ClaudeCode');
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+
+    it('a refused id is reported next to the entry and the discussion keeps its choice', async () => {
+      vi.mocked(discussionsApi.update).mockRejectedValue(new Error('model id must not start with "-"'));
+      const { onAgentSwitch, toast } = renderHeader();
+      const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      fireEvent.click(trigger);
+      fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: '-c' } });
+      const free = document.querySelector<HTMLElement>('[data-kind="free"]')!;
+      await act(async () => { fireEvent.click(free); });
+      expect(discussionsApi.update).toHaveBeenCalledWith(
+        'disc-agent-switch',
+        { agent: 'ClaudeCode', connection_id: null, model: '-c' },
+      );
+      const alert = screen.getByRole('alert');
+      expect(alert).toHaveTextContent('model id must not start with "-"');
+      expect(free.nextElementSibling).toBe(alert);
+      expect(onAgentSwitch).not.toHaveBeenCalled();
+      expect(toast).not.toHaveBeenCalled();
+      expect(screen.getByRole('menu')).toBeInTheDocument();
+    });
+
+    it('after a reload the stored model is still « Personnalisé », checked under its agent; a mode leaves it', async () => {
+      renderHeader({ discussion: { ...makeDiscussion(), model: 'claude-fable-b' } });
+      const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      expect(trigger.querySelector('.kr-agent-switch-custom')).toHaveTextContent('agentPicker.custom');
+      expect(trigger.querySelector('.kr-agent-switch-suffix')).toHaveTextContent('· claude-fable-b');
+      fireEvent.click(trigger);
+      const custom = screen.getByRole('menuitem', { name: 'Claude Code · agentPicker.custom · claude-fable-b' });
+      expect(custom).toHaveAttribute('data-current', 'true');
+      // The current mode clears it: sent as a tier, without a model.
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Claude Code · disc.tier.default' }));
+      });
+      expect(discussionsApi.update).toHaveBeenCalledWith(
+        'disc-agent-switch',
+        { agent: 'ClaudeCode', tier: 'default', connection_id: null },
+      );
+    });
   });
 
   it('keeps the choices open and reports the API error', async () => {

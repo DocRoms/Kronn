@@ -262,6 +262,12 @@
   max-width: calc(var(--kr-space-8) * 8);
 }
 
+/* KT-1885 — the agent picker's field mode takes the width of a form field. */
+.ds-demo-agent-field {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 8);
+}
+
 /* KT-1881 — the content of the Dialog and Drawer demos. */
 .ds-demo-field {
   display: flex;

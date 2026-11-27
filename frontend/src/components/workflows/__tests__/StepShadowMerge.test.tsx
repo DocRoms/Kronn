@@ -102,15 +102,17 @@ describe('StepShadowsEditor — the merge of a step (KT-1544)', () => {
     const onChange = renderEditor(step({ shadows: two, shadow_merge: merge() }));
     fireEvent.change(screen.getByTestId('wf-step-shadows-merge-timeout'), { target: { value: '15' } });
     expect(onChange).toHaveBeenLastCalledWith(two, { enabled: true, timeout_secs: 900 });
-    fireEvent.change(screen.getByTestId('wf-step-shadows-merge-condense-agent'), { target: { value: 'ClaudeCode' } });
+    // KT-1885 — the condense agent is the shared picker, exact model mode.
+    fireEvent.click(screen.getByTestId('wf-step-shadows-merge-condense-agent'));
+    fireEvent.click(within(within(screen.getByTestId('wf-step-shadows-merge-condense-agent-menu')).getByRole('group', { name: 'Claude Code' }))
+      .getAllByRole('menuitem')[0]);
     expect(onChange).toHaveBeenLastCalledWith(two, { enabled: true, agent: { agent: 'ClaudeCode' } });
   });
 
   it('shows the saved wait and condense agent', () => {
     renderEditor(step({ shadows: two, shadow_merge: merge({ timeout_secs: 1200, agent: { agent: 'ClaudeCode', model: 'opus' } }) }));
     expect(screen.getByTestId('wf-step-shadows-merge-timeout')).toHaveValue(20);
-    expect(screen.getByTestId('wf-step-shadows-merge-condense-agent')).toHaveValue('ClaudeCode');
-    expect(screen.getByTestId('wf-step-shadows-merge-condense-model')).toHaveValue('opus');
+    expect(screen.getByTestId('wf-step-shadows-merge-condense-agent')).toHaveTextContent('Claude Code · opus');
   });
 
   it('follows a renamed shadow and forgets a removed one, so a save is never refused', () => {

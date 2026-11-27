@@ -15,7 +15,8 @@ export interface GalleryComponent {
 const component = (id: string, name: string): GalleryComponent =>
   ({ id, name, caption: `designSystem.caption.${id}` });
 
-export const GALLERY_COMPONENTS: readonly GalleryComponent[] = [
+/** The base controls: exactly the components of components/ui/. */
+export const UI_GALLERY_COMPONENTS: readonly GalleryComponent[] = [
   component('button', 'Button'),
   component('iconButton', 'IconButton'),
   component('menu', 'Menu'),
@@ -40,6 +41,14 @@ export const GALLERY_COMPONENTS: readonly GalleryComponent[] = [
   component('drawerHeader', 'DrawerHeader'),
   component('cardHeader', 'CardHeader'),
 ];
+
+/** KT-1885 — shared components built on those controls, shown after them:
+ *  the one agent picker and its modes. */
+export const SHARED_GALLERY_COMPONENTS: readonly GalleryComponent[] = [
+  component('agentSwitchPicker', 'AgentSwitchPicker'),
+];
+
+export const GALLERY_COMPONENTS: readonly GalleryComponent[] = [...UI_GALLERY_COMPONENTS, ...SHARED_GALLERY_COMPONENTS];
 
 /** Anchor of the tokens part of the page. */
 export const TOKENS_ANCHOR = 'ds-tokens';

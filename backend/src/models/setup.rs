@@ -1932,6 +1932,35 @@ pub struct SetAgentFallbackRequest {
 
 // ─── Model tiers ──────────────────────────────────────────────────────────
 
+/// Longest exact model id a discussion stores (KT-1993).
+pub const MAX_EXACT_MODEL_CHARS: usize = 200;
+
+/// The validation rule for the exact model id of a discussion (KT-1993): trimmed,
+/// not empty, one line of at most [`MAX_EXACT_MODEL_CHARS`] characters, and not
+/// starting with `-`. The id reaches the agent CLI as the token right after
+/// `--model`, so a leading dash would be read as an option (`-c`,
+/// `--dangerously-skip-permissions`). No model id starts with a dash.
+/// Inner spaces are kept: each id is one argv token, not a shell line, so a
+/// space cannot add a token. The id is not checked against any catalogue here.
+/// At launch, `model_catalog::preflight_resolve` passes an unknown id through
+/// unchanged; only an id that disappeared from the live catalogue is replaced
+/// by a same-agent model or refused.
+pub fn normalize_exact_model(value: &str) -> Result<String, String> {
+    let model = value.trim();
+    if model.is_empty() {
+        return Err("model is empty".into());
+    }
+    if model.chars().count() > MAX_EXACT_MODEL_CHARS || model.chars().any(char::is_control) {
+        return Err(format!(
+            "model must be one line of at most {MAX_EXACT_MODEL_CHARS} characters"
+        ));
+    }
+    if model.starts_with('-') {
+        return Err("model is an agent option, not a model id: it must not start with '-'".into());
+    }
+    Ok(model.to_string())
+}
+
 /// Abstract model capability tier. Kronn maps each tier to a concrete --model flag per agent.
 /// Priority: AgentSettings.model (explicit) > ModelTier > Default (no flag).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default, TS)]

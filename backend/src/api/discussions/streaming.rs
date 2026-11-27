@@ -2292,6 +2292,23 @@ fn prepend_initial_event(stream: SseStream, initial_event: Option<Event>) -> Sse
     }
 }
 
+/// KT-1993 — the exact model a turn runs on, before the connection's tier map
+/// (which applies only when this returns `None`). Highest first: a fallback pin
+/// (a turn continued on a fallback runs on the link's own model, KT-1518); a
+/// per-message tier override, which drops the discussion's exact model; the
+/// discussion's exact model; otherwise `None`, so the tier decides.
+pub(crate) fn turn_exact_model(
+    discussion_model: Option<&str>,
+    tier_override: Option<ModelTier>,
+    fallback_pin: Option<&crate::core::agent_fallback::Pin>,
+) -> Option<String> {
+    match fallback_pin {
+        Some(pin) => pin.model.clone(),
+        None if tier_override.is_some() => None,
+        None => discussion_model.map(str::to_string),
+    }
+}
+
 /// Freeze the conversational view at the message that owns this dispatch.
 ///
 /// Plural targets are executed one at a time inside a discussion so their
@@ -3156,11 +3173,7 @@ pub(super) async fn make_agent_stream_inner(
             .flatten(),
         None => None,
     };
-    let disc_model = match &fallback_pin {
-        Some(pin) => pin.model.clone(),
-        None if tier_override.is_some() => None,
-        None => disc.model.clone(),
-    };
+    let disc_model = turn_exact_model(disc.model.as_deref(), tier_override, fallback_pin.as_ref());
     let disc_model = disc_model.or_else(|| {
         external_connection.as_ref().and_then(|connection| {
             crate::http_transport::connection_tier_model(connection, disc_tier)

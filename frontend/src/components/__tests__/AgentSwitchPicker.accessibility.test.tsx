@@ -64,12 +64,14 @@ describe('AgentSwitchPicker — accessible agent identity colours', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Switch agent' }));
     const popover = document.querySelector<HTMLElement>('.kr-agent-switch-popover');
-    expect(popover?.style.top).toBe('45px');
+    expect(popover?.style.top).toBe('44px');
 
+    // KT-1885 — as little room above as below: it stays under its trigger, capped
+    // to the room left, rather than covering the trigger (see the placement tests).
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 60 });
     fireEvent(window, new Event('resize'));
-    expect(popover?.style.top).toBe('8px');
-    expect(popover?.style.maxHeight).toBe('44px');
+    expect(popover?.style.top).toBe('44px');
+    expect(popover?.style.maxHeight).toBe('8px');
 
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight });
     rectSpy.mockRestore();

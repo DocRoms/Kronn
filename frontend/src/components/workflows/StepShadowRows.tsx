@@ -18,9 +18,8 @@ import {
   withShadowMerged, withShadowRemoved, type ShadowEdit,
 } from '../../lib/shadowMerge';
 import { MAX_SHADOWS, stepCanCarryShadows } from './shadowEditorModel';
-import { ShadowAgentPicker, TransportBadge, type MainAgent } from './ShadowAgentPicker';
 import { agentModelLabel, shadowDifferences, stepLoadLabel, stepMainAgent, type LoadNames } from './shadowRowModel';
-import type { AgentSwitchTarget } from '../AgentSwitchPicker';
+import { AgentSwitchPicker, TransportBadge, type AgentSwitchTarget, type ExactModelSelection, type MainAgent } from '../AgentSwitchPicker';
 import './StepShadowRows.css';
 import type { ModelTiersConfig, StepShadow, WorkflowStep } from '../../types/generated';
 
@@ -93,6 +92,27 @@ function MergeHelp({ merged, next, timeoutSecs, t, testId }: { merged: string; n
   );
 }
 
+/** KT-1885 — the shared agent picker in its « exact model » mode: agent + model id, « = principal », main model greyed. */
+function ExactModelPicker({ choices, modelTiers, disabled, ariaLabel, ...selection }: ExactModelSelection & {
+  choices?: readonly AgentSwitchTarget[];
+  modelTiers?: ModelTiersConfig | null;
+  disabled?: boolean;
+  ariaLabel: string;
+}) {
+  return (
+    <AgentSwitchPicker
+      currentAgent={selection.main.agent}
+      availableAgents={[]}
+      availableTargets={choices?.length ? [...choices] : undefined}
+      modelTiers={modelTiers}
+      disabled={disabled}
+      title={ariaLabel}
+      ariaLabel={ariaLabel}
+      exactModel={selection}
+    />
+  );
+}
+
 function Toggle({ kind, on, label, title, disabled, onClick, testId }: {
   kind: 'active' | 'merge'; on: boolean; label: string; title: string; disabled?: boolean; onClick: () => void; testId: string;
 }) {
@@ -158,7 +178,7 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, names,
           <div key={shadow.id} className="wf-shadow-subrow" data-role="shadow" data-testid={rowId} data-paused={!active} data-merged={isMerged} title={tooltip}>
             <span className="wf-shadow-subrow-name">{t('wf.shadow.rows.roleShadow')}</span>
             <span className="wf-shadow-subrow-agent">
-              <ShadowAgentPicker
+              <ExactModelPicker
                 value={shadow.agent}
                 choices={choices}
                 main={main}
@@ -166,7 +186,6 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, names,
                 disabled={!editable}
                 ariaLabel={t('wf.shadow.rows.pickerLabel', tooltip)}
                 testId={`${rowId}-agent`}
-                t={t}
                 onChange={agent => onEdit?.(withShadowChanged(shadows, merge, shadow.id, { ...shadow, agent }))}
               />
             </span>
@@ -214,7 +233,7 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, names,
         );
       })}
       {editable && shadows.length < MAX_SHADOWS && (
-        <ShadowAgentPicker
+        <ExactModelPicker
           value={undefined}
           choices={choices}
           main={main}
@@ -222,11 +241,10 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, names,
           ariaLabel={t('wf.shadow.rows.addLabel')}
           testId={`${testId}-add`}
           className="wf-shadow-add"
-          t={t}
           onChange={agent => onEdit?.(withShadowAdded(shadows, merge, { id: freshShadowId(shadows), label: '', enabled: true, ...(agent ? { agent } : {}) }))}
         >
           <Plus size={10} aria-hidden /> <span>{t('wf.shadow.rows.add')}</span>
-        </ShadowAgentPicker>
+        </ExactModelPicker>
       )}
       {merge && merged.length > 0 && (
         <div className="wf-shadow-merged" data-testid={`${testId}-merged`}>
@@ -244,7 +262,7 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, names,
           />
           <span className="wf-shadow-merged-agent" data-testid={`${testId}-merged-agent`}>
             <span className="wf-shadow-merged-by">{t('wf.shadow.rows.mergedBy')}</span>
-            <ShadowAgentPicker
+            <ExactModelPicker
               value={merge.agent}
               choices={choices}
               main={main}
@@ -252,7 +270,6 @@ export function StepShadowRows({ step, nextStepName, choices, modelTiers, names,
               disabled={!editable}
               ariaLabel={t('wf.shadow.rows.condenseLabel')}
               testId={`${testId}-condense`}
-              t={t}
               onChange={agent => onEdit?.(withMergeAgent(shadows, merge, agent))}
             />
           </span>

@@ -329,7 +329,19 @@ export function ChatHeader({
                 ariaLabel={t('disc.switchAgentAndTier')}
                 role={t('disc.targetDiscussionAgent')}
                 currentTier={discussion.tier ?? 'default'}
-                currentModel={discussion.model}
+                // KT-1994 — the discussion's exact model (KT-1993): « Personnalisé ».
+                // A refusal is shown by the picker next to the entry; the choice stays.
+                customModel={{
+                  model: discussion.model,
+                  onSelect: async (target: AgentSwitchTarget, model: string) => {
+                    await discussionsApi.update(discussion.id, {
+                      agent: target.agent,
+                      connection_id: target.connectionId ?? null,
+                      model,
+                    });
+                    onAgentSwitch(target.agent);
+                  },
+                }}
                 currentModelFallback={headerModelFallback}
                 tierLabels={{
                   economy: t('disc.tier.economy'),
@@ -344,6 +356,7 @@ export function ChatHeader({
                     : AGENT_MENTIONS.find(mention => mention.type === discussion.agent)?.trigger
                   ?? discussion.agent
                 }
+                // A mode sends its tier without a model: the server clears the exact model.
                 onTargetSelectionChange={async (target: AgentSwitchTarget, tier) => {
                   try {
                     await discussionsApi.update(discussion.id, {

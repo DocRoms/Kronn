@@ -49,6 +49,11 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** KT-1994 — an agent's other models are folded under one control. */
+async function unfold(menu: HTMLElement, agent: string) {
+  fireEvent.click(await within(menu).findByRole('menuitem', { name: `${agent} · agentPicker.otherModels` }));
+}
+
 function renderRows(target: WorkflowStep, extra: Partial<Parameters<typeof StepShadowRows>[0]> = {}) {
   const edits: ShadowEdit[] = [];
   render(<StepShadowRows step={target} nextStepName="publish" choices={choices} onEdit={edit => edits.push(edit)} t={t} {...extra} />);
@@ -234,15 +239,19 @@ describe('StepShadowRows — the agent/model menu', () => {
     expect(within(menu).getByTestId('wf-shadow-rows-twin-agent-same')).toBeInTheDocument();
     const groups = within(menu).getAllByRole('group').map(group => group.getAttribute('aria-label'));
     expect(groups).toEqual(['Ollama', 'LiteLLM', 'Claude Code']);
-    expect(within(within(menu).getByRole('group', { name: 'LiteLLM' })).getByText('wf.shadow.rows.transport.http')).toBeInTheDocument();
-    expect(within(within(menu).getByRole('group', { name: 'Ollama' })).getByText('wf.shadow.rows.transport.local')).toBeInTheDocument();
-    expect(within(within(menu).getByRole('group', { name: 'Claude Code' })).getByText('wf.shadow.rows.transport.cli')).toBeInTheDocument();
+    // KT-1994 — the catalogue's models no mode points to are folded under « Autres modèles ».
+    expect(within(menu).queryByRole('menuitem', { name: 'Ollama · llama4:8b' })).toBeNull();
+    await unfold(menu, 'Ollama');
+    expect(within(within(menu).getByRole('group', { name: 'LiteLLM' })).getByText('agentPicker.kind.api')).toBeInTheDocument();
+    expect(within(within(menu).getByRole('group', { name: 'Ollama' })).getByText('agentPicker.kind.local')).toBeInTheDocument();
+    expect(within(within(menu).getByRole('group', { name: 'Claude Code' })).getByText('agentPicker.kind.cli')).toBeInTheDocument();
     await waitFor(() => expect(within(menu).getByRole('menuitem', { name: 'Ollama · llama4:8b' })).toBeInTheDocument());
   });
 
   it('greys out the main run\'s model', async () => {
     renderRows(withShadows());
     const menu = await open('wf-shadow-rows-twin-agent');
+    await unfold(menu, 'Ollama');
     const main = await within(menu).findByRole('menuitem', { name: 'Ollama · qwen3.8:27b-mlx' });
     expect(main).toBeDisabled();
     expect(main).toHaveAttribute('data-main', 'true');
@@ -252,6 +261,7 @@ describe('StepShadowRows — the agent/model menu', () => {
   it('picks an agent and model for the shadow', async () => {
     const edits = renderRows(withShadows());
     const menu = await open('wf-shadow-rows-twin-agent');
+    await unfold(menu, 'Ollama');
     fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Ollama · llama4:8b' }));
     expect(edits[0].shadows.find(s => s.id === 'twin')?.agent).toEqual({ agent: 'Ollama', model: 'llama4:8b' });
     expect(screen.queryByTestId('wf-shadow-rows-twin-agent-menu')).toBeNull();
@@ -260,6 +270,7 @@ describe('StepShadowRows — the agent/model menu', () => {
   it('picks a connection: the shadow keeps its connection id', async () => {
     const edits = renderRows(withShadows());
     const menu = await open('wf-shadow-rows-twin-agent');
+    await unfold(menu, 'LiteLLM');
     fireEvent.click(await within(menu).findByRole('menuitem', { name: 'LiteLLM · gemini-4-argon' }));
     expect(edits[0].shadows.find(s => s.id === 'twin')?.agent).toEqual({ agent: 'LiteLlm', model: 'gemini-4-argon', connection_id: 'lite-1' });
   });
@@ -274,11 +285,24 @@ describe('StepShadowRows — the agent/model menu', () => {
   it('+ Shadow opens the same menu and creates a line with the chosen agent and model', async () => {
     const edits = renderRows(withShadows());
     const menu = await open('wf-shadow-rows-add');
+    await unfold(menu, 'Ollama');
     fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Ollama · llama4:8b' }));
     expect(edits[0].shadows.map(s => s.id)).toEqual(['argon', 'twin', 'shadow-3']);
     expect(edits[0].shadows[2]).toEqual({ id: 'shadow-3', label: '', enabled: true, agent: { agent: 'Ollama', model: 'llama4:8b' } });
     // The new line is compared only until its Merge is turned on.
     expect(edits[0].merge).toEqual({ enabled: true, shadows: ['argon'], timeout_secs: 600 });
+  });
+
+  // KT-1994 — a shadow's model that no mode of its agent names reads « Personnalisé », from its saved value.
+  it('labels a saved model outside the modes « Personnalisé » and lists it, checked, under its agent while folded', async () => {
+    renderRows(withShadows());
+    const trigger = screen.getByTestId('wf-shadow-rows-argon-agent');
+    expect(trigger.querySelector('.kr-agent-switch-custom')).toHaveTextContent('agentPicker.custom');
+    const menu = await open('wf-shadow-rows-argon-agent');
+    const lite = within(menu).getByRole('group', { name: 'LiteLLM' });
+    expect(within(lite).getByRole('menuitem', { name: 'LiteLLM · agentPicker.custom · gemini-4-argon' }))
+      .toHaveAttribute('data-current', 'true');
+    expect(within(lite).getByRole('menuitem', { name: 'LiteLLM · agentPicker.otherModels' })).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('closes on Escape', async () => {
@@ -330,6 +354,7 @@ describe('StepShadowRows — the merged result', () => {
     const edits = renderRows(withShadows());
     await act(async () => { fireEvent.click(screen.getByTestId('wf-shadow-rows-condense')); });
     const menu = screen.getByTestId('wf-shadow-rows-condense-menu');
+    await unfold(menu, 'Ollama');
     fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Ollama · llama4:8b' }));
     expect(edits[0].merge).toEqual({ enabled: true, shadows: ['argon'], timeout_secs: 600, agent: { agent: 'Ollama', model: 'llama4:8b' } });
   });

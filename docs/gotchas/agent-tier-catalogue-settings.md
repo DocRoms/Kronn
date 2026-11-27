@@ -116,17 +116,20 @@ CLI tiers. No embedded model list participates in the display helper anymore.
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:12-49#resolveCatalogTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:77-88#catalogTierEntry]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:141-151#resolvedTier]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1219-1229#resolvedTier]
 
 The shared picker keeps an unavailable configured entry disabled. A failed
 snapshot read reports the error and retains previous data as cached, not live.
-Saved per-discussion and Quick Prompt overrides are shown for the current
-selection; alternative choices resolve their own tiers. The Quick Prompt
-caller still explicitly clears its old override when choosing a new agent/tier.
+Saved Quick Prompt overrides are shown for the current selection; alternative
+choices resolve their own tiers. The Quick Prompt caller still explicitly
+clears its old override when choosing a new agent/tier. A discussion's exact
+model (KT-1993) is no tier override: the header passes it as `customModel` and
+the picker shows it as « Personnalisé » unless it is the current mode's own
+model (KT-1994).
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/ChatHeader.tsx:332#currentModel]
+[src: file: frontend/src/components/ChatHeader.tsx:334#customModel]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1717-1748#changeQuickPromptAgent]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3375-3376#currentModel]
 
@@ -146,8 +149,8 @@ refetches the catalogue. An unknown configured ID remains searchable, and a
 known unavailable choice remains disabled; accessible descriptions retain the
 model, provenance and unavailable state after filtering.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:53-62#matchesCatalogSearch]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:162-168#visibleChoices]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:358-393#tierOptions]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1250-1256#visibleChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1192-1227#tierOptions]
 
 The search field is outside the menu, within a portalled non-modal dialog.
 Arrow keys move among enabled choices; Home/End retain their caret behavior in
@@ -155,13 +158,13 @@ search and navigate choices when an option has focus. Escape inside the picker
 does not propagate to its parent form. Closing with Escape or completing an
 asynchronous selection restores trigger focus. Reopening clears the query,
 an empty result is explicit, and the popup's height is bounded by the viewport.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:170-195#navigateChoices]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:197-214#updatePopoverPosition]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:104-109#restoreFocusRef]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:319-325#setQuery]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:342-362#createPortal]
-[src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:168-205#reports]
-[src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:229-256#closes]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1211-1236#navigateChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:591-600#place]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:586-591#restoreFocusRef]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1363-1370#setQuery]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1380-1399#createPortal]
+[src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:167-204#reports]
+[src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:228-255#closes]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.accessibility.test.tsx:40-76#repositions]
 
 These are component regressions, not a new browser layout qualification.
@@ -171,19 +174,20 @@ component results forward as browser qualification.
 
 ### Composer mention catalogue contract
 
-Both composer palettes share tier buttons and the same catalogue resolver and
-opening-time snapshot reader as the agent picker. A named principal connection
+Both composer palettes render the agent picker's own palette and tier buttons
+(`AgentPickerPalette`, `AgentPickerTierChoices`, KT-1885) with the same
+catalogue resolver and opening-time snapshot reader as the agent picker. A named principal connection
 uses only its own tier configuration; an empty HTTP tier may use that same
 connection's default. Exact model IDs, provenance and verification time remain
 accessible even when an alias is displayed. Failed reloads retain stale data
 and an explicit error; typing within an open palette does not refetch.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:12-49#resolveCatalogTier]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
-[src: file: frontend/src/components/MentionTierChoices.tsx:7-15#MentionTierChoices]
-[src: file: frontend/src/components/MentionTierChoices.tsx:39-44#lastChecked]
-[src: file: frontend/src/components/ChatInput.tsx:517#useModelCatalogSnapshot]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:196-198#AgentPickerTierChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:105#lastChecked]
+[src: file: frontend/src/components/ChatInput.tsx:518#useModelCatalogSnapshot]
 [src: file: frontend/src/components/ChatInput.tsx:741-751#mentionTierResolution]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:201#useModelCatalogSnapshot]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:205#useModelCatalogSnapshot]
 
 Untouched principal insertion preserves its saved model override and does not
 write a tier preference. Explicit tier choices resolve their own configuration.
@@ -194,11 +198,11 @@ keep their exact session and stable ordinal, expose no model tier, and do not
 change native preferences. New-discussion submissions retain the immutable
 connection and explicitly selected tier.
 [src: file: frontend/src/lib/mentionTierSelection.ts:6-16#nextMentionTierIndex]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:879-885#applyMentionSuggestion]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:646-653#initialTargets]
-[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:149-157#untouched]
-[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:159-170#persists]
-[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:216-243#cli_ordinal]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:515-521#applyMentionSuggestion]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:659-666#initialTargets]
+[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:192-200#untouched]
+[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:176-187#persists]
+[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:246-273#cli_ordinal]
 
 The new regressions use API fixtures, including colliding IDs in two HTTP
 namespaces and a real send/creation callback assertion. They neither call a
@@ -215,7 +219,7 @@ tier. Canonical alias prefixes rank before additional substring matches, so
 typing `@co` still highlights Codex before a Claude Code substring result.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:53-62#matchesCatalogSearch]
 [src: file: frontend/src/components/ChatInput.tsx:752-769#mentionMatchesQuery]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:235-238#matchingMentionTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:239-242#matchingMentionTargets]
 [src: file: frontend/src/lib/mention-autocomplete.ts:7-10#mentionMatchRank]
 
 The unfinished search token accepts Unicode letters and common model-ID
@@ -252,7 +256,7 @@ Unavailable known entries remain disabled. Clearing an override is explicit
 and leaves tier resolution to the caller/backend.
 [src: file: frontend/src/components/ModelCatalogPicker.tsx:21-71#ModelCatalogPicker]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:309-315#ModelCatalogPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4544-4559#ModelCatalogPicker]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4545-4560#ModelCatalogPicker]
 
 Reasoning choices come from the effective model's `reasoning_modes`, not a
 fixed low/medium/high list. An existing value absent from that list is retained
@@ -306,7 +310,7 @@ configuration. The callback updates only the compensation step, not the main
 pipeline. Search, exact connection namespaces, provenance and unavailable tiers
 therefore share the existing picker behavior.
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:334-363#renderAgentTierPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:5025-5028#updateRb]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:5029-5032#updateRb]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:334-338#renderAgentTierPicker]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.coverage.test.tsx:984-1048#recover]
 
@@ -332,8 +336,8 @@ Resending the same agent no longer clears an existing connection or invalidates
 the summary cache. A lightweight agent lookup avoids loading the transcript
 merely to compare targets.
 [src: file: backend/src/models/discussions.rs:609-618#connection_id]
-[src: file: backend/src/api/discussions/crud.rs:910-940#validate_connection_target]
-[src: file: backend/src/api/discussions/crud.rs:983-1007#invalidate_summary_cache]
+[src: file: backend/src/api/discussions/crud.rs:935-965#validate_connection_target]
+[src: file: backend/src/api/discussions/crud.rs:1025-1049#invalidate_summary_cache]
 [src: file: backend/src/db/discussions.rs:1110-1119#get_discussion_agent]
 
 Seven isolated Router/SQLite regressions cover changed and unchanged targets,

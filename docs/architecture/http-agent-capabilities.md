@@ -292,7 +292,7 @@ mutable Quick Prompt. CLI effort keeps its existing snapshot format.
 [src: file: backend/src/api/mcp_remote.rs:584-612#create_batch_run_with_launch_settings]
 [src: file: backend/src/db/discussion_launch_settings.rs:18-117#capture]
 [src: file: backend/src/db/sql/186_discussion_http_settings.sql:1-10#discussion_http_settings]
-[src: file: backend/src/api/discussions/crud.rs:664-675#capture]
+[src: file: backend/src/api/discussions/crud.rs:676-687#capture]
 
 HTTP launches transmit explicit `reasoning_effort` and `max_tokens` on the
 OpenAI-compatible wire. Ollama receives `think` and `options.num_predict` after

@@ -1,11 +1,12 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useId, useLayoutEffect, useMemo, useRef } from 'react';
 import { AppLink } from './AppLink';
 import { PAGE_PATHS, settingsSectionPath } from '../lib/routes';
 import { newTabClickProps } from '../lib/newTabNavigation';
 import '../pages/DiscussionsPage.css';
 import { ProfileTooltip } from './ProfileTooltip';
 import { MediaGenerateForm } from './MediaGenerateForm';
-import { AgentSwitchPicker, type AgentSwitchTarget } from './AgentSwitchPicker';
+import { AgentPickerPalette, AgentSwitchPicker, type AgentPickerPaletteRow, type AgentSwitchTarget } from './AgentSwitchPicker';
+import { agentPaletteFieldAria } from '../lib/agentPickerPalette';
 import { MarkdownEditor } from './MarkdownComposerTools';
 import { SearchableSelect } from './SearchableSelect';
 import { DiscussionSkillPicker } from './DiscussionSkillPicker';
@@ -18,10 +19,9 @@ import { userError } from '../lib/userError';
 import type { ExternalApiConnectionView } from '../lib/api';
 import type { Project, AgentDetection, AgentReadiness, AgentType, AgentsConfig, Skill, AgentProfile, Directive, MessageTarget, ModelTier, ModelTierConfig } from '../types/generated';
 import { requiresFullAccessToRun } from '../lib/agentFullAccess';
-import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
 import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
-import { MentionTierChoices } from './MentionTierChoices';
 import { MENTION_TIER_CHOICES, nextMentionTierIndex } from '../lib/mentionTierSelection';
 import { clearDraft, loadDraft, NEW_DISCUSSION_DRAFT_ID, saveDraft, type DraftRoutingTiers } from '../lib/chat-drafts';
 import { externalAgentTargets } from '../lib/externalAgentIdentity';
@@ -39,7 +39,7 @@ import {
   Folder, ChevronRight, GitBranch,
   MessageSquare, X, AlertTriangle,
   Settings, Check, Zap, UserCircle, FileText, Paperclip, Image,
-  Clapperboard, Cpu,
+  Clapperboard,
 } from 'lucide-react';
 
 interface LaunchTarget {
@@ -92,6 +92,8 @@ export interface NewDiscConfig {
   directiveIds: string[];
   workspaceMode: 'Direct' | 'Isolated';
   tier: 'economy' | 'default' | 'reasoning';
+  /** KT-1994 — an exact model chosen outside the modes (« Personnalisé »); it wins over the tier. */
+  model?: string | null;
   branchName: string;
   baseBranch: string;
   pendingFiles?: File[];
@@ -182,6 +184,8 @@ export function NewDiscussionForm({
   // with the user's `ServerConfig.default_model_tier` on mount (0.8.6 phase 4).
   // Strict semantic — only applied at form-open time, never retroactively.
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
+  // KT-1994 — an exact model from the picker's other models; a mode clears it.
+  const [newDiscModel, setNewDiscModel] = useState<string | null>(null);
   const [promptAgentTiers, setPromptAgentTiers] = useState<DraftRoutingTiers>(() => initialDraft?.routingTiers ?? {});
   const [agentHandoffsEnabled, setAgentHandoffsEnabled] = useState<boolean | null>(null);
   // 0.8.6 phase 2 — disc-first refactor. When `false`, the disc is
@@ -237,6 +241,14 @@ export function NewDiscussionForm({
     ...catalogTargetSearchTerms(target, MENTION_TIER_CHOICES.map(tier => targetTierResolution(target, tier))),
   ])).sort((a, b) => mentionMatchRank(a.trigger, mentionQuery) - mentionMatchRank(b.trigger, mentionQuery));
   const availableMentionTargets = matchingMentionTargets.filter(target => target.available);
+  // KT-1885 — the prompt names the @ menu and its highlighted row for assistive tech.
+  const mentionListId = `${useId()}-mentions`;
+  const highlightedMention = availableMentionTargets[mentionIndex];
+  const mentionFieldAria = agentPaletteFieldAria(
+    mentionListId,
+    matchingMentionTargets.length > 0,
+    highlightedMention ? launchTargetKey(highlightedMention) : null,
+  );
   const availableSwitchTargets = useMemo<AgentSwitchTarget[]>(() =>
     launchTargets
       .filter(target => target.available)
@@ -672,6 +684,7 @@ export function NewDiscussionForm({
         directiveIds: newDiscDirectiveIds,
         workspaceMode: newDiscWorkspaceMode,
         tier: agentLaunchMode === 'prompt' ? primaryTier : newDiscTier,
+        ...(agentLaunchMode === 'selected' && newDiscModel ? { model: newDiscModel } : {}),
         branchName: newDiscBranchName,
         baseBranch: newDiscBaseBranch,
         pendingFiles: pendingFiles.length > 0 ? pendingFiles : undefined,
@@ -848,65 +861,63 @@ export function NewDiscussionForm({
                 const available = availableMentionTargets;
                 const unavailable = matching.filter(target => !target.available);
                 if (matching.length === 0) return null;
+                // KT-1885 — the shared agent picker's palette: its rows, tier
+                // choices and availability badges; the prompt keeps the keys.
                 return (
-                  <div
-                    ref={autocompleteRef}
+                  <AgentPickerPalette
+                    id={mentionListId}
+                    listRef={autocompleteRef}
                     className="disc-mention-popover disc-new-autocomplete"
-                    role="listbox"
-                    aria-label={t('disc.mentionAgents')}
-                    data-placement="below"
+                    ariaLabel={t('disc.mentionAgents')}
+                    placement="below"
                     style={{ maxHeight: 250 }}
-                  >
-                    {catalogError && <div role="status">{t('modelCatalog.loadError')}</div>}
-                    {available.length > 0 && (
-                      <div className="disc-mention-group">{t('disc.routingAvailableAgents')}</div>
-                    )}
-                    {available.map((target, index) => {
-                      const targetKey = launchTargetKey(target);
-                      const currentTier = promptAgentTiers[targetKey] ?? newDiscTier;
-                      return (
-                        <div
-                          key={targetKey}
-                          role="option"
-                          aria-selected={index === mentionIndex}
-                          aria-disabled={targetTierResolution(target, currentTier).unavailable}
-                          className="disc-mention-item"
-                          data-highlighted={index === mentionIndex}
-                          onMouseEnter={() => {
+                    status={catalogError ? t('modelCatalog.loadError') : undefined}
+                    t={t}
+                    rows={[
+                      ...available.map((target, index): AgentPickerPaletteRow => {
+                        const currentTier = promptAgentTiers[launchTargetKey(target)] ?? newDiscTier;
+                        const current = targetTierResolution(target, currentTier);
+                        return {
+                          key: launchTargetKey(target),
+                          agent: target.agent,
+                          label: target.trigger,
+                          detail: target.label,
+                          group: t('disc.routingAvailableAgents'),
+                          availability: current.unavailable
+                            ? { state: 'unavailable', label: t('modelCatalog.unavailable'), title: current.refusal ?? undefined }
+                            : null,
+                          highlighted: index === mentionIndex,
+                          onHover: () => {
                             setMentionIndex(index);
                             setMentionTierIndex(null);
-                          }}
-                          onMouseDown={event => {
-                            // Disabled buttons can still bubble pointer events to the row.
-                            // Never turn a refused tier choice into an implicit default.
-                            if (event.target instanceof Element && event.target.closest('button')) return;
-                            event.preventDefault();
-                            applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target);
-                          }}
-                        >
-                          <div className="disc-mention-main">
-                            <Cpu size={13} style={{ color: agentTextColor(target.agent) }} />
-                            <span className="font-semibold" style={{ color: agentTextColor(target.agent) }}>{target.trigger}</span>
-                            <span className="text-muted">{target.label}</span>
-                          </div>
-                          <MentionTierChoices trigger={target.trigger} currentTier={currentTier}
-                            keyboardTier={index === mentionIndex && mentionTierIndex !== null ? MENTION_TIER_CHOICES[mentionTierIndex] : undefined}
-                            ariaLabel={t('disc.modelTier')} resolve={tier => targetTierResolution(target, tier)}
-                            onSelect={tier => applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target, tier)} t={t} />
-                        </div>
-                      );
-                    })}
-                    {unavailable.length > 0 && (
-                      <div className="disc-mention-group">{t('disc.routingDisabledAgent')}</div>
-                    )}
-                    {unavailable.map(target => (
-                      <div key={launchTargetKey(target)} className="disc-mention-item disc-mention-item-disabled" aria-disabled="true">
-                        <Cpu size={13} style={{ color: agentTextColor(target.agent) }} />
-                        <span className="font-semibold">{target.trigger}</span>
-                        <span className="text-muted">{t('disc.promptAgentUnavailable')}</span>
-                      </div>
-                    ))}
-                  </div>
+                          },
+                          onSelect: () => applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target),
+                          tiers: {
+                            targetLabel: target.trigger,
+                            currentTier,
+                            keyboardTier: index === mentionIndex && mentionTierIndex !== null ? MENTION_TIER_CHOICES[mentionTierIndex] : undefined,
+                            ariaLabel: t('disc.modelTier'),
+                            resolve: tier => targetTierResolution(target, tier),
+                            tierLabel: tier => t(`disc.tier.${tier}`),
+                            modelLabel: tier => targetTierResolution(target, tier).model || t('disc.defaultAgentModel'),
+                            titleFor: tier => t('disc.routingInvokeTier', t(`disc.tier.${tier}`),
+                              targetTierResolution(target, tier).model || t('disc.defaultAgentModel')),
+                            defaultLabel: t('disc.defaultAgentModel'),
+                            onSelect: tier => {
+                              if (tier) applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target, tier);
+                            },
+                          },
+                        };
+                      }),
+                      ...unavailable.map((target): AgentPickerPaletteRow => ({
+                        key: launchTargetKey(target),
+                        agent: target.agent,
+                        label: target.trigger,
+                        group: t('disc.routingDisabledAgent'),
+                        availability: { state: 'disabled', label: t('disc.promptAgentUnavailable') },
+                      })),
+                    ]}
+                  />
                 );
               })()}
 
@@ -961,6 +972,7 @@ export function NewDiscussionForm({
                   placeholder={t('disc.promptPlaceholder')}
                   value={newDiscPrompt}
                   aria-label={t('disc.prompt')}
+                  {...mentionFieldAria}
                   onChange={e => {
                     if (newDiscPrefilled) return;
                     setNewDiscPrompt(e.target.value);
@@ -1257,6 +1269,16 @@ export function NewDiscussionForm({
                       setNewDiscAgent(target.agent);
                       setNewDiscConnectionId(target.connectionId ?? null);
                       setNewDiscTier(tier);
+                      setNewDiscModel(null);
+                    }}
+                    customModel={{
+                      model: newDiscModel,
+                      onSelect: async (target, model) => {
+                        setAgentLaunchMode('selected');
+                        setNewDiscAgent(target.agent);
+                        setNewDiscConnectionId(target.connectionId ?? null);
+                        setNewDiscModel(model);
+                      },
                     }}
                   />
                 ) : (

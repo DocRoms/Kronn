@@ -1879,6 +1879,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               projects={projects}
               skills={availableSkills}
               quickPrompts={availableQuickPrompts}
+              agentChoices={agentChoices}
+              modelTiers={agentAccess?.model_tiers}
               t={t}
               focusOnOpen={shadowFocus}
               onFocused={() => setShadowFocus(false)}
@@ -4831,6 +4833,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           projects={projects}
                           skills={availableSkills}
                           quickPrompts={availableQuickPrompts}
+                          agentChoices={agentChoices}
+                          modelTiers={agentAccess?.model_tiers}
                           t={t}
                           focusOnOpen={shadowFocus && i === shadowTarget}
                           onFocused={() => setShadowFocus(false)}

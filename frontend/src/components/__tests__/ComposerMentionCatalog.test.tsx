@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApiMock } from '../../test/apiMock';
@@ -42,15 +43,19 @@ function familyConfig(): ModelTiersConfig {
     kiro: empty(), copilot_cli: empty(), ollama: empty(), nvidia: empty(),
     lite_llm: { economy: 'foreign-family', default: 'foreign-family', reasoning: 'foreign-family' } };
 }
-async function showChat(savedModel?: string, connectionPatch: Partial<ExternalApiConnectionView> = {}) {
+async function showChat(
+  savedModel?: string,
+  connectionPatch: Partial<ExternalApiConnectionView> = {},
+  wrap: (input: ReactNode) => ReactNode = input => input,
+) {
   const onSend = vi.fn();
   const discussion = { id: 'catalog-mentions', agent: 'LiteLlm', connection_id: 'team-a', tier: 'default',
     model: savedModel, participants: ['LiteLlm'], messages: [], language: 'fr', skill_ids: [], directive_ids: [] } as unknown as Discussion;
-  render(<ChatInput discussion={discussion} agents={[agent]} externalConnections={[{ ...connection, ...connectionPatch }]} modelTiers={familyConfig()}
+  render(<>{wrap(<ChatInput discussion={discussion} agents={[agent]} externalConnections={[{ ...connection, ...connectionPatch }]} modelTiers={familyConfig()}
     sending={false} disabled={false} ttsEnabled={false} ttsState="idle" worktreeError={null}
     availableSkills={[]} availableDirectives={[]} onSend={onSend} onStop={vi.fn()} onOrchestrate={vi.fn()}
     onTtsToggle={vi.fn()} onWorktreeErrorDismiss={vi.fn()} onWorktreeRetry={vi.fn()}
-    isAgentRestricted={() => false} toast={vi.fn()} t={t} />);
+    isAgentRestricted={() => false} toast={vi.fn()} t={t} />)}</>);
   const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
   await act(async () => { fireEvent.change(textarea, { target: { value: '@litellm' } }); });
   return { textarea, onSend };
@@ -64,7 +69,7 @@ async function showNew(connectionPatch: Partial<ExternalApiConnectionView> = {})
   return { textarea, onSubmit };
 }
 function tierButton(tier: string): HTMLButtonElement {
-  return document.querySelector<HTMLButtonElement>(`.disc-mention-tier-choice[data-tier="${tier}"]`)!;
+  return document.querySelector<HTMLButtonElement>(`.kr-agent-switch-tier-option[data-tier="${tier}"]`)!;
 }
 beforeEach(() => { localStorage.clear(); list.mockReset().mockResolvedValue(snapshot()); });
 afterEach(cleanup);
@@ -131,6 +136,23 @@ describe('composer mentions — shared exact catalogue contract', () => {
     expect(textarea).toHaveValue('@equipe');
   });
 
+  // KT-1885 — the @ menu is the shared agent picker's palette: an unavailable
+  // choice wears the same badge as in every other agent picker, and its row
+  // cannot be chosen by pointer either.
+  it.each(['chat', 'new'] as const)('shows an unavailable choice with the shared availability badge (%s)', async mode => {
+    list.mockResolvedValue(snapshot({ availability: 'unavailable' }));
+    const { textarea } = mode === 'chat' ? await showChat() : await showNew();
+    fireEvent.change(textarea, { target: { value: '@equipe' } });
+    const palette = screen.getByRole('listbox', { name: 'disc.mentionAgents' });
+    expect(palette).toHaveClass('kr-agent-switch-palette');
+    const row = within(palette).getAllByRole('option')[0];
+    expect(row).toHaveAttribute('aria-disabled', 'true');
+    expect(within(row).getAllByText('modelCatalog.unavailable')
+      .some(node => node.getAttribute('data-state') === 'unavailable')).toBe(true);
+    fireEvent.mouseDown(row);
+    expect(textarea).toHaveValue('@equipe');
+  });
+
   it('resolves the principal HTTP connection and cached provenance, not a colliding model or family default', async () => {
     await showChat();
     expect(tierButton('reasoning')).toHaveAttribute('title', expect.stringContaining('Modèle équipe A'));
@@ -143,13 +165,17 @@ describe('composer mentions — shared exact catalogue contract', () => {
     await showNew();
     expect(tierButton('reasoning')).toHaveAttribute('title', expect.stringContaining('Modèle équipe A'));
     expect(tierButton('reasoning')).toHaveAccessibleDescription(expect.stringContaining('modelCatalog.provenance.cached'));
-    expect(within(tierButton('reasoning')).getByText('modelCatalog.provenance.cached')).toBeVisible();
+    // KT-1885 — the row's tiers share it: written once, next to the agent, not in each tier.
+    const row = tierButton('reasoning').closest<HTMLElement>('[role="option"]')!;
+    expect(within(row).getAllByText('modelCatalog.provenance.cached')).toHaveLength(1);
+    expect(within(row).getByTestId('agent-catalog-state')).toHaveTextContent('modelCatalog.provenance.cached');
+    expect(within(tierButton('reasoning')).queryByText('modelCatalog.provenance.cached')).toBeNull();
   });
 
   it('keeps the principal saved override for untouched insertion but resolves explicit tier choices independently', async () => {
     const { textarea } = await showChat('saved-unknown');
     expect(tierButton('default').title).toContain('Modèle équipe A');
-    expect(document.querySelector('.disc-mention-tier-choices')).toHaveAttribute('aria-label', expect.stringContaining('saved-unknown'));
+    expect(document.querySelector('.kr-agent-switch-tier-choices')).toHaveAttribute('aria-label', expect.stringContaining('saved-unknown'));
     fireEvent.keyDown(textarea, { key: 'Enter' });
     expect(textarea).toHaveValue('@litellm ');
     expect(document.querySelector('.disc-composer-routing-chips')).toBeNull();
@@ -226,7 +252,7 @@ describe('composer mentions — shared exact catalogue contract', () => {
     list.mockResolvedValue(data);
     const { textarea, onSend } = await showChat();
     await act(async () => { fireEvent.change(textarea, { target: { value: '@codex-cli-4' } }); });
-    expect(document.querySelector('.disc-mention-tier-choices')).toBeNull();
+    expect(document.querySelector('.kr-agent-switch-tier-choices')).toBeNull();
     expect(screen.getByLabelText('disc.routingCliModelManaged')).toBeInTheDocument();
     fireEvent.change(textarea, { target: { value: '@cli-4' } });
     expect(screen.getByLabelText('disc.routingCliModelManaged')).toBeInTheDocument();
@@ -253,5 +279,87 @@ describe('composer mentions — shared exact catalogue contract', () => {
     await act(async () => { fireEvent.change(textarea, { target: { value: '@lite' } }); });
     expect(await screen.findByText('modelCatalog.loadError')).toBeVisible();
     expect(tierButton('reasoning')).toHaveAccessibleDescription(expect.stringContaining('modelCatalog.provenance.cached'));
+  });
+});
+
+// KT-1885 review 2 — the @ menu is never taller than the room it has: from the
+// composer's top up to the message list's top (under the discussion header and
+// its banners), minus --kr-space-2; it scrolls inside.
+describe('composer mentions — the @ menu stays in the message area (KT-1885 review 2)', () => {
+  const rect = (top: number, bottom: number) => ({
+    top, bottom, left: 0, right: 480, width: 480, height: bottom - top, x: 0, y: top, toJSON: () => ({}),
+  }) as DOMRect;
+
+  it('measures its height from the composer up to the message list, and again when the window resizes', async () => {
+    let composerTop = 700;
+    const spy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('disc-messages')) return rect(180, composerTop);
+      // Anchored above the composer (bottom: 100%): its bottom is the composer's top minus its margin.
+      if (this.classList.contains('kr-agent-switch-palette')) return rect(composerTop - 900, composerTop - 4);
+      return rect(0, 0);
+    });
+    try {
+      await showChat(undefined, {}, input => (
+        <div className="disc-messages-col">
+          <div className="disc-messages" />
+          {input}
+        </div>
+      ));
+      const menu = screen.getByRole('listbox', { name: 'disc.mentionAgents' });
+      // 696 (its bottom) − 180 (the message list's top) − 8.
+      expect(menu.style.maxHeight).toBe('508px');
+      composerTop = 600;
+      await act(async () => { window.dispatchEvent(new Event('resize')); });
+      expect(menu.style.maxHeight).toBe('408px');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('outside a discussion column, the window bounds it', async () => {
+    const spy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('kr-agent-switch-palette') ? rect(-200, 500) : rect(0, 0);
+    });
+    try {
+      await showChat();
+      expect(screen.getByRole('listbox', { name: 'disc.mentionAgents' }).style.maxHeight).toBe('492px');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// KT-1885 review — the @ menu is a listbox the field drives: the field names
+// it and its highlighted row, and the arrows keep that row in view.
+describe('composer mentions — the field drives the shared palette (KT-1885)', () => {
+  it.each(['chat', 'new'] as const)('names the list and its highlighted row, and scrolls it into view (%s)', async mode => {
+    const scrollIntoView = vi.fn();
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      const { textarea } = mode === 'chat' ? await showChat() : await showNew();
+      await act(async () => { fireEvent.change(textarea, { target: { value: '@' } }); });
+      const menu = screen.getByRole('listbox', { name: 'disc.mentionAgents' });
+      const options = within(menu).getAllByRole('option').filter(option => option.getAttribute('aria-disabled') !== 'true');
+      expect(options.length).toBeGreaterThan(1);
+      expect(textarea).toHaveAttribute('aria-controls', menu.id);
+      expect(textarea).toHaveAttribute('aria-expanded', 'true');
+      expect(textarea).toHaveAttribute('aria-activedescendant', options[0].id);
+      scrollIntoView.mockClear();
+      fireEvent.keyDown(textarea, { key: 'ArrowDown' });
+      const highlighted = within(menu).getAllByRole('option').find(option => option.getAttribute('aria-selected') === 'true');
+      expect(highlighted).toBe(options[1]);
+      expect(textarea).toHaveAttribute('aria-activedescendant', options[1].id);
+      expect(document.getElementById(textarea.getAttribute('aria-activedescendant') ?? '')).toBe(options[1]);
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
+      expect(scrollIntoView.mock.contexts.at(-1)).toBe(options[1]);
+      // The tier choices inside a row are no Tab stops: the field keeps the keyboard.
+      for (const tier of menu.querySelectorAll('.kr-agent-switch-tier-option')) expect(tier).toHaveAttribute('tabindex', '-1');
+      fireEvent.keyDown(textarea, { key: 'Escape' });
+      expect(textarea).not.toHaveAttribute('aria-activedescendant');
+      expect(textarea).not.toHaveAttribute('aria-controls');
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
   });
 });

@@ -27,6 +27,8 @@ import { STATUS_TONES } from '../ui/statusTones';
 import type { OverlaySize } from '../ui/overlay';
 import { OVERLAY_WIDTHS } from '../../styles/designTokens';
 import { GALLERY_COMPONENTS, componentAnchor } from './designSystemGallery';
+import { AgentSwitchPicker, type AgentAvailability, type AgentSwitchTarget } from '../AgentSwitchPicker';
+import type { AgentType, ModelTier, ShadowAgent } from '../../types/generated';
 
 type T = (key: string, ...args: (string | number)[]) => string;
 
@@ -628,6 +630,101 @@ function CardHeaderDemo({ t }: { t: T }) {
   );
 }
 
+/** Sample agents of the picker demo: product names, the same in every locale. */
+const DEMO_PICKER_TARGETS: AgentSwitchTarget[] = [
+  { agent: 'ClaudeCode' }, { agent: 'Codex' }, { agent: 'GeminiCli' }, { agent: 'Ollama' },
+];
+
+/** KT-1885 — the one agent picker in its four modes: a field (agent + tier),
+ *  a compact chip, a multi-choice list and an exact model. Gemini CLI shows
+ *  how an unavailable agent reads in every mode. */
+function AgentSwitchPickerDemo({ t }: { t: T }) {
+  const [field, setField] = useState<{ agent: AgentType; tier: ModelTier }>({ agent: 'ClaudeCode', tier: 'default' });
+  const [withDefault, setWithDefault] = useState<{ agent: AgentType; tier: ModelTier | null }>({ agent: 'ClaudeCode', tier: null });
+  const tierLabels = { economy: t('disc.tier.economy'), default: t('disc.tier.default'), reasoning: t('disc.tier.reasoning') };
+  const [chip, setChip] = useState<AgentType>('Codex');
+  const [many, setMany] = useState<AgentSwitchTarget[]>([{ agent: 'ClaudeCode' }, { agent: 'Codex' }]);
+  const [exact, setExact] = useState<ShadowAgent | undefined>(undefined);
+  // KT-1994 — the full list: modes with their model, other models, « Personnalisé », « Récents ».
+  const [full, setFull] = useState<{ target: AgentSwitchTarget; tier: ModelTier; model: string | null }>({
+    target: { agent: 'ClaudeCode' }, tier: 'default', model: null,
+  });
+  const label = t('designSystem.demo.agentLabel');
+  const availability = (target: AgentSwitchTarget): AgentAvailability | null => target.agent === 'GeminiCli'
+    ? { state: 'unavailable', label: t('designSystem.demo.agentUnavailable') }
+    : null;
+  const common = { availableAgents: [], availableTargets: DEMO_PICKER_TARGETS, availability, title: label, ariaLabel: label };
+  return (
+    <>
+      <Row label={t('designSystem.demo.agentField')}>
+        <div className="ds-demo-agent-field">
+          <AgentSwitchPicker
+            {...common}
+            variant="field"
+            currentAgent={field.agent}
+            currentTier={field.tier}
+            tierLabels={tierLabels}
+            defaultModelLabel={t('disc.defaultAgentModel')}
+            onTargetSelectionChange={async (target, tier) => setField({ agent: target.agent, tier })}
+          />
+        </div>
+      </Row>
+      <Row label={t('designSystem.demo.agentFullList')}>
+        <div className="ds-demo-agent-field">
+          <AgentSwitchPicker
+            {...common}
+            variant="field"
+            currentAgent={full.target.agent}
+            currentConnectionId={full.target.connectionId}
+            currentTier={full.tier}
+            tierLabels={tierLabels}
+            defaultModelLabel={t('disc.defaultAgentModel')}
+            onTargetSelectionChange={async (target, tier) => setFull({ target, tier, model: null })}
+            customModel={{
+              model: full.model,
+              onSelect: async (target, model) => setFull(current => ({ target, tier: current.tier, model })),
+            }}
+          />
+        </div>
+      </Row>
+      {/* The API assistants' list: a fourth track, « Défaut », the agent's own model. */}
+      <Row label={t('designSystem.demo.agentWithDefault')}>
+        <AgentSwitchPicker
+          {...common}
+          currentAgent={withDefault.agent}
+          currentTier={withDefault.tier}
+          tierLabels={tierLabels}
+          defaultModelLabel={t('disc.defaultAgentModel')}
+          onTargetSelectionChange={async (target, tier) => setWithDefault({ agent: target.agent, tier })}
+          onDefaultTierSelection={async target => setWithDefault({ agent: target.agent, tier: null })}
+        />
+      </Row>
+      <Row label={t('designSystem.demo.agentChip')}>
+        <AgentSwitchPicker {...common} compact currentAgent={chip} onChange={async agent => setChip(agent)} />
+      </Row>
+      <Row label={t('designSystem.demo.agentMultiple')}>
+        <AgentSwitchPicker
+          {...common}
+          currentAgent="ClaudeCode"
+          multiple={{
+            selected: many,
+            onToggle: target => setMany(current => current.some(item => item.agent === target.agent)
+              ? current.filter(item => item.agent !== target.agent)
+              : [...current, target]),
+          }}
+        />
+      </Row>
+      <Row label={t('designSystem.demo.agentExactModel')}>
+        <AgentSwitchPicker
+          {...common}
+          currentAgent="ClaudeCode"
+          exactModel={{ value: exact, onChange: setExact, main: { agent: 'ClaudeCode', tier: 'default' }, testId: 'ds-agent-exact' }}
+        />
+      </Row>
+    </>
+  );
+}
+
 const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   button: ButtonDemo,
   iconButton: IconButtonDemo,
@@ -652,6 +749,7 @@ const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   sectionHeader: SectionHeaderDemo,
   drawerHeader: DrawerHeaderDemo,
   cardHeader: CardHeaderDemo,
+  agentSwitchPicker: AgentSwitchPickerDemo,
 };
 
 /** KT-1880 — each component of components/ui/ under its own heading, with its

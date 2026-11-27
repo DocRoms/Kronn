@@ -166,12 +166,13 @@ in silence.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:44-58#unusableExternalAgentTargets]
 
 `AgentSwitchPicker` remains the common selector on discussion, QP/compare and
-workflow surfaces. It reads the shared snapshot, shows provenance, and leaves
-known unavailable choices visible but disabled. Settings exposes refresh plus
-manual create/update/delete, including chat/image/video capabilities and
-reasoning modes.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:101#useModelCatalogSnapshot]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:386-428#unavailable]
+workflow surfaces, the API assistants, the shadows' exact model and (through its
+palette) the composer's @ menu (KT-1885). It reads the shared snapshot, shows
+provenance, and leaves known unavailable choices visible but disabled. Settings
+exposes refresh plus manual create/update/delete, including chat/image/video
+capabilities and reasoning modes.
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1210#useModelCatalogSnapshot]
+[src: file: frontend/src/lib/agentAvailability.ts:23-33#tierAvailability]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:182-211#createManual]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:212-229#deleteManual]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:327-337#capability]

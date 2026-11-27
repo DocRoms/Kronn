@@ -2465,6 +2465,8 @@ export function DiscussionsPage({
         workspace_mode: config.workspaceMode === 'Isolated' ? 'Isolated' : undefined,
         base_branch: config.workspaceMode === 'Isolated' ? config.baseBranch : undefined,
         tier: config.tier !== 'default' ? config.tier : undefined,
+        // KT-1994 — the picker's « Personnalisé »: an exact model that wins over the tier.
+        ...(config.model ? { model: config.model } : {}),
         // A disc created as a waiting room for invited peers must not keep a
         // live discussion agent. The `agent` above is only a placeholder for a
         // NOT NULL column — left active, the first invited CLI produced a

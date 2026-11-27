@@ -3,9 +3,8 @@
  * (Principal row + shadows), and the `Agent · model` a row names.
  */
 import { AGENT_LABELS } from '../../lib/constants';
-import type { AgentSwitchTarget } from '../AgentSwitchPicker';
+import type { AgentSwitchTarget, MainAgent } from '../AgentSwitchPicker';
 import { stepCanCarryShadows } from './shadowEditorModel';
-import type { MainAgent } from './ShadowAgentPicker';
 import { resolveCatalogTier } from '../../lib/modelCatalogSelection';
 import { skillBaseId, skillPinnedVersion } from '../../lib/automationSkills';
 import type { ModelTiersConfig, QuickPrompt, ShadowAgent, Skill, StepShadow, WorkflowStep } from '../../types/generated';

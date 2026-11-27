@@ -435,6 +435,53 @@ describe('NewDiscussionForm — creation flow layout', () => {
     ));
   });
 
+  // KT-1994 — a model outside the modes is sent as the discussion's exact model; a mode clears it.
+  it('starts on a custom model typed in the picker, labelled « Personnalisé », and a mode clears it', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    const picker = await screen.findByTestId('new-disc-agent-picker');
+    // The typed id is offered for the current agent: Codex first.
+    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.economy' }));
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'gpt-5.5-codex-max' } });
+    const free = document.querySelectorAll<HTMLElement>('[data-kind="free"]');
+    expect(free).toHaveLength(1);
+    await act(async () => { fireEvent.click(free[0]); });
+    expect(picker.querySelector('.kr-agent-switch-custom')).toHaveTextContent('agentPicker.custom');
+    expect(picker).toHaveTextContent('gpt-5.5-codex-max');
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), { target: { value: 'Analyse ce changement.' } });
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ agent: 'Codex', model: 'gpt-5.5-codex-max' }),
+    ));
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.economy' }));
+    });
+    expect(picker.querySelector('.kr-agent-switch-custom')).toBeNull();
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1][0]).toEqual(expect.objectContaining({ agent: 'Codex', tier: 'economy' }));
+    expect(onSubmit.mock.calls[1][0]).not.toHaveProperty('model');
+  });
+
   it('selects usable OpenCode and preserves its native identity in the discussion payload', async () => {
     const onSubmit = vi.fn();
     render(
