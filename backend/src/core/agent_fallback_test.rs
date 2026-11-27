@@ -109,6 +109,9 @@ fn a_task_failure_a_refusal_a_test_failure_or_a_work_timeout_is_never_a_trigger(
         // happens to quote a rate limit the agent was reading about.
         "Agent stalled (no output for 300s) — last line: HTTP 429 Too Many Requests",
         "workflow global timeout reached while the step was running",
+        // KT-2107 — the notices Kronn appends when it stops a run itself.
+        "HTTP 429 rate_limit_exceeded\n\n---\n⚠️ **Agent interrupted by Kronn after 20 min without output.** Retry the turn.",
+        "HTTP 429 rate_limit_exceeded\n\n---\n⚠️ **Agent interrupted by Kronn after reaching the 240-minute global execution limit.**",
         "",
     ];
     for text in not_the_providers {

@@ -20,7 +20,7 @@ a review round, so a redirect here can also be reclaiming an attempt with
 real prior review history, not only a brand-new one. Every other `Blocked`
 reason (`WorkerSessionCommittedElsewhere`, or an `Applying`-origin
 infra/dirty-main hold) still falls through to the refusal.
-[src: file: backend/src/db/orchestration.rs:9506-9521#AwaitingWorkerAcceptance]
+[src: file: backend/src/db/orchestration.rs:9510-9525#AwaitingWorkerAcceptance]
 
 Before doing anything else, the function resumes the checkpoint the ADR §3
 state machine actually allows: `Blocked` clears back ONLY to
@@ -37,7 +37,7 @@ the CAS inside that same `transition_execution` and is refused the ordinary
 way ("not a resumable worker state") rather than silently double-applying —
 this is NOT a test of two simultaneous callers racing each other.
 [src: file: backend/src/db/orchestration.rs:9514-9548#Provisioning]
-[src: file: backend/src/db/orchestration.rs:9630#cancel_live_offers_for_execution]
+[src: file: backend/src/db/orchestration.rs:9634#cancel_live_offers_for_execution]
 
 The caller decides what Provisioning becomes next, exactly like the initial
 launch: a native worker dispatches straight to `Working` (added to the

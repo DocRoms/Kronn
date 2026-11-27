@@ -148,7 +148,7 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4374-4420#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:4397-4443#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:1766-1851#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1360-1413#preflight_workflow_launch]
 

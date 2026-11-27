@@ -167,8 +167,8 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/api/discussions/crud.rs:596-608#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/api/discussions/crud.rs:1032-1036#attach_discussion_participants]
-[src: file: backend/src/api/discussions/streaming.rs:2375-2487#independent_sibling_notice]
-[src: file: backend/src/api/discussions/streaming.rs:2268-2323#discussion_at_dispatch_trigger]
+[src: file: backend/src/api/discussions/streaming.rs:2481-2593#independent_sibling_notice]
+[src: file: backend/src/api/discussions/streaming.rs:2295-2350#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2297-2332#thread_under_trigger]
 [src: file: backend/src/db/discussions.rs:2032-2056#already_scheduled]
 
@@ -268,7 +268,7 @@ Two distinctions the reason must not blur, and does not:
   the untracked path alone changes nothing a room user sees — which is exactly how the
   second producer of the generic string survived the first fix. `strings` on the built
   binary, not a source grep, is what proved a second one existed.
-[src: file: backend/src/api/discussions/streaming.rs:1376-1421#AgentExecutionOutcome] [src: file: backend/src/api/discussions/streaming.rs:1619-1634#finish_tracked_preflight]
+[src: file: backend/src/api/discussions/streaming.rs:1400-1445#AgentExecutionOutcome] [src: file: backend/src/api/discussions/streaming.rs:1647-1662#finish_tracked_preflight]
 
 ## Persistence and interruption
 
@@ -278,7 +278,7 @@ Two distinctions the reason must not blur, and does not:
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
   [src: file: backend/src/api/discussions/crud.rs:673-716#replace_message_targets]
-  [src: file: backend/src/api/discussions/runtime.rs:790-809#dispatch_target_tier]
+  [src: file: backend/src/api/discussions/runtime.rs:980-999#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.
 - `messages.target_agent` remains the first-target compatibility projection.

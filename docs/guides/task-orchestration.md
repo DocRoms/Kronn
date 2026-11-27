@@ -269,8 +269,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8514-8517#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8525-8527#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8518-8521#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8529-8531#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -686,7 +686,7 @@ Three rules:
   model has no shell, so it can neither build, run the tests nor commit. It is
   skipped and the next agent is tried: a mixed list gives its CLI agent. Only a
   prelocalised (`scoped`) worker continues on an HTTP model.
-  [src: file: backend/src/api/discussions/runtime.rs:1105#needs_shell]
+  [src: file: backend/src/api/discussions/runtime.rs:1120#needs_shell]
   The rule covers the moves Kronn makes on its own, and the reassignment
   itself refuses such a quota fallback, whichever step chose it. An explicit
   choice of an HTTP agent for a generic worker, by a person or by the

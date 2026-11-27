@@ -141,7 +141,7 @@ guarantee that arbitrary user content is secret-free.
 [src: file: backend/src/agents/tool_trace.rs:198-262#from_codex]
 [src: file: backend/src/agents/tool_trace.rs:264-339#from_claude_line]
 [src: file: backend/src/agents/tool_trace.rs:341-380#collect]
-[src: file: backend/src/api/discussions/streaming.rs:913-961#lift_acp_tool_calls]
+[src: file: backend/src/api/discussions/streaming.rs:938-986#lift_acp_tool_calls]
 
 Native ACP sessions receive Kronn's bridge even when no project is attached.
 The runtime reconstructs the reserved `kronn-internal` entry from its own

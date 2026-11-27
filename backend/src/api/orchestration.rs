@@ -19527,6 +19527,21 @@ pub fn compact_next_action(
             reason: "stopped at the run time limit (see last_error); a resume gets the same limit: resume only if the rest fits, or reassign with a reason naming what not to rerun, or cancel",
         });
     }
+    // KT-2107 — stopped for lack of output.
+    if execution.status == Interrupted
+        && detail.recovery.as_ref().is_some_and(|recovery| {
+            recovery.pending
+                && recovery.recovery_action == Action::ResumeWorker
+                && recovery
+                    .recovery_reason
+                    .starts_with(crate::db::orchestration::WORKER_INACTIVE_REASON)
+        })
+    {
+        return Some(CompactNextAction {
+            tool: Some("task_exec_resume"),
+            reason: "stopped after a stretch without output (see last_error): resume, or reassign with a reason saying what ran when the output stopped, or cancel",
+        });
+    }
     // KT-1540 — a worker that ended without delivering is parked for one resume.
     if execution.status == Interrupted
         && detail.recovery.as_ref().is_some_and(|recovery| {

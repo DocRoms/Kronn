@@ -144,7 +144,12 @@ pub(super) fn interrupt_undelivered_with_notice(
         UndeliveredCause::Completed => "worker_completed_without_delivery",
         UndeliveredCause::Failed => "worker_failed_without_delivery",
         UndeliveredCause::Stopped => "worker_stopped_without_delivery",
-        UndeliveredCause::TimedOut => crate::db::orchestration::WORKER_TIMED_OUT_REASON,
+        UndeliveredCause::TimedOut => match limit_stop.as_ref().map(|stop| stop.kind) {
+            Some(crate::api::worker_time_limit::StopKind::Inactivity) => {
+                crate::db::orchestration::WORKER_INACTIVE_REASON
+            }
+            _ => crate::db::orchestration::WORKER_TIMED_OUT_REASON,
+        },
     };
     let actor = crate::models::PlanningActor {
         kind: crate::models::PlanningActorKind::Backend,
@@ -197,6 +202,16 @@ pub(super) fn interrupt_undelivered_with_notice(
                 .unwrap_or_default();
             let (task_id, execution_id) = (&interrupted.task_id, &interrupted.execution_id);
             let content = match (cause, &limit_stop) {
+                (UndeliveredCause::TimedOut, Some(stop))
+                    if stop.kind == crate::api::worker_time_limit::StopKind::Inactivity =>
+                {
+                    format!(
+                        "**Worker arrêté faute de sortie, sans livraison**\n\nKronn a arrêté le dispatch `{job_id}` de la tâche `{task_id}` après {limit} min sans sortie, au bout de {elapsed} min (Config > Serveur, « Timeout d'inactivité agent »). Le worker n'a déclaré aucun échec et n'avait pas encore livré. L'exécution `{execution_id}` est maintenant `Interrupted`. {kept}{refused}{refusal} Reprends-la (`task_exec_resume`) ou réaffecte-la (`task_exec_reassign`, dont le champ `reason` est lu par le worker) en lui indiquant quelle commande est restée muette. Sinon annule-la (`task_exec_cancel`).",
+                        elapsed = stop.elapsed.as_secs() / 60,
+                        limit = stop.limit.as_secs() / 60,
+                        kept = stop.kept(true),
+                    )
+                }
                 (UndeliveredCause::TimedOut, Some(stop)) => format!(
                     "**Worker arrêté par la limite de temps, sans livraison**\n\nKronn a arrêté le dispatch `{job_id}` de la tâche `{task_id}` après {elapsed} min : il a atteint la durée maximale d'une exécution agent ({limit} min, Config > Serveur). Le worker n'a déclaré aucun échec et n'avait pas encore livré. L'exécution `{execution_id}` est maintenant `Interrupted`. {kept}{refused}{refusal} Reprends-la (`task_exec_resume`) ou réaffecte-la (`task_exec_reassign`, dont le champ `reason` est lu par le worker) : le worker repart avec la limite de son agent ({limit} min s'il reste le même), donc indique-lui quelle commande longue ne pas relancer. Sinon annule-la (`task_exec_cancel`).",
                     elapsed = stop.elapsed.as_secs() / 60,
@@ -1377,12 +1392,19 @@ async fn finish_dispatch_turn(
             // On a read failure, prefer the wording that states the real cause
             // over one that sends the reader to a sub-discussion we can't confirm.
             .unwrap_or(false);
-        fail_dispatch_job(
-            state,
-            &job,
-            &unsuccessful_completion_diagnostic(&response, is_task_worker),
-        )
-        .await;
+        // KT-2107 — a provider refusal no fallback link took over is the
+        // provider's, not a failure the worker reported.
+        let refusal = is_task_worker
+            .then(|| crate::core::agent_fallback::classify_trigger(&response))
+            .flatten();
+        let diagnostic = match refusal {
+            Some(trigger) => worker_refusal_diagnostic(
+                trigger,
+                crate::core::agent_fallback::announced_reset(&response, chrono::Utc::now()),
+            ),
+            None => unsuccessful_completion_diagnostic(&response, is_task_worker),
+        };
+        fail_dispatch_job(state, &job, &diagnostic).await;
         return;
     }
 
@@ -1601,6 +1623,23 @@ async fn retry_after_transient_upstream(
             false
         }
     }
+}
+
+/// KT-2107 — the `last_error` of a task worker its provider refused, when no
+/// fallback link took it over. The cause sits in the first 160 characters.
+fn worker_refusal_diagnostic(
+    trigger: crate::core::agent_fallback::Trigger,
+    announced: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    let reset = announced
+        .map(|reset| format!(" announced reset {};", reset.format("%Y-%m-%d %H:%M UTC")))
+        .unwrap_or_default();
+    format!(
+        "task worker refused by its provider: failure_kind={};{reset} no fallback link took it \
+         over. The worker had not delivered. Use `task_exec_resume` once the provider serves \
+         again, or `task_exec_reassign` to another agent.",
+        trigger.code(),
+    )
 }
 
 /// Durable `last_error` for a turn that ended unsuccessfully.
@@ -3984,6 +4023,59 @@ mod chain_render_tests {
                 crate::db::discussions::list_message_targets(conn, notice_id)?.len(),
                 1,
                 "the notice is aimed at the principal"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-2107 — a worker Kronn stopped for lack of output is parked with that
+    /// cause, and the principal is told the inactivity limit, not "worker failed".
+    #[tokio::test]
+    async fn a_worker_stopped_by_the_inactivity_limit_is_parked_with_that_cause() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let execution_id = working_execution(conn, "j-idle")?;
+            crate::api::worker_time_limit::record_stop(
+                conn,
+                &execution_id,
+                "j-idle",
+                crate::api::worker_time_limit::StopKind::Inactivity,
+                std::time::Duration::from_secs(95 * 60),
+                std::time::Duration::from_secs(20 * 60),
+                None,
+            )?;
+            let settled = persist_dispatch_settlement(
+                conn,
+                "j-idle",
+                "d-limit-child",
+                None,
+                crate::db::workflows::BatchChildOutcome::Failed,
+                Some("task worker stopped by Kronn"),
+                None,
+            )?;
+            assert!(settled.changed);
+
+            let recovery = crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                .expect("an inactivity stop leaves a decision to the principal");
+            assert_eq!(
+                recovery.recovery_reason,
+                crate::db::orchestration::WORKER_INACTIVE_REASON
+            );
+            assert!(recovery.pending);
+            let notices = parent_notices(conn, "orch-worker-")?;
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            let (notice_id, notice) = &notices[0];
+            assert_eq!(
+                notice_id,
+                &format!("orch-worker-timed-out:{execution_id}:j-idle")
+            );
+            assert!(notice.contains("20 min sans sortie"), "{notice}");
+            assert!(notice.contains("task_exec_resume"), "{notice}");
+            assert!(
+                !notice.contains("limite de temps") && !notice.contains("Worker échoué"),
+                "{notice}"
             );
             Ok(())
         })

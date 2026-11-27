@@ -794,6 +794,29 @@ fn model_stall_notice(stderr: &[String]) -> Option<String> {
         .map(|reason| format!("⚠️ **Agent interrupted by Kronn.** {reason}"))
 }
 
+/// KT-2107 — which of Kronn's limits stopped the run, and the bound it applied.
+/// The run's own watchdog states its bound in its stop line: inside a tool call
+/// it is longer than `model_idle`, which is only the fallback.
+fn kronn_stop_of(
+    reason: Option<&AgentTimeoutReason>,
+    stderr: &[String],
+    model_idle: Duration,
+) -> Option<(crate::api::worker_time_limit::StopKind, Duration)> {
+    use crate::api::worker_time_limit::StopKind;
+    match reason {
+        Some(AgentTimeoutReason::Global(limit)) => Some((StopKind::TimeLimit, *limit)),
+        Some(AgentTimeoutReason::Stall(limit)) => Some((StopKind::Inactivity, *limit)),
+        None => {
+            let line = stderr
+                .iter()
+                .map(|line| line.trim())
+                .find(|line| crate::agents::idle_watchdog::is_stall_reason(line))?;
+            let limit = crate::agents::idle_watchdog::stall_limit(line).unwrap_or(model_idle);
+            Some((StopKind::Inactivity, limit))
+        }
+    }
+}
+
 /// The text-silence bound the stream consumer applies, or `None` when the run's
 /// own activity watchdog owns inactivity (the global deadline still holds).
 fn consumer_text_stall(activity_watched: bool, stall: Duration) -> Option<Duration> {
@@ -5301,19 +5324,6 @@ pub(super) async fn make_agent_stream_inner(
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
-                // KT-1408 — the process is dead: a worker the global limit
-                // stopped leaves a WIP checkpoint instead of a dirty worktree.
-                if let (Some(AgentTimeoutReason::Global(_)), Some(job_id)) =
-                    (timeout_reason.as_ref(), dispatch_job_id.as_deref())
-                {
-                    crate::api::worker_time_limit::checkpoint_stopped_worker(
-                        &state,
-                        job_id,
-                        run_started.elapsed(),
-                        global_timeout,
-                    )
-                    .await;
-                }
                 let finished_worker_launch = match served_model {
                     Some(recorder) => Some(recorder.finish().await),
                     None => None,
@@ -5391,6 +5401,23 @@ pub(super) async fn make_agent_stream_inner(
                 }
 
                 let mut stderr_lines = process.captured_stderr_flushed().await;
+                // KT-1408 — the process is dead: a worker one of Kronn's limits
+                // stopped leaves a WIP checkpoint instead of a dirty worktree, and
+                // the stop is journaled with its kind (KT-2107).
+                let kronn_stop =
+                    kronn_stop_of(timeout_reason.as_ref(), &stderr_lines, model_idle_timeout);
+                if let (Some((kind, limit)), Some(job_id)) =
+                    (kronn_stop, dispatch_job_id.as_deref())
+                {
+                    crate::api::worker_time_limit::checkpoint_stopped_worker(
+                        &state,
+                        job_id,
+                        kind,
+                        run_started.elapsed(),
+                        limit,
+                    )
+                    .await;
+                }
                 // Capture only after the linked validation child has stopped
                 // and its artifacts have been sanitized. Later disk changes
                 // cannot borrow this reply's terminal marker.
@@ -7348,6 +7375,52 @@ mod agent_lifecycle_tests {
     /// KT-932 — a reply that stalled after some text must still say why it
     /// ended: the model's watchdog writes its reason to stderr, and this lifts
     /// it out from among whatever else the run logged.
+    /// KT-2107 — the limit journaled for a stop is the one that stopped the run:
+    /// a tool call's longer bound, Kronn's own stream limits, or none at all.
+    #[test]
+    fn the_journaled_stop_carries_the_bound_that_stopped_the_run() {
+        use crate::api::worker_time_limit::StopKind;
+        let idle = Duration::from_secs(1200);
+        let tool = crate::agents::idle_watchdog::tool_stall_reason(
+            "OpenCode",
+            "cargo test",
+            Duration::from_secs(9600),
+        );
+        assert_eq!(
+            super::kronn_stop_of(None, &[tool], idle),
+            Some((StopKind::Inactivity, Duration::from_secs(9600))),
+            "a stop inside a tool call is not the model's 20 min"
+        );
+        assert_eq!(
+            super::kronn_stop_of(
+                Some(&super::AgentTimeoutReason::Global(Duration::from_secs(
+                    14400
+                ))),
+                &[],
+                idle
+            ),
+            Some((StopKind::TimeLimit, Duration::from_secs(14400)))
+        );
+        assert_eq!(
+            super::kronn_stop_of(
+                Some(&super::AgentTimeoutReason::Stall(Duration::from_secs(600))),
+                &[],
+                idle
+            ),
+            Some((StopKind::Inactivity, Duration::from_secs(600)))
+        );
+        assert_eq!(
+            super::kronn_stop_of(None, &["Agent stalled (no output for soon)".into()], idle),
+            Some((StopKind::Inactivity, idle)),
+            "an unreadable bound falls back to the model's delay"
+        );
+        assert_eq!(
+            super::kronn_stop_of(None, &["Agent exited with exit code 1".into()], idle),
+            None,
+            "a run that ended by itself was not stopped by Kronn"
+        );
+    }
+
     #[test]
     fn a_model_stall_is_named_in_the_reply_it_cut_short() {
         let reason = crate::agents::idle_watchdog::stall_reason(
@@ -7362,6 +7435,14 @@ mod agent_lifecycle_tests {
         ];
 
         let notice = super::model_stall_notice(&stderr).expect("the stall is found");
+        assert_eq!(
+            super::kronn_stop_of(None, &stderr, Duration::from_secs(60)),
+            Some((
+                crate::api::worker_time_limit::StopKind::Inactivity,
+                Duration::from_secs(900)
+            )),
+            "the bound is the one the stop line states"
+        );
 
         assert!(notice.contains("Agent interrupted by Kronn"), "{notice}");
         assert!(
