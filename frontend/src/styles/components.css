@@ -446,21 +446,40 @@ select.input option {
 }
 
 /* ── MCP origin badges (shared: Plugins page + Project cards) ──────────── */
+/* KT-2006 — the label is `--kr-text-secondary` (6.8:1 or more on a registry
+   card in every theme); the origin hue stays on the dot and the border.
+   `--kr-success` / `--kr-warning` as text fell to 4.3:1 on a card in light,
+   and success to 3.1:1 in sakura. */
 .mcp-origin-badge {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 0.7rem;
   padding: 1px 6px;
   border-radius: 3px;
   font-weight: 500;
   letter-spacing: 0.02em;
+  color: var(--kr-text-secondary);
+}
+.mcp-origin-badge::before {
+  content: '';
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 .mcp-origin-official {
-  color: var(--kr-success);
-  border: 1px solid rgba(var(--kr-success-rgb), 0.3);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.45);
+}
+.mcp-origin-official::before {
+  background: var(--kr-success);
 }
 .mcp-origin-community {
-  color: var(--kr-warning);
-  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.3);
+  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.45);
+}
+.mcp-origin-community::before {
+  background: var(--kr-warning);
 }
 
 /* ── Plugin kind badge (MCP / API / hybrid) ─────────────────────────────── */
@@ -474,13 +493,23 @@ select.input option {
   font-weight: 500;
   letter-spacing: 0.02em;
 }
+/* KT-2006 — same split as the origin badge: the label in
+   `--kr-text-secondary`, the kind hue on the icon and the border
+   (`--kr-info` and `--kr-purple-soft` are 3.7–4.2:1 as text on a registry
+   card in sakura and euronews). */
 .mcp-kind-badge-mcp {
-  color: var(--kr-info);
+  color: var(--kr-text-secondary);
   border: 1px solid rgba(var(--kr-info-rgb), 0.35);
 }
+.mcp-kind-badge-mcp svg {
+  color: var(--kr-info);
+}
 .mcp-kind-badge-api {
-  color: var(--kr-purple-soft);
+  color: var(--kr-text-secondary);
   border: 1px solid rgba(var(--kr-purple-soft-rgb), 0.35);
+}
+.mcp-kind-badge-api svg {
+  color: var(--kr-purple-soft);
 }
 .mcp-kind-badge-hybrid {
   color: var(--kr-text-primary);
@@ -757,6 +786,29 @@ select.input option {
   color: var(--kr-text-secondary);
   font-size: var(--kr-fs-xs);
   text-align: right;
+}
+
+/* KT-2015 — a model a joined session declared: the id on the first line, whole
+   (it wraps, never cut), and under it, in the muted role, where it comes from. */
+.disc-participant-details dl > div[data-source='join'] {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  column-gap: 10px;
+  row-gap: 2px;
+}
+
+.disc-participant-details dl > div[data-source='join'] > .disc-participant-model {
+  grid-column: 2;
+  max-width: none;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.disc-participant-details dl > div[data-source='join'] > .disc-participant-model-source {
+  grid-column: 2;
+  color: var(--kr-text-muted);
 }
 
 /* The invite button is styled by `.disc-chat-header-btn--primary`

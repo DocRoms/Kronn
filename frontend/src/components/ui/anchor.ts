@@ -3,10 +3,12 @@
 // The layer is rendered into document.body with `position: fixed`, so a list
 // with `overflow: hidden` or its own stacking context does not clip it. Its
 // place is computed from the anchor's box AND the layer's own size, once the
-// layer is rendered, and again on scroll and resize while it stays open. It
+// layer is rendered, and again while it stays open: on a scroll outside the
+// layer (its own list scrolling does not move it), on a resize of the window,
+// and on a size change of the layer or of its anchor (KT-2014). It
 // never leaves the window: it flips to the side with more room, is clamped
 // sideways, and a layer taller than the room scrolls inside a max-height.
-import { useLayoutEffect, useState, type CSSProperties, type RefObject } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 
 export type Placement = 'top' | 'bottom';
 export type Align = 'center' | 'start' | 'end';
@@ -56,6 +58,13 @@ export function anchoredStyle(
  *  origin, so its width is not squeezed by a previous place. */
 const UNPLACED: CSSProperties = { position: 'fixed', top: 0, left: 0, visibility: 'hidden' };
 
+const STYLE_KEYS = ['position', 'top', 'left', 'maxHeight', 'visibility'] as const;
+
+/** The same place: re-placing to it keeps the style object and renders nothing. */
+function samePlace(a: CSSProperties, b: CSSProperties): boolean {
+  return STYLE_KEYS.every(key => a[key] === b[key]);
+}
+
 export interface Anchored {
   style: CSSProperties;
   /** False while the layer waits to be measured, hidden: a browser refuses
@@ -74,8 +83,15 @@ export function useAnchoredStyle(
   align: Align,
 ): Anchored {
   const [style, setStyle] = useState<CSSProperties>(UNPLACED);
+  // The style last asked for, to compare without scheduling a render.
+  const current = useRef<CSSProperties>(UNPLACED);
   useLayoutEffect(() => {
     if (!open) return;
+    const apply = (next: CSSProperties) => {
+      if (samePlace(current.current, next)) return;
+      current.current = next;
+      setStyle(next);
+    };
     const place = () => {
       const anchor = anchorRef.current;
       const layer = layerRef.current;
@@ -91,15 +107,25 @@ export function useAnchoredStyle(
         width: root.clientWidth || window.innerWidth,
         height: root.clientHeight || window.innerHeight,
       };
-      setStyle(anchoredStyle(anchor.getBoundingClientRect(), size, viewport, placement, align));
+      apply(anchoredStyle(anchor.getBoundingClientRect(), size, viewport, placement, align));
+    };
+    // The layer's own list scrolling moves neither it nor its anchor.
+    const onScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && layerRef.current?.contains(target)) return;
+      place();
     };
     place();
-    window.addEventListener('scroll', place, true);
+    window.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', place);
+    // New content in the layer, or an anchor that grows, without a scroll or a resize.
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => place());
+    for (const node of [layerRef.current, anchorRef.current]) if (node) observer?.observe(node);
     return () => {
-      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', place);
-      setStyle(UNPLACED);
+      observer?.disconnect();
+      apply(UNPLACED);
     };
   }, [anchorRef, layerRef, open, placement, align]);
   return { style, placed: style !== UNPLACED };

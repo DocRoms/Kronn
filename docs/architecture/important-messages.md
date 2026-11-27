@@ -135,7 +135,7 @@ and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
 [src: file: frontend/src/pages/DiscussionsPage.tsx:5577-5601#ImportantMessageForm]
 [src: file: frontend/src/components/ImportantMessageForm.tsx:90-104#taskRef]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1409-1439#openPlan]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1415-1445#openPlan]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:90-93#initialTaskId]
 
 The publication-key field appears only inside the open form. It uses the

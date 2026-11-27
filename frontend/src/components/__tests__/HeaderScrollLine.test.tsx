@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { HeaderScrollLine } from '../HeaderScrollLine';
+import { WHEEL_LINE_PX } from '../../lib/stripOverflow';
 import { ParticipantsStrip } from '../ParticipantsStrip';
 
 const LINE = 200;
@@ -120,6 +121,28 @@ describe('HeaderScrollLine', () => {
     expect(scroller().scrollLeft).toBe(100);
     act(() => { fireEvent.wheel(scroller(), { deltaY: 500, deltaX: 0 }); });
     expect(scroller().scrollLeft).toBe(TRIGGER + 3 * CHIP - LINE);
+  });
+
+  // KT-2015 — a wheel that reports lines (deltaMode 1) or pages (2) moved the
+  // line by 1 to 3 px a notch: its delta was read as pixels.
+  it('counts a wheel in line or page mode in pixels, and lets the page scroll when the line cannot move', () => {
+    renderLine();
+    const room = TRIGGER + 3 * CHIP - LINE;
+    act(() => { fireEvent.wheel(scroller(), { deltaY: 1, deltaX: 0, deltaMode: 1 }); });
+    expect(scroller().scrollLeft).toBe(WHEEL_LINE_PX);
+    act(() => { fireEvent.wheel(scroller(), { deltaY: -1, deltaX: 0, deltaMode: 1 }); });
+    expect(scroller().scrollLeft).toBe(0);
+    act(() => { fireEvent.wheel(scroller(), { deltaY: 1, deltaX: 0, deltaMode: 2 }); });
+    expect(scroller().scrollLeft).toBe(room);
+    // At the end the line cannot move: the wheel is not consumed, the page scrolls.
+    let consumed = true;
+    act(() => { consumed = !fireEvent.wheel(scroller(), { deltaY: 3, deltaX: 0, deltaMode: 1 }); });
+    expect(consumed).toBe(false);
+    expect(scroller().scrollLeft).toBe(room);
+    // Moving, it is consumed.
+    act(() => { consumed = !fireEvent.wheel(scroller(), { deltaY: -1, deltaX: 0, deltaMode: 1 }); });
+    expect(consumed).toBe(true);
+    expect(scroller().scrollLeft).toBe(room - WHEEL_LINE_PX);
   });
 
   it('opens the full list from the pinned counter, as a layer in document.body', async () => {

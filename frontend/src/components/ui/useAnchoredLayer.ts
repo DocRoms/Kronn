@@ -8,9 +8,12 @@
 // - Tab and Shift+Tab move between its controls and stay inside it;
 // - Escape closes it and gives focus back to the anchor that opened it;
 // - a press outside the anchor and the layer closes it, and focus stays where
-//   the press lands.
+//   the press lands; a press inside a layer opened from it that is on the
+//   stack of open layers (a Menu, a useDialogFocus dialog, another anchored
+//   layer) is not outside (KT-2014). A portal popover that does not call
+//   `registerLayer` (AgentSwitchPicker, DecisionModelPicker today) is outside.
 import { useCallback, useEffect, useRef, type RefCallback, type RefObject } from 'react';
-import { useDialogFocus } from '../../hooks/useDialogFocus';
+import { insideLayerAbove, placeFocus, useDialogFocus } from '../../hooks/useDialogFocus';
 import { useAnchoredStyle, type Align, type Anchored, type Placement } from './anchor';
 
 export interface AnchoredLayerOptions {
@@ -45,8 +48,9 @@ export function useAnchoredLayer<T extends HTMLElement>({
     onEscape: () => {
       latestClose.current();
       // Back to the anchor, whatever had focus when the layer opened (a row
-      // of another list that is gone, for instance).
-      anchorRef.current?.focus();
+      // of another list that is gone, for instance). Placed: the anchor's
+      // tooltip costs no Escape.
+      placeFocus(anchorRef.current);
     },
   });
 
@@ -62,7 +66,9 @@ export function useAnchoredLayer<T extends HTMLElement>({
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (!target) return;
-      if (layerRef.current?.contains(target) || anchorRef.current?.contains(target)) return;
+      const layer = layerRef.current;
+      if (layer?.contains(target) || anchorRef.current?.contains(target)) return;
+      if (layer && insideLayerAbove(layer, target)) return;
       latestClose.current();
     };
     document.addEventListener('pointerdown', onPointerDown);

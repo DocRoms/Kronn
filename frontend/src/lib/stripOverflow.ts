@@ -25,3 +25,16 @@ export function measureChipsOutOfView(scroller: HTMLElement, list: HTMLElement):
 export function lineFadesEnd(scroller: HTMLElement): boolean {
   return scroller.scrollWidth - scroller.scrollLeft - scroller.clientWidth > 1;
 }
+
+/** KT-2015 — a wheel in line mode counts one line per this many pixels (the
+ *  step Chromium uses for a line), so one notch moves the header line by a
+ *  readable step instead of 1 to 3 px. */
+export const WHEEL_LINE_PX = 40;
+
+/** The vertical wheel delta in pixels: `deltaY` counts pixels, lines or pages
+ *  as `deltaMode` says; a page is the scroller's visible width. */
+export function wheelPixels(event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>, scroller: HTMLElement): number {
+  if (event.deltaMode === 1) return event.deltaY * WHEEL_LINE_PX;
+  if (event.deltaMode === 2) return event.deltaY * scroller.clientWidth;
+  return event.deltaY;
+}

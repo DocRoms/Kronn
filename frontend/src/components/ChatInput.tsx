@@ -2041,7 +2041,10 @@ export function ChatInput({
                 );
                 return;
               }
-              if (e.key === 'Escape') { setMentionQuery(null); return; }
+              // KT-2015 — consumed like the emoji menu's Escape: the page's
+              // window listener skips a handled key, so the side panel behind
+              // stays open until the next Escape.
+              if (e.key === 'Escape') { e.preventDefault(); setMentionQuery(null); return; }
             }
             // `nativeEvent.isComposing` is true while an IME is
             // composing a candidate (CJK, accented dead keys on some

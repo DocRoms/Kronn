@@ -715,7 +715,9 @@ export function DiscussionsPage({
     if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel
       && !showNotesPanel) return;
     const closePanel = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      // KT-2015 — a key a menu already handled (the composer's @ or emoji
+      // menu closing) is not also a request to close the panel behind it.
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
       setShowGitPanel(false);
       setShowTerminalPanel(false);
       setShowPlanPanel(false);

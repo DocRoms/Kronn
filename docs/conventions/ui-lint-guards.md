@@ -11,28 +11,30 @@ See also [design-tokens.md](design-tokens.md) for the scales and
 
 | Guard | Where | What it refuses | Baseline |
 |---|---|---|---|
-| `ui-guards/no-literal-ui-string` | ESLint | A literal UI string in JSX: text, `aria-label`, `title`, `placeholder`, `alt`, `label` | `frontend/eslint-suppressions.json` |
-| `ui-guards/control-has-name` | ESLint | An icon-only `<button>`, or an `<input>`/`<select>`/`<textarea>`, without an accessible name | same |
+| `ui-guards/no-literal-ui-string` | ESLint | A literal UI string in JSX: text, a literal in braces or as a branch of a child expression (`{ok ? 'Saved' : 'Failed'}`, `{empty && 'None'}`, `{a \|\| 'Untitled'}`, `{a ?? 'Untitled'}`), a template or a concatenation with text; in the nine attributes `aria-label`, `aria-description`, `aria-placeholder`, `aria-roledescription`, `aria-valuetext`, `title`, `placeholder`, `alt`, `label`; and in the text props of a component (`description`, `help`, `error`, `message`, `confirmLabel`, `content`) | `frontend/eslint-suppressions.json` |
+| `ui-guards/control-has-name` | ESLint | An icon-only `<button>` or native element with `role="button"`, or an `<input>`/`<select>`/`<textarea>`, without an accessible name | same |
 | `ui-guards/no-adhoc-dialog` | ESLint | A modal (`aria-modal`, `<dialog>`) built outside `components/ui` (use `Dialog`, `Drawer`, `ConfirmDialog`) | same |
 | `ui-guards/no-foreign-page-stylesheet` | ESLint | A page or a component importing the stylesheet of another page (`src/pages/<Page>.css`) | same |
-| `ui-guards/no-off-scale-style` | ESLint | An inline `fontSize`, radius or colour outside the tokens; a `useIsMobile`/`matchMedia` width outside `BREAKPOINTS` | same |
+| `ui-guards/no-off-scale-style` | ESLint | An inline `fontSize`, radius or colour outside the tokens, each branch of a `? :`, `&&`, `\|\|`, `??` value read, and a literal colour in a `--custom` key; a `useIsMobile`/`matchMedia` width outside `BREAKPOINTS` | same |
 | `no-restricted-globals` / `-properties` (KT-1881) | ESLint | `window.confirm()` and `confirm()` | same |
-| Off-scale stylesheet values | `pnpm lint:theme` | A `font-size`, radius, colour or `@media` width outside the scales, in a `.css` file | `frontend/src/styles/themeAuditBaseline.json` (counts per file and kind) |
+| Off-scale stylesheet values | `pnpm lint:theme` | A `font-size` (the size inside a `font:` shorthand too), radius, colour, or `@media`/`@container` width (range syntax included) outside the scales, in a `.css` file, nested rules included | `frontend/src/styles/themeAuditBaseline.json` (counts per file and kind) |
 | Status colours in every theme | `pnpm lint:theme` | A status colour (`--kr-success`…, `--kr-status-*`) under 4.5:1 on a surface, in any theme, light ones included | same file (`contrast` cells) |
 | No warning in `components/ui` | ESLint | Every rule that warns elsewhere is an error under `src/components/ui/**` | none: the folder has no warning |
 | `ui-guards/no-adhoc-agent-identity` (KT-1936) | ESLint | An element written in an agent's colour (`style.color` from `agentTextColor()` / `agentColor()`) whose content, or whose siblings (the other children of its nearest JSX parent, through a `cond &&` or a `? :`), also write a model (a `.model`, `model_tier`, `*Model` expression) or a role (`t('disc.target…')`, `t('ui.agentIdentity.role.…')`): render `AgentIdentity` | none: no violation when it came in; off in `components/ui` |
 | Agent colours as text (KT-1936) | `pnpm lint:theme` | A `--kr-agent-<agent>-text` token under 4.5:1 on a surface, in any theme | none: no cell is allowed under its floor |
 
-`[src: file: frontend/scripts/eslint-ui-guards.mjs:111]`
-`[src: file: frontend/scripts/eslint-ui-guards.mjs:455#noAdhocAgentIdentity]`
-`[src: file: frontend/scripts/eslint-ui-guards.mjs:445#jsxContainerOf]`
-`[src: file: frontend/src/lib/__tests__/uiGuardsLint.test.ts:144]`
-`[src: file: frontend/scripts/eslint-ui-guards.mjs:183]`
-`[src: file: frontend/scripts/eslint-ui-guards.mjs:245]`
-`[src: file: frontend/scripts/eslint-ui-guards.mjs:279]`
-`[src: file: frontend/scripts/eslint-ui-guards.mjs:330]`
-`[src: file: frontend/src/styles/themeAudit.ts:389]`
-`[src: file: frontend/src/styles/themeAudit.ts:466]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:179#noLiteralUiString]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:72#UI_TEXT_ATTRS]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:109#COMPONENT_TEXT_PROPS]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:589#noAdhocAgentIdentity]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:579#jsxContainerOf]`
+`[src: file: frontend/src/lib/__tests__/uiGuardsLint.test.ts:217]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:291#controlHasName]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:358#noAdhocDialog]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:392#noForeignPageStylesheet]`
+`[src: file: frontend/scripts/eslint-ui-guards.mjs:457#noOffScaleStyle]`
+`[src: file: frontend/src/styles/themeAudit.ts:431#RADIUS_PROP]`
+`[src: file: frontend/src/styles/themeAudit.ts:570#checkBaseline]`
 `[src: file: frontend/eslint.config.js:22]`
 
 ## How a baseline moves
@@ -59,10 +61,27 @@ See also [design-tokens.md](design-tokens.md) for the scales and
   letter (GET, PDF, MCP), a unit (`ms`, `px`, `tok`), or a product name
   (`PRODUCT_NAMES`). Text inside `<code>`, `<kbd>`, `<pre>`, `<samp>`, `<var>` is
   code.
-  `[src: file: frontend/scripts/eslint-ui-guards.mjs:95]`
+  `[src: file: frontend/scripts/eslint-ui-guards.mjs:97#isUntranslatable]`
+  KT-2016: the same test applies to every piece of literal text an expression
+  renders, in a JSX child or in one of the attributes and props above: a string
+  in braces, each branch of `? :`, the right of `&&`, both sides of `||` and `??`
+  (one report per branch), and a template or a concatenation, whose literal
+  parts are read together (`` `Delete ${name}` `` → « Delete »; `` `${m}m${s}s` ``
+  is units only). The component props (`description`, `help`, `error`,
+  `message`, `confirmLabel`, `content`) are read on a component, a name with a
+  capital, not on a native element (`<meta content>`).
+  `[src: file: frontend/scripts/eslint-ui-guards.mjs:132#literalPieces]`
 - **Name of a control:** `aria-label`, `aria-labelledby` or `title` that is not
-  empty; for a button, text or an expression among its children (an icon
-  imported from `lucide-react`, or a component ending in `Icon`, is not text).
+  empty; for a button, or a native element with `role="button"` (KT-2016), text
+  among its children. An icon imported from `lucide-react`, or a component
+  ending in `Icon`, `Glyph` or `Spinner`, is not text. An expression among the
+  children is read (KT-2016): JSX in it is read like a child, each branch of
+  `? :` and the right of `&&` must carry text for it to name the button
+  (`{open ? <ChevronUp/> : <ChevronDown/>}` names nothing), and a variable or a
+  property named `icon` or `…Icon` holds an icon; any other expression (a
+  variable, a call) still counts as text. A component with `role="button"` is
+  left alone: its props may name it.
+  `[src: file: frontend/scripts/eslint-ui-guards.mjs:235#expressionCarriesText]`
   For a field: a wrapping `<label>`, being the direct child of `Field`, a
   `<label htmlFor>` with the same id in the file. A `placeholder` does not
   count, although HTML-AAM computes a name from it and axe's `label` rule
@@ -84,8 +103,22 @@ See also [design-tokens.md](design-tokens.md) for the scales and
   640/768/900, or a `min-width` that is not one of them (design-tokens.md:
   `<bp - 1>px`). A literal equal to a token's value (`font-size: 12px`) is still
   off scale: the token is not read.
-  `[src: file: frontend/src/styles/themeAudit.ts:321]`
-  `[src: file: frontend/src/styles/themeAudit.ts:373]`
+  `[src: file: frontend/src/styles/themeAudit.ts:366#OffScaleKind]`
+  `[src: file: frontend/src/styles/themeAudit.ts:412#withoutTokens]`
+  KT-2016: the size inside a `font:` shorthand is a font size (the part before
+  `/line-height`, or the first length, size keyword or type token; `font:
+  inherit` and system fonts have none). A rule that holds nested rules is read
+  with its own declarations, those after a nested rule included, and each
+  nested rule on its own. A width in range syntax counts as its breakpoint:
+  `width <= N` as `max-width: N` (N + 1), `width < N` and `width >= N` as N,
+  `width > N` as N + 1, `N < width` turned around; an `@container` width is held
+  to the same breakpoints as an `@media` one.
+  `[src: file: frontend/src/styles/themeAudit.ts:478#fontShorthandSize]`
+  `[src: file: frontend/src/styles/themeAudit.ts:82#cssRules]`
+  `[src: file: frontend/src/styles/themeAudit.ts:457#queryWidths]`
+  An inline style value behind a condition is read branch by branch (each
+  branch of `? :`, the right of `&&`, both sides of `||`/`??`), a style object
+  cast `as CSSProperties` too.
 - **Ad-hoc agent identity (KT-1936):** the "name" is an element whose inline
   `style.color` is `agentTextColor(…)` or `agentColor(…)`; "next to" is its own
   content and its siblings, the other children of its nearest JSX parent
@@ -111,7 +144,47 @@ See also [design-tokens.md](design-tokens.md) for the scales and
     `disc.target…` / `ui.agentIdentity.role.…`;
   - a string built for a `title` or an `aria-label` (« name · model »): the
     guard reads JSX children, not attributes.
-  `[src: file: frontend/scripts/eslint-ui-guards.mjs:400]`
+  `[src: file: frontend/scripts/eslint-ui-guards.mjs:534#MODEL_NAME]`
+
+## What the guards cannot see (written limits)
+
+These are limits of a rule that reads one file's JSX or one stylesheet at a
+time. They are not chased; review covers them.
+
+- **A value held outside the JSX.** A string or a style object kept in a
+  constant, a variable, a function's return or a `.map()` callback defined
+  elsewhere (`const LABEL = 'Save'; … {LABEL}`, `const s = { fontSize: 11 };
+  … style={s}`) is not read: the guards read literals written in the JSX
+  expression itself.
+- **An agent and its model written with no agent colour.** The identity rule
+  keys on the colour (`agentTextColor()` / `agentColor()` in `style.color`),
+  by design: a name written next to its model in another colour, or in none,
+  is not reported (see « Ad-hoc agent identity » above).
+- **A swap inside a file.** A baseline is a count per file and rule (or file and
+  kind): fixing one baselined violation and adding a new one in the same file
+  keeps the count, and nothing fails. Review reads the diff of every file the
+  baselines list.
+- **`components/ui`.** `no-adhoc-dialog` and `no-adhoc-agent-identity` are off
+  in the whole folder, where `Dialog` and `AgentIdentity` are built.
+- **A dialog without `aria-modal`.** `role="dialog"` or `role="alertdialog"`
+  with no `aria-modal` is the documented inline pattern (popovers, inline
+  confirmations), not a hole.
+
+## KT-2016 — what the extensions added to the baselines (2026-11-23)
+
+Each count was raised by hand to the exact number of reports the extension
+adds, never by regenerating the file.
+
+- `eslint-suppressions.json`, `no-literal-ui-string`: +58 in 17 files
+  (literal branches, literals in braces, templates and concatenations, all of
+  them hard-coded strings). `control-has-name`: +0: the two icon-only buttons
+  the extension found (`GitPanel` branch creation, `PlanningProposalReview`
+  reject confirmation) are named, and the three `role="button"` places
+  (`AiDocViewer` tree rows, `ProjectCard` header) are named by their text.
+  `no-off-scale-style`: +0.
+- `themeAuditBaseline.json`: `font-size` +22 (`font:` shorthands with a px
+  size), `breakpoint` +8 (`@container` widths); the nested rules of
+  `styles/neon.css` add nothing.
 
 ## Measured before blocking (2026-11-22, base 428316a53)
 

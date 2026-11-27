@@ -54,7 +54,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 4
+      "count": 5
     }
   },
   "src/components/CollectionFavoritesHeader.tsx": {
@@ -89,6 +89,11 @@
   },
   "src/components/DiscInviteButton.tsx": {
     "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    }
+  },
+  "src/components/DiscussionDetailsSection.tsx": {
+    "ui-guards/no-literal-ui-string": {
       "count": 1
     }
   },
@@ -157,7 +162,7 @@
       "count": 5
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 4
+      "count": 5
     }
   },
   "src/components/GlobalSearchPanel.tsx": {
@@ -172,7 +177,7 @@
   },
   "src/components/HostSyncPreview.tsx": {
     "ui-guards/no-literal-ui-string": {
-      "count": 1
+      "count": 2
     },
     "ui-guards/no-off-scale-style": {
       "count": 2
@@ -208,7 +213,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 7
+      "count": 18
     },
     "ui-guards/no-off-scale-style": {
       "count": 17
@@ -291,7 +296,7 @@
   },
   "src/components/ProjectSkills.tsx": {
     "ui-guards/no-literal-ui-string": {
-      "count": 1
+      "count": 3
     },
     "ui-guards/no-off-scale-style": {
       "count": 7
@@ -340,7 +345,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 1
+      "count": 2
     }
   },
   "src/components/TaskLaunchDialog.tsx": {
@@ -388,6 +393,9 @@
       "count": 4
     },
     "ui-guards/no-adhoc-dialog": {
+      "count": 1
+    },
+    "ui-guards/no-literal-ui-string": {
       "count": 1
     },
     "ui-guards/no-off-scale-style": {
@@ -452,7 +460,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 9
+      "count": 14
     },
     "ui-guards/no-off-scale-style": {
       "count": 3
@@ -513,7 +521,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 44
+      "count": 46
     },
     "ui-guards/no-off-scale-style": {
       "count": 19
@@ -610,7 +618,7 @@
       "count": 9
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 7
+      "count": 11
     }
   },
   "src/components/workflows/AutoDisabledReview.tsx": {
@@ -663,7 +671,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 8
+      "count": 11
     }
   },
   "src/components/workflows/WorkflowDetail.tsx": {
@@ -677,7 +685,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 5
+      "count": 9
     },
     "ui-guards/no-off-scale-style": {
       "count": 7
@@ -699,7 +707,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 54
+      "count": 69
     }
   },
   "src/hooks/ToastItem.tsx": {
@@ -742,7 +750,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 6
+      "count": 7
     },
     "ui-guards/no-off-scale-style": {
       "count": 4
@@ -786,7 +794,7 @@
       "count": 5
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 6
+      "count": 10
     },
     "ui-guards/no-off-scale-style": {
       "count": 2
@@ -819,7 +827,7 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 2
+      "count": 3
     },
     "ui-guards/no-off-scale-style": {
       "count": 6

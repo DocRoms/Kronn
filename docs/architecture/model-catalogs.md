@@ -171,7 +171,7 @@ palette) the composer's @ menu (KT-1885). It reads the shared snapshot, shows
 provenance, and leaves known unavailable choices visible but disabled. Settings
 exposes refresh plus manual create/update/delete, including chat/image/video
 capabilities and reasoning modes.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1263#useModelCatalogSnapshot]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1294#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/agentAvailability.ts:23-33#tierAvailability]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:182-211#createManual]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:212-229#deleteManual]

@@ -49,7 +49,7 @@ alone does not establish a user-visible duration.
 1. The active transcript is rendered as the complete `activeDiscussion.messages`
    collection inside one scrolling container; this code does not window or
    paginate visible message rows.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3893-3913#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3899-3919#transcriptElements]
    Each normal item creates a
    `MessageBubble`; tool groups create `ToolCallsGroup`.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:4081-4140#MessageBubble]
@@ -89,17 +89,17 @@ alone does not establish a user-visible duration.
 1. On initial settling of a loaded discussion, `scrollToBottomSettled` writes
    `scrollTop = scrollHeight` on animation frames for up to 700 ms; the effect
    is reached after a non-empty message list loads.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2052-2091#bottomSettleRafRef]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2131-2145#lastSettledDiscIdRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2058-2097#bottomSettleRafRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2137-2151#lastSettledDiscIdRef]
 2. For streaming content while stuck to the bottom, the page calls
    `scrollIntoView` no more often than once per 250 ms.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2025-2040#lastScrollRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2027-2042#lastScrollRef]
 3. Incoming stream chunks are buffered and flush at most once per animation
    frame into the discussion streaming map.
    [src: file: frontend/src/hooks/useRafBatchedStream.ts:20-49#useRafBatchedStream]
    The active streaming text is
    deferred before being passed to the streaming reply renderer.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1589-1595#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1591-1597#deferredStreamingText]
    [src: file: frontend/src/pages/DiscussionsPage.tsx:1589-1597#deferredStreamingText]
 
 ## Findings and priorities

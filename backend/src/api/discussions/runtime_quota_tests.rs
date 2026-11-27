@@ -1,7 +1,9 @@
 //! KT-1517 — a native agent whose provider account is out of quota or credits ends
 //! its turn failed, tells the room why, and shows the state on its card.
 
-use super::{finish_dispatch_turn, provider_quota_message};
+use super::{
+    ensure_failure_visible, finish_dispatch_turn, provider_quota_message, record_quota_card,
+};
 use crate::db::discussion_sessions::{list_participant_views, PresenceState};
 use std::sync::Arc;
 
@@ -226,4 +228,264 @@ async fn the_quota_state_shows_on_the_agent_until_a_later_turn_succeeds() {
         Some(PresenceState::QuotaExhausted),
         "a successful turn must clear the quota badge"
     );
+}
+
+/// KT-2012 — the room of [`state_with_room`] holding an exact model on its own
+/// agent (Codex) and connection.
+async fn room_with_exact_model() -> crate::AppState {
+    let state = state_with_room().await;
+    state
+        .db
+        .with_conn(|conn| {
+            for id in ["conn-room", "conn-other"] {
+                conn.execute(
+                    "INSERT INTO external_api_connections
+                     (id, display_name, mention_alias, credential_slug, origin_preset)
+                     VALUES (?1, ?1, ?1, ?1, 'other')",
+                    [id],
+                )?;
+            }
+            conn.execute(
+                "UPDATE discussions SET model = 'gpt-exact', connection_id = 'conn-room'
+                 WHERE id = 'd-quota'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    state
+}
+
+/// How a test turn is addressed: the agent it runs on (`None`: the room's),
+/// the connection its dispatch names, and the trigger's per-message mode.
+#[derive(Default)]
+struct TurnShape {
+    agent: Option<crate::models::AgentType>,
+    connection: Option<&'static str>,
+    per_message_mode: Option<&'static str>,
+}
+
+/// A claimed dispatch addressed as `shape` says, the way the room records it:
+/// the trigger message's target carries the agent, connection and mode.
+async fn addressed_dispatch(
+    state: &crate::AppState,
+    turn: i64,
+    shape: TurnShape,
+) -> crate::db::agent_dispatch::AgentDispatchJob {
+    // The room runs one turn at a time: the earlier test turns are over.
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET status = 'Failed'
+                 WHERE discussion_id = 'd-quota' AND status = 'Running'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let job = running_dispatch(state, turn).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            let trigger = format!("u{turn}");
+            let (kind, agent_type) = match &shape.agent {
+                Some(agent) => ("agent", format!("{agent:?}")),
+                None => ("discussion_agent", "Codex".to_string()),
+            };
+            conn.execute(
+                "INSERT INTO message_targets
+                 (message_id, target_kind, agent_type, connection_id, model_tier, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                rusqlite::params![
+                    trigger,
+                    kind,
+                    agent_type,
+                    shape.connection,
+                    shape.per_message_mode
+                ],
+            )?;
+            let agent_json = shape
+                .agent
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET agent_override_json = ?2, connection_id = ?3
+                 WHERE id = ?1",
+                rusqlite::params![job.id, agent_json, shape.connection],
+            )?;
+            crate::db::agent_dispatch::get(conn, &job.id)?
+                .ok_or_else(|| anyhow::anyhow!("the claimed dispatch is gone"))
+        })
+        .await
+        .unwrap()
+}
+
+/// What a stored refusal card credits: the System message's `model` and
+/// `model_tier`, and the card's own `tier`.
+type StoredCard = (Option<String>, Option<String>, serde_json::Value);
+
+async fn stored_card(state: &crate::AppState, job_id: &str) -> StoredCard {
+    let messages = state
+        .db
+        .with_read_conn(|conn| crate::db::discussions::list_messages(conn, "d-quota"))
+        .await
+        .unwrap();
+    messages
+        .into_iter()
+        .filter(|message| message.role == crate::models::MessageRole::System)
+        .find_map(|message| {
+            let json = message.content.strip_prefix("[kronn:agent-error]\n")?;
+            let card: serde_json::Value = serde_json::from_str(json).ok()?;
+            (card["retry_dispatch_id"] == job_id).then(|| {
+                (
+                    message.model.clone(),
+                    message.model_tier.clone(),
+                    card["tier"].clone(),
+                )
+            })
+        })
+        .unwrap_or_else(|| panic!("no refusal card for {job_id}"))
+}
+
+/// The quota card and the unexplained-end card two turns addressed as `shape`
+/// leave in the room, read back from the stored System messages.
+async fn refusal_cards_of(
+    state: &crate::AppState,
+    shape: impl Fn() -> TurnShape,
+    turn: i64,
+) -> (StoredCard, StoredCard) {
+    let quota = addressed_dispatch(state, turn, shape()).await;
+    record_quota_card(state, &quota, "quota_exhausted: limit reached", None).await;
+    let unexplained = addressed_dispatch(state, turn + 1, shape()).await;
+    ensure_failure_visible(
+        state,
+        &unexplained,
+        "agent finished without a durable reply",
+    )
+    .await;
+    (
+        stored_card(state, &quota.id).await,
+        stored_card(state, &unexplained.id).await,
+    )
+}
+
+/// KT-2012 — a refused turn of the discussion's own agent and connection ran
+/// the exact model: both refusal cards credit it.
+#[tokio::test]
+async fn exact_model_refusal_cards_credit_it_to_a_turn_of_the_discussions_own_agent() {
+    let state = room_with_exact_model().await;
+    let (quota, unexplained) = refusal_cards_of(&state, TurnShape::default, 1).await;
+    assert_eq!(quota.0.as_deref(), Some("gpt-exact"), "quota card");
+    assert_eq!(
+        unexplained.0.as_deref(),
+        Some("gpt-exact"),
+        "unexplained end"
+    );
+    // A dispatch naming the room's own connection is still the room's own turn.
+    let same_connection = || TurnShape {
+        connection: Some("conn-room"),
+        ..TurnShape::default()
+    };
+    let (quota, unexplained) = refusal_cards_of(&state, same_connection, 3).await;
+    assert_eq!(quota.0.as_deref(), Some("gpt-exact"), "quota card");
+    assert_eq!(
+        unexplained.0.as_deref(),
+        Some("gpt-exact"),
+        "unexplained end"
+    );
+}
+
+/// KT-2012 — a mention and a dispatch naming another connection never ran the
+/// discussion's exact model: their refusal cards credit none.
+#[tokio::test]
+async fn exact_model_refusal_cards_never_credit_it_to_a_mention_or_another_connection() {
+    let state = room_with_exact_model().await;
+    let mention = || TurnShape {
+        agent: Some(crate::models::AgentType::ClaudeCode),
+        ..TurnShape::default()
+    };
+    let (quota, unexplained) = refusal_cards_of(&state, mention, 1).await;
+    assert_eq!(quota.0, None, "quota card of a mention");
+    assert_eq!(unexplained.0, None, "unexplained end of a mention");
+    let other_connection = || TurnShape {
+        connection: Some("conn-other"),
+        ..TurnShape::default()
+    };
+    let (quota, unexplained) = refusal_cards_of(&state, other_connection, 3).await;
+    assert_eq!(quota.0, None, "quota card on another connection");
+    assert_eq!(unexplained.0, None, "unexplained end on another connection");
+}
+
+/// KT-2012 — a turn of the discussion's own agent sent with a per-message mode
+/// ran that mode, not the exact model: its cards credit no exact model and
+/// name the mode the turn was asked to run.
+#[tokio::test]
+async fn exact_model_refusal_cards_drop_it_for_a_per_message_mode() {
+    let state = room_with_exact_model().await;
+    let per_message_mode = || TurnShape {
+        per_message_mode: Some("reasoning"),
+        ..TurnShape::default()
+    };
+    let (quota, unexplained) = refusal_cards_of(&state, per_message_mode, 1).await;
+    for (name, (model, model_tier, card_tier)) in
+        [("quota card", quota), ("unexplained end", unexplained)]
+    {
+        assert_eq!(model, None, "{name}");
+        assert_eq!(model_tier.as_deref(), Some("reasoning"), "{name}");
+        assert_eq!(card_tier, "reasoning", "{name}");
+    }
+}
+
+/// KT-2012 — a turn continued on a fallback link ran the link's own model: a
+/// refusal of that link credits the pin's model and mode, never the room's.
+#[tokio::test]
+async fn exact_model_refusal_cards_credit_a_fallback_pins_model() {
+    let state = room_with_exact_model().await;
+    let pinned = || TurnShape {
+        agent: Some(crate::models::AgentType::ClaudeCode),
+        ..TurnShape::default()
+    };
+    let quota = addressed_dispatch(&state, 1, pinned()).await;
+    let unexplained = addressed_dispatch(&state, 2, pinned()).await;
+    for job in [&quota, &unexplained] {
+        let id = job.id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::core::agent_fallback::set_pin(
+                    conn,
+                    &id,
+                    &crate::core::agent_fallback::Pin {
+                        from_agent: crate::models::AgentType::Codex,
+                        to_agent: crate::models::AgentType::ClaudeCode,
+                        model: Some("claude-pinned".to_string()),
+                        tier: crate::models::ModelTier::Economy,
+                        hops: 1,
+                    },
+                    crate::core::agent_fallback::Trigger::QuotaExhausted,
+                )
+            })
+            .await
+            .unwrap();
+    }
+    record_quota_card(&state, &quota, "quota_exhausted: limit reached", None).await;
+    ensure_failure_visible(
+        &state,
+        &unexplained,
+        "agent finished without a durable reply",
+    )
+    .await;
+    for (name, id) in [
+        ("quota card", &quota.id),
+        ("unexplained end", &unexplained.id),
+    ] {
+        let (model, model_tier, card_tier) = stored_card(&state, id).await;
+        assert_eq!(model.as_deref(), Some("claude-pinned"), "{name}");
+        assert_eq!(model_tier.as_deref(), Some("economy"), "{name}");
+        assert_eq!(card_tier, "economy", "{name}");
+    }
 }

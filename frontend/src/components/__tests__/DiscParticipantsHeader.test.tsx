@@ -172,6 +172,79 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     expect(document.body.textContent).not.toContain('undefined');
   });
 
+  // KT-2015 — the model a joined session declared was captured once, at join:
+  // the tooltip and the details say so, so it is not read as the model of the
+  // last reply. A native agent and a workflow step declare nothing at join.
+  it('says a joined session\'s model was declared at join, in its tooltip and details; not for a native agent or a workflow step', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, agent_type: 'ClaudeCode', model: 'claude-sonnet-4-5', session_id: 'sess-A', role: 'peer', status: 'active' },
+      { id: 2, agent_type: 'Codex', model: null, session_id: 'sess-B', role: 'peer', status: 'active' },
+      {
+        id: -1, agent_type: 'Vibe', model: 'devstral', session_id: null, role: 'native_resume',
+        status: 'active', wake_mode: 'native_dispatch',
+      },
+      {
+        id: 7, agent_type: 'Kiro', model: 'kiro-model', session_id: 'step', role: 'agent', status: 'active',
+        wake_mode: 'native_dispatch',
+        workflow_step: { run_id: 'r', workflow_id: 'w', workflow_name: 'Impl', step_key: 's', step_name: 'Step' },
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-join-model" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const chips = document.querySelectorAll('.disc-participant-chip');
+    const tooltipOf = (i: number) => {
+      const anchor = chips[i].parentElement as HTMLElement;
+      fireEvent.mouseEnter(anchor);
+      const text = screen.getByRole('tooltip').textContent;
+      fireEvent.keyDown(window, { key: 'Escape' });
+      fireEvent.mouseLeave(anchor);
+      return text;
+    };
+    // The provenance is a third part of the tooltip; the id stays said once.
+    const joined = tooltipOf(0) ?? '';
+    expect(joined.split(' — ')[2]).toBe('disc.modelDeclaredAtJoin');
+    expect(joined.split('claude-sonnet-4-5')).toHaveLength(2);
+    for (const i of [1, 2, 3]) expect(tooltipOf(i)).not.toContain('disc.modelDeclaredAtJoin');
+
+    const modelRow = () => document.querySelector('.disc-participant-model');
+    const sourceLine = () => document.querySelector('.disc-participant-model-source');
+    await openParticipant(0);
+    // The value is the full id alone; the provenance is a line of its own under it.
+    expect(modelRow()).toHaveTextContent(/^claude-sonnet-4-5$/);
+    expect(modelRow()).toHaveAttribute('data-source', 'join');
+    expect(sourceLine()).toHaveTextContent(/^disc\.modelDeclaredAtJoin$/);
+    expect(sourceLine()?.tagName).toBe('DD');
+    expect(sourceLine()?.parentElement).toBe(modelRow()?.parentElement);
+    await openParticipant(1);
+    expect(modelRow()).toHaveTextContent('ui.agentIdentity.model.notDeclared');
+    expect(modelRow()).not.toHaveAttribute('data-source');
+    expect(sourceLine()).toBeNull();
+    await openParticipant(2);
+    expect(modelRow()).toHaveTextContent(/^devstral$/);
+    expect(modelRow()).not.toHaveAttribute('data-source');
+    expect(sourceLine()).toBeNull();
+    await openParticipant(3);
+    expect(modelRow()).toHaveTextContent(/^kiro-model$/);
+    expect(modelRow()).not.toHaveAttribute('data-source');
+    expect(sourceLine()).toBeNull();
+    expect(document.body.textContent).not.toContain('disc.modelDeclaredAtJoin');
+  });
+
+  it('keeps the file\'s contract on the declared JOIN model in line with the UI, in four locales (KT-2015)', () => {
+    const source = readFileSync('src/components/DiscParticipantsHeader.tsx', 'utf8');
+    expect(source).toMatch(/captured at JOIN time[\s\S]*labels it explicitly as such[\s\S]*disc\.modelDeclaredAtJoin/);
+    for (const locale of ['en', 'fr', 'es', 'zh']) {
+      const file = readFileSync(`src/lib/i18n/locales/${locale}.ts`, 'utf8');
+      // One phrase, without the id: the row and the tooltip already show it.
+      const phrase = file.match(/['"]disc\.modelDeclaredAtJoin['"]:\s*(['"])([^'"\n]+)\1/)?.[2];
+      expect(phrase, locale).toBeTruthy();
+      expect(phrase, locale).not.toContain('{0}');
+    }
+  });
+
   it('puts the main agent first, labelled main agent, and a native one-off agent apart (KT-1936)', async () => {
     (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: 1, agent_type: 'Codex', session_id: 'sess-B', role: 'peer', status: 'active' },

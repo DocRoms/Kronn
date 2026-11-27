@@ -116,7 +116,7 @@ CLI tiers. No embedded model list participates in the display helper anymore.
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:12-49#resolveCatalogTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-101#catalogTierEntry]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1276-1286#resolvedTier]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1307-1317#resolvedTier]
 
 The shared picker keeps an unavailable configured entry disabled. A failed
 snapshot read reports the error and retains previous data as cached, not live.
@@ -129,7 +129,7 @@ model (KT-1994).
 [src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:103-106#catalogModelProvenance]
-[src: file: frontend/src/components/ChatHeader.tsx:332#customModel]
+[src: file: frontend/src/components/ChatHeader.tsx:361#customModel]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1717-1748#changeQuickPromptAgent]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3375-3376#currentModel]
 
@@ -149,8 +149,8 @@ refetches the catalogue. An unknown configured ID remains searchable, and a
 known unavailable choice remains disabled; accessible descriptions retain the
 model, provenance and unavailable state after filtering.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:66-75#matchesCatalogSearch]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1326-1332#visibleChoices]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1250-1285#tierOptions]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1357-1363#visibleChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1281-1316#tierOptions]
 
 The search field is outside the menu, within a portalled non-modal dialog.
 Arrow keys move among enabled choices; Home/End retain their caret behavior in
@@ -158,11 +158,11 @@ search and navigate choices when an option has focus. Escape inside the picker
 does not propagate to its parent form. Closing with Escape or completing an
 asynchronous selection restores trigger focus. Reopening clears the query,
 an empty result is explicit, and the popup's height is bounded by the viewport.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1268-1293#navigateChoices]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1299-1324#navigateChoices]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:602-611#place]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:597-602#restoreFocusRef]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1443-1450#setQuery]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:1454-1473#createPortal]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1474-1481#setQuery]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1485-1504#createPortal]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:167-204#reports]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:228-255#closes]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.accessibility.test.tsx:95-131#repositions]

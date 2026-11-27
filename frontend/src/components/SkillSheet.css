@@ -60,7 +60,10 @@
 .skill-sheet-chip[aria-pressed='true'] { border-color: var(--kr-accent-border); background: var(--kr-accent-bg); color: var(--kr-text-primary); }
 .skill-sheet-action:hover, .skill-sheet-chip:hover { color: var(--kr-text-primary); }
 .skill-sheet-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--kr-sp-3); padding-top: var(--kr-sp-4); border-top: 1px solid var(--kr-border-subtle); }
-.skill-sheet-buttons { display: flex; align-items: center; gap: var(--kr-sp-3); }
+/* KT-1996 — the armed delete grows to its word and shows a sentence: the row
+   wraps rather than running out of the sheet. */
+.skill-sheet-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--kr-sp-3); min-width: 0; }
+.skill-sheet-buttons .kr-confirm-delete { justify-content: flex-end; }
 .skill-card-open { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .skill-card-open:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 3px; }
 

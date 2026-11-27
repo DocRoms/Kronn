@@ -254,6 +254,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 2px 0;
+  /* KT-1989 — a row scrolled into view on the way back from a diff keeps its
+     whole focus ring (2px offset + 2px outline, 4px halo) inside the list. */
+  scroll-margin-block: var(--kr-sp-4);
 }
 
 /* Committed-on-branch section: read-only listing of files already saved

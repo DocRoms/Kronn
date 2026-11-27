@@ -24,11 +24,11 @@ fails if a component lacks one of the three.
 |---|---|---|
 | `Button` | `variant` primary / neutral / ghost / danger, `size` sm / md / lg, optional `icon`. `type="button"` by default. | native |
 | `IconButton` | An icon only; `label` is required and is its name and its tooltip. | native; tooltip on focus |
-| `Menu` | Menu button. `items`, plus at most one `destructiveItem`, always rendered last after a separator. | Enter / Space / ↓ open on the first item, ↑ on the last; arrows, Home, End, type-ahead; Escape and Tab close and give focus back |
+| `Menu` | Menu button. `items`, plus at most one `destructiveItem`, always rendered last after a separator. | Enter / Space / ↓ open on the first item, ↑ on the last; arrows, Home, End, type-ahead; Escape and Tab close and give focus back; Escape on the trigger closes an open menu (one with no enabled item keeps the focus there) |
 | `StatusBadge` | `tone` success / warning / danger / info / neutral (the `--kr-status-*` colours on the dot, border and tint; the label stays `--kr-text-primary` for 4.5:1), the status always written. | — |
 | `Tabs` | `tablist` / `tab` / `tabpanel` roles, `label` names the list; with no `panel` the tabs only report the choice. | ← → move and select, Home / End, a disabled tab is skipped |
 | `SearchField` | `type="search"` with a required `label` (hidden unless `showLabel`) and a clear button. | Escape clears a non-empty field and stops there |
-| `Tooltip` | Wraps one focusable element; `describe` wires it as `aria-describedby`. | opens on hover and keyboard focus, Escape closes, hoverable (WCAG 1.4.13) |
+| `Tooltip` | Wraps one focusable element; `describe` wires it as `aria-describedby`. | opens on hover and keyboard focus, hoverable (WCAG 1.4.13); every open tooltip hides on Escape. A tooltip the user put there (pointer, or a focus the user moved with Tab or the arrows) with no layer above it takes that Escape: a Dialog, a Drawer or an anchored layer around it stays open until the next one. A tooltip shown by a focus a layer placed (initial focus, focus given back on close) still shows, hides on the Escape and lets it through to the layer. Activating the anchor (Enter, Space, a press) hides it |
 | `Dialog` | Modal layer, centred. `title` (its name, an `h2`), optional `description`, `footer` for the actions, `size` sm / md / lg (480 / 640 / 960 px), `role` dialog / alertdialog. | focus on the first control of the body (or `initialFocus`), Tab kept inside, Escape / the cross / the scrim close it, focus back to the opener |
 | `Drawer` | The same props and keyboard as `Dialog`, as a side panel the full height of the window at its end edge. | as `Dialog` |
 | `ConfirmDialog` | In place of `window.confirm`: an alertdialog, `title` is the question, `message` what happens, `confirmLabel` the verb and the object ("Delete 3 projects", never "OK"), `tone` danger (default) or primary. `useConfirm()` gives it as a promise. | focus on Cancel (Enter at once answers no); Escape, the cross and the scrim cancel |
@@ -52,7 +52,12 @@ fails if a component lacks one of the three.
 A floating layer never leaves the window: it is measured once rendered,
 flips to the side with more room, is clamped `--kr-space-2` from the edges,
 and a menu taller than the room scrolls inside a max-height
-`[src: file: frontend/src/components/ui/anchor.ts:30#anchoredStyle]`.
+`[src: file: frontend/src/components/ui/anchor.ts:32#anchoredStyle]`.
+The place is redone while the layer is open on a scroll outside it (its own
+list scrolling does not count), a resize of the window, and a size change of
+the layer or its anchor (`ResizeObserver`); a place that did not move keeps
+the same style object, so nothing re-renders (KT-2014)
+`[src: file: frontend/src/components/ui/anchor.ts:78#useAnchoredStyle]`.
 
 ## Dialog, Drawer and ConfirmDialog (KT-1881)
 
@@ -63,8 +68,20 @@ its heading, `aria-describedby` on its description, and one cross (an
 every dialog and drawer
 `[src: file: frontend/src/components/ui/overlay.tsx:47#OverlayFrame]`.
 Focus, Tab trap, Escape and focus return come from `useDialogFocus`: one
-Escape closes one layer, the innermost first
-`[src: file: frontend/src/hooks/useDialogFocus.ts:44#useDialogFocus]`.
+Escape closes one layer, the innermost first; when the focus is lost to
+`body` (its control was removed) the top layer of the stack answers, modal or
+not `[src: file: frontend/src/hooks/useDialogFocus.ts:102#useDialogFocus]`.
+A `Tooltip` costs an Escape only when the user put it there: opened by the
+pointer, or by a focus the user moved (Tab, the arrows), and with no layer
+opened above the one holding its anchor. That Escape hides it and stops, the
+dialog around stays open. A focus a layer places — its initial focus, the
+focus it gives back on close, `Menu` back on its trigger, an anchored layer
+back on its anchor — goes through `placeFocus`; the tooltip it shows stays
+visible but owns no Escape: it hides on it and the key goes on to the layer
+`[src: file: frontend/src/hooks/useDialogFocus.ts:71#placeFocus]`. Every open
+tooltip hides on the same Escape, and activating its anchor (Enter, Space, a
+press) hides it, so a menu trigger's tooltip costs no press on the way out
+`[src: file: frontend/src/components/ui/Tooltip.tsx:33#Tooltip]`.
 
 - **Layers.** A `Drawer` sits on `--kr-z-drawer`, a `Dialog` on
   `--kr-z-modal`, a `ConfirmDialog` on `--kr-z-modal-nested`, so a
@@ -506,8 +523,8 @@ the participant chips and their details, and the discussion list rows.
   agent's last reply on that mode, else « default model ». None of them reads
   the catalogue, which the picker loads only when it opens: their text does
   not change when the list opens.
-  `[src: file: frontend/src/lib/agentModelResolution.ts:76#discussionAgentModel]`
-  `[src: file: frontend/src/lib/agentModelResolution.ts:30#resolveIdentityModel]`
+  `[src: file: frontend/src/lib/agentModelResolution.ts:130#discussionAgentModel]`
+  `[src: file: frontend/src/lib/agentModelResolution.ts:36#resolveIdentityModel]`
 - **The roles:** main agent, one-off agent, CLI session, workflow step
   (`ui.agentIdentity.role.*`); `roleLabel` writes another word in the chip
   (the picker's caller, the guided-tour demo).
@@ -524,7 +541,7 @@ the participant chips and their details, and the discussion list rows.
   « Personnalisé » in the place of the tier.
   `[src: file: frontend/src/components/ui/agentIdentityKinds.ts:37#AGENT_IDENTITY_MODEL_MAX_CHARS]`
   `[src: file: frontend/src/components/ui/agentIdentityKinds.ts:74#agentIdentityText]`
-  `[src: file: frontend/src/components/AgentSwitchPicker.tsx:1400#identityText]`
+  `[src: file: frontend/src/components/AgentSwitchPicker.tsx:1431#identityText]`
 - **Colour:** the name takes `agentTextColor()`, a text-safe token per agent
   (`--kr-agent-<agent>-text`) that holds 4.5:1 on every surface of every
   theme; the brand colour (`agentColor()`) stays on dots, borders and icons;
@@ -580,20 +597,31 @@ native one) or a joined CLI session.
   moves to the layer's first control once it is placed, Tab and Shift+Tab stay
   between its controls, Escape closes it and gives focus back to the control
   that opened it (the counter, the chip), a press outside that control and the
-  layer closes it. A new anchored layer of this kind uses the same hook.
+  layer closes it. A press inside a layer opened from it is not outside when
+  that layer is on the stack of open layers that `useDialogFocus` keeps: a
+  `Menu`, a `Dialog` / `Drawer` / `ConfirmDialog` (and every other
+  `useDialogFocus` dialog), another anchored layer (KT-2014)
+  `[src: file: frontend/src/hooks/useDialogFocus.ts:51#insideLayerAbove]`.
+  Any other popover rendered in `body` (`AgentSwitchPicker`,
+  `DecisionModelPicker` today) is not on that stack: a press in it closes the
+  anchored layer under it. Before such a popover is opened from an anchored
+  layer, it must call `registerLayer` while it is open
+  `[src: file: frontend/src/hooks/useDialogFocus.ts:40#registerLayer]`; none
+  does yet because no caller nests one.
+  A new anchored layer of this kind uses the same hook.
 - **The details header** is a flex row: the full-size identity shrinks
   (`min-width: 0`) and wraps rather than overflows, the model is the part cut
   with an ellipsis (its full id stays in the header's tooltip, the layer's
   accessible name and the « declared model » row), and the close button never
   shrinks, so it stays inside the 320px layer at every width
   (`styles/components.css`, held by `components/ui/stylesheets.test.ts`).
-`[src: file: frontend/src/components/ui/useAnchoredLayer.ts:31#useAnchoredLayer]`
+`[src: file: frontend/src/components/ui/useAnchoredLayer.ts:34#useAnchoredLayer]`
 `[src: file: frontend/src/components/ParticipantsStrip.tsx:48#ParticipantsStrip]`
 `[src: file: frontend/src/components/HeaderScrollLine.tsx:27#HeaderScrollLine]`
 `[src: file: frontend/src/lib/stripOverflow.ts:5#measureStripOverflow]`
 `[src: file: frontend/src/lib/stripOverflow.ts:15#measureChipsOutOfView]`
-`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:110#participantRole]`
-`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:172#ParticipantDetailsLayer]`
+`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:110-112#participantRole]`
+`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:173-184#ParticipantDetailsLayer]`
 
 ## The one agent picker
 
@@ -670,8 +698,8 @@ unfolding « Autres modèles » puts the control right under the band. Both
 measure the band's height (`stickyHeaderHeight`). Band text holds 4.5:1 in
 every theme (`agentPickerContrast.test.ts`).
 `[src: file: frontend/src/components/AgentSwitchPicker.css:455]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:737#stickyHeaderHeight]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:812#keepFocusClearOfHeader]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:743#stickyHeaderHeight]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:821#keepFocusClearOfHeader]`
 
 **Free models (KT-2010).** The catalogue entry carries no price, so the
 model's own words decide, and providers spell it several ways (owner's
@@ -712,9 +740,9 @@ listed, and when nothing matches one line says so. The fold controls are
 hidden while searching. The trigger writes the model id the configuration
 names (or the custom model), whether or not the catalogue is loaded: its text
 never changes when the list opens; the display name goes to its title.
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:782#AgentModelList]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:791#AgentModelList]`
 `[src: file: frontend/src/lib/modelCatalogSelection.ts:58-64#modeModelId]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:911]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:920]`
 
 With `customModel` (the discussion header and the new-discussion form) and in
 the exact-model mode, each agent's other models (the catalogue's models no
@@ -736,15 +764,33 @@ server-side (KT-1993, [discussion-agent-routing](../architecture/discussion-agen
 a refusal is shown next to the entry and the previous choice stays: the picker
 trims, it never re-validates.
 `[src: file: frontend/src/components/AgentSwitchPicker.tsx:74-78#OTHER_MODELS_RENDER_LIMIT]`
-`[src: file: frontend/src/components/AgentSwitchPicker.tsx:1376-1377#selectModel]`
-`[src: file: frontend/src/components/ChatHeader.tsx:334]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:1407-1408#selectModel]`
+`[src: file: frontend/src/components/ChatHeader.tsx:363]`
 `[src: file: frontend/src/pages/DiscussionsPage.tsx:2469]`
 
 « Récents » sits on top of those lists: the last three distinct choices
 (agent, connection, mode or exact model), most recent first, hidden while
 searching. They are written when a choice is applied, in localStorage under
 `kronn:agentPicker:recents`, a synced UI preference mirrored server-side like
-the collection favourites.
+the collection favourites. A recent row is disabled exactly when the row of
+the same choice in its group is, with that row's title: its mode (an
+unavailable mode; in the shadow picker the step's own run, which is its
+explicit model, else the mode it runs on), or the catalogue entry of its exact
+model; a refusal of a recent exact model is shown next to that recent (KT-2013).
+When the header falls back to the last reply, it skips the replies of the exact
+models the open page saw the discussion hold and drop, and a reply whose
+trigger names, for the agent, another connection than the one it runs on (a
+mention); a trigger naming no connection is an ordinary turn of the
+discussion's own connection. Known limits, waiting for a backend field (a reply
+records neither whether it ran the discussion's exact model nor the connection
+of an inherited turn): (a) the dropped exact models are the open page's memory
+only, so after a reload and until the next reply the header names the cleared
+exact model again; (b) after the discussion moves to another connection, the
+replies of the previous connection read as the new one's.
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:1123#renderRecent]`
+`[src: file: frontend/src/components/AgentSwitchPicker.tsx:1657#isMain]`
+`[src: file: frontend/src/lib/agentModelResolution.ts:100#lastReplyModel]`
+`[src: file: frontend/src/components/ChatHeader.tsx:139#droppedExact]`
 `[src: file: frontend/src/lib/agentPickerRecents.ts:54#readAgentPickerRecents]`
 `[src: file: frontend/src/lib/uiPreferences.ts:53]`
 

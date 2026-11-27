@@ -54,6 +54,40 @@ describe('ui-guards/no-literal-ui-string', () => {
   ])('leaves alone %s', async (_name, code) => {
     expect(await guard(rule, code)).toEqual([]);
   });
+
+  // KT-2016 — the forms the probe of the guards found unreported.
+  it.each([
+    ['a literal in braces', wrap("<p>{'Texte'}</p>")],
+    ['a template without expression in braces', wrap('<p>{`Saved changes`}</p>')],
+    ['a literal after &&', wrap("<p>{empty && 'Nothing yet'}</p>")],
+    ['a literal after ||', wrap("<p>{label || 'Untitled'}</p>")],
+    ['a literal after ??', wrap("<p>{label ?? 'Untitled'}</p>")],
+    ['a literal branch of a ternary beside t()', wrap("<p>{ok ? t('a.saved') : 'Failed'}</p>")],
+    ['a template with text in a child', wrap('<p>{`${count} items left`}</p>')],
+    ['a template with an expression in an aria-label', wrap('<button aria-label={`Delete ${name}`}>{t(\'a\')}</button>')],
+    ['a concatenation in a title', wrap("<span title={'Open ' + name}>{t('a')}</span>")],
+    ['a literal branch in a placeholder', wrap("<input aria-label={t('a')} placeholder={busy ? t('a.wait') : 'Type here'} />")],
+    ['the description of a component', wrap("<EmptyState description=\"Nothing to show yet\" />", "import { EmptyState } from './ui/EmptyState';")],
+    ['the confirmLabel of a component', wrap("<ConfirmDialog confirmLabel={'Delete it'} />", "import { ConfirmDialog } from './ui/ConfirmDialog';")],
+  ])('fails on %s', async (_name, code) => {
+    expect(await guard(rule, code)).toEqual([2]);
+  });
+
+  it('reports each literal branch of a ternary', async () => {
+    expect(await guard(rule, wrap("<p>{ok ? 'Saved' : 'Failed'}</p>"))).toEqual([2, 2]);
+  });
+
+  it.each([
+    ['punctuation, a path, a unit or a product in braces', wrap("<p>{' · '}{'~/.kronn'}{n > 1 ? 'ms' : 's'}{'Kronn'}</p>")],
+    ['a template of values only', wrap('<p title={`${agent} · ${model}`}>{`${n}px`}</p>')],
+    ['an elapsed time', wrap('<p>{`${m}m${s}s`}</p>')],
+    ['a ternary of t() calls', wrap("<p>{ok ? t('a.saved') : t('a.failed')}</p>")],
+    ['a literal in braces inside code', wrap("<code>{'pnpm lint --fix'}</code>")],
+    ['content on a native element', wrap('<meta content="width=device-width, initial scale" />')],
+    ['the error of a component that is not a string', wrap('<Field error={hasError} />', "import { Field } from './ui/Field';")],
+  ])('leaves alone %s', async (_name, code) => {
+    expect(await guard(rule, code)).toEqual([]);
+  });
 });
 
 describe('ui-guards/control-has-name', () => {
@@ -80,6 +114,34 @@ describe('ui-guards/control-has-name', () => {
     ['a hidden file input', wrap("<input type=\"file\" style={{ display: 'none' }} />")],
     ['a submit input', wrap('<input type="submit" />')],
     ['spread props, which may carry the name', wrap('<input {...props} />', 'const props = {};')],
+  ])('leaves alone %s', async (_name, code) => {
+    expect(await guard(rule, code)).toEqual([]);
+  });
+
+  // KT-2016 — an element that plays a button, and buttons whose children only
+  // draw icons through an expression.
+  const more = "import { X, ChevronUp, ChevronDown, Loader2, Check } from 'lucide-react';";
+  it.each([
+    ['a div role="button" with an icon only', wrap('<div role="button" tabIndex={0} onClick={() => {}}><X size={12} /></div>', more)],
+    ['a span role="button" with no child', wrap('<span role="button" tabIndex={0} onClick={() => {}} />', more)],
+    ['a ternary of two icons', wrap('<button onClick={() => {}}>{open ? <ChevronUp /> : <ChevronDown />}</button>', more)],
+    ['an icon behind &&', wrap('<button>{busy && <Loader2 />}<Check /></button>', more)],
+    ['an icon held in a variable', wrap('<button>{icon}</button>', 'const icon = null;')],
+    ['an icon held in a property', wrap('<button>{item.icon}</button>', 'const item = { icon: null };')],
+    ['a spinner component', wrap('<button><Spinner /></button>', "import { Spinner } from './Spinner';")],
+  ])('fails on %s', async (_name, code) => {
+    expect(await guard(rule, code)).toEqual([2]);
+  });
+
+  it.each([
+    ['a role="button" named by its text', wrap("<div role=\"button\" tabIndex={0}><X />{t('a.open')}</div>", more)],
+    ['a role="button" named by a variable child', wrap('<div role="button" tabIndex={0}><X /><span>{node.name}</span></div>', more)],
+    ['a role="button" with aria-label', wrap("<div role=\"button\" aria-label={t('a')}><X /></div>", more)],
+    ['a ternary with a text branch', wrap("<button>{busy ? <Loader2 /> : t('a.save')}</button>", more)],
+    ['an icon and a label behind &&', wrap("<button>{busy && <Loader2 />}{t('a.save')}</button>", more)],
+    ['a variable that is not an icon', wrap('<button>{label}</button>', "const label = 'x';")],
+    ['an unknown component', wrap('<button><Label /></button>', "import { Label } from './Label';")],
+    ['a component with role="button", whose props may name it', wrap('<Row role="button" />', "import { Row } from './Row';")],
   ])('leaves alone %s', async (_name, code) => {
     expect(await guard(rule, code)).toEqual([]);
   });
@@ -133,8 +195,19 @@ describe('ui-guards/no-off-scale-style', () => {
     ['a zero radius and a circle', wrap("<p style={{ borderRadius: 0, borderTopLeftRadius: '50%' }} />")],
     ['a computed size', wrap('<p style={{ fontSize: `${size}px` }} />', 'const size = 12;')],
     ['a breakpoint of the scale', 'import { useIsMobile } from "../hooks/useMediaQuery";\nexport function Example() { return useIsMobile(900); }\n'],
+    ['branches on the scale', wrap("<p style={{ fontSize: compact ? 'var(--kr-type-xs)' : 'var(--kr-type-sm)', color: on && 'var(--kr-accent)' }} />", 'const compact = true; const on = true;')],
   ])('leaves alone %s', async (_name, code) => {
     expect(await guard(rule, code)).toEqual([]);
+  });
+
+  // KT-2016 — a value behind a condition is read, branch by branch.
+  it.each([
+    ['a px font size in a ternary branch', wrap("<p style={{ fontSize: compact ? 11 : 'var(--kr-type-sm)' }} />", 'const compact = true;')],
+    ['a literal colour behind &&', wrap("<p style={{ color: on && '#ff0000' }} />", 'const on = true;')],
+    ['a radius behind ??', wrap('<p style={{ borderRadius: radius ?? 6 }} />', 'const radius = undefined;')],
+    ['a literal colour in a --custom key', wrap("<p style={{ '--tone': '#ff0000' } as React.CSSProperties} />")],
+  ])('fails on %s', async (_name, code) => {
+    expect(await guard(rule, code)).toEqual([2]);
   });
 });
 

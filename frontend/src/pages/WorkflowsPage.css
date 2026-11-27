@@ -575,6 +575,27 @@
   margin-left: auto;
 }
 
+/* KT-1996 — armed with its impact, the footer may wrap: the actions keep their
+   natural width beside the run summary while they fit (the card does not grow)
+   and take a row of their own only when they do not, where they may shrink.
+   The delete control's box is dissolved into the actions so its button and its
+   sentence wrap as separate items: "Lancer" and "Confirmer" share a row and the
+   sentence takes the row below, wrapping inside the card. */
+.wf-card-footer:has(.kr-confirm-delete-impact) {
+  flex-wrap: wrap;
+}
+
+.wf-card-footer:has(.kr-confirm-delete-impact) .wf-card-actions {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.wf-card-actions .kr-confirm-delete {
+  display: contents;
+}
+
 .wf-card-run-btn,
 .wf-card-delete-btn {
   display: inline-flex;

@@ -675,15 +675,21 @@ function usePopover(layoutKey: unknown, busy = false) {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.isComposing) close();
     };
+    // KT-2013 — a page scroll moves the trigger; the popover's own list
+    // scrolling moves nothing: it is not placed again for it.
+    const placeOnPageScroll = (event: Event) => {
+      if (event.target instanceof Node && popoverRef.current?.contains(event.target)) return;
+      place();
+    };
     document.addEventListener('mousedown', closeOutside);
     document.addEventListener('keydown', closeOnEscape);
     window.addEventListener('resize', place);
-    window.addEventListener('scroll', place, true);
+    window.addEventListener('scroll', placeOnPageScroll, true);
     return () => {
       document.removeEventListener('mousedown', closeOutside);
       document.removeEventListener('keydown', closeOnEscape);
       window.removeEventListener('resize', place);
-      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('scroll', placeOnPageScroll, true);
     };
   }, [open, place, close]);
 
@@ -762,8 +768,11 @@ interface AgentModelListProps {
   place?: () => void;
   /** The current choice cannot be chosen again (the discussion's picker). */
   disableSelected: boolean;
-  /** The exact-model mode greys the principal's own model. */
-  isMain?: (target: AgentSwitchTarget, model: string | null) => boolean;
+  /**
+   * The exact-model mode greys the principal's own model; a mode row passes
+   * its `tier` (the step's mode when the step names no model).
+   */
+  isMain?: (target: AgentSwitchTarget, model: string | null, tier?: ModelTier | null) => boolean;
   availability: (target: AgentSwitchTarget) => AgentAvailability | null;
   /** Other models, a custom model and a typed id. */
   models: boolean;
@@ -969,7 +978,7 @@ function AgentModelList({
           const title = tier === null ? defaultLabel : modeTitle(group.target, tier);
           const details = tierDetails(tier, resolution, title, t);
           const ownState = details.state && !sameAvailability(details.state, shared) ? details.state : null;
-          const onMain = Boolean(isMain?.(group.target, modelId || null));
+          const onMain = Boolean(isMain?.(group.target, modelId || null, tier));
           const descriptionId = `${id}-${group.key}-${tier ?? 'agent-default'}`;
           return (
             <button
@@ -1115,48 +1124,70 @@ function AgentModelList({
     const label = defaultTargetLabel(target);
     const blocked = availabilityBlocks(availability(target));
     const tier = entry.model ? undefined : entry.tier ?? null;
-    const modelId = entry.model ?? (tier ? modeModelId(resolve(target, tier), tier) : '');
+    const group = groups.find(candidate => candidate.key === targetKey(target));
+    // KT-2013 — the row of the same choice in its group: its mode, else the
+    // catalogue entry of its model. Its guards and its title are the recent's.
+    const mode = tier === undefined ? undefined : group?.allModes.find(candidate => candidate.tier === tier);
+    const modelId = entry.model ?? mode?.modelId ?? (tier ? modeModelId(resolve(target, tier), tier) : '');
     const choice = entry.model ? t('agentPicker.custom') : tier ? tierLabel(tier) : defaultLabel;
     const shown = modelId || t('wf.shadow.rows.defaultModel');
-    const group = groups.find(candidate => candidate.key === targetKey(target));
     const selected = Boolean(group) && (entry.model
       ? group?.custom === entry.model
       : group?.selectedTier !== undefined && group?.selectedTier === tier);
     // The recent row has no entry of its own: its group's catalogue entry for that id, when listed.
-    const displayName = modelId ? group?.listed.find(model => model.model_id === modelId)?.display_name : undefined;
+    const listedEntry = modelId ? group?.listed.find(model => model.model_id === modelId) : undefined;
+    const displayName = listedEntry?.display_name;
+    const onMain = Boolean(isMain?.(target, modelId || null, tier));
+    let rowBlocked: boolean;
+    let rowTitle: string | undefined;
+    if (tier !== undefined) {
+      const details = tierDetails(tier, mode?.resolution ?? null, tier === null ? defaultLabel : modeTitle(target, tier), t);
+      rowBlocked = details.blocked;
+      rowTitle = details.title;
+    } else {
+      const unavailable = listedEntry?.availability === 'unavailable';
+      rowBlocked = unavailable;
+      rowTitle = [modelName(listedEntry, modelId), unavailable ? t('modelCatalog.unavailable') : '']
+        .filter(Boolean).join(' — ') || undefined;
+    }
+    const row = `recent:${recentKey(entry)}`;
     return (
-      <button
-        key={recentKey(entry)}
-        type="button"
-        role="menuitem"
-        className="kr-agent-switch-mode kr-agent-switch-recent"
-        data-kind="recent"
-        data-current={selected}
-        aria-label={withFreeName(`${t('agentPicker.recent')}: ${label} · ${choice} · ${shown}`, modelId, displayName, t)}
-        disabled={busy || blocked || (disableSelected && selected)}
-        onClick={() => onChoose(entry.model
-          ? { kind: 'model', target, model: entry.model, row: 'recent' }
-          : { kind: 'tier', target, tier: tier ?? null })}
-      >
-        <span className="kr-agent-switch-mode-label">
-          <span
-            className="kr-agent-switch-option-dot"
-            style={{ background: AGENT_COLORS[target.agent] ?? 'var(--kr-text-faint)' }}
-          />
-          <span className="kr-agent-switch-tier-name">{label}</span>
-        </span>
-        <span className="kr-agent-switch-mode-value">
-          <span className="kr-agent-switch-recent-choice">
-            {tier && <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>}
-            {choice}
+      <Fragment key={recentKey(entry)}>
+        <button
+          type="button"
+          role="menuitem"
+          className="kr-agent-switch-mode kr-agent-switch-recent"
+          data-kind="recent"
+          data-current={selected}
+          data-main={onMain || undefined}
+          aria-label={withFreeName(`${t('agentPicker.recent')}: ${label} · ${choice} · ${shown}`, modelId, displayName, t)}
+          title={onMain ? t('wf.shadow.rows.mainModel') : rowTitle}
+          disabled={busy || blocked || rowBlocked || onMain || (disableSelected && selected)}
+          onClick={() => onChoose(entry.model
+            ? { kind: 'model', target, model: entry.model, row }
+            : { kind: 'tier', target, tier: tier ?? null })}
+        >
+          <span className="kr-agent-switch-mode-label">
+            <span
+              className="kr-agent-switch-option-dot"
+              style={{ background: AGENT_COLORS[target.agent] ?? 'var(--kr-text-faint)' }}
+            />
+            <span className="kr-agent-switch-tier-name">{label}</span>
           </span>
-          {modelId
-            ? <code className="kr-agent-switch-mode-model">{modelId}</code>
-            : <span className="kr-agent-switch-mode-default">{shown}</span>}
-          <FreeModelBadge modelId={modelId} displayName={displayName} t={t} />
-        </span>
-        <span className="kr-agent-switch-mode-check">{selected && <Check size={10} aria-hidden="true" />}</span>
-      </button>
+          <span className="kr-agent-switch-mode-value">
+            <span className="kr-agent-switch-recent-choice">
+              {tier && <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>}
+              {choice}
+            </span>
+            {modelId
+              ? <code className="kr-agent-switch-mode-model">{modelId}</code>
+              : <span className="kr-agent-switch-mode-default">{shown}</span>}
+            <FreeModelBadge modelId={modelId} displayName={displayName} t={t} />
+          </span>
+          <span className="kr-agent-switch-mode-check">{selected && <Check size={10} aria-hidden="true" />}</span>
+        </button>
+        {errorAfter(targetKey(target), row)}
+      </Fragment>
     );
   };
 
@@ -1589,10 +1620,10 @@ function ExactModelPicker({
     ? [...listed.filter(target => targetKey(target) === valueKey), ...listed.filter(target => targetKey(target) !== valueKey)]
     : listed;
   const { open, setOpen, place, close, rootRef, popoverRef, searchRef } = usePopover(query);
-  const { catalog } = useModelCatalogSnapshot(open);
+  const { catalog, catalogError } = useModelCatalogSnapshot(open);
   useLayoutEffect(() => {
     if (open) place();
-  }, [open, place, catalog]);
+  }, [open, place, catalog, catalogError]);
   const navigate = usePopoverKeys(popoverRef, searchRef, close);
   const triggerVariant = variant ?? (compact ? 'compact' : 'chip');
 
@@ -1616,9 +1647,17 @@ function ExactModelPicker({
     if (recent) setRecents(recordAgentPickerRecent(recent));
     onChange(next);
   };
-  const isMain = (target: AgentSwitchTarget, model: string | null) =>
-    target.agent === main.agent && (target.connectionId ?? null) === (main.connectionId ?? null)
-    && (model ?? '') === (main.model ?? '');
+  // KT-2013 — what the step runs: its explicit model, else the model of its
+  // mode; a mode that names none is greyed as that mode, not as the agent's default.
+  const mainKey = targetKey(main);
+  const mainTier = main.tier ?? null;
+  const mainTarget = targets.find(target => targetKey(target) === mainKey) ?? { agent: main.agent, connectionId: main.connectionId };
+  const mainModel = main.model?.trim()
+    || (mainTier ? modeModelId(resolve(mainTarget, mainTier), mainTier) : '');
+  const isMain = (target: AgentSwitchTarget, model: string | null, tier?: ModelTier | null) =>
+    targetKey(target) === mainKey && (mainModel
+      ? (model ?? '') === mainModel
+      : tier !== undefined && tier === mainTier);
   const choose = (choice: ListChoice) => {
     const connectionId = choice.target.connectionId ?? null;
     const model = choice.kind === 'model' ? choice.model.trim() : modeModelId(
@@ -1691,6 +1730,8 @@ function ExactModelPicker({
             value={query}
             onChange={setQuery}
           />
+          {/* KT-2013 — the list without its models says why, like the tier picker's. */}
+          {catalogError && <span role="status" className="kr-agent-switch-status">{t('modelCatalog.loadError')}</span>}
           <AgentModelList
             ariaLabel={ariaLabel}
             testId={`${testId}-menu`}

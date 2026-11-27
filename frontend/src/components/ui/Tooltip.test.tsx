@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Tooltip, TOOLTIP_CLOSE_DELAY_MS } from './Tooltip';
+import { Dialog } from './Dialog';
+import { Drawer } from './Drawer';
+import { IconButton } from './IconButton';
+import { placeFocus } from '../../hooks/useDialogFocus';
 
 const tip = () => document.querySelector('[role="tooltip"]');
 
@@ -113,5 +117,123 @@ describe('Tooltip', () => {
     expect(container.contains(tip())).toBe(false);
     expect(tip()!.parentElement).toBe(document.body);
     expect((tip() as HTMLElement).style.position).toBe('fixed');
+  });
+
+  // KT-2014 — the dialog listens on body and stops Escape there: an open
+  // tooltip inside it takes Escape first, one layer per Escape (WCAG 1.4.13).
+  for (const [name, Overlay] of [['Dialog', Dialog], ['Drawer', Drawer]] as const) {
+    it(`inside a ${name}, the first Escape hides the tooltip and leaves the ${name} open, the second closes it`, async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      render(
+        <Overlay open onClose={onClose} title="Schedule">
+          <Tooltip content="Runs every hour"><button type="button">Help</button></Tooltip>
+        </Overlay>,
+      );
+      fireEvent.mouseEnter(screen.getByRole('button', { name: 'Help' }).parentElement!);
+      expect(tip()).not.toBeNull();
+      await user.keyboard('{Escape}');
+      expect(tip()).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      await user.keyboard('{Escape}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('leaves Escape to the page once it is hidden, and ignores it during an IME composition', () => {
+    const page = vi.fn();
+    document.addEventListener('keydown', page);
+    try {
+      render(<Tooltip content="Runs every hour"><button type="button">Schedule</button></Tooltip>);
+      fireEvent.mouseEnter(screen.getByRole('button').parentElement!);
+      fireEvent.keyDown(document, { key: 'Escape', isComposing: true });
+      expect(tip()).not.toBeNull();
+      page.mockClear();
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(tip()).toBeNull();
+      expect(page).not.toHaveBeenCalled();
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(page).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener('keydown', page);
+    }
+  });
+
+  // KT-2014 — a tooltip owns an Escape only when the user put it there (the
+  // pointer, or a focus the user moved). One a layer showed by placing the
+  // focus hides on the Escape and lets it through to the layer.
+  const cross = () => document.querySelector<HTMLButtonElement>('.ui-overlay-close')!;
+  for (const [name, Overlay] of [['Dialog', Dialog], ['Drawer', Drawer]] as const) {
+    it(`a ${name} whose initial focus is its cross closes on one Escape`, async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      render(<Overlay open onClose={onClose} title="Schedule"><p>Nothing to act on</p></Overlay>);
+      expect(cross()).toHaveFocus();
+      await user.keyboard('{Escape}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(tip()).toBeNull();
+    });
+
+    it(`inside a ${name}, the tooltip of the cross the user tabbed onto takes the first Escape`, async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      render(<Overlay open onClose={onClose} title="Schedule"><button type="button">Help</button></Overlay>);
+      expect(screen.getByRole('button', { name: 'Help' })).toHaveFocus();
+      await user.tab();
+      expect(cross()).toHaveFocus();
+      expect(tip()).not.toBeNull();
+      await user.keyboard('{Escape}');
+      expect(tip()).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(cross()).toHaveFocus();
+      await user.keyboard('{Escape}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('hides every open tooltip on the same Escape, one opened by focus and one by hover', async () => {
+    const user = userEvent.setup();
+    render(<><IconButton label="Edit" icon={<span />} /><IconButton label="Copy" icon={<span />} /></>);
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Edit' })).toHaveFocus();
+    fireEvent.mouseEnter(screen.getByRole('button', { name: 'Copy' }).parentElement!);
+    expect(document.querySelectorAll('[role="tooltip"]')).toHaveLength(2);
+    await user.keyboard('{Escape}');
+    expect(document.querySelectorAll('[role="tooltip"]')).toHaveLength(0);
+  });
+
+  it('hides when its anchor is activated: Enter, Space or a press', async () => {
+    const user = userEvent.setup();
+    render(<><button type="button">Before</button><IconButton label="Edit" icon={<span />} /></>);
+    const button = screen.getByRole('button', { name: 'Edit' });
+    for (const key of ['{Enter}', ' ']) {
+      act(() => screen.getByRole('button', { name: 'Before' }).focus());
+      await user.tab();
+      expect(button).toHaveFocus();
+      expect(tip()).not.toBeNull();
+      await user.keyboard(key);
+      expect(tip()).toBeNull();
+      expect(button).toHaveFocus();
+    }
+    fireEvent.mouseEnter(button.parentElement!);
+    expect(tip()).not.toBeNull();
+    fireEvent.pointerDown(button);
+    expect(tip()).toBeNull();
+  });
+
+  it('shown by a focus a layer placed, it hides on Escape and lets it through', () => {
+    const page = vi.fn();
+    document.addEventListener('keydown', page);
+    try {
+      render(<IconButton label="Edit" icon={<span />} />);
+      act(() => placeFocus(screen.getByRole('button', { name: 'Edit' })));
+      expect(tip()).not.toBeNull();
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(tip()).toBeNull();
+      expect(page).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener('keydown', page);
+    }
   });
 });

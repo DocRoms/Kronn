@@ -3,8 +3,9 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
-import { ANCHOR_GAP, VIEWPORT_MARGIN, anchoredStyle } from './anchor';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, renderHook } from '@testing-library/react';
+import { ANCHOR_GAP, VIEWPORT_MARGIN, anchoredStyle, useAnchoredStyle } from './anchor';
 
 const viewport = { width: 1000, height: 900 };
 const box = { top: 100, bottom: 130, left: 200, right: 240 };
@@ -94,5 +95,84 @@ describe('anchoredStyle', () => {
     const tokens = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'styles', 'tokens.css'), 'utf8');
     expect(tokens).toContain(`--kr-space-1: ${ANCHOR_GAP}px;`);
     expect(tokens).toContain(`--kr-space-2: ${VIEWPORT_MARGIN}px;`);
+  });
+});
+
+// KT-2014 — when the placement is redone: not on the layer's own scroll, not
+// into a new style object when nothing moved, and on a size change.
+describe('useAnchoredStyle', () => {
+  const observers: Array<{ callback: ResizeObserverCallback; observed: Element[] }> = [];
+  class FakeResizeObserver {
+    observed: Element[] = [];
+    constructor(public callback: ResizeObserverCallback) { observers.push(this); }
+    observe(node: Element) { this.observed.push(node); }
+    unobserve() {}
+    disconnect() { this.observed = []; }
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    observers.length = 0;
+    document.body.innerHTML = '';
+  });
+
+  /** An anchor at 100..130 px and a 160 x `height` layer holding a list. */
+  function mount(height: { value: number }) {
+    const anchor = document.createElement('button');
+    const layer = document.createElement('div');
+    const list = document.createElement('ul');
+    layer.append(list);
+    document.body.append(anchor, layer);
+    const rect = vi.spyOn(anchor, 'getBoundingClientRect').mockImplementation(() => {
+      const r = { top: 100, bottom: 130, left: 200, right: 240 };
+      return { ...r, x: r.left, y: r.top, width: 40, height: 30, toJSON: () => r } as DOMRect;
+    });
+    Object.defineProperty(layer, 'offsetWidth', { configurable: true, get: () => 160 });
+    Object.defineProperty(layer, 'scrollHeight', { configurable: true, get: () => height.value });
+    let renders = 0;
+    const anchorRef = { current: anchor };
+    const layerRef = { current: layer };
+    const hook = renderHook(() => {
+      renders += 1;
+      return useAnchoredStyle(anchorRef, layerRef, true, 'top', 'start');
+    });
+    return { anchor, layer, list, rect, hook, renders: () => renders };
+  }
+
+  it('is not recomputed on a scroll of the layer\'s own list, and is on a scroll of the page', () => {
+    const { list, rect, hook } = mount({ value: 50 });
+    expect(hook.result.current.placed).toBe(true);
+    rect.mockClear();
+    act(() => { list.dispatchEvent(new Event('scroll')); });
+    expect(rect).not.toHaveBeenCalled();
+    act(() => { document.dispatchEvent(new Event('scroll')); });
+    expect(rect).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps its style object, and renders nothing, when a scroll moved nothing', () => {
+    const { hook, renders } = mount({ value: 50 });
+    const before = hook.result.current.style;
+    const count = renders();
+    act(() => {
+      document.dispatchEvent(new Event('scroll'));
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(hook.result.current.style).toBe(before);
+    expect(renders()).toBe(count);
+  });
+
+  it('follows a size change of the layer, without a scroll or a resize', () => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    const height = { value: 50 };
+    const { layer, anchor, hook } = mount(height);
+    expect(hook.result.current.style.top).toBe(100 - ANCHOR_GAP - 50);
+    const observer = observers.at(-1)!;
+    expect(observer.observed).toEqual([layer, anchor]);
+    height.value = 80;
+    act(() => { observer.callback([], observer as unknown as ResizeObserver); });
+    expect(hook.result.current.style.top).toBe(100 - ANCHOR_GAP - 80);
+    hook.unmount();
+    expect(observer.observed).toEqual([]);
   });
 });

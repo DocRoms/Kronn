@@ -1282,6 +1282,178 @@ describe('McpPage', () => {
     expect(document.body.textContent).toContain('A test server');
   });
 
+  it('makes every registry card a keyboard stop that Enter or Space opens (KT-2006)', () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
+    const registry: McpDefinition[] = [
+      { id: 'test-mcp', name: 'Test MCP', description: 'A test server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Anthropic', official: true },
+      { id: 'other-mcp', name: 'Other MCP', description: 'Another server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Someone', official: false },
+    ];
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
+    fireEvent.click(getAddPluginButton());
+
+    const grid = document.querySelector<HTMLElement>('.mcp-registry-grid');
+    if (!grid) throw new Error('registry grid not found');
+    const cards = Array.from(grid.querySelectorAll<HTMLElement>('.mcp-registry-card'));
+    expect(cards.length).toBeGreaterThanOrEqual(2);
+    for (const card of cards) {
+      expect(card).toHaveAttribute('role', 'button');
+      expect(card).toHaveAttribute('tabindex', '0');
+    }
+
+    // A key from a card's content is not the card's own: nothing opens.
+    const testCard = cards.find(card => card.textContent?.includes('Test MCP'));
+    if (!testCard) throw new Error('Test MCP card not found');
+    fireEvent.keyDown(testCard.querySelector('.mcp-registry-card-name')!, { key: 'Enter' });
+    expect(document.querySelector('.mcp-registry-grid')).not.toBeNull();
+
+    testCard.focus();
+    expect(testCard).toHaveFocus();
+    fireEvent.keyDown(testCard, { key: 'Enter' });
+    expect(document.querySelector('.mcp-registry-grid')).toBeNull();
+    expect(screen.getByDisplayValue('Test MCP')).toBeInTheDocument();
+  });
+
+  it('opens a registry card with Space as well (KT-2006)', () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
+    const registry: McpDefinition[] = [
+      { id: 'test-mcp', name: 'Test MCP', description: 'A test server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Anthropic', official: true },
+    ];
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
+    fireEvent.click(getAddPluginButton());
+
+    const card = Array.from(document.querySelectorAll<HTMLElement>('.mcp-registry-card'))
+      .find(c => c.textContent?.includes('Test MCP'));
+    if (!card) throw new Error('Test MCP card not found');
+    fireEvent.keyDown(card, { key: ' ' });
+    expect(document.querySelector('.mcp-registry-grid')).toBeNull();
+    expect(screen.getByDisplayValue('Test MCP')).toBeInTheDocument();
+  });
+
+  describe('focus between the registry and the configuration step (KT-2006 review)', () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
+    const registry: McpDefinition[] = [
+      { id: 'test-mcp', name: 'Test MCP', description: 'A test server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Anthropic', official: true },
+      { id: 'other-mcp', name: 'Other MCP', description: 'Another server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Someone', official: false },
+    ];
+    const openForm = () => {
+      wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
+      fireEvent.click(getAddPluginButton());
+    };
+    const registryCard = (name: string) => {
+      const card = Array.from(document.querySelectorAll<HTMLElement>('.mcp-registry-grid .mcp-registry-card'))
+        .find(c => c.querySelector('.mcp-registry-card-name')?.textContent === name);
+      if (!card) throw new Error(`${name} card not found`);
+      return card;
+    };
+    const dialog = () => screen.getByRole('dialog');
+
+    it('Enter on a card moves the focus to the first field of the step that replaces the grid', () => {
+      openForm();
+      const card = registryCard('Other MCP');
+      card.focus();
+      fireEvent.keyDown(card, { key: 'Enter' });
+      const label = screen.getByDisplayValue('Other MCP');
+      expect(label).toHaveFocus();
+      expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+    });
+
+    it('a click on a card moves the focus into the step as well', () => {
+      openForm();
+      fireEvent.click(registryCard('Test MCP'));
+      expect(screen.getByDisplayValue('Test MCP')).toHaveFocus();
+    });
+
+    it('back to the catalogue focuses the activated card and puts the grid back at its scroll offset, without scrolling to the card', () => {
+      const scrollIntoView = vi.fn();
+      const original = HTMLElement.prototype.scrollIntoView;
+      HTMLElement.prototype.scrollIntoView = scrollIntoView;
+      try {
+        openForm();
+        const grid = document.querySelector<HTMLElement>('.mcp-registry-grid')!;
+        grid.scrollTop = 1234;
+        fireEvent.scroll(grid);
+        const card = registryCard('Other MCP');
+        card.focus();
+        fireEvent.keyDown(card, { key: 'Enter' });
+        expect(document.querySelector('.mcp-registry-grid')).toBeNull();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Retour' }));
+        // The grid is rebuilt: a new scroll box, put back where the user left it.
+        const rebuilt = document.querySelector<HTMLElement>('.mcp-registry-grid')!;
+        expect(rebuilt).not.toBe(grid);
+        expect(rebuilt.scrollTop).toBe(1234);
+        // The search field's autofocus does not win over the card.
+        expect(registryCard('Other MCP')).toHaveFocus();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+      } finally {
+        HTMLElement.prototype.scrollIntoView = original;
+      }
+    });
+
+    it('scrolls only as far as needed when the card is not in view at the restored offset', () => {
+      const scrollIntoView = vi.fn();
+      const originalScroll = HTMLElement.prototype.scrollIntoView;
+      const originalRect = HTMLElement.prototype.getBoundingClientRect;
+      HTMLElement.prototype.scrollIntoView = scrollIntoView;
+      // The grid shows 0..400; the card sits below it, at 880..980.
+      HTMLElement.prototype.getBoundingClientRect = function getRect(this: HTMLElement) {
+        const [top, bottom] = this.classList.contains('mcp-registry-grid')
+          ? [0, 400]
+          : this.classList.contains('mcp-registry-card') ? [880, 980] : [0, 0];
+        return { top, bottom, left: 0, right: 300, width: 300, height: bottom - top, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+      };
+      try {
+        openForm();
+        fireEvent.keyDown(registryCard('Other MCP'), { key: 'Enter' });
+        fireEvent.click(screen.getByRole('button', { name: 'Retour' }));
+        expect(registryCard('Other MCP')).toHaveFocus();
+        expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' });
+      } finally {
+        HTMLElement.prototype.scrollIntoView = originalScroll;
+        HTMLElement.prototype.getBoundingClientRect = originalRect;
+      }
+    });
+
+    it('closing the form forgets the card: reopening it focuses the search field', () => {
+      openForm();
+      fireEvent.keyDown(registryCard('Other MCP'), { key: 'Enter' });
+      fireEvent.keyDown(dialog(), { key: 'Escape' });
+      expect(screen.queryByRole('dialog')).toBeNull();
+      fireEvent.click(getAddPluginButton());
+      expect(document.activeElement).toBe(document.querySelector('.mcp-add-modal input'));
+    });
+  });
+
+  it('names the installed state of a registry card with a word, part of the card name (KT-2006 review)', () => {
+    const overview: McpOverview = {
+      servers: [makeServer('test-mcp', 'Test MCP')],
+      configs: [makeConfig('c1', 'test-mcp', 'Test MCP')],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
+    };
+    const registry: McpDefinition[] = [
+      { id: 'test-mcp', name: 'Test MCP', description: 'A test server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Anthropic', official: true },
+      { id: 'other-mcp', name: 'Other MCP', description: 'Another server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Someone', official: false },
+    ];
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
+    fireEvent.click(getAddPluginButton());
+    const grid = document.querySelector<HTMLElement>('.mcp-registry-grid')!;
+
+    const installed = within(grid).getByRole('button', { name: /Test MCP.*Déjà ajouté/ });
+    expect(installed).toHaveClass('mcp-registry-card-installed');
+    const mark = within(installed).getByRole('img', { name: 'Déjà ajouté' });
+    expect(mark).toHaveAttribute('title', 'Déjà ajouté');
+
+    const notInstalled = within(grid).getByRole('button', { name: /Other MCP/ });
+    expect(within(notInstalled).queryByRole('img', { name: 'Déjà ajouté' })).toBeNull();
+  });
+
+  it('keeps the whole focus ring of a card scrolled into view inside the grid (KT-2006 review)', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/pages/McpPage.css'), 'utf8');
+    const cardRule = css.match(/\n\.mcp-registry-card\s*\{([^}]+)\}/)?.[1] ?? '';
+    // 2px outline + 2px offset, and the 4px halo: an 8px margin keeps them in.
+    expect(cardRule).toMatch(/scroll-margin(-block)?:\s*var\(--kr-sp-4\)/);
+  });
+
   it('shows the read-only built-in kronn-internal entry as a standard plugin card', () => {
     // kronn-internal is auto-injected into every project — surfaced as a
     // read-only system card on the MAIN Plugins view (not behind "Ajouter"),

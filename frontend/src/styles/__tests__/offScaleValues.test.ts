@@ -9,7 +9,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BREAKPOINTS } from '../designTokens';
 import {
-  auditRepo, BREAKPOINT_PX, checkBaseline, dropFallbacks, offScaleValues, type ThemeAuditBaseline,
+  auditRepo, BREAKPOINT_PX, checkBaseline, cssRules, dropFallbacks, fontShorthandSize, offScaleValues, queryWidths,
+  type ThemeAuditBaseline,
 } from '../themeAudit';
 
 const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -60,6 +61,58 @@ describe('off-scale values in a stylesheet', () => {
 
   it('holds the breakpoints equal to BREAKPOINTS', () => {
     expect(BREAKPOINT_PX).toEqual(Object.values(BREAKPOINTS));
+  });
+});
+
+// KT-2016 — the forms the review of the guards found unread.
+describe('what the stylesheet audit reads (KT-2016)', () => {
+  it('measures the size inside a font shorthand', () => {
+    const css = [
+      '.a { font: 500 10px/1.3 var(--kr-font-mono, ui-monospace, monospace); }',
+      '.b { font: 12px var(--kr-font-mono); }',
+      '.c { font: inherit; }',
+      '.d { font: 600 var(--kr-fs-xs) var(--kr-font-mono); }',
+      '.e { font: var(--kr-type-sm)/1.4 var(--kr-font-sans); }',
+      '.f { font: italic 0.8rem serif; }',
+    ].join('\n');
+    expect(kinds(css)).toEqual([['font-size', 1], ['font-size', 2], ['font-size', 6]]);
+    expect(fontShorthandSize('500 10px/1.3 var(--kr-font-mono)')).toBe('10px');
+    expect(fontShorthandSize('caption')).toBeNull();
+  });
+
+  it('reads a rule that holds a nested rule, the nested rule, and what follows it', () => {
+    const css = [
+      '.a {',
+      '  font-size: 11px;',
+      '  &:hover { border-radius: 6px; }',
+      '  color: #e8eaed;',
+      '}',
+      '.b { font-size: 9px; }',
+    ].join('\n');
+    expect(kinds(css)).toEqual([['font-size', 2], ['radius', 3], ['colour', 4], ['font-size', 6]]);
+    expect(cssRules(css).map(r => r.selector)).toEqual(['.a', '.a:hover', '.b']);
+    expect(cssRules('.x, .y { .z { color: red; } }').map(r => r.selector)).toEqual(['.x .z, .y .z']);
+  });
+
+  it('keeps reading a theme layer whose rules sit inside a theme block', () => {
+    const css = ':root[data-theme="arcade"] {\n  .kr-a { font-size: 9px; }\n}\n.after { font-size: 8px; }';
+    expect(kinds(css, 'styles/neon.css')).toEqual([['font-size', 2], ['font-size', 4]]);
+    expect(cssRules(css).map(r => r.selector)).toEqual([':root[data-theme="arcade"] .kr-a', '.after']);
+  });
+
+  it('reads @media range syntax and @container widths', () => {
+    const css = [
+      '@media (width <= 700px) { .a { display: none; } }',
+      '@media (width < 640px) { .b { display: none; } }',
+      '@media (width <= 639px) { .c { display: none; } }',
+      '@media (768px <= width) { .d { display: none; } }',
+      '@media (400px < width <= 899px) { .e { display: none; } }',
+      '@container (max-width: 420px) { .f { display: none; } }',
+      '@container card (width < 24rem) { .g { display: none; } }',
+      '@container (min-width: 900px) { .h { display: none; } }',
+    ].join('\n');
+    expect(kinds(css)).toEqual([['breakpoint', 1], ['breakpoint', 5], ['breakpoint', 6], ['breakpoint', 7]]);
+    expect(queryWidths('(400px < width <= 899px)').map(w => w.bp)).toEqual([401, 900]);
   });
 });
 

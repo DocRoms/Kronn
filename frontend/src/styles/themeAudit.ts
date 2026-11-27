@@ -65,18 +65,61 @@ export function stripComments(css: string): string {
 
 export type CssRule = { selector: string; body: string; line: number };
 
-/** Innermost `selector { declarations }` blocks; at-rule wrappers are skipped. */
+/** A nested selector resolved against its parent rule's (`&` or a
+ *  descendant), every combination of their comma lists. */
+function nestSelector(parent: string, child: string): string {
+  const parents = parent.split(',').map(s => s.trim());
+  return child.split(',').map(s => s.trim()).flatMap(c =>
+    parents.map(p => (c.includes('&') ? c.replace(/&/g, p) : `${p} ${c}`))).join(', ');
+}
+
+/** `selector { declarations }` blocks; an at-rule wrapper with nothing but
+ *  rules inside is skipped. KT-2016 — a rule that holds nested rules
+ *  (CSS nesting) is read too: its body is its own declarations, each nested
+ *  rule blanked out (line breaks kept, so a line counted in the body stays
+ *  true), and the nested rules come out on their own with their selector
+ *  resolved against the parent's (`&`, or a descendant). */
 export function cssRules(css: string): CssRule[] {
   const text = stripComments(css);
-  const rules: CssRule[] = [];
-  const re = /([^{}]+)\{([^{}]*)\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const selector = m[1].trim().replace(/\s+/g, ' ');
-    const line = text.slice(0, m.index + m[0].indexOf('{')).split('\n').length;
-    rules.push({ selector, body: m[2], line });
+  const rules: Array<CssRule & { open: number }> = [];
+  type Frame = { prelude: number; open: number; line: number; selector: string; nested: Array<[number, number]> };
+  const stack: Frame[] = [];
+  let segment = 0;
+  let line = 1;
+  const blank = (s: string) => s.replace(/[^\n]/g, ' ');
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (c === '\n') line += 1;
+    else if (c === ';') segment = i + 1;
+    else if (c === '{') {
+      const raw = text.slice(segment, i).trim().replace(/\s+/g, ' ');
+      const parent = [...stack].reverse().find(f => !f.selector.startsWith('@'));
+      // A conditional at-rule nested in a rule applies to the rule's own
+      // selector: `.a { @media (…) { color: x } }` styles `.a`.
+      const selector = !parent ? raw
+        : !raw.startsWith('@') ? nestSelector(parent.selector, raw)
+          : /^@(?:media|supports|container|layer)\b/.test(raw) ? parent.selector : raw;
+      stack.push({ prelude: segment, open: i, line, selector, nested: [] });
+      segment = i + 1;
+    } else if (c === '}') {
+      const frame = stack.pop();
+      segment = i + 1;
+      if (!frame) continue;
+      let body = '';
+      let from = frame.open + 1;
+      for (const [start, end] of frame.nested) {
+        body += text.slice(from, start) + blank(text.slice(start, end));
+        from = end;
+      }
+      body += text.slice(from, i);
+      if (frame.nested.length === 0 || body.trim() !== '') {
+        rules.push({ selector: frame.selector, body, line: frame.line, open: frame.open });
+      }
+      stack.at(-1)?.nested.push([frame.prelude, i + 1]);
+    }
   }
-  return rules;
+  // In the order the blocks open, as they are written.
+  return rules.sort((a, b) => a.open - b.open).map(({ selector, body, line: at }) => ({ selector, body, line: at }));
 }
 
 export function declarations(body: string): Array<[string, string]> {
@@ -392,19 +435,69 @@ const RADIUS_PROP = /^border(?:-(?:top|bottom|start|end)-(?:left|right|start|end
 const NAMED_COLOUR_PROP =
   /^(?:color|background(?:-color)?|border(?:-(?:top|right|bottom|left))?(?:-color)?|outline(?:-color)?|fill|stroke|(?:box|text)-shadow|caret-color|accent-color|text-decoration(?:-color)?|column-rule(?:-color)?|--.*)$/;
 
+/** One width a `@media` or `@container` query tests: where it sits in the
+ *  prelude, the breakpoint it stands for (the first width of the wider
+ *  layout; NaN for a width not in px) and the feature as written. */
+export type QueryWidth = { index: number; bp: number; feature: string };
+
+const LENGTH = String.raw`([\d.]+)(px|rem|em)`;
+const RANGE_FEATURE = new RegExp(
+  String.raw`\(\s*(?:${LENGTH}\s*([<>]=?)\s*)?(?:width|inline-size)\s*(?:([<>]=?)\s*${LENGTH})?\s*\)`, 'g');
+const FLIP: Record<string, string> = { '<': '>', '<=': '>=', '>': '<', '>=': '<=' };
+
+/** `width OP N`, as a breakpoint: `<= N` and `max-width: N` → N + 1; `< N`
+ *  and `>= N` and `min-width: N` → N; `> N` → N + 1. */
+function rangeBreakpoint(op: string, value: number, unit: string): number {
+  if (unit !== 'px') return Number.NaN;
+  return op === '<=' || op === '>' ? value + 1 : value;
+}
+
+/** KT-2016 — the widths of a query prelude: `(max-width: N)`, `(min-width:
+ *  N)`, and the range syntax (`width <= N`, `N < width`, `A < width <= B`). */
+export function queryWidths(prelude: string): QueryWidth[] {
+  const out: QueryWidth[] = [];
+  for (const w of prelude.matchAll(/\(\s*(max|min)-(?:width|inline-size)\s*:\s*([\d.]+)(px|rem|em)\s*\)/g)) {
+    out.push({ index: w.index ?? 0, bp: rangeBreakpoint(w[1] === 'max' ? '<=' : '>=', Number(w[2]), w[3]), feature: w[0] });
+  }
+  for (const w of prelude.matchAll(RANGE_FEATURE)) {
+    const [, leftValue, leftUnit, leftOp, rightOp, rightValue, rightUnit] = w;
+    if (leftOp) out.push({ index: w.index ?? 0, bp: rangeBreakpoint(FLIP[leftOp], Number(leftValue), leftUnit), feature: w[0] });
+    if (rightOp) out.push({ index: w.index ?? 0, bp: rangeBreakpoint(rightOp, Number(rightValue), rightUnit), feature: w[0] });
+  }
+  return out.sort((a, b) => a.index - b.index);
+}
+
+/** The global keywords and system fonts of a `font:` shorthand: no size. */
+const FONT_WITHOUT_SIZE = /^(?:inherit|initial|unset|revert|revert-layer|caption|icon|menu|message-box|small-caption|status-bar)$/i;
+const FONT_SIZE_TOKEN =
+  /^(?:[\d.]+(?:px|rem|em|%|pt|pc|vw|vh|vmin|vmax|ch|ex|cap|lh|rlh|q|mm|cm|in)|(?:xx?x?-)?(?:small|large)|medium|smaller|larger|(?:calc|clamp|min|max)\(.*\)|var\(--kr-(?:type|fs)-[a-z0-9-]+\))$/i;
+
+/** KT-2016 — the size inside a `font:` shorthand: the part before
+ *  `/line-height`, or else the first length, size keyword or type token;
+ *  null for a keyword or a system font, or a size it cannot tell. */
+export function fontShorthandSize(value: string): string | null {
+  const v = dropFallbacks(value).replace(/\s*!important$/i, '').trim();
+  if (FONT_WITHOUT_SIZE.test(v)) return null;
+  const parts: string[] = v.match(/(?:[^\s()/]+|\([^()]*\))+|\//g) ?? [];
+  const slash = parts.indexOf('/');
+  if (slash > 0) return parts[slash - 1];
+  return parts.find(p => FONT_SIZE_TOKEN.test(p)) ?? null;
+}
+
 /** Font sizes, radii, colours and `@media` widths of one stylesheet that sit
- *  off the design scales (docs/conventions/design-tokens.md). */
+ *  off the design scales (docs/conventions/design-tokens.md). KT-2016: the
+ *  size in a `font:` shorthand, `@media` range syntax and `@container`
+ *  widths are read too. */
 export function offScaleValues(file: string, css: string): OffScaleFinding[] {
   const findings: OffScaleFinding[] = [];
   const text = stripComments(css);
-  for (const media of text.matchAll(/@media[^{]*/g)) {
-    for (const w of media[0].matchAll(/\(\s*(max|min)-width\s*:\s*([\d.]+)(px|rem|em)\s*\)/g)) {
-      const value = Number(w[2]);
-      const bp = w[3] === 'px' ? (w[1] === 'max' ? value + 1 : value) : Number.NaN;
-      if (!BREAKPOINT_PX.includes(bp)) {
+  for (const query of text.matchAll(/@(?:media|container)[^{]*/g)) {
+    const at = query[0].startsWith('@media') ? '@media' : '@container';
+    for (const w of queryWidths(query[0])) {
+      if (!BREAKPOINT_PX.includes(w.bp)) {
         findings.push({
-          file, kind: 'breakpoint', line: lineOf(text, (media.index ?? 0) + (w.index ?? 0)),
-          detail: `@media (${w[1]}-width: ${w[2]}${w[3]})`,
+          file, kind: 'breakpoint', line: lineOf(text, (query.index ?? 0) + w.index),
+          detail: `${at} ${w.feature.replace(/\s+/g, ' ')}`,
         });
       }
     }
@@ -425,6 +518,9 @@ export function offScaleValues(file: string, css: string): OffScaleFinding[] {
         findings.push({ file, kind, line, detail: `${prop}: ${value.replace(/\s+/g, ' ').slice(0, 60)}` });
       if (prop === 'font-size') {
         if (!FONT_SIZE_OK.test(dropFallbacks(value))) push('font-size');
+      } else if (prop === 'font') {
+        const size = fontShorthandSize(value);
+        if (size !== null && !FONT_SIZE_OK.test(size)) push('font-size');
       } else if (RADIUS_PROP.test(prop)) {
         if (!radiusOk(value)) push('radius');
       } else if (!COLOUR_EXEMPT.has(file)) {

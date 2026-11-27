@@ -2540,7 +2540,7 @@ const fr: TranslationDict = {
   'disc.resumeSince': 'Depuis',
   'disc.presenceOffline': 'hors ligne · reconnexion requise',
   'disc.presencePaused': 'en pause',
-  'disc.modelDeclaredAtJoin': 'Modèle déclaré au join : {0}',
+  'disc.modelDeclaredAtJoin': 'modèle déclaré en rejoignant la discussion',
   'disc.resumeCli': 'Reprendre',
   'disc.resumeCliCopy': 'Copier la commande : {0}',
   'disc.attemptedModel': 'Modèle tenté : {0}',
@@ -5429,6 +5429,7 @@ const fr: TranslationDict = {
   'mcp.cat.other': 'Autres',
   'mcp.official': 'Officiel',
   'mcp.community': 'Communautaire',
+  'mcp.alreadyAdded': 'Déjà ajouté',
   // Plugin kind badges + filter
   'mcp.kind.mcp': 'MCP',
   'mcp.kind.api': 'API',

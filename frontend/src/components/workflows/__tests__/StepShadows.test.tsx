@@ -251,9 +251,13 @@ describe('StepShadowsEditor (KT-1459)', () => {
       renderEditor(step({ agent: 'ClaudeCode', shadows: [shadow('alt', { agent: { agent: 'Custom', connection_id: 'litellm' } })] }),
         vi.fn(), { agentChoices: choices });
       const menu = await open('wf-shadow-alt');
-      const main = within(within(menu).getByRole('group', { name: 'Claude Code' })).getAllByRole('menuitem')[0];
+      // KT-2013 — the step runs its own mode (`default`, no model named): that
+      // mode's row is the principal's, not the agent's default row.
+      const claude = within(within(menu).getByRole('group', { name: 'Claude Code' }));
+      const main = claude.getByRole('menuitem', { name: 'Claude Code · Standard' });
       expect(main).toBeDisabled();
       expect(main).toHaveAttribute('data-main', 'true');
+      expect(claude.getByRole('menuitem', { name: "Claude Code · modèle par défaut de l'agent" })).toBeEnabled();
       expect(within(within(menu).getByRole('group', { name: 'LiteLLM proxy' })).getAllByRole('menuitem')[0]).toBeEnabled();
     });
 

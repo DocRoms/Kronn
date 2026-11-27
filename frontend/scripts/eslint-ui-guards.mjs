@@ -10,8 +10,9 @@
  * `src/styles/themeAudit.ts`, run by `pnpm lint:theme`.
  *
  * Rules (plugin `ui-guards`):
- *   - no-literal-ui-string       a literal UI string in JSX (text, aria-label, title…)
- *   - control-has-name           an icon-only <button>, or an <input>/<select>/<textarea>, without a name
+ *   - no-literal-ui-string       a literal UI string in JSX (text, a literal branch of a child expression,
+ *                                aria-label, title…, the text props of a component), templates and `+` included
+ *   - control-has-name           an icon-only <button> or role="button", or an <input>/<select>/<textarea>, without a name
  *   - no-adhoc-dialog            role="dialog"/"alertdialog", aria-modal or <dialog> outside components/ui
  *   - no-foreign-page-stylesheet a page or a component importing the stylesheet of another page
  *   - no-off-scale-style         an inline font size, radius or colour outside the tokens, a breakpoint outside BREAKPOINTS
@@ -81,7 +82,7 @@ const CODE_ELEMENTS = new Set(['code', 'kbd', 'pre', 'samp', 'var']);
  *  lower-case letter, at most six characters: GET, PDF, MCP, Σ), or a unit. */
 const CODE_WORD = /^[^\s]*[/._$~=@{}\\][^\s]*$/;
 const ACRONYM = /^[^\p{Ll}]{1,6}$/u;
-const UNIT = /^(?:s|ms|min|h|px|tok|tk|k|kb|mb|gb|v|x)$/i;
+const UNIT = /^(?:s|ms|m|min|h|d|px|tok|tk|k|kb|mb|gb|v|x)$/i;
 const PUNCTUATION = /^[\p{P}\p{S}\d\s]*$/u;
 
 /** A command-line flag or a kebab-case identifier (`--output`, `my-project`). */
@@ -102,12 +103,78 @@ export function isUntranslatable(text) {
   });
 }
 
+/** KT-2016 — the text props of the shared components (components/ui), read
+ *  on a component (an element whose name starts with a capital) only:
+ *  `<meta content>` or a native `<input>`'s attributes are not text. */
+export const COMPONENT_TEXT_PROPS = new Set([
+  'description', 'help', 'error', 'message', 'confirmLabel', 'content',
+]);
+
 function insideCode(node) {
   for (let p = node.parent; p; p = p.parent) {
     if (p.type === 'JSXElement' && CODE_ELEMENTS.has(elementName(p.openingElement))) return true;
   }
   return false;
 }
+
+const unwrapTs = node => {
+  let n = node;
+  while (n && (n.type === 'TSAsExpression' || n.type === 'TSNonNullExpression' || n.type === 'TSSatisfiesExpression')) n = n.expression;
+  return n;
+};
+
+/** KT-2016 — the literal text an expression renders, one piece per string a
+ *  reader can get: a string literal; a template, its literal parts together
+ *  (`Delete ${name}` → "Delete "); a concatenation, its literal operands
+ *  together; and each branch of `? :`, the right of `&&`, both sides of `||`
+ *  and `??`. A call (`t('…')`), a variable or JSX gives no piece: JSX text is
+ *  read on its own, and a string held in a constant is out of reach. */
+export function literalPieces(expr, out = []) {
+  const node = unwrapTs(expr);
+  if (!node) return out;
+  switch (node.type) {
+    case 'Literal':
+      if (typeof node.value === 'string') out.push({ node, text: node.value });
+      break;
+    case 'TemplateLiteral':
+      out.push({ node, text: node.quasis.map(q => q.value.cooked ?? '').join(' ') });
+      for (const e of node.expressions) literalPieces(e, out);
+      break;
+    case 'BinaryExpression': {
+      if (node.operator !== '+') break;
+      const operands = [];
+      const flatten = n => {
+        const u = unwrapTs(n);
+        if (u.type === 'BinaryExpression' && u.operator === '+') { flatten(u.left); flatten(u.right); } else operands.push(u);
+      };
+      flatten(node);
+      const parts = [];
+      for (const o of operands) {
+        if (o.type === 'Literal' && typeof o.value === 'string') parts.push(o.value);
+        else if (o.type === 'TemplateLiteral') {
+          parts.push(o.quasis.map(q => q.value.cooked ?? '').join(' '));
+          for (const e of o.expressions) literalPieces(e, out);
+        } else literalPieces(o, out);
+      }
+      if (parts.length > 0) out.push({ node, text: parts.join(' ') });
+      break;
+    }
+    case 'ConditionalExpression':
+      literalPieces(node.consequent, out);
+      literalPieces(node.alternate, out);
+      break;
+    case 'LogicalExpression':
+      if (node.operator !== '&&') literalPieces(node.left, out);
+      literalPieces(node.right, out);
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+
+/** A piece a reader would hear as a sentence to translate. */
+const isUiText = text => HAS_LETTER.test(text) && !isUntranslatable(text);
 
 const noLiteralUiString = {
   meta: {
@@ -123,15 +190,28 @@ const noLiteralUiString = {
     return {
       JSXText(node) {
         const text = node.value.trim();
-        if (!HAS_LETTER.test(text) || isUntranslatable(text) || insideCode(node)) return;
+        if (!isUiText(text) || insideCode(node)) return;
         context.report({ node, messageId: 'text', data: { text: text.slice(0, 40) } });
+      },
+      // A JSX child in braces: `{'Text'}`, `{ok ? 'Saved' : 'Failed'}`,
+      // `{empty && 'Nothing yet'}`, `{`${n} items`}` (KT-2016).
+      JSXExpressionContainer(node) {
+        if (node.parent?.type !== 'JSXElement' && node.parent?.type !== 'JSXFragment') return;
+        if (insideCode(node)) return;
+        for (const { node: piece, text } of literalPieces(node.expression)) {
+          if (isUiText(text)) context.report({ node: piece, messageId: 'text', data: { text: text.trim().slice(0, 40) } });
+        }
       },
       JSXAttribute(node) {
         const name = attrName(node);
-        if (!UI_TEXT_ATTRS.has(name)) return;
-        const text = staticAttrValue(node);
-        if (text === null || !HAS_LETTER.test(text) || isUntranslatable(text)) return;
-        context.report({ node, messageId: 'attr', data: { attr: name, text: text.trim().slice(0, 40) } });
+        const component = /^[A-Z]/.test(elementName(node.parent) ?? '');
+        if (!UI_TEXT_ATTRS.has(name) && !(component && COMPONENT_TEXT_PROPS.has(name))) return;
+        const v = node.value;
+        const pieces = v?.type === 'Literal' ? [{ text: typeof v.value === 'string' ? v.value : '' }]
+          : v?.type === 'JSXExpressionContainer' ? literalPieces(v.expression) : [];
+        for (const { text } of pieces) {
+          if (isUiText(text)) context.report({ node, messageId: 'attr', data: { attr: name, text: text.trim().slice(0, 40) } });
+        }
       },
     };
   },
@@ -141,11 +221,38 @@ const noLiteralUiString = {
 
 const UNNAMED_INPUT_TYPES = new Set(['hidden', 'submit', 'reset', 'button', 'image']);
 
+/** A component that draws a glyph, not text: an icon imported from
+ *  lucide-react, or a name ending in Icon, Glyph or Spinner. */
+const ICON_NAME = /(?:Icon|Glyph|Spinner)$/;
+/** A variable or a property that holds an icon (`{icon}`, `{item.icon}`). */
+const ICON_VALUE = /^icon$|Icon$/;
+
+/** True when an expression rendered as a child can carry text. KT-2016: the
+ *  branches of `? :`, the right of `&&` and both sides of `||`/`??` are
+ *  read, so `{open ? <ChevronUp/> : <ChevronDown/>}` draws icons only; JSX in
+ *  an expression is read like a child; `{icon}` holds an icon. Any other
+ *  expression (a variable, a call) still counts as text. */
+function expressionCarriesText(expr, icons) {
+  const e = unwrapTs(expr);
+  switch (e.type) {
+    case 'JSXEmptyExpression': return false;
+    case 'JSXElement': case 'JSXFragment': return carriesText(e, icons);
+    case 'ConditionalExpression': return expressionCarriesText(e.consequent, icons) || expressionCarriesText(e.alternate, icons);
+    case 'LogicalExpression':
+      return (e.operator !== '&&' && expressionCarriesText(e.left, icons)) || expressionCarriesText(e.right, icons);
+    case 'Literal': return typeof e.value === 'string' ? e.value.trim() !== '' : typeof e.value === 'number';
+    case 'Identifier': return !ICON_VALUE.test(e.name) && e.name !== 'undefined';
+    case 'MemberExpression': return e.computed || e.property.type !== 'Identifier' || !ICON_VALUE.test(e.property.name);
+    default: return true;
+  }
+}
+
 /** True when a JSX child can carry text a reader hears. Conservative: an
- *  expression or an unknown component counts as text; an icon does not. */
+ *  unknown component counts as text, and so does an expression unless it
+ *  only draws icons (expressionCarriesText); an icon does not. */
 function carriesText(child, icons) {
   if (child.type === 'JSXText') return child.value.trim() !== '';
-  if (child.type === 'JSXExpressionContainer') return child.expression.type !== 'JSXEmptyExpression';
+  if (child.type === 'JSXExpressionContainer') return expressionCarriesText(child.expression, icons);
   if (child.type === 'JSXFragment') return child.children.some(c => carriesText(c, icons));
   if (child.type !== 'JSXElement') return false;
   const opening = child.openingElement;
@@ -155,7 +262,7 @@ function carriesText(child, icons) {
     || (hidden.value?.type === 'JSXExpressionContainer' && hidden.value.expression.value === true))) return false;
   if (name === 'img') return names(findAttr(opening, 'alt'));
   if (name === 'svg') return Boolean(findAttr(opening, 'aria-label')) || child.children.some(c => c.type === 'JSXElement' && elementName(c.openingElement) === 'title');
-  if (icons.has(name) || /Icon$/.test(name ?? '')) return false;
+  if (icons.has(name) || ICON_NAME.test(name ?? '')) return false;
   if (child.children.length === 0) return /^[a-z]/.test(name ?? '') ? false : true;
   return child.children.some(c => carriesText(c, icons));
 }
@@ -187,7 +294,7 @@ const controlHasName = {
     docs: { description: 'An icon-only button and a form field have an accessible name.' },
     schema: [],
     messages: {
-      button: `This icon-only <button> has no name: use IconButton (label=…), or give it aria-label. ${DOC}`,
+      button: `This icon-only <{{tag}}> has no name: use IconButton (label=…), or give it aria-label. ${DOC}`,
       field: `This <{{tag}}> has no name: wrap it in Field (label=…), or give it a <label htmlFor>, aria-label, aria-labelledby or title (a placeholder is not a name). ${DOC}`,
     },
   },
@@ -214,11 +321,16 @@ const controlHasName = {
       JSXElement(node) {
         const opening = node.openingElement;
         const tag = elementName(opening);
-        if (tag !== 'button' && tag !== 'input' && tag !== 'select' && tag !== 'textarea') return;
+        // KT-2016 — a native element that plays a button (`<div role="button">`)
+        // is named the same way as a <button>.
+        const roleButton = /^[a-z]/.test(tag ?? '') && tag !== 'button' && staticAttrValue(findAttr(opening, 'role')) === 'button';
+        if (tag !== 'button' && tag !== 'input' && tag !== 'select' && tag !== 'textarea' && !roleButton) return;
         if (hasSpread(opening) || outOfTree(opening)) return;
         if (['aria-label', 'aria-labelledby', 'title'].some(a => names(findAttr(opening, a)))) return;
-        if (tag === 'button') {
-          if (!node.children.some(c => carriesText(c, icons))) context.report({ node: opening, messageId: 'button' });
+        if (tag === 'button' || roleButton) {
+          if (!node.children.some(c => carriesText(c, icons))) {
+            context.report({ node: opening, messageId: 'button', data: { tag: roleButton ? `${tag} role="button"` : 'button' } });
+          }
           return;
         }
         // A placeholder does not name a field here, although HTML-AAM and
@@ -328,6 +440,20 @@ function styleValue(node) {
   return null;
 }
 
+/** KT-2016 — the values a style property can take: each branch of `? :`,
+ *  the right of `&&`, both sides of `||` and `??`. */
+function styleBranches(node, out = []) {
+  const n = unwrapTs(node);
+  if (n.type === 'ConditionalExpression') {
+    styleBranches(n.consequent, out);
+    styleBranches(n.alternate, out);
+  } else if (n.type === 'LogicalExpression') {
+    if (n.operator !== '&&') styleBranches(n.left, out);
+    styleBranches(n.right, out);
+  } else out.push(n);
+  return out;
+}
+
 const noOffScaleStyle = {
   meta: {
     type: 'suggestion',
@@ -346,23 +472,29 @@ const noOffScaleStyle = {
         if (prop.type !== 'Property' || prop.computed) continue;
         const key = keyName(prop);
         if (!key) continue;
-        const value = styleValue(prop.value);
-        if (value === null) continue;
-        const text = String(value).trim();
-        // A template with expressions computes its size: only its literal
-        // parts are read, for a colour.
-        const computed = prop.value.type === 'TemplateLiteral' && prop.value.expressions.length > 0;
-        if (key === 'fontSize') {
-          if (!computed && (typeof value === 'number' || !FONT_SIZE_OK.test(dropFallbacks(text)))) {
-            context.report({ node: prop, messageId: 'fontSize', data: { value: text } });
-          }
-        } else if (RADIUS_PROPS.test(key)) {
-          if (!computed && ((typeof value === 'number' && value !== 0) || (typeof value === 'string' && !radiusOk(text)))) {
-            context.report({ node: prop, messageId: 'radius', data: { prop: key, value: text } });
-          }
-        } else if (COLOUR_PROPS.has(key) && typeof value === 'string' && hasLiteralColour(text)) {
-          context.report({ node: prop, messageId: 'colour', data: { prop: key, value: text.slice(0, 40) } });
+        for (const branch of styleBranches(prop.value)) checkValue(prop, key, branch);
+      }
+    };
+    // One value of a property: the property's own, or one branch of it.
+    const checkValue = (prop, key, node) => {
+      const value = styleValue(node);
+      if (value === null) return;
+      const text = String(value).trim();
+      // A template with expressions computes its size: only its literal
+      // parts are read, for a colour.
+      const computed = node.type === 'TemplateLiteral' && node.expressions.length > 0;
+      if (key === 'fontSize') {
+        if (!computed && (typeof value === 'number' || !FONT_SIZE_OK.test(dropFallbacks(text)))) {
+          context.report({ node: prop, messageId: 'fontSize', data: { value: text } });
         }
+      } else if (RADIUS_PROPS.test(key)) {
+        if (!computed && ((typeof value === 'number' && value !== 0) || (typeof value === 'string' && !radiusOk(text)))) {
+          context.report({ node: prop, messageId: 'radius', data: { prop: key, value: text } });
+        }
+      } else if ((COLOUR_PROPS.has(key) || key.startsWith('--')) && typeof value === 'string' && hasLiteralColour(text)) {
+        // A `--custom` key is read for a colour, as the stylesheet audit
+        // reads a custom property (KT-2016).
+        context.report({ node: prop, messageId: 'colour', data: { prop: key, value: text.slice(0, 40) } });
       }
     };
     const checkWidth = (node, px) => {
@@ -371,7 +503,9 @@ const noOffScaleStyle = {
     return {
       JSXAttribute(node) {
         if (attrName(node) !== 'style' || node.value?.type !== 'JSXExpressionContainer') return;
-        if (node.value.expression.type === 'ObjectExpression') checkStyle(node.value.expression);
+        // `{ '--x': … } as CSSProperties` is how a custom property is typed.
+        const style = unwrapTs(node.value.expression);
+        if (style.type === 'ObjectExpression') checkStyle(style);
       },
       CallExpression(node) {
         const callee = node.callee.type === 'Identifier' ? node.callee.name

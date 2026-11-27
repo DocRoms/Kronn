@@ -61,7 +61,7 @@
   ],
   "offScale": {
     "components/AgentSwitchPicker.css": {
-      "breakpoint": 1
+      "breakpoint": 2
     },
     "components/AiDocViewer.css": {
       "breakpoint": 1,
@@ -79,7 +79,7 @@
       "radius": 7
     },
     "components/AuditTimeline.css": {
-      "breakpoint": 1,
+      "breakpoint": 2,
       "radius": 3
     },
     "components/AutomationSidebarControls.css": {
@@ -112,11 +112,11 @@
     "components/DiscussionActionCard.css": {
       "colour": 1,
       "radius": 1,
-      "breakpoint": 1
+      "breakpoint": 2
     },
     "components/DiscussionPlanPanel.css": {
       "radius": 5,
-      "font-size": 13,
+      "font-size": 14,
       "colour": 1,
       "breakpoint": 1
     },
@@ -177,7 +177,7 @@
       "breakpoint": 1
     },
     "components/LivePageTrustedActions.css": {
-      "font-size": 2,
+      "font-size": 3,
       "radius": 3
     },
     "components/MarkdownComposerTools.css": {
@@ -212,7 +212,7 @@
       "breakpoint": 1
     },
     "components/ProjectRepositoryResourcesPanel.css": {
-      "font-size": 7,
+      "font-size": 8,
       "radius": 4,
       "breakpoint": 1
     },
@@ -226,7 +226,7 @@
       "breakpoint": 1
     },
     "components/RepositoryResourceSheets.css": {
-      "font-size": 1,
+      "font-size": 4,
       "breakpoint": 1
     },
     "components/RevalidateAudit.css": {
@@ -276,6 +276,12 @@
     "components/settings/FallbackRow.css": {
       "breakpoint": 1
     },
+    "components/ui/KeyValueList.css": {
+      "breakpoint": 1
+    },
+    "components/ui/Table.css": {
+      "breakpoint": 1
+    },
     "components/workflows/QuotaPauseControls.css": {
       "radius": 1
     },
@@ -294,7 +300,7 @@
     },
     "pages/DiscussionsPage.css": {
       "radius": 43,
-      "font-size": 88,
+      "font-size": 90,
       "breakpoint": 9,
       "colour": 13
     },
@@ -305,10 +311,10 @@
       "font-size": 4
     },
     "pages/PagesPage.css": {
-      "font-size": 26,
+      "font-size": 38,
       "radius": 12,
       "colour": 23,
-      "breakpoint": 1
+      "breakpoint": 4
     },
     "pages/PlanningPage.css": {
       "font-size": 6,
@@ -338,7 +344,7 @@
     },
     "pages/WorkflowsPage.css": {
       "radius": 80,
-      "font-size": 56,
+      "font-size": 58,
       "breakpoint": 18,
       "colour": 21
     },

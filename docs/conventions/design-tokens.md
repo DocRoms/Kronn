@@ -76,6 +76,14 @@ holds the same 4.5:1 as the added and removed text.
   `StatusBadge` writes its label in `--kr-text-primary` and leaves the status
   colour to the dot, the border and the tint
   `[src: file: frontend/src/components/ui/StatusBadge.test.tsx:40]`.
+  The plugin badges follow the same split (KT-2006): the origin, kind and
+  credential badges of a registry card write their label in
+  `--kr-text-secondary` and keep their hue on a dot, an icon or the border;
+  a test measures them, the category pills and the card metadata at 4.5:1 in
+  the seven themes. Do not fade text with `opacity`: axe measures the
+  blended colour.
+  `[src: file: frontend/src/styles/components.css:453]`
+  `[src: file: frontend/src/styles/__tests__/pluginRegistryContrast.test.ts:76]`
 - **Agent names as text (KT-1936):** most agent brand colours fall under
   4.5:1 as text on some surface of some theme (Codex 2.75:1 on light,
   OpenCode 2.28:1 on dark). Each default agent has a text token,

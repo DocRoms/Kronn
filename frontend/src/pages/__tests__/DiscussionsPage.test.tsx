@@ -872,6 +872,41 @@ describe('DiscussionsPage', () => {
     expect(screen.queryByRole('complementary', { name: 'Terminal' })).not.toBeInTheDocument();
   });
 
+  // KT-2015 — the composer's @ menu consumed nothing on Escape, and the page's
+  // window listener closed every side panel: one key closed both.
+  it('Escape in the @ or emoji menu closes the menu only; the next Escape closes the side panel', async () => {
+    const discussion = makeListDiscussion('d-escape-menu', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    await wrap(
+      <DiscussionsPage
+        projects={[]} agents={[]} allDiscussions={[discussion]} configLanguage="fr"
+        agentAccess={null} refetchDiscussions={noop} refetchProjects={noop}
+        onNavigate={noop} toast={toastFn} initialActiveDiscussionId="d-escape-menu"
+        {...liftedProps()}
+      />,
+    );
+    await openPanel(/^Git$/);
+    expect(await screen.findByTestId('git-panel')).toBeInTheDocument();
+    const textarea = document.querySelector('.disc-composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.change(textarea, { target: { value: '@' } });
+    await waitFor(() => expect(document.querySelector('.kr-agent-switch-palette-row')).not.toBeNull());
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    expect(document.querySelector('.kr-agent-switch-palette-row')).toBeNull();
+    expect(screen.getByTestId('git-panel')).toBeInTheDocument();
+
+    // The emoji menu keeps its behaviour: it closes, the panel stays.
+    fireEvent.change(textarea, { target: { value: ':smi' } });
+    await waitFor(() => expect(document.querySelector('.disc-emoji-popover')).not.toBeNull());
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    expect(document.querySelector('.disc-emoji-popover')).toBeNull();
+    expect(screen.getByTestId('git-panel')).toBeInTheDocument();
+
+    // No menu open: the next Escape closes the panel.
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('git-panel')).toBeNull());
+  });
+
   it('shows a single close button on every panel: the shell\'s own', async () => {
     const discussion = makeListDiscussion('d-one-close', 0);
     vi.mocked(discussionsApi.get).mockResolvedValue(discussion);

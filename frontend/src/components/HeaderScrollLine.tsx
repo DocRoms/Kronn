@@ -2,7 +2,7 @@ import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type ReactNode,
 } from 'react';
-import { lineFadesEnd } from '../lib/stripOverflow';
+import { lineFadesEnd, wheelPixels } from '../lib/stripOverflow';
 import { HeaderScrollLineContext } from './headerScrollLineContext';
 import './HeaderScrollLine.css';
 
@@ -21,7 +21,7 @@ export interface HeaderScrollLineProps {
  * list stays in view. The right edge fades while something lies past it.
  *
  * Reached by pointer and touch (native scrolling), by a vertical wheel (turned
- * sideways here) and by keyboard (the browser scrolls a focused control into
+ * sideways here, its lines and pages counted in pixels) and by keyboard (the browser scrolls a focused control into
  * view). The line never wraps and keeps the header's height.
  */
 export function HeaderScrollLine({ children, className }: HeaderScrollLineProps) {
@@ -54,7 +54,7 @@ export function HeaderScrollLine({ children, className }: HeaderScrollLineProps)
       const room = scroller.scrollWidth - scroller.clientWidth;
       if (room <= 1) return;
       const before = scroller.scrollLeft;
-      scroller.scrollLeft = Math.max(0, Math.min(room, before + event.deltaY));
+      scroller.scrollLeft = Math.max(0, Math.min(room, before + wheelPixels(event, scroller)));
       if (scroller.scrollLeft !== before) event.preventDefault();
     };
     scroller.addEventListener('wheel', onWheel, { passive: false });

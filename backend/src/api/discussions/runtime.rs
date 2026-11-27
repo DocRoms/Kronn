@@ -1867,6 +1867,61 @@ async fn fail_dispatch_job_with_outcome_kind(
     state.agent_dispatch_notify.notify_waiters();
 }
 
+/// KT-2012 — the agent, model and mode a refusal card credits to the turn: the
+/// turn's own resolution, as the fallback room line names it
+/// ([`super::agent_fallback::failing_turn_model`]). A fallback pin credits the
+/// link's model and mode; a per-message mode (the trigger message's target)
+/// drops the discussion's exact model and gives the card its mode; the exact
+/// model goes to a turn of the discussion's own agent and connection only,
+/// never to a mention or a second participant.
+fn refused_turn(
+    discussion: &crate::models::Discussion,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    targets: &[crate::models::MessageTarget],
+    pin: Option<&crate::core::agent_fallback::Pin>,
+) -> (
+    crate::models::AgentType,
+    Option<String>,
+    crate::models::ModelTier,
+) {
+    let agent = job
+        .agent_override
+        .clone()
+        .unwrap_or_else(|| discussion.agent.clone());
+    let model = super::agent_fallback::failing_turn_model(discussion, &agent, job, targets, pin);
+    let tier = pin
+        .map(|pin| pin.tier)
+        .or_else(|| {
+            dispatch_target_tier(
+                targets,
+                job.agent_override.as_ref(),
+                job.connection_id.as_deref(),
+            )
+        })
+        .unwrap_or(discussion.tier);
+    (agent, model, tier)
+}
+
+/// The room, the trigger message's targets and the fallback pin of a dispatch:
+/// what [`refused_turn`] reads.
+type RefusedTurnInputs = (
+    crate::models::Discussion,
+    Vec<crate::models::MessageTarget>,
+    Option<crate::core::agent_fallback::Pin>,
+);
+
+fn refused_turn_inputs(
+    conn: &rusqlite::Connection,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) -> anyhow::Result<Option<RefusedTurnInputs>> {
+    let Some(discussion) = crate::db::discussions::get_discussion(conn, &job.discussion_id)? else {
+        return Ok(None);
+    };
+    let targets = crate::db::discussions::list_message_targets(conn, &job.trigger_message_id)?;
+    let pin = crate::core::agent_fallback::get_pin(conn, &job.id)?;
+    Ok(Some((discussion, targets, pin)))
+}
+
 /// KT-1517 — the System card a quota-refused turn leaves in its own room: the
 /// provider's message, when it resets if it said, and the way out. It is linked to
 /// the dispatch, so the room's Retry runs the same turn again.
@@ -1879,22 +1934,9 @@ async fn record_quota_card(
     let lookup = job.clone();
     let loaded = state
         .db
-        .with_read_conn(move |conn| {
-            Ok(
-                crate::db::discussions::get_discussion(conn, &lookup.discussion_id)?.map(
-                    |discussion| {
-                        (
-                            discussion.agent,
-                            discussion.tier,
-                            discussion.model,
-                            discussion.language,
-                        )
-                    },
-                ),
-            )
-        })
+        .with_read_conn(move |conn| refused_turn_inputs(conn, &lookup))
         .await;
-    let (agent, tier, model, language) = match loaded {
+    let (discussion, targets, pin) = match loaded {
         Ok(Some(loaded)) => loaded,
         Ok(None) => return,
         Err(db_error) => {
@@ -1902,7 +1944,8 @@ async fn record_quota_card(
             return;
         }
     };
-    let agent = job.agent_override.clone().unwrap_or(agent);
+    let (agent, model, tier) = refused_turn(&discussion, job, &targets, pin.as_ref());
+    let language = discussion.language;
     let message = error.strip_prefix("quota_exhausted: ").unwrap_or(error);
     let content = super::start_refusal::quota_exhausted_card(
         &language,
@@ -1951,21 +1994,10 @@ async fn ensure_failure_visible(
             if has_message {
                 return Ok(None);
             }
-            Ok(
-                crate::db::discussions::get_discussion(conn, &lookup.discussion_id)?.map(
-                    |discussion| {
-                        (
-                            discussion.agent,
-                            discussion.tier,
-                            discussion.model,
-                            discussion.language,
-                        )
-                    },
-                ),
-            )
+            refused_turn_inputs(conn, &lookup)
         })
         .await;
-    let (agent, tier, model, language) = match loaded {
+    let (discussion, targets, pin) = match loaded {
         Ok(Some(loaded)) => loaded,
         Ok(None) => return,
         Err(error) => {
@@ -1973,7 +2005,8 @@ async fn ensure_failure_visible(
             return;
         }
     };
-    let agent = job.agent_override.clone().unwrap_or(agent);
+    let (agent, model, tier) = refused_turn(&discussion, job, &targets, pin.as_ref());
+    let language = discussion.language;
     let content =
         super::start_refusal::unexplained_end_card(&language, reason, tier, Some(&job.id));
     super::start_refusal::record_refusal_card(

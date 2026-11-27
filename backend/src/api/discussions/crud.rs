@@ -2460,7 +2460,7 @@ mod tests {
         let discussion = exact_model_loaded(&state, &discussion_id).await;
         assert_eq!(discussion.tier, ModelTier::Reasoning);
         // The dispatch's choice (streaming.rs): the discussion's exact model wins over its tier.
-        let resolved = turn_exact_model(discussion.model.as_deref(), None, None);
+        let resolved = turn_exact_model(discussion.model.as_deref(), true, None, None);
         assert_eq!(resolved.as_deref(), Some("claude-exact-run"));
         let tier_only = crate::agents::runner::effective_model_flag(
             None,
@@ -2489,8 +2489,12 @@ mod tests {
         .await;
         let discussion_id = response.0.data.expect("discussion created").id;
         let discussion = exact_model_loaded(&state, &discussion_id).await;
-        let resolved =
-            turn_exact_model(discussion.model.as_deref(), Some(ModelTier::Economy), None);
+        let resolved = turn_exact_model(
+            discussion.model.as_deref(),
+            true,
+            Some(ModelTier::Economy),
+            None,
+        );
         assert_eq!(
             resolved, None,
             "a one-off tier drops the exact model for this turn"
@@ -2517,13 +2521,14 @@ mod tests {
             hops: 1,
         };
         assert_eq!(
-            turn_exact_model(discussion.model.as_deref(), None, Some(&pin)).as_deref(),
+            turn_exact_model(discussion.model.as_deref(), true, None, Some(&pin)).as_deref(),
             Some("claude-fallback-link"),
             "a continued turn runs on the link's own model"
         );
         assert_eq!(
             turn_exact_model(
                 discussion.model.as_deref(),
+                true,
                 Some(ModelTier::Economy),
                 Some(&pin)
             )
@@ -2555,18 +2560,273 @@ mod tests {
             hops: 1,
         };
         assert_eq!(
-            turn_exact_model(discussion.model.as_deref(), None, Some(&pin)),
+            turn_exact_model(discussion.model.as_deref(), true, None, Some(&pin)),
             None,
             "a tier-only pin leaves the model to the tier"
         );
         assert_eq!(
             turn_exact_model(
                 discussion.model.as_deref(),
+                true,
                 Some(ModelTier::Economy),
                 Some(&pin)
             ),
             None,
             "a tier-only pin with a tier override is still model-free"
+        );
+    }
+
+    /// KT-2012 — an OpenCode discussion holding the exact model
+    /// `opencode-go/beam-free`, in reasoning mode, with Claude Code as a second
+    /// participant.
+    async fn exact_model_opencode_room() -> crate::models::Discussion {
+        let state = state_with_disc("exact-turn-owner").await;
+        let mut discussion = exact_model_loaded(&state, "exact-turn-owner").await;
+        discussion.agent = AgentType::OpenCode;
+        discussion.connection_id = None;
+        discussion.tier = ModelTier::Reasoning;
+        discussion.model = Some("opencode-go/beam-free".into());
+        discussion.participants = vec![AgentType::OpenCode, AgentType::ClaudeCode];
+        discussion
+    }
+
+    fn exact_model_http_connection(id: &str, preset: &str) -> ExternalApiConnection {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "display_name": id, "mention_alias": id,
+            "endpoint": "http://127.0.0.1:1", "credential_slug": id,
+            "origin_preset": preset,
+            "economy_model": format!("{id}-eco"),
+            "default_model": format!("{id}-default"),
+            "reasoning_model": format!("{id}-reasoning"),
+            "created_at": "2026-11-22T00:00:00Z", "updated_at": "2026-11-22T00:00:00Z"
+        }))
+        .expect("valid connection")
+    }
+
+    #[tokio::test]
+    async fn exact_model_turn_a_mentioned_cli_agent_runs_its_own_mode() {
+        use crate::api::discussions::streaming::resolve_turn_model;
+        let discussion = exact_model_opencode_room().await;
+        // `@claude`, no per-message mode: Claude Code's own reasoning model.
+        let resolved =
+            resolve_turn_model(&discussion, &AgentType::ClaudeCode, None, None, None, None);
+        assert_eq!(resolved, None, "the OpenCode model is never handed on");
+        let flag = crate::agents::runner::effective_model_flag(
+            resolved.as_deref(),
+            &AgentType::ClaudeCode,
+            discussion.tier,
+            None,
+        );
+        assert_eq!(
+            flag,
+            crate::agents::runner::effective_model_flag(
+                None,
+                &AgentType::ClaudeCode,
+                ModelTier::Reasoning,
+                None
+            ),
+            "Claude Code starts on its own model for the discussion's mode"
+        );
+        assert_ne!(flag.as_deref(), Some("opencode-go/beam-free"));
+
+        // `@claude` with a per-message mode: still its own model, for that mode.
+        assert_eq!(
+            resolve_turn_model(
+                &discussion,
+                &AgentType::ClaudeCode,
+                None,
+                None,
+                Some(ModelTier::Economy),
+                None
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_turn_a_second_participant_runs_its_own_mode() {
+        use crate::api::discussions::streaming::{
+            resolve_turn_model, turn_exact_model, turn_runs_on_discussion_target,
+        };
+        let discussion = exact_model_opencode_room().await;
+        let participant = discussion.participants[1].clone();
+        assert_ne!(participant, discussion.agent);
+        assert!(!turn_runs_on_discussion_target(
+            &discussion.agent,
+            None,
+            &participant,
+            None
+        ));
+        for tier_override in [None, Some(ModelTier::Default)] {
+            assert_eq!(
+                resolve_turn_model(&discussion, &participant, None, None, tier_override, None),
+                None,
+                "a second participant never receives the room's exact model ({tier_override:?})"
+            );
+            assert_eq!(
+                turn_exact_model(discussion.model.as_deref(), false, tier_override, None),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_model_turn_a_mentioned_connection_gets_its_own_model_for_the_mode() {
+        use crate::api::discussions::streaming::resolve_turn_model;
+        // A CLI discussion: `@litellm` runs on its connection, never on OpenCode's model.
+        let discussion = exact_model_opencode_room().await;
+        let litellm = exact_model_http_connection("lite", "lite_llm");
+        assert_eq!(
+            resolve_turn_model(
+                &discussion,
+                &AgentType::LiteLlm,
+                Some("lite"),
+                Some(&litellm),
+                None,
+                None
+            )
+            .as_deref(),
+            Some("lite-reasoning"),
+            "the discussion's mode on the connection's own map"
+        );
+        assert_eq!(
+            resolve_turn_model(
+                &discussion,
+                &AgentType::LiteLlm,
+                Some("lite"),
+                Some(&litellm),
+                Some(ModelTier::Economy),
+                None
+            )
+            .as_deref(),
+            Some("lite-eco"),
+            "the per-message mode on the connection's own map"
+        );
+
+        // A room on connection A with an exact model: `@b` is the same agent
+        // type on another connection, and gets B's own model.
+        let mut room = discussion.clone();
+        room.agent = AgentType::Custom;
+        room.connection_id = Some("conn-a".into());
+        room.model = Some("conn-a-exact".into());
+        let other = exact_model_http_connection("conn-b", "other");
+        assert_eq!(
+            resolve_turn_model(
+                &room,
+                &AgentType::Custom,
+                Some("conn-b"),
+                Some(&other),
+                None,
+                None
+            )
+            .as_deref(),
+            Some("conn-b-reasoning")
+        );
+        assert_eq!(
+            resolve_turn_model(
+                &room,
+                &AgentType::Custom,
+                Some("conn-b"),
+                Some(&other),
+                Some(ModelTier::Economy),
+                None
+            )
+            .as_deref(),
+            Some("conn-b-eco")
+        );
+
+        // The room's own connection, inherited or named by the dispatch, keeps it.
+        let own = exact_model_http_connection("conn-a", "other");
+        for dispatch_connection in [None, Some("conn-a")] {
+            assert_eq!(
+                resolve_turn_model(
+                    &room,
+                    &AgentType::Custom,
+                    dispatch_connection,
+                    Some(&own),
+                    None,
+                    None
+                )
+                .as_deref(),
+                Some("conn-a-exact"),
+                "{dispatch_connection:?}"
+            );
+        }
+        // …and a per-message mode drops it for the connection's own map.
+        assert_eq!(
+            resolve_turn_model(
+                &room,
+                &AgentType::Custom,
+                None,
+                Some(&own),
+                Some(ModelTier::Economy),
+                None
+            )
+            .as_deref(),
+            Some("conn-a-eco")
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_turn_of_the_discussions_own_agent_keeps_it() {
+        use crate::api::discussions::streaming::resolve_turn_model;
+        use crate::core::agent_fallback::Pin;
+        let discussion = exact_model_opencode_room().await;
+        assert_eq!(
+            resolve_turn_model(&discussion, &AgentType::OpenCode, None, None, None, None)
+                .as_deref(),
+            Some("opencode-go/beam-free")
+        );
+        assert_eq!(
+            resolve_turn_model(
+                &discussion,
+                &AgentType::OpenCode,
+                None,
+                None,
+                Some(ModelTier::Economy),
+                None
+            ),
+            None,
+            "a per-message mode still drops it"
+        );
+        // A fallback pin still wins, whoever runs the continued turn.
+        let pin = Pin {
+            from_agent: AgentType::OpenCode,
+            to_agent: AgentType::ClaudeCode,
+            model: Some("claude-link".into()),
+            tier: ModelTier::Reasoning,
+            hops: 1,
+        };
+        for agent in [AgentType::OpenCode, AgentType::ClaudeCode] {
+            assert_eq!(
+                resolve_turn_model(&discussion, &agent, None, None, None, Some(&pin)).as_deref(),
+                Some("claude-link")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_clears_it_when_switching_between_two_connections() {
+        let state = exact_model_prompt_state().await;
+        let error = exact_model_update(
+            &state,
+            "general",
+            serde_json::json!({ "agent": "Custom", "connection_id": "saved-provider" }),
+        )
+        .await;
+        assert!(error.is_empty(), "custom connection refused: {error}");
+        exact_model_seed(&state, "general", "custom-of-a").await;
+        let error = exact_model_update(
+            &state,
+            "general",
+            serde_json::json!({ "connection_id": "saved-provider-2" }),
+        )
+        .await;
+        assert!(error.is_empty(), "connection switch refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "general").await,
+            None,
+            "the previous connection's model does not follow onto the new one"
         );
     }
 

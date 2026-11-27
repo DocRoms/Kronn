@@ -9,7 +9,7 @@ explicit return to the agent default. [src: file: frontend/src/components/workfl
 `AgentSwitchPicker` accepts a nullable current tier so an existing saved review
 can be displayed without forcing a tier selection. Its concrete-tier and
 default-tier callbacks remain the only paths that report a selection to its
-caller. [src: file: frontend/src/components/AgentSwitchPicker.tsx:470-483#AgentSwitchPickerProps] [src: file: frontend/src/components/AgentSwitchPicker.tsx:1340-1371#select]
+caller. [src: file: frontend/src/components/AgentSwitchPicker.tsx:470-483#AgentSwitchPickerProps] [src: file: frontend/src/components/AgentSwitchPicker.tsx:1371-1402#select]
 
 The manual catalogue form keys a target by `runtime_target_id` and updates its
 matching `agent_type` only in the searchable selector callback. During edit,
