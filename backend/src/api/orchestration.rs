@@ -8424,23 +8424,29 @@ async fn run_one_validation_reaching(
     }
 }
 
-/// How a validation is started at `reach`. A reach a trust level opened is
-/// never started unconfined: it runs under the level's sandbox (Full access) or
-/// keeps the lane sandbox with Kronn's data directory closed (Docker), and a
-/// host with no sandbox refuses it with the reason.
+/// How a validation is started at `reach`. A level's Full access runs under the
+/// level's sandbox when the host has one; its Docker keeps the lane sandbox with
+/// Kronn's data directory closed.
+///
+/// KT-2024: the reach changes the sandbox, never where the validation builds.
 fn launch_for_reach(
     reach: ValidationReachLaunch,
     cwd: &std::path::Path,
 ) -> Result<ValidationLaunch, String> {
+    use crate::core::task_worker_sandbox::LaneOnly;
     match reach {
-        ValidationReachLaunch::Host => Ok(ValidationLaunch::Unconfined),
+        ValidationReachLaunch::Host => {
+            LaneOnly::for_worktree(cwd, None).map(ValidationLaunch::InLane)
+        }
         ValidationReachLaunch::Docker(socket) => {
             validation_launch(cwd).map(|launch| launch.reaching(socket))
         }
         // As the user. Under the vault sandbox when the host has one and the
         // owner kept the protection on, otherwise with the backend's rights.
-        ValidationReachLaunch::TrustHost => Ok(crate::core::trust_sandbox::confinement()
-            .map_or(ValidationLaunch::Unconfined, ValidationLaunch::Level)),
+        ValidationReachLaunch::TrustHost => {
+            LaneOnly::for_worktree(cwd, crate::core::trust_sandbox::confinement())
+                .map(ValidationLaunch::InLane)
+        }
         ValidationReachLaunch::TrustDocker(socket) => validation_launch(cwd)
             .map(|launch| launch.reaching(socket))
             .map(ValidationLaunch::hiding_kronn),
@@ -8471,13 +8477,12 @@ async fn run_one_validation_with(
 pub enum ValidationLaunch {
     /// Under the lane's sandbox.
     Confined(crate::core::task_worker_sandbox::Confinement),
-    /// With the backend's rights: a project whose human chose full access
-    /// (KT-1433), and tests that validate a scripted command in a temporary
-    /// directory that is not a lane.
+    /// Without the lane's sandbox but in the lane's environment (KT-2024): full
+    /// access (KT-1433) or a trust level's own sandbox (KT-1492).
+    InLane(crate::core::task_worker_sandbox::LaneOnly),
+    /// Tests that run a scripted command in a directory that is not a lane.
+    #[cfg(any(test, feature = "test-support"))]
     Unconfined,
-    /// KT-1492: as the user, under the sandbox of what a trust level grants
-    /// (Kronn's data directory closed, the rest open).
-    Level(crate::core::trust_sandbox::LevelConfinement),
 }
 
 impl ValidationLaunch {
@@ -8504,7 +8509,8 @@ impl ValidationLaunch {
     pub fn confinement(&self) -> Option<&dyn crate::core::task_worker_sandbox::CommandConfinement> {
         match self {
             Self::Confined(confinement) => Some(confinement),
-            Self::Level(level) => Some(level),
+            Self::InLane(lane) => Some(lane),
+            #[cfg(any(test, feature = "test-support"))]
             Self::Unconfined => None,
         }
     }

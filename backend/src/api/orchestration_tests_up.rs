@@ -4769,8 +4769,8 @@ fn the_shipped_validation_launch_is_confined_or_refused_never_unconfined() {
         Ok(ValidationLaunch::Unconfined) => {
             panic!("the shipped launch ran a worker's tree unconfined")
         }
-        Ok(ValidationLaunch::Level(_)) => {
-            panic!("the lane launch of a worker's tree is never the trust-level one")
+        Ok(ValidationLaunch::InLane(_)) => {
+            panic!("the lane launch of a worker's tree is never the unsandboxed one")
         }
         Ok(ValidationLaunch::Confined(_)) => {
             assert!(

@@ -198,6 +198,15 @@ Release notes for 0.9.3 and earlier are available in the
   turn before the integration takes the lane. On Windows Kronn cannot look for
   a worker's processes yet: a stop is journaled as `unsupported` and nothing
   is held. See `docs/gotchas/worker-processes-and-vite-temp.md`.
+- Workers: an integration validation builds in its lane at every reach
+  (KT-2024). A validation started without the lane sandbox (a project set to
+  full access, a room at trust level Full) got none of the lane's environment:
+  it built in the target directory exported to the Kronn process (a dev
+  launcher's `CARGO_TARGET_DIR`, the running server's own build), or else in
+  the worktree's own `target/`, cold either way. Every validation now gets its
+  lane's build and data directories, its ports and its build budget, and the
+  disk check before it measures that lane. A validation left unconfined keeps
+  its network and the owner's package caches; only the sandbox is offline.
 
 ## [0.15.3] - 2026-11-19
 

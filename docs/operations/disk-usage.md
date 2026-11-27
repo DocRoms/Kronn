@@ -41,7 +41,8 @@ inside the lane or the worktree, so they go with it.
 **Ownership is a manifest, not a name.** `wt-*` proves nothing: humans and other tooling build in
 `target/wt-0151-integration`. Kronn writes `.kronn-lane.json` (execution id, lane, worktree) when it
 provisions a lane, again on every Claude worker launch (resumes and reworks, task or campaign) and before
-a validation builds in a worker's lane whatever the worker kind, so a lane Kronn made is never left
+a validation builds in a worker's lane whatever the worker kind and whatever its reach (sandbox, Docker,
+full access, a trust level: KT-2024), so a lane Kronn made is never left
 unowned. The file is written once per execution (a relaunch leaves the lane's idle clock alone) next to a
 `.gitignore` of `*`, so a checkout that does not ignore `target/` never reads it as uncommitted work. A lane
 carrying the marker is swept. A lane **without** a marker is swept only when durable lineage attributes it
@@ -205,7 +206,7 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
 [src: file: backend/src/api/orchestration.rs:5641-5679#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:16601-16612#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:16610-16621#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -269,7 +270,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:1132-1200#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:12519-12542#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:12525-12548#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.

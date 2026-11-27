@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1290-1354#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:8564-8621#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:8623-8719#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:8451-8468#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:8848-8910#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:8573-8630#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:8632-8728#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:8457-8474#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:8857-8919#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -370,7 +370,7 @@ What was established, and what was not:
   `unable to make temporary file` is therefore the signature of this cause.
 
 **The fix: the temporary file stays in the lane.** The lane environment
-(`WorkerLane::env`, so the warm-up, the sandboxed validations *and* the worker's
+(`WorkerLane::env`, so the warm-up, every validation whatever its reach *and* the worker's
 own shell) carries `-save-temps=obj` on macOS for a project that builds C through
 `cc` — under the target-scoped `CFLAGS_aarch64_apple_darwin` /
 `CFLAGS_x86_64_apple_darwin` since KT-1742 (it was a plain `CFLAGS` on every macOS
@@ -478,14 +478,14 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 (`first_build.outcome`, `duration_ms`) and check the lane target for
 `.kronn-warm.json`.
 
-[src: file: backend/src/core/task_worker_env.rs:1324-1366#drain_output]
+[src: file: backend/src/core/task_worker_env.rs:1336-1378#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1159-1171#warm_lane_cancellable]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1786-1798#first_build_args]
 [src: file: backend/src/core/project_toolchains.rs:609#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:12911-12942#warm_failure_notice]
+[src: file: backend/src/api/orchestration.rs:12920-12951#warm_failure_notice]
 
 ## Seed and lane agree on the C flags (KT-1742)
 
@@ -995,7 +995,7 @@ load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:338-345#effective_bash_timeouts_ms]
-[src: file: backend/src/core/task_worker_env.rs:1036-1046#apply_bash_timeouts]
+[src: file: backend/src/core/task_worker_env.rs:1048-1058#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15226-15228#apply_bash_timeouts]
 [src: file: backend/src/core/worktree.rs:5335-5336#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:321-322#BASH_DEFAULT_TIMEOUT_MS]
@@ -1055,8 +1055,8 @@ Cargo (`pnpm tauri build`) is not detected: the rule reads binaries, not scripts
 [src: file: backend/src/core/task_worker_warm_skip.rs:81#cold_target_note]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1845#warm_worktree]
 [src: file: backend/src/core/task_worker_lane_warm.rs:507#skipped_by_validations]
-[src: file: backend/src/api/orchestration.rs:12796#warm_lane_for_validations]
-[src: file: backend/src/api/orchestration.rs:12997#record_toolchain_smoke_check_on]
+[src: file: backend/src/api/orchestration.rs:12801-12805#warm_lane_for_validations]
+[src: file: backend/src/api/orchestration.rs:13003-13006#record_toolchain_smoke_check_on]
 [src: file: backend/src/db/orchestration.rs:8113#refusal_for]
 
 ## Maintenance command

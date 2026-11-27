@@ -223,9 +223,9 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:13409#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:13446-13470#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:11340-11364#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:13415#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:13455-13479#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:11349-11373#publish_accepted_delivery_or_warn]
 [src: file: backend/src/api/orchestration_tests_up.rs:23221-23331#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
@@ -692,7 +692,7 @@ Three rules:
   choice of an HTTP agent for a generic worker, by a person or by the
   principal (at launch, with `task_exec_reassign` or in the UI), stays
   possible.
-  [src: file: backend/src/api/orchestration.rs:17109#QuotaFallback]
+  [src: file: backend/src/api/orchestration.rs:17115#QuotaFallback]
   When nothing is left, the worker is not moved, and what follows depends on
   the path:
   - a **failed turn** (rate limit, outage, authentication): both rooms read the

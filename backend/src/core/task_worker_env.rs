@@ -444,6 +444,23 @@ impl WorkerLane {
         env
     }
 
+    /// KT-2024 — [`Self::env`] without what exists only because the sandbox refuses
+    /// something (the network, the home's caches, Chromium's rendezvous).
+    pub fn unconfined_env(&self, provisioned: &Provisioned) -> Vec<(&'static str, OsString)> {
+        let caches: Vec<&str> = self
+            .package_manager_cache_env()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        self.env(provisioned)
+            .into_iter()
+            .filter(|(name, _)| {
+                ![CARGO_NET_OFFLINE_ENV, E2E_CHROMIUM_SINGLE_PROCESS_ENV].contains(name)
+                    && !caches.contains(name)
+            })
+            .collect()
+    }
+
     /// KT-1751 — the download cache of each package manager the project uses
     /// (npm, yarn, composer, found from the manifests at any depth), moved to
     /// `<data dir>/cache/<name>`: inside the lane, so inside a write root, instead
