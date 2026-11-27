@@ -29,6 +29,10 @@
 //!    `id_rsa*`, `credentials*`, `.aws/`, `.ssh/`. A write that contains
 //!    any matching substring (≥ 12 chars) is rejected — catches the
 //!    "agent grepped my .env then wrote a doc about it" failure mode.
+//!    Committed templates (`*.example`, `*.sample`, `*.dist`, `*.template`)
+//!    and values that only name a host (`URLS_BASE=www.example.com`) are
+//!    not tracked: a document cites them, and rejecting them threw away
+//!    finished work.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -344,6 +348,43 @@ fn reads_as_a_value(shared: &[u8]) -> bool {
     seen.iter().filter(|seen| **seen).count() >= 6 && (mixed || case_changes >= 8)
 }
 
+/// A committed template (`.env.example`, `.env.mcp.example`, …) holds
+/// placeholders and public defaults, not secrets: a document may quote it.
+fn is_public_template(name: &str) -> bool {
+    [".example", ".sample", ".dist", ".template"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+/// A value that only names a host (`www.example.com`,
+/// `https://acme.atlassian.net/`, `api.example.com:8443`) is an address a
+/// document cites, not a secret. A user, a path or a query keeps it tracked.
+fn is_bare_host(value: &str) -> bool {
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value);
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let host = match rest.rsplit_once(':') {
+        Some((host, port))
+            if !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            host
+        }
+        _ => rest,
+    };
+    let labels: Vec<&str> = host.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 fn window_hash(window: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -526,7 +567,7 @@ pub fn scan_sensitive_files(worktree: &Path) -> SensitiveSubstrings {
             || name.starts_with("credentials")
             || rel.contains(".aws/")
             || rel.contains(".ssh/");
-        if !is_sensitive {
+        if !is_sensitive || is_public_template(name) {
             return;
         }
         // Whatever the syntax or the encoding around it, a long run of a
@@ -548,6 +589,9 @@ pub fn scan_sensitive_files(worktree: &Path) -> SensitiveSubstrings {
                 // KEY=VALUE — keep VALUE.
                 if let Some((_k, v)) = trimmed.split_once('=') {
                     let v = v.trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+                    if is_bare_host(v) {
+                        continue;
+                    }
                     if v.len() >= BLOOM_MIN_SUBSTRING_LEN {
                         subs.add(v, &rel);
                         continue;
@@ -1523,6 +1567,63 @@ mod tests {
             check_docs_write(content, &subs),
             Err(SecretRejection::SensitiveFileSubstring { .. })
         ));
+    }
+
+    /// A host a `.env` points at and the lines of a committed template are
+    /// what a document cites: they fail nothing. A secret beside them, or a
+    /// URL carrying a user and password, still does.
+    #[test]
+    fn a_public_host_or_a_template_line_fails_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join(".env"),
+            "URLS_BASE=www.example.com\nATLASSIAN_URL=\"https://acme.atlassian.net/\"\nSTATSD=metrics.internal:8125\nDB_PASSWORD=actuallySecretValue123\nBROKER=https://bot:hunter2hunter2@mq.example.com\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(".env.mcp.example"),
+            "JIRA_USERNAME=your.name@example.com\nJIRA_API_TOKEN=your-api-token-here\n",
+        )
+        .unwrap();
+        let subs = scan_sensitive_files(tmp.path());
+        let cited = "The site runs on www.example.com, tickets on https://acme.atlassian.net/, \
+                     metrics go to metrics.internal:8125. Set JIRA_API_TOKEN=your-api-token-here.";
+        assert_eq!(check_docs_content(cited, &subs), Ok(()));
+        for leak in [
+            "The password is actuallySecretValue123.",
+            "Broker: https://bot:hunter2hunter2@mq.example.com",
+        ] {
+            assert!(
+                matches!(
+                    check_docs_content(leak, &subs),
+                    Err(SecretRejection::SensitiveFileSubstring { ref source, .. }) if source == ".env"
+                ),
+                "{leak}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_bare_host_reads_only_an_address() {
+        for host in [
+            "www.example.com",
+            "https://acme.atlassian.net",
+            "http://a-b.example.org/",
+            "api.example.com:8443",
+        ] {
+            assert!(is_bare_host(host), "{host}");
+        }
+        for value in [
+            "actuallySecretValue123",
+            "https://user:pass@example.com",
+            "https://example.com/hooks/abc",
+            "example.com?token=abc",
+            "-bad.example.com",
+            "localhost",
+            "",
+        ] {
+            assert!(!is_bare_host(value), "{value}");
+        }
     }
 
     #[test]
