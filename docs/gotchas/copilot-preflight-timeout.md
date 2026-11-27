@@ -14,8 +14,8 @@ advances the deadline without relying on child startup timing. The assertion
 requires the process to be absent immediately on return, with `ESRCH`, without
 the former 50 ms sleep. A separate regression exercises the full invocation
 path and pins its unchanged four-second production deadline.
-[src: file: backend/src/agents/runner_test_tests_up.rs:11631-11666#copilot_task_worker_preflight_times_out_and_terminates_the_child]
-[src: file: backend/src/agents/runner_test_tests_up.rs:11753-11776#copilot_preflight_full_spawn_path_preserves_its_four_second_deadline]
+[src: file: backend/src/agents/runner_test_tests_up.rs:11721-11756#copilot_task_worker_preflight_times_out_and_terminates_the_child]
+[src: file: backend/src/agents/runner_test_tests_up.rs:11843-11866#copilot_preflight_full_spawn_path_preserves_its_four_second_deadline]
 
 The preflight keeps ownership of `Child` outside the timed output collection.
 Timeout explicitly awaits `Child::kill`, which also waits/reaps in Tokio;
@@ -23,9 +23,9 @@ Timeout explicitly awaits `Child::kill`, which also waits/reaps in Tokio;
 and spawn errors are covered separately. The timer budget still includes
 spawning; this does not alter account classification, authentication or worker
 reassignment policy.
-[src: file: backend/src/agents/runner.rs:13773-13822#wait_copilot_preflight_child_with_timeout]
-[src: file: backend/src/agents/runner.rs:13740-13771#run_copilot_task_worker_preflight_with_timeout]
-[src: file: backend/src/agents/runner_test_tests_up.rs:11716-11752#copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure]
+[src: file: backend/src/agents/runner.rs:13831-13880#wait_copilot_preflight_child_with_timeout]
+[src: file: backend/src/agents/runner.rs:13798-13829#run_copilot_task_worker_preflight_with_timeout]
+[src: file: backend/src/agents/runner_test_tests_up.rs:11806-11842#copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure]
 [Tokio Child lifecycle](https://docs.rs/tokio/latest/tokio/process/struct.Child.html#method.kill)
 
 These are local shell fixtures, not a real agent or account check. The release

@@ -256,7 +256,7 @@ transaction as the runs; the confirmations count them apart from the run's
 working files. `DELETE /api/workflows/{id}/runs/{run_id}` deletes only a run of
 workflow `id`: a run of another workflow, or an unknown one, answers `Run not
 found` and nothing is deleted.
-[src: file: backend/src/api/workflows.rs:7314-7340#delete_run]
+[src: file: backend/src/api/workflows.rs:7376-7402#delete_run]
 A link names its run in `run_retention::REFERENCING_COLUMNS`, so retention
 never trims nor deletes such a run.
 [src: file: backend/src/db/step_artifacts.rs:198-207#delete]
@@ -641,8 +641,8 @@ keeps its previous data. A stdout that starts with `{` or `[` is parsed and
 stored as the JSON value; if it does not parse, the step fails the same way.
 Other text is published as a string. The Exec output is scrubbed of the
 project's GitHub token before it reaches the run record or a Page.
-`[src: file: backend/src/workflows/exec_step.rs:60-62#MAX_PUBLISH_OUTPUT_BYTES]`
-`[src: file: backend/src/workflows/exec_step.rs:460-465#secrets]`
+`[src: file: backend/src/workflows/exec_step.rs:61-63#MAX_PUBLISH_OUTPUT_BYTES]`
+`[src: file: backend/src/workflows/exec_step.rs:502-507#secrets]`
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
@@ -817,10 +817,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1230-1253#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:17463-17652#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:18879-18921#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:19116-19158#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:19160-19230#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:17582-17771#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:18998-19040#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:19235-19277#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:19279-19349#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -899,7 +899,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:5315-5317#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:5377-5379#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:131-263#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -947,7 +947,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:5469-5665#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5531-5727#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:81-91#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 

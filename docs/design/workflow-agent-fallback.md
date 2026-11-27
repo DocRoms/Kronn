@@ -54,7 +54,7 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:1894-1940#ModelTier]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:1969-2015#ModelTier]
 [src: file: backend/src/agents/runner.rs:3674-3708#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:

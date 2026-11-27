@@ -8,15 +8,15 @@ the durable source binding and live membership stay in the principal room. The
 child remains the task/evidence room, and acceptance returns the work instructions
 directly to the CLI. A bridge reload therefore resumes the principal room instead
 of the child.
-[src: file: backend/src/api/orchestration.rs:9083-9103#accept_worker_offer_and_attach]
-[src: file: backend/src/api/orchestration.rs:9228-9232#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:20594-20595#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:9174-9194#accept_worker_offer_and_attach]
+[src: file: backend/src/api/orchestration.rs:9319-9323#worker_cli_session_id]
+[src: file: backend/src/api/orchestration.rs:20728-20729#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6472-6507#call_task_exec_accept_worker_offer]
 
 The terminal return path remains compatibility code for offers accepted by older
 bridges. It emits return messages only when it actually moved legacy child-owned
 state; an execution-scoped worker already in its origin is a no-op.
-[src: file: backend/src/db/orchestration.rs:7045-7088#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:7070-7113#return_cli_worker_to_origin]
 
 ## Historical pre-KT-837 recovery contract
 
@@ -94,8 +94,8 @@ do not require a return because they never transfer the session.
 [src: file: backend/src/db/sql/171_cli_worker_bindings.sql:1-11#task_execution_cli_bindings]
 [src: file: backend/src/db/worker_offers.rs:523-533#pin]
 [src: file: backend/src/db/cli_worker_bindings.rs:33-73#pin]
-[src: file: backend/src/db/orchestration.rs:7045-7052#return_cli_worker_to_origin]
-[src: file: backend/src/db/orchestration.rs:9393-9417#restore_reassigned_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:7070-7077#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:9511-9535#restore_reassigned_cli_worker_to_origin]
 
 The return refuses a source binding or active membership moved to a third room,
 and rolls back the associated state transition. An explicitly unlinked known
@@ -115,7 +115,7 @@ deliveries and their evidence are never rewritten.
 [src: file: backend/src/db/cli_worker_bindings.rs:110-115#was_pinned]
 [src: file: backend/src/db/cli_worker_bindings.rs:150-165#unresolved_child_binding]
 [src: file: backend/src/api/orchestration_tests_up.rs:13573-13613#cli_durable_return_legacy_worker_can_explicitly_reconfirm_its_accepted_offer]
-[src: file: backend/src/api/orchestration_tests_up.rs:13654-13656#cli_durable_return_old_offer_cannot_recapture_a_terminal_worker]
+[src: file: backend/src/api/orchestration_tests_up.rs:13655-13657#cli_durable_return_old_offer_cannot_recapture_a_terminal_worker]
 
 The original KT-618 report remains a historical independent review: it did not
 execute these later regressions and did not establish the subsequently reproduced

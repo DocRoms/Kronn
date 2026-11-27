@@ -6,7 +6,7 @@ settings. An empty or absent list retains the existing launch policy. This is
 an explicit per-step declaration; listing a companion project in documentation
 does not automatically grant access.
 [src: file: backend/src/models/workflows.rs:1243-1247#read_only_repos]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4677-4691#read_only_repos]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4678-4692#read_only_repos]
 
 ```json
 {
@@ -51,8 +51,8 @@ container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4712-4717#read_only_repos]
 [src: file: backend/src/agents/runner.rs:4763-4765#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:1511-1521#apply]
-[src: file: backend/src/agents/runner.rs:14930-14941#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15175-15186#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:14988-14999#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15233-15244#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14791-14810#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14940-14954#is_codex]
+[src: file: backend/src/agents/runner.rs:14849-14868#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:14998-15012#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -336,8 +336,8 @@ setup output, a `CollectApiData` source and a Quick Exec run keep the
 historical `[... output tronqué — limite N KB ...]` suffix and write no file,
 so a collected value never carries a local path. The file goes with the run's
 directory.
-[src: file: backend/src/workflows/exec_step.rs:1137-1182#captured_text]
-[src: file: backend/src/workflows/exec_step.rs:1256-1273#truncation_marker]
+[src: file: backend/src/workflows/exec_step.rs:1176-1221#captured_text]
+[src: file: backend/src/workflows/exec_step.rs:1295-1312#truncation_marker]
 
 ### Approved repository scripts (KT-918)
 
@@ -372,8 +372,8 @@ the copy. The run's checkout is in `KRONN_WORKTREE`, the copy in
 `KRONN_APPROVED_SCRIPTS_DIR`. The setup command still runs in the checkout.
 [src: file: backend/src/workflows/exec_step.rs:143-163#approved_script_child]
 [src: file: backend/src/workflows/exec_step.rs:167-191#prepare_approved_scripts]
-[src: file: backend/src/workflows/exec_step.rs:525-536#approved_copy]
-[src: file: backend/src/workflows/exec_step.rs:776-782#approved_script_child]
+[src: file: backend/src/workflows/exec_step.rs:567-578#approved_copy]
+[src: file: backend/src/workflows/exec_step.rs:815-821#approved_script_child]
 
 Limits: only the declared files are verified. Absolute imports, paths built
 from `KRONN_WORKTREE` and interpreter search paths outside the copy are not
@@ -400,7 +400,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test_tests_up.rs:12555-12616#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test_tests_up.rs:12645-12706#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations
