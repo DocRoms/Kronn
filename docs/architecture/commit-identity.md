@@ -19,7 +19,7 @@ override.
   `ProjectCommitSettings` shape): name, e-mail and sign-off (Auto / Always / Never).
   Validated on save (`WorkersConfig::validate`) and published to the process by
   `config::save` and at boot (`commit_policy::set_global_settings`).
-  [src: file: backend/src/models/setup.rs:174#commit]
+  [src: file: backend/src/models/setup.rs:179#commit]
   [src: file: backend/src/core/commit_policy.rs:221#set_global_settings]
 - **Project — the card** (Dashboard › project › *Identité et signoff des commits*)
   saves `ProjectCommitSettings` inside the project workspace
@@ -77,7 +77,7 @@ but:
   worker commits (`orch-commit-identity:<execution>:worker|principal`, so a resume
   cannot post it twice): *Ce projet n'a pas d'identité de commit : Kronn utilise
   `<email>`. Règle-la dans la carte du projet.*
-  [src: file: backend/src/api/orchestration.rs:14313-14317#announce_global_commit_identity]
+  [src: file: backend/src/api/orchestration.rs:14432-14436#announce_global_commit_identity]
 - the project card shows the same warning (`global_identity`).
 
 An identity set in Settings › Workers is a decision, so it raises no notice.
@@ -96,5 +96,5 @@ published to the process by `config::save` and at boot
   [src: file: backend/src/core/worktree.rs:1912-1914#ensure_os_junk_excluded]
 - A checkout that holds only junk is not dirty: delivery and cleanup go through.
   A *tracked* junk file that changed is still work.
-  [src: file: backend/src/core/worktree.rs:6980-6986#worktree_dirty_files]
+  [src: file: backend/src/core/worktree.rs:6982-6988#worktree_dirty_files]
 - A type change (`T`, a file replaced by a symlink) is delivered as *Modified*.

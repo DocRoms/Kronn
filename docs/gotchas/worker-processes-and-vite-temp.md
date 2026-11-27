@@ -13,8 +13,8 @@ get SIGTERM, then SIGKILL, and the table is re-read for what was started
 meanwhile. Only the ended dispatch's id is matched.
 [src: file: backend/src/core/dispatch_reaper.rs:29-30#DISPATCH_ENV]
 [src: file: backend/src/core/child_env.rs:980-992#DISPATCH_ENV]
-[src: file: backend/src/api/orchestration.rs:838-852#stop_worker_dispatch_processes]
-[src: file: backend/src/api/orchestration.rs:854-860#stop_worker_dispatch_processes_with]
+[src: file: backend/src/api/orchestration.rs:859-873#stop_worker_dispatch_processes]
+[src: file: backend/src/api/orchestration.rs:875-881#stop_worker_dispatch_processes_with]
 [src: file: backend/src/core/dispatch_reaper.rs:644-699#reap_dispatch]
 
 What is taken, and what is not:
@@ -102,4 +102,4 @@ lane's first build (KT-1255): the deny-default profile, never the backend's own
 rights. If vitest cannot load its config under that profile the frontend reads
 as unavailable, with the command's output as the reason.
 [src: file: backend/src/core/task_worker_env.rs:1382-1442#check_frontend]
-[src: file: backend/src/api/orchestration.rs:3483-3503#worker_probe_runner]
+[src: file: backend/src/api/orchestration.rs:3504-3524#worker_probe_runner]

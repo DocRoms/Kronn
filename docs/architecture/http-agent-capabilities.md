@@ -51,7 +51,7 @@ capability they appear to have is a **tool Kronn executes server-side on their b
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
 any MCP environment is built [src: file: backend/src/agents/runner.rs:9670-9691#start_ollama_http_with_idle], and
-`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:13935-13952#insert_claude_mcp_config].
+`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:13993-14010#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
 
@@ -181,7 +181,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3462-3529#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3479-3546#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -227,7 +227,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3764-3812#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3781-3829#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -277,7 +277,7 @@ rest of the discussion, or keep the partial answer.
 * **In a discussion, the round ceiling is no longer a failure.** The round's calls are
   refused, the model answers with what it has, and the question follows. A workflow step or
   a worker still fails with its reason: there is no one there to answer.
-  [src: file: backend/src/agents/runner.rs:11309-11418#ask_on_ceiling]
+  [src: file: backend/src/agents/runner.rs:11367-11476#ask_on_ceiling]
   [src: file: backend/src/api/discussions/ceilings.rs:117-205#ceiling_question]
 
 ## Saved Quick Prompt generation settings (KT-670)
@@ -301,7 +301,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:10060#apply_http]
+[src: file: backend/src/agents/runner.rs:10118#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -315,7 +315,7 @@ overrides are outside this single-launch snapshot change.
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:591-644#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
 [src: file: backend/src/workflows/steps.rs:1542-1546#reasoning_effort_override]
-[src: file: backend/src/agents/runner.rs:13363-13367#validate]
+[src: file: backend/src/agents/runner.rs:13421-13425#validate]
 
 The HTTP regression launches through the native QP tool and the discussion
 stream, edits the template while the job is queued, then inspects both requests
@@ -347,7 +347,7 @@ Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
-[src: file: backend/src/agents/runner.rs:7329-7360#reachable_tools_bytes]
+[src: file: backend/src/agents/runner.rs:7336-7367#reachable_tools_bytes]
 [src: file: backend/src/agents/runner_test_tests_up.rs:1748-1786#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
@@ -461,7 +461,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:955-983#extract]
-  [src: file: backend/src/api/agent_tools.rs:4974-4998#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4991-5015#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -473,8 +473,8 @@ shipping it. Three things changed:
   on a later turn keeps it. A result that was already an extract gets no paths,
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
-  [src: file: backend/src/agents/runner.rs:7586-7614#shape_of]
-  [src: file: backend/src/agents/runner.rs:7616-7656#working_extract_examples].
+  [src: file: backend/src/agents/runner.rs:7625-7653#shape_of]
+  [src: file: backend/src/agents/runner.rs:7655-7695#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
   identical call is still replayed once and then refused, and a call with another
@@ -486,8 +486,8 @@ each, with their metrics nested, the full native catalogue (51,990 B) and a
 shape is 1,071 B; the model reads the shape, sends one call with
 `$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
 unshortened; the conversation then stands at 21,421 estimated tokens of 36,043
-[src: file: backend/src/agents/runner_test_tests_up.rs:3047-3052#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
-[src: file: backend/src/agents/runner_test_tests_up.rs:3056-3059#a_200_kb_response_yields_the_web_vitals].
+[src: file: backend/src/agents/runner_test_tests_up.rs:3135-3140#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
+[src: file: backend/src/agents/runner_test_tests_up.rs:3144-3147#a_200_kb_response_yields_the_web_vitals].
 
 **The window follows the catalogue (KT-1527).** The three shortening tests
 (`a_shortened_api_response_announces_its_shape_and_how_to_ask_for_a_part`, the one
@@ -502,14 +502,14 @@ They now size their window from the catalogue they carry
 messages get the same room whatever the catalogue weighs. With today's catalogue
 that is a ~36K window, not exactly 32K. A test inflates the catalogue by 1.5 KB and
 then 20 KB and replays all three scenarios
-[src: file: backend/src/agents/runner_test_tests_up.rs:3331-3336#a_catalogue_change_does_not_flip_the_shortening_fixtures].
+[src: file: backend/src/agents/runner_test_tests_up.rs:3419-3424#a_catalogue_change_does_not_flip_the_shortening_fixtures].
 
 That decoupling drops the signal the old tests gave, badly, when the catalogue
 outgrew the real 32K budget. A guard test keeps it, on its own: a 32K window must
 leave at least 5,000 B for the messages beside the declared catalogue (9,450 B
 today). When it fails, the catalogue outgrew the 32K budget and has to be trimmed,
 or the default Ollama window raised
-[src: file: backend/src/agents/runner_test_tests_up.rs:3354-3360#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
+[src: file: backend/src/agents/runner_test_tests_up.rs:3442-3448#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
 
 **When the plain cut does happen, the result stays a valid envelope.** A JSON
 result that nothing smarter could shorten used to be cut as text, handing the model
@@ -519,8 +519,8 @@ response>, "excerpt": "<start of the original>", "note": "…"}`, with the large
 excerpt that keeps the envelope inside the budget once embedded in `messages`. An
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
-[src: file: backend/src/agents/runner.rs:8047-8054#truncated_json_envelope]
-[src: file: backend/src/agents/runner_test_tests_up.rs:3380-3383#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
+[src: file: backend/src/agents/runner.rs:8086-8093#truncated_json_envelope]
+[src: file: backend/src/agents/runner_test_tests_up.rs:3468-3471#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or
 writes a good one unprompted. The "model" in that test reads the shape and follows
@@ -547,7 +547,7 @@ Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
 [src: file: backend/src/api/agent_workflow_tools.rs:63-120#draft_patch]
 [src: file: backend/src/api/agent_workflow_tools.rs:211-213#enabled]
-[src: file: backend/src/api/workflows.rs:3019-3079#validate_step_references]
+[src: file: backend/src/api/workflows.rs:3059-3119#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same
@@ -566,8 +566,8 @@ undergo the existing clamping. This protects a protocol contract;
 it does not establish model authoring quality. The measured attempts and their
 execution checks are recorded in
 [`native-workflow-2026-09-22.md`](../research/native-workflow-2026-09-22.md).
-[src: file: backend/src/agents/runner.rs:8033-8050#workflow_step_schema]
-[src: file: backend/src/agents/runner_test_tests_up.rs:2437-2504#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
+[src: file: backend/src/agents/runner.rs:8072-8089#workflow_step_schema]
+[src: file: backend/src/agents/runner_test_tests_up.rs:2525-2592#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 ### Further capabilities
 

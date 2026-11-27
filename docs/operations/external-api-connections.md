@@ -125,7 +125,7 @@ encrypted with the instance key in the `stored_credentials` table since 0.14.3
 `config.toml` without them. `#[ts(skip)]` only keeps the value out of the
 generated TypeScript model. See [key-management.md](key-management.md).
 [src: file: backend/src/core/credential_store.rs:347-350#sync_for_save]
-[src: file: backend/src/models/setup.rs:1285-1290#ApiKey]
+[src: file: backend/src/models/setup.rs:1360-1365#ApiKey]
 
 Deletion is not transactional across SQLite and the local configuration. Kronn
 deletes the connection row first, then removes the matching token entry from a
@@ -157,7 +157,7 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:15626-15657#ollama_tokens]
+[src: file: backend/src/agents/runner.rs:15684-15715#ollama_tokens]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
@@ -317,7 +317,7 @@ those tokens ahead of the call.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:19116-19125#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:19235-19244#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6221-6236#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:190-208#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]

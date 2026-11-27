@@ -223,10 +223,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:13488#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:13528-13552#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:11419-11443#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration_tests_up.rs:23337-23447#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:13607#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:13647-13671#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:11516-11540#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration_tests_up.rs:23339-23449#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -234,7 +234,7 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:1104-1120#agent_handoff_paid_limit]
+[src: file: backend/src/models/setup.rs:1179-1195#agent_handoff_paid_limit]
 [src: file: backend/src/db/discussions.rs:1703-1704#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1711-1746#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
@@ -258,7 +258,7 @@ The activity clock default is 20 minutes
 (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
 wins). A tool call in flight (a cold build run by the worker itself) is activity
 up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
-[src: file: backend/src/db/orchestration.rs:8486-8491#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8604-8609#DEFAULT_ACTIVITY_TIMEOUT_SECS]
 
 **Queue deadline.** An execution queued longer than the queue deadline is
 reported, never interrupted: the principal room receives one orchestration
@@ -269,8 +269,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8518-8521#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8529-8531#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8636-8639#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8647-8649#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -692,7 +692,7 @@ Three rules:
   choice of an HTTP agent for a generic worker, by a person or by the
   principal (at launch, with `task_exec_reassign` or in the UI), stays
   possible.
-  [src: file: backend/src/api/orchestration.rs:17188#QuotaFallback]
+  [src: file: backend/src/api/orchestration.rs:17307#QuotaFallback]
   When nothing is left, the worker is not moved, and what follows depends on
   the path:
   - a **failed turn** (rate limit, outage, authentication): both rooms read the
