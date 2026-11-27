@@ -77,7 +77,7 @@ but:
   worker commits (`orch-commit-identity:<execution>:worker|principal`, so a resume
   cannot post it twice): *Ce projet n'a pas d'identité de commit : Kronn utilise
   `<email>`. Règle-la dans la carte du projet.*
-  [src: file: backend/src/api/orchestration.rs:14243-14247#announce_global_commit_identity]
+  [src: file: backend/src/api/orchestration.rs:14313-14317#announce_global_commit_identity]
 - the project card shows the same warning (`global_identity`).
 
 An identity set in Settings › Workers is a decision, so it raises no notice.

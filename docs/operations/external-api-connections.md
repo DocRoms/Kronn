@@ -317,7 +317,7 @@ those tokens ahead of the call.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:19046-19055#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:19116-19125#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6221-6236#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:190-208#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]

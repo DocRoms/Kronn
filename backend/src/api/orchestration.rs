@@ -9842,6 +9842,38 @@ async fn deliver_authorized_worker_manifest_inner(
     {
         return Ok(DeliverOutcome::InvalidManifest(detail));
     }
+    // KT-2109 — a rework that hands back unchanged the delivery its review sent
+    // back. A delivery reassigned unreviewed, or sent back by the integration, may
+    // be handed back as it was.
+    if matches!(exec.status, TaskExecutionStatus::Working) && exec.attempt_no > 0 {
+        let (eid, attempt) = (exec.id.clone(), exec.attempt_no);
+        let previous = db
+            .with_read_conn(move |conn| {
+                let Some(previous) = crate::db::worker_deliveries::list_deliveries(conn, &eid)?
+                    .into_iter()
+                    .rev()
+                    .find(|delivery| delivery.attempt_no < attempt)
+                else {
+                    return Ok(None);
+                };
+                let sent_back =
+                    crate::db::worker_reviews::get_review(conn, &eid, previous.attempt_no)?
+                        .is_some_and(|review| review.decision == "request_changes");
+                Ok(sent_back.then_some(previous))
+            })
+            .await
+            .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+        if let Some(detail) = previous.and_then(|previous| {
+            unchanged_delivery_refusal(
+                &previous,
+                &manifest,
+                &git_facts.head_sha,
+                exec.dispatch_job_id.is_some(),
+            )
+        }) {
+            return Ok(DeliverOutcome::InvalidManifest(detail));
+        }
+    }
     let child = exec.sub_discussion_id.clone().unwrap_or_default();
     let provider_changes = {
         let exec_id = exec.id.clone();
@@ -10124,13 +10156,7 @@ fn empty_delivery_refusal(
     if facts.head_sha != facts.base_sha || manifest.dod_status.iter().any(|status| status.met) {
         return None;
     }
-    let next = if parked_at_turn_end {
-        "it ends its turn with one paragraph saying what blocks it or what it found, then Kronn \
-         parks the execution and tells the principal, who can resume or reassign it."
-    } else {
-        "it tells the principal what blocks it or what it found: no dispatch ends with its turn, \
-         so Kronn does not park this execution, and the principal has to reassign or cancel it."
-    };
+    let next = hand_back_next(parked_at_turn_end);
     // Redacted whole, before the cut: the text is stored and shown in the principal's room.
     let reason = crate::core::redact::redact_stored_text(&manifest.summary);
     Some(format!(
@@ -10141,6 +10167,53 @@ fn empty_delivery_refusal(
         clip_chars(&reason, 200),
         short_sha(&facts.base_sha),
         manifest.dod_status.len(),
+    ))
+}
+
+/// What a worker whose hand-back was refused does instead.
+fn hand_back_next(parked_at_turn_end: bool) -> &'static str {
+    if parked_at_turn_end {
+        "it ends its turn with one paragraph saying what blocks it or what it found, then Kronn \
+         parks the execution and tells the principal, who can resume or reassign it."
+    } else {
+        "it tells the principal what blocks it or what it found: no dispatch ends with its turn, \
+         so Kronn does not park this execution, and the principal has to reassign or cancel it."
+    }
+}
+
+/// KT-2109 — the previous delivery handed back as it was: same HEAD, same claims.
+/// A reworded summary is not a change; new evidence is.
+fn unchanged_delivery_refusal(
+    previous: &crate::models::TaskExecutionDelivery,
+    manifest: &DeliveryManifestV1,
+    delivered_head: &str,
+    parked_at_turn_end: bool,
+) -> Option<String> {
+    // A CLI manifest may name its HEAD abbreviated.
+    let same_commit =
+        |sha: &str| delivered_head.starts_with(sha) || sha.starts_with(delivered_head);
+    if !same_commit(&previous.head_sha) {
+        return None;
+    }
+    let claims = |manifest: &DeliveryManifestV1| DeliveryManifestV1 {
+        summary: String::new(),
+        head_sha: String::new(),
+        ..manifest.clone()
+    };
+    let before = parse_delivery_manifest(&previous.manifest_json).ok()?;
+    if claims(&before) != claims(manifest) {
+        return None;
+    }
+    Some(format!(
+        "nothing changed since attempt {}: HEAD is still `{}` and the manifest makes the same \
+         claims (only the summary differs), so there is nothing new to review. The worker \
+         delivers again once it has committed the change asked for. When that change needed no \
+         commit (a check run again), or when it holds the work right as it is, it says so in the \
+         manifest itself (a test's evidence, a Definition of Done item, a limitation), not only \
+         in the summary. Otherwise {}",
+        previous.attempt_no,
+        short_sha(delivered_head),
+        hand_back_next(parked_at_turn_end),
     ))
 }
 

@@ -169,7 +169,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_tools.rs:1897-1914#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1401-1415#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1417-1434#worker_repair_iteration_limit]`
-`[src: file: backend/src/api/orchestration.rs:11849-11863#worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:11922-11936#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
