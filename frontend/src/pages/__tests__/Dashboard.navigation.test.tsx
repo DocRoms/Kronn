@@ -25,11 +25,17 @@ vi.mock('../DiscussionsPage', () => ({
 vi.mock('../McpPage', () => ({ McpPage: () => <div data-testid="mcp-page" /> }));
 vi.mock('../WorkflowsPage', () => ({ WorkflowsPage: () => <div data-testid="workflow-page" /> }));
 vi.mock('../PlanningPage', () => ({ PlanningPage: () => <div data-testid="planning-page" /> }));
-vi.mock('../SettingsPage', () => ({
-  SettingsPage: ({ embedOriginPrefill }: { embedOriginPrefill?: { origin: string } | null }) => (
-    <div data-testid="settings-page" data-prefill={embedOriginPrefill?.origin ?? ''} />
-  ),
-}));
+vi.mock('../SettingsPage', async () => {
+  // The real card that resumes the tour, as Settings draws it.
+  const { TourProgressCta } = await import('../../components/tour/TourProgressCta');
+  return {
+    SettingsPage: ({ embedOriginPrefill }: { embedOriginPrefill?: { origin: string } | null }) => (
+      <div data-testid="settings-page" data-prefill={embedOriginPrefill?.origin ?? ''}>
+        <TourProgressCta />
+      </div>
+    ),
+  };
+});
 vi.mock('../PagesPage', () => ({ PagesPage: () => <div data-testid="pages-page" /> }));
 
 vi.mock('../../lib/api', async () => {
@@ -363,15 +369,17 @@ describe('Dashboard navigation', () => {
   it('opens Artifacts settings with a blocked site typed in, on load and from a link in place', async () => {
     await renderDashboard('/config/artifacts?origin=https%3A%2F%2Fvimeo.com');
     expect(await screen.findByTestId('settings-page')).toHaveAttribute('data-prefill', 'https://vimeo.com');
-    // Consumed: a reload must not prefill it again.
-    await waitFor(() => expect(window.location.pathname).toBe('/config'));
+    // Consumed: a reload must not prefill it again. KT-1923 — it gives way to
+    // the section's own address, on the Work sub-page.
+    await waitFor(() => expect(window.location.pathname).toBe('/config/work'));
+    expect(window.location.hash).toBe('#settings-artifacts');
     expect(window.location.search).toBe('');
 
     await act(async () => {
       navigateAppTab('/config/artifacts?origin=https%3A%2F%2Fplayer.example.com');
     });
     await waitFor(() => expect(screen.getByTestId('settings-page')).toHaveAttribute('data-prefill', 'https://player.example.com'));
-    await waitFor(() => expect(window.location.pathname).toBe('/config'));
+    await waitFor(() => expect(window.location.pathname).toBe('/config/work'));
   });
 
   it('drops a stale discussion id and keeps the safe list view', async () => {
@@ -388,12 +396,14 @@ describe('Dashboard navigation', () => {
 });
 
 describe('Dashboard page addresses', () => {
+  // The tab's address, and where it lands: `/config` opens the first
+  // sub-page of Settings (KT-1923).
   const PAGES = [
-    ['discussions', '/discussions', 'discussion-page'],
-    ['planning', '/planning', 'planning-page'],
-    ['workflows', '/workflows', 'workflow-page'],
-    ['mcps', '/plugins', 'mcp-page'],
-    ['settings', '/config', 'settings-page'],
+    ['discussions', '/discussions', 'discussion-page', '/discussions'],
+    ['planning', '/planning', 'planning-page', '/planning'],
+    ['workflows', '/workflows', 'workflow-page', '/workflows'],
+    ['mcps', '/plugins', 'mcp-page', '/plugins'],
+    ['settings', '/config', 'settings-page', '/config/you'],
   ] as const;
 
   it('makes every tab a link to its page, so a modified click opens it in a new tab', async () => {
@@ -434,22 +444,22 @@ describe('Dashboard page addresses', () => {
     expect(navTab('projects')).toHaveAttribute('aria-current', 'page');
   });
 
-  it.each(PAGES)('opens %s straight from its address', async (page, path, testId) => {
+  it.each(PAGES)('opens %s straight from its address', async (page, path, testId, landed) => {
     await renderDashboard(path);
 
     expect(await screen.findByTestId(testId)).toBeInTheDocument();
     expect(navTab(page)).toHaveAttribute('aria-current', 'page');
     expect(navTab('projects')).not.toHaveAttribute('aria-current');
-    expect(window.location.pathname).toBe(path);
+    expect(window.location.pathname).toBe(landed);
   });
 
-  it.each(PAGES)('moves the address to %s when its tab is clicked', async (page, path, testId) => {
+  it.each(PAGES)('moves the address to %s when its tab is clicked', async (page, _path, testId, landed) => {
     await renderDashboard('/projects');
 
     await act(async () => { navTab(page).click(); });
 
     expect(await screen.findByTestId(testId)).toBeInTheDocument();
-    expect(window.location.pathname).toBe(path);
+    expect(window.location.pathname).toBe(landed);
   });
 
   it('keeps one page on screen at a time', async () => {
@@ -491,5 +501,30 @@ describe('Dashboard page addresses', () => {
 
     expect(await screen.findByTestId('pages-page')).toBeInTheDocument();
     expect(window.location.pathname).toBe('/pages');
+  });
+});
+
+// KT-1923 — the tour step on the agents opens their sub-page WITHOUT the
+// section's anchor: the anchor starts Settings' own arrival scroll (and takes
+// the focus), which moved the target after the tour had measured it, so the
+// spotlight stood 184 to 195 px away from it (guided-tour-viewport.spec.ts).
+describe('Dashboard — the guided tour opens a Settings sub-page (KT-1923)', () => {
+  afterEach(() => { localStorage.removeItem('kronn:tour-progress:v1'); });
+
+  it('resuming at the agents step lands on /config/agents, with no anchor for Settings to scroll to', async () => {
+    const { TOUR_STEPS } = await import('../../components/tour/tourSteps');
+    const at = TOUR_STEPS.findIndex(step => step.id === 'agents-config');
+    localStorage.setItem('kronn:tour-progress:v1', JSON.stringify({
+      schemaVersion: 1,
+      completedStepIds: TOUR_STEPS.slice(0, at).map(step => step.id),
+      currentStepId: 'agents-config',
+      hasStarted: true,
+      skippedStepIds: [],
+    }));
+    await renderDashboard('/config/you');
+    const resume = await screen.findByTestId('settings-tour-progress');
+    await act(async () => { fireEvent.click(resume); });
+    await waitFor(() => expect(window.location.pathname).toBe('/config/agents'));
+    expect(window.location.hash).toBe('');
   });
 });

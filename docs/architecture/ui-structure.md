@@ -28,7 +28,7 @@ so back, forward and reload follow it. React Router 8 runs in Data mode.
 | Automatisation | `/workflows`, `/workflows/:workflowId`, `/workflows/:workflowId/runs/:runId`, the workflow wizard at `/workflows/new` (create) and `/workflows/:workflowId/edit`, and one segment per tab — `/workflows/qp/:qpId?`, `/workflows/qa/:qaId?`, `/workflows/qe/:qeId?`, `/workflows/skills/:skillId?`. A bare `/workflows` reopens where the previous visit left off (localStorage record, read by the route, which replaces the bare address with it); an explicit address, Back and Forward are what they say, and a preset arriving at the bare address opens the wizard on the workflows list instead. A remembered resource the loaded list no longer knows is let go in place of its address |
 | Pages (Artifacts) | `/pages`, `/pages/:pageId` for the open Page — redirects to `/projects` until the capability is activated. A bare `/pages` reopens where the previous visit left off (localStorage checkpoint), else the first Page |
 | Plugins | `/plugins`, `/plugins/:configId` for the config open in the detail panel — kept while the overview is still loading; a config the loaded overview does not know is let go in place of the address |
-| Config | `/config`, `/config#<anchor>` — a section (`#settings-server`) or a setting (`#run-payload-retention`) — brought into view on arrival once the page has settled: the anchor must exist, a setting must be enabled (its value loaded) and its position must hold still, then a section scrolls to the top and a setting to the centre with the focus; content still loading above it is followed for a short while, until the reader scrolls. The side menu's entries are links to these addresses: a click scrolls in the page and replaces the address, Ctrl/Cmd-click opens a new tab; the highlight of the visible section never writes the address, and after an arrival on an anchor it stays on that anchor's section until the reader scrolls (a setting at the bottom of the page ends the scroll where the highlight would otherwise name the last section); `/config/artifacts?origin=<site>` opens the allowed-sites section with a site typed in (never added) — an arrival, consumed into `/config` so a reload or a Back never replays it |
+| Config | KT-1923 — five sub-pages, one address each: `/config/you`, `/config/agents`, `/config/work`, `/config/security`, `/config/system`; `/config` alone, an unknown segment or an unknown anchor on `/config` open the first. An anchor is the hash, `/config/<sub-page>#<anchor>` — a section (`#settings-server`) or a setting (`#run-payload-retention`) — brought into view on arrival once the page has settled: the anchor must exist, a setting must be enabled (its value loaded) and its position must hold still, then a section scrolls to the top and a setting to the centre with the focus; content still loading above it is followed for a short while, until the reader scrolls. An arrival on a section also opens its fold and puts the focus on its heading. Every anchor of the old single page (`/config#settings-usage`, `#credentials`, `#artifacts`…), and an anchor asked on another sub-page's address, is replaced by its own sub-page's address. The list on the left (search, the five sub-pages, the design system apart) and the links to the sections under a sub-page's name are links to these addresses: a section link scrolls in the page and replaces the address, a sub-page or a hit of another sub-page is a step Back can undo, Ctrl/Cmd-click opens a new tab; `/config/artifacts?origin=<site>` opens the allowed-sites section with a site typed in (never added) — an arrival, consumed into `/config/work#settings-artifacts` so a reload or a Back never replays it. The design system is `/config/design-system[/components]` (KT-1987) |
 
 `/` and any unknown address redirect to `/projects`, keeping the hash and the
 query. `[src: file: frontend/src/lib/routes.ts:21-29]`
@@ -44,7 +44,7 @@ Views that take the whole window, outside the dashboard shell:
 
 A mosaic's members and layout are its query string; changing the layout
 rewrites the address in place. An invalid mosaic (fewer than two members)
-redirects to `/projects`. `[src: file: frontend/src/lib/routes.ts:327-338#STANDALONE_ROOT]`
+redirects to `/projects`. `[src: file: frontend/src/lib/routes.ts:588-599#STANDALONE_ROOT]`
 `[src: file: frontend/src/lib/discussion-mosaic-navigation.ts:7-17#discussionMosaicRoute]`
 `[src: file: frontend/src/routes/StandaloneDiscussionsMosaicRoute.tsx:7-19]`
 
@@ -57,14 +57,16 @@ on. `#discussion-<id>?message=…`, `#project-<id>`, `#page/<id>?…`,
 `#config` are all mapped. An id that cannot be decoded (`#page/%E0%A4%A`)
 names nothing: the link lands on its page, bare, rather than on an address
 the router cannot read; the same id in a direct address is handed to the
-page as it is, like any unknown id. Any other hash is left alone: it routes
-nowhere, and only Configuration reads it, as the anchor (a section or a
-setting) to bring into view. A hash is an in-page anchor, never a route.
-When one of Configuration's own links sets the anchor, the page has already
-scrolled: the route is told so in memory, for that one move only, never in
-the history entry, so a reload, Back or Forward to the entry is an arrival
-like any other.
-`[src: file: frontend/src/routes/SettingsRoute.tsx:37-60]`
+page as it is, like any unknown id. Any other hash is left alone by the
+app root: only Configuration reads it, as the anchor (a section or a
+setting) to bring into view, after sending it to the sub-page that holds it
+(KT-1923: one table, `SETTINGS_SECTIONS`, places every section and the
+anchors inside it). When one of Configuration's own links sets the anchor,
+the page has already scrolled: the route is told so in memory, for that one
+move only, never in the history entry, so a reload, Back or Forward to the
+entry is an arrival like any other.
+`[src: file: frontend/src/routes/SettingsRoute.tsx:56-75]`
+`[src: file: frontend/src/lib/routes.ts:348-356#settingsRedirectPath]`
 `[src: file: frontend/src/lib/revealWhenSettled.ts:32-93#revealWhenSettled]`
 `[src: file: frontend/src/lib/legacyRoutes.ts:11-49]`
 `[src: file: frontend/src/App.tsx:182-185#legacyHashToPath]`
@@ -77,11 +79,11 @@ like any other.
   `[src: file: frontend/src/routes/appRoutes.tsx:14-31]`
   `[src: file: frontend/src/routes/dashboardRoutes.tsx:19-41#dashboardRoutes]`
   `[src: file: frontend/src/App.tsx:209-210#Outlet]`
-  `[src: file: frontend/src/pages/Dashboard.tsx:1223-1226#Outlet]`
+  `[src: file: frontend/src/pages/Dashboard.tsx:1232-1235#Outlet]`
 - **Paths** — spelled out once, in `lib/routes.ts`. Components navigate with
   `useKronnNavigate()`, never with a literal path.
   `[src: file: frontend/src/lib/routes.ts:1-8]`
-  `[src: file: frontend/src/hooks/useKronnNavigate.ts:52-62#useKronnNavigate]`
+  `[src: file: frontend/src/hooks/useKronnNavigate.ts:55-65#useKronnNavigate]`
 - **Route components** — one per page under `routes/`, each its own lazy chunk.
   It reads the shell's outlet context and maps it to the page's props; the
   pages themselves do not know the router.
@@ -188,7 +190,7 @@ the owner** (always zero until the decision compartment is filled). Its accessib
 name states the counts. It owns its polling (3 s while something moves, 15 s idle,
 once more on open and when the tab returns), so a refresh re-renders the bell and
 its panel, not the dashboard.
-[src: file: frontend/src/pages/Dashboard.tsx:770-784#ActivityBell]
+[src: file: frontend/src/pages/Dashboard.tsx:779-793#ActivityBell]
 [src: file: frontend/src/components/activity/ActivityBell.tsx:25-96#ActivityBell]
 [src: file: frontend/src/components/activity/ActivityBell.css:14-44#data-running]
 [src: file: frontend/src/hooks/useActivityOverview.ts:12-52#useActivityOverview]
@@ -444,8 +446,8 @@ therefore keeps its `#76B900` brand accent while using a WCAG-AA companion green
 adapted to light and dark themes in aliases, message attribution, comparisons,
 workflow summaries and the shared agent selector.
 `[src: file: frontend/src/lib/constants.ts:207-223#agentTextColor]`
-`[src: file: frontend/src/styles/tokens.css:82-84#kr-agent-nvidia-text]`
-`[src: file: frontend/src/styles/tokens.css:386-387#kr-agent-nvidia-text]`
+`[src: file: frontend/src/styles/tokens.css:86-88#kr-agent-nvidia-text]`
+`[src: file: frontend/src/styles/tokens.css:390-391#kr-agent-nvidia-text]`
 
 **Quick Prompt Compare details:** a completed or live Compare opens a dedicated
 multi-column workspace whose columns can be reordered without losing their
@@ -470,7 +472,7 @@ Note: the old "Agents" tab has been merged into Config. Nav order: Projets → D
 
 **Project overview blocks (KT-989):** `ProjectGitBlock` and `ProjectDependenciesBlock` read through `useCachedResource`, a module-level stale-while-revalidate cache keyed per project: last result and its date at once, background refresh, an error keeps the data. Git status is requested twice, first with `?skip_pr_lookup=true` (local Git only, a PR link already cached is still returned), then in full. Invalidate with `invalidateCachedResource` when the cached value stops being true (branch switch).
 
-**Guided tour (0.3.6)**: 17-step interactive onboarding auto-launched on first visit. 5 acts (Projets → Plugins → Discussions → Automatisation → Config). 4 interactive steps with `waitForClick` (user must click the real UI element — pulse animation, "Next" blocked). Spotlight via box-shadow cutout, tooltip auto-positioned. Ends on Discussions page. Persistence: `kronn:tour-completed` in localStorage. Components: `TourProvider` (context + state machine), `TourOverlay` (portal), `tourSteps.ts` (declarative step definitions), `useTourPositioning.ts` (placement + MutationObserver).
+**Guided tour (0.3.6)**: 17-step interactive onboarding auto-launched on first visit. 5 acts (Projets → Plugins → Discussions → Automatisation → Config). 4 interactive steps with `waitForClick` (user must click the real UI element — pulse animation, "Next" blocked). Spotlight via box-shadow cutout, tooltip auto-positioned. Ends on Discussions page. Persistence: `kronn:tour-completed` in localStorage. Components: `TourProvider` (context + state machine), `TourOverlay` (portal), `tourSteps.ts` (declarative step definitions), `useTourPositioning.ts` (placement + MutationObserver). A step on Settings names its section (`settingsSection`); the tour opens that section's sub-page without its anchor, so Settings' own arrival scroll does not race the tour's, and after any page switch the step waits for its target to hold still (`waitForStablePosition`) before it is shown (KT-1923) `[src: file: frontend/src/pages/Dashboard.tsx:71]` `[src: file: frontend/src/components/tour/useTourPositioning.ts:295]`.
 
 ### Project Bootstrap (create from scratch)
 

@@ -1,7 +1,8 @@
 import type { ReactElement } from 'react';
 import type { RouteObject } from 'react-router';
 import {
-  DESIGN_SYSTEM_ROUTE, DISCUSSION_COMPARE_ROUTE, EMBED_SETTINGS_SEGMENT, PAGE_PATHS, WORKFLOW_EDITOR_ROUTES, type DashboardPage,
+  DESIGN_SYSTEM_ROUTE, DISCUSSION_COMPARE_ROUTE, EMBED_SETTINGS_SEGMENT, PAGE_PATHS, SETTINGS_SUB_PAGE_ROUTE, WORKFLOW_EDITOR_ROUTES,
+  type DashboardPage,
 } from '../lib/routes';
 import { HomeRedirect } from './HomeRedirect';
 import { RouteShell } from './RouteShell';
@@ -41,6 +42,8 @@ export const dashboardRoutes: RouteObject[] = [
   pageRoute('mcps', 'Plugins', <PluginsRoute />, '/:configId?'),
   pageRoute('settings', 'Settings', <SettingsRoute />),
   pageRoute('settings', 'Settings', <SettingsRoute />, EMBED_SETTINGS_SEGMENT),
+  // KT-1923 — `/config/<sub-page>`; the static `/artifacts` and `/design-system` rank before it.
+  pageRoute('settings', 'Settings', <SettingsRoute />, SETTINGS_SUB_PAGE_ROUTE),
   pageRoute('settings', 'Design system', <DesignSystemRoute />, DESIGN_SYSTEM_ROUTE, 'settings-design-system'),
   { path: '*', element: <HomeRedirect /> },
 ];

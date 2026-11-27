@@ -26,6 +26,10 @@
   --kr-bg-code: rgba(0, 0, 0, 0.25);
   --kr-bg-code-panel: #1e1e1e;
   --kr-bg-scrim: rgba(0, 0, 0, 0.3);
+  /* KT-2017 — the opaque surface of an in-page sticky band (the section links
+     of a Settings sub-page): the page's own ground, so content passing under
+     it is hidden, never read through it. Resolved per theme from its base. */
+  --kr-bg-sticky: var(--kr-bg-base);
 
   /* ── Accent (blue) ────────────────────────────────────────────────────── */
   --kr-accent: #4daafc;

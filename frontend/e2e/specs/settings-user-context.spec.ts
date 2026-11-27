@@ -82,7 +82,7 @@ test.describe('Settings — user context editor', () => {
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('you');
 
     const section = page.locator('#settings-user-context');
     await section.scrollIntoViewIfNeeded();
@@ -101,7 +101,7 @@ test.describe('Settings — user context editor', () => {
     installUserContextStubs(page, []);
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('you');
 
     const section = page.locator('#settings-user-context');
     await section.scrollIntoViewIfNeeded();
@@ -119,7 +119,7 @@ test.describe('Settings — user context editor', () => {
     ]);
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('you');
 
     const section = page.locator('#settings-user-context');
     await section.scrollIntoViewIfNeeded();
@@ -149,7 +149,7 @@ test.describe('Settings — user context editor', () => {
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('you');
 
     const section = page.locator('#settings-user-context');
     await section.scrollIntoViewIfNeeded();
@@ -169,7 +169,7 @@ test.describe('Settings — user context editor', () => {
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('you');
 
     const section = page.locator('#settings-user-context');
     await section.scrollIntoViewIfNeeded();

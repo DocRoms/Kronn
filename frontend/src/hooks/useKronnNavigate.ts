@@ -2,10 +2,11 @@ import { useLayoutEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router';
 import {
   PAGE_PATHS, automationPath, designSystemPath, discussionComparePath, discussionPath, livePagePath, planningTaskPath, pluginPath,
-  projectPath, settingsSectionPath, workflowPath,
+  projectPath, settingsSectionPath, settingsSubPagePath, workflowPath,
   type AutomationIntent, type AutomationSelection, type DashboardPage, type DesignSystemLocation, type DiscussionsIntent,
   type ProjectLocation,
   type SettingsIntent,
+  type SettingsSubPage,
 } from '../lib/routes';
 
 export interface KronnNavigateOptions {
@@ -33,6 +34,8 @@ export interface KronnNavigate {
   toWorkflows: (intent?: AutomationIntent) => void;
   /** Configuration, scrolled to one of its anchors (a section or a field), and what to do there on arrival. */
   toSettingsSection: (sectionId: string, intent?: SettingsIntent, options?: KronnNavigateOptions) => void;
+  /** KT-1923 — one of the five sub-pages of Settings, at its top. */
+  toSettingsSubPage: (page: SettingsSubPage, options?: KronnNavigateOptions) => void;
   /** The design system sub-page of Configuration, on a tab and optionally one of its entries. */
   toDesignSystem: (location?: DesignSystemLocation, options?: KronnNavigateOptions) => void;
   /** The Plugins page with this config open. */
@@ -98,6 +101,9 @@ export function useKronnNavigate(): KronnNavigate {
         replace: options?.replace,
         state: Object.keys(state).length > 0 ? state : null,
       });
+    },
+    toSettingsSubPage: (page, options) => {
+      void navigateRef.current(settingsSubPagePath(page), { replace: options?.replace });
     },
     toDesignSystem: (location, options) => {
       void navigateRef.current(designSystemPath(location), { replace: options?.replace });

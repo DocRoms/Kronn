@@ -104,6 +104,26 @@ interface AgentsSectionProps {
    *  via `onModelTierTargetConsumed` once taken. */
   modelTierTarget?: { agentType: string; tier: string } | null;
   onModelTierTargetConsumed?: () => void;
+  /** KT-1923 — an agent whose row an address or a search hit lands on
+   *  (`agent-config-<agent>`): its card opens. A new `token` opens it again. */
+  revealAgent?: { agentType: string; token: number } | null;
+  /** KT-1923 — lays out the parts that are sections of Settings of their own;
+   *  without it they stay inside the agents section. `usagePanel` is not drawn then. */
+  sections?: (parts: AgentsSectionParts) => ReactNode;
+}
+
+/** The parts of the agents section that Settings lists as sections of their own. */
+export interface AgentsSectionParts {
+  /** The agents themselves: defaults, fleet, connections. */
+  agents: ReactNode;
+  /** The local chat models (Ollama). */
+  localModels: ReactNode;
+  /** The local media source (ComfyUI). */
+  media: ReactNode;
+  /** The context compression (RTK). */
+  compression: ReactNode;
+  /** The model catalogues. */
+  catalogue: ReactNode;
 }
 
 // KT-586 — hoisted so the card can show a read-only tier preview outside the
@@ -158,6 +178,8 @@ export function AgentsSection({
   inDocker = false,
   modelTierTarget = null,
   onModelTierTargetConsumed,
+  revealAgent = null,
+  sections,
 }: AgentsSectionProps) {
   // The tier to point at, kept until it is found: the arrival intent is
   // acknowledged at once (a reload or a Back must not replay it), while the
@@ -196,8 +218,15 @@ export function AgentsSection({
     // A System CTA deep-links to one agent's tier picker, which lives in the
     // fold. Opening it at mount means the focus effect below finds its target
     // on the first try instead of retrying against a card that never renders.
-    return modelTierTarget ? new Set([modelTierTarget.agentType]) : new Set();
+    return new Set([modelTierTarget?.agentType, revealAgent?.agentType].filter((agent): agent is string => Boolean(agent)));
   });
+  const [takenReveal, setTakenReveal] = useState(revealAgent);
+  if (revealAgent !== takenReveal) {
+    setTakenReveal(revealAgent);
+    if (revealAgent && !expandedAgents.has(revealAgent.agentType)) {
+      setExpandedAgents(new Set(expandedAgents).add(revealAgent.agentType));
+    }
+  }
   const [tierEditing, setTierEditing] = useState<Record<string, {
     economy: string; default: string; reasoning: string;
     economy_effort: string; default_effort: string; reasoning_effort: string;
@@ -1583,7 +1612,39 @@ export function AgentsSection({
           );
   };
 
-  return (
+  // KT-1923 — the local models, the media sources, the compression and the
+  // catalogue are sections of Settings of their own; with `sections` the page
+  // places them, without it they stay inside this one, as before.
+  const split = sections !== undefined;
+  const compressionPart = <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />;
+  const localRows = localAgents.map(agent => (
+              <div
+                key={agent.agent_type}
+                className="set-agent-row set-agent-row-ollama"
+                data-agent-type={agent.agent_type}
+                style={{ '--agent-color': agentColor('Ollama', mentionColors) } as CSSProperties}
+              >
+                <OllamaCard
+                  t={t}
+                  modelCostSuffix={modelCostSuffix}
+                  title={renderAgentNameControl('Ollama', 'Ollama')}
+                  headerAccessory={renderConcurrencyControl('Ollama')}
+                  modelsBlock={(pickers, hint) => renderFallbackControl('Ollama', { pickers, hint })}
+                  toolsControl={renderToolsControl('Ollama')}
+                />
+              </div>
+  ));
+  // KT-1381 — local images and videos, next to the local chat models.
+  const comfyRow = (
+            <div className="set-agent-row set-agent-row-ollama" data-agent-type="ComfyUI">
+              <ComfyUiCard t={t} modelsBlock={renderComfyBlock} />
+            </div>
+  );
+  // After the modes: a catalogue is what the modes draw from, not a
+  // fourth way of reaching a model.
+  const cataloguePart = <ModelCatalogSection sharedCatalog={catalog} />;
+
+  const agentsPart = (
     <div className="set-agents-section">
         {(() => {
           const isWSL = agents.some(a => a.host_label === 'WSL');
@@ -1794,10 +1855,12 @@ export function AgentsSection({
           </div>
         </section>
 
-        <div className="set-agent-economy-grid">
-          <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
-          {usagePanel}
-        </div>
+        {!split && (
+          <div className="set-agent-economy-grid">
+            {compressionPart}
+            {usagePanel}
+          </div>
+        )}
 
         <AgentFullAccessNotice rows={effectiveAccess ?? []} />
 
@@ -1922,6 +1985,7 @@ export function AgentsSection({
           </div>
         </section>
 
+        {!split && (
         <section className="set-agent-mode" data-mode="local" data-testid="agent-mode-local">
           <div className="set-agent-mode-head">
             <span className="set-external-api-heading-icon" aria-hidden="true"><HardDrive size={17} /></span>
@@ -1931,29 +1995,11 @@ export function AgentsSection({
             </span>
           </div>
           <div className="set-agent-mode-grid">
-            {localAgents.map(agent => (
-              <div
-                key={agent.agent_type}
-                className="set-agent-row set-agent-row-ollama"
-                data-agent-type={agent.agent_type}
-                style={{ '--agent-color': agentColor('Ollama', mentionColors) } as CSSProperties}
-              >
-                <OllamaCard
-                  t={t}
-                  modelCostSuffix={modelCostSuffix}
-                  title={renderAgentNameControl('Ollama', 'Ollama')}
-                  headerAccessory={renderConcurrencyControl('Ollama')}
-                  modelsBlock={(pickers, hint) => renderFallbackControl('Ollama', { pickers, hint })}
-                  toolsControl={renderToolsControl('Ollama')}
-                />
-              </div>
-            ))}
-            {/* KT-1381 — local images and videos, next to the local chat models. */}
-            <div className="set-agent-row set-agent-row-ollama" data-agent-type="ComfyUI">
-              <ComfyUiCard t={t} modelsBlock={renderComfyBlock} />
-            </div>
+            {localRows}
+            {comfyRow}
           </div>
         </section>
+        )}
 
         {/* KT-339 — unified External API zone: LiteLLM, NVIDIA and any other
             OpenAI-compatible service live here as named connections. KT-586 —
@@ -1968,9 +2014,7 @@ export function AgentsSection({
           modelsBlock={renderConnectionBlock}
         />
 
-        {/* After the modes: a catalogue is what the modes draw from, not a
-            fourth way of reaching a model. */}
-        <ModelCatalogSection sharedCatalog={catalog} />
+        {!split && cataloguePart}
 
         {/* Best practices links */}
         <div className="set-best-practices">
@@ -2034,4 +2078,13 @@ export function AgentsSection({
       )}
     </div>
   );
+
+  if (!split) return agentsPart;
+  return sections({
+    agents: agentsPart,
+    localModels: <div className="set-agent-mode-grid" data-testid="agent-mode-local">{localRows}</div>,
+    media: <div className="set-agent-mode-grid" data-testid="agent-mode-media">{comfyRow}</div>,
+    compression: compressionPart,
+    catalogue: cataloguePart,
+  });
 }

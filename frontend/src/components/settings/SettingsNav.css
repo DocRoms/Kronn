@@ -1,0 +1,197 @@
+/* KT-1923 — the list of Settings: the search, its hits, the five sub-pages,
+   the design system apart. The frame (sticky column, card) is `.set-nav`. */
+
+.set-subnav {
+  gap: var(--kr-space-2);
+}
+
+.set-subnav-search {
+  margin-bottom: var(--kr-space-1);
+}
+
+.set-subnav ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.set-subnav-hits {
+  padding-bottom: var(--kr-space-2);
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.set-subnav-hit,
+.set-subnav-page {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-2);
+  padding: var(--kr-space-2) var(--kr-space-3);
+  border: 1px solid transparent;
+  border-radius: var(--kr-radius-control);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-type-md);
+  text-decoration: none;
+}
+
+.set-subnav-hit {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+}
+
+.set-subnav-hit-label {
+  color: var(--kr-text-primary);
+  font-weight: 600;
+}
+
+.set-subnav-hit-where {
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+}
+
+.set-subnav-hit:hover,
+.set-subnav-page:hover {
+  border-color: var(--kr-border-light);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.set-subnav-hit:focus-visible,
+.set-subnav-page:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
+.set-subnav-page[aria-current='page'] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-text);
+  font-weight: 650;
+}
+
+.set-subnav-page-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.set-subnav-page-count {
+  min-width: 1.5em;
+  padding: 0 var(--kr-space-2);
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+  text-align: center;
+}
+
+.set-subnav-apart {
+  margin-top: var(--kr-space-3);
+  padding-top: var(--kr-space-3);
+  border-top: 1px solid var(--kr-border-light);
+}
+
+.set-subnav-apart-title {
+  margin: 0 var(--kr-space-3) var(--kr-space-1);
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+  font-weight: 600;
+}
+
+/* The head of a sub-page: its name and sentence. The links to its sections
+   follow it in their own band. */
+.set-subpage-head {
+  margin-bottom: var(--kr-space-1);
+}
+
+/* KT-2017 — the band of section links: a direct child of the sub-page's box,
+   so it sticks under the app's top bar from the top to the bottom of the
+   sub-page, at every width. One line, its height fixed (the anchor offset adds
+   it, SettingsPage.css); the links that do not fit scroll sideways inside it
+   (HeaderScrollLine), never the page. An opaque surface; a line under it once
+   stuck. Under the top bar (--kr-z-sticky) and under the menus an agent row
+   lifts to 40 while open; dialogs, popovers, toasts and the tour sit far above. */
+.set-subpage-band {
+  position: sticky;
+  top: var(--set-band-top);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  height: var(--set-band-height);
+  margin: 0 calc(-1 * var(--kr-space-1)) var(--kr-space-4);
+  padding: 0 var(--kr-space-1);
+  border-bottom: 1px solid transparent;
+  background: var(--kr-bg-sticky);
+}
+
+.set-subpage-band[data-stuck] {
+  border-bottom-color: var(--kr-border);
+  box-shadow: var(--kr-shadow-sm);
+}
+
+.set-subpage-band-line {
+  min-width: 0;
+}
+
+.set-subpage-links {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--kr-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.set-subpage-links a {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--kr-space-1) var(--kr-space-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-radius-pill);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-type-sm);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.set-subpage-links a:hover {
+  border-color: var(--kr-accent-border);
+  color: var(--kr-accent-text);
+}
+
+.set-subpage-links a:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
+/* The section being read: filled and underlined, so the mark does not rest
+   on colour alone (the underline keeps the link's width: nothing shifts). */
+.set-subpage-links a[aria-current='location'] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-text);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+/* A section the page brings into view takes the focus on its heading. */
+.set-subpage [data-settings-focus]:focus {
+  outline: none;
+}
+
+.set-subpage [data-settings-focus]:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.set-subpage[hidden] {
+  display: none;
+}
+
+/* A new listed section that wraps content which used to sit inside Agents. */
+.set-listed-section > .set-section > .ui-section-header {
+  margin-bottom: var(--kr-space-3);
+}

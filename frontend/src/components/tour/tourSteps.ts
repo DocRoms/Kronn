@@ -25,6 +25,9 @@ export type Page =
 export interface TourStep {
   id: string;
   page: Page;
+  /** KT-1923 — on the settings page, the section the step opens (its sub-page
+   *  holds it): Settings has five sub-pages, `/config` opens the first. */
+  settingsSection?: string;
   selector: string | null;
   titleKey: string;
   descKey: string;
@@ -413,6 +416,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'agents-config',
     page: 'settings',
+    settingsSection: 'settings-agent-config',
     // Enabling an agent comes before talking to one, so this opens the act even
     // though it means one hop into the settings page.
     selector: '[data-tour-id="settings-agents"]',

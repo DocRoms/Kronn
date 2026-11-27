@@ -277,7 +277,7 @@ it('confirms and re-arms only the provider reported as quota-blocked', async () 
   const originalConfirm = window.confirm;
   window.confirm = vi.fn().mockReturnValue(true);
   try {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[sampleAgent]} />);
 
     const button = await screen.findByRole('button', { name: /réarmer le fournisseur/i });
     fireEvent.click(button);
@@ -320,13 +320,13 @@ const defaultProps = {
 
 describe('SettingsPage', () => {
   it('exposes a stable deep-link target for agent collaboration settings', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[sampleAgent]} />);
 
     expect(document.getElementById('settings-agent-handoffs')).toBeTruthy();
   });
 
   it('persists the discussion-note composer toggle', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="system" />);
     const toggle = screen.getByRole('switch', { name: 'Notes de discussion hors contexte' });
     expect(toggle).toHaveAttribute('aria-checked', 'true');
 
@@ -338,14 +338,14 @@ describe('SettingsPage', () => {
     expect(toggle).toHaveAttribute('aria-checked', 'false');
   });
 
-  it('renders all main sections', async () => {
+  it('renders all main sections, each on its sub-page (KT-1923)', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    fireEvent.click(screen.getByTestId('settings-subpage-agents'));
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
     const body = document.body.textContent!;
 
     // Configuration heading
     expect(body).toContain('Configuration');
-    // Database section
-    expect(body).toContain('Base de données');
     // Agents section
     expect(body).toContain('Agents');
     // Skills section
@@ -356,58 +356,57 @@ describe('SettingsPage', () => {
     expect(body).toContain('Profils agent');
     expect(body).toContain('chaque step Agent');
     expect(body).toContain('chaque carte agent');
+    // Database section: on the System sub-page, not drawn before its first visit.
+    expect(document.getElementById('settings-database')).toBeNull();
+    fireEvent.click(screen.getByTestId('settings-subpage-system'));
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    expect(document.getElementById('settings-database')?.textContent).toContain('Base de données');
   });
 
-  it('renders a persistent section index and marks the selected destination', async () => {
+  it('keeps the page header and marks the current sub-page in the list (KT-1923)', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
 
-    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const nav = screen.getByRole('navigation', { name: 'Pages des réglages' });
     expect(nav).toBeTruthy();
     expect(document.querySelector('.set-layout')).toBeTruthy();
     expect(document.body.textContent).toContain('Centre de contrôle');
     expect(document.body.textContent).toContain('1/1 agents actifs');
     expect(document.body.textContent).toContain('1 racine scannée');
 
-    const buttons = [...nav.querySelectorAll<HTMLButtonElement>('.set-nav-btn')];
-    const preferences = buttons.find(button => button.textContent?.includes('Interface & langues'));
-    const database = buttons.find(button => button.textContent?.includes('Base de données'));
-    expect(buttons.filter(button => button.getAttribute('aria-current') === 'location')).toHaveLength(1);
-    expect(database).toBeTruthy();
+    const you = screen.getByTestId('settings-subpage-you');
+    const system = screen.getByTestId('settings-subpage-system');
+    expect(nav.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
+    expect(you).toHaveAttribute('aria-current', 'page');
 
-    fireEvent.click(database!);
-    expect(database!.getAttribute('aria-current')).toBe('location');
-    expect(preferences?.hasAttribute('aria-current')).toBe(false);
+    fireEvent.click(system);
+    expect(system).toHaveAttribute('aria-current', 'page');
+    expect(you).not.toHaveAttribute('aria-current');
   });
 
-  it('places Artifacts after Voice and before Project scanning, in the index and on the page', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+  it('places Artifacts last on the Work sub-page (KT-1923)', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} subPage="work" />);
 
-    const nav = screen.getByRole('navigation', { name: 'Sections' });
-    const labels = [...nav.querySelectorAll<HTMLButtonElement>('.set-nav-btn')].map(button => button.textContent?.trim());
-    const artifacts = labels.indexOf('Artifacts');
-    expect(artifacts).toBeGreaterThan(0);
-    expect(labels[artifacts - 1]).toContain('Voice');
-    expect(labels[artifacts + 1]).toContain('Scan des projets');
-
-    const sectionIds = [...(document.querySelector('.set-content')?.children ?? [])].map(child => child.id).filter(Boolean);
-    const at = sectionIds.indexOf('settings-artifacts');
-    expect(sectionIds.slice(at - 1, at + 2)).toEqual(['settings-voice', 'settings-artifacts', 'settings-scan']);
+    const sectionIds = [...(document.querySelector('[data-subpage="work"]')?.children ?? [])].map(child => child.id).filter(Boolean);
+    expect(sectionIds).toEqual([
+      'settings-scan', 'settings-workers', 'settings-worktrees', 'settings-sourcing', 'settings-continual-learning', 'settings-artifacts',
+    ]);
     expect(screen.getByTestId('settings-external-content')).toHaveTextContent('Contenus externes');
     expect(screen.getByTestId('settings-external-content')).toHaveTextContent('Sites autorisés');
   });
 
-  it('keeps agent capabilities directly after agents and the two beta sections', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+  it('opens Agents and models on the agents, then their models, usage and capabilities (KT-1923)', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} subPage="agents" />);
 
-    const content = document.querySelector('.set-content');
-    const sectionIds = [...(content?.children ?? [])]
+    const sectionIds = [...(document.querySelector('[data-subpage="agents"]')?.children ?? [])]
       .map(child => child.id)
       .filter(Boolean);
-    expect(sectionIds.slice(0, 5)).toEqual([
-      'settings-identity',
+    expect(sectionIds).toEqual([
       'settings-agent-config',
-      'settings-sourcing',
-      'settings-continual-learning',
+      'settings-local-models',
+      'settings-media',
+      'settings-compression',
+      'settings-catalogue',
+      'settings-usage',
       'settings-capabilities',
     ]);
   });
@@ -439,7 +438,8 @@ describe('SettingsPage', () => {
     expect(screen.queryByTestId('design-system-page')).toBeNull();
     expect(document.querySelector('tr[data-token]')).toBeNull();
     expect(document.querySelector('.ds-index, .ds-component')).toBeNull();
-    expect(document.querySelector('.set-nav a[href*="design-system"]')).toBeNull();
+    // KT-1923 — the list links it too, apart, for contributors.
+    expect(document.querySelector('.set-subnav-apart a[href="/config/design-system"]')).toBeTruthy();
   });
 
   it('does not import the gallery: it is a chunk of its own (KT-1987)', () => {
@@ -456,16 +456,17 @@ describe('SettingsPage', () => {
     expect(screen.getByText(/agent CLI externe déjà rattaché/)).toBeInTheDocument();
   });
 
-  it('groups the legacy lower settings into workspace and system areas', async () => {
+  it('opens each sub-page on its name and sentence instead of the old group intros (KT-1923)', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
 
-    const groups = [...document.querySelectorAll('.set-content-group-intro h2')].map(node => node.textContent);
-    expect(groups).toEqual(['Expérience & projets', 'Sécurité et système']);
-    expect(document.querySelector('#settings-user-context + .set-content-group-intro')).toBeTruthy();
+    expect(document.querySelector('.set-content-group-intro')).toBeNull();
+    const head = document.querySelector('[data-subpage="you"] .set-subpage-head')!;
+    expect(head.querySelector('h2')?.textContent).toBe('Vous');
+    expect(head.textContent).toContain('Ce qui vous décrit et la façon dont Kronn se présente à vous.');
   });
 
   it('separates agent skills from MCP connections in the capabilities card', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[sampleAgent]} />);
 
     const capabilities = document.querySelector('#settings-capabilities');
     expect(capabilities).toBeTruthy();
@@ -487,7 +488,7 @@ describe('SettingsPage', () => {
   });
 
   it('explains capability types, origins and current global scope', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[sampleAgent]} />);
     fireEvent.click(screen.getByRole('button', { name: 'Comprendre les capacités' }));
 
     expect(screen.getByText(/Skill : procédure/)).toBeInTheDocument();
@@ -497,7 +498,7 @@ describe('SettingsPage', () => {
   });
 
   it('filters the unified capability area by origin and type', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[sampleAgent]} />);
     document.querySelectorAll('.set-accordion-header').forEach(button => fireEvent.click(button));
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 
@@ -527,7 +528,7 @@ describe('SettingsPage', () => {
   it('shows the current version and local Ko-fi support card under the settings menu', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
 
-    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const nav = screen.getByRole('navigation', { name: 'Pages des réglages' });
     const versionCard = nav.querySelector('[data-testid="settings-nav-version"]');
     expect(versionCard).toBeTruthy();
     expect(versionCard!.textContent).toContain('Kronn v');
@@ -554,7 +555,7 @@ describe('SettingsPage', () => {
   it('puts the Kronn mark to the left of the version and the licence', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
 
-    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const nav = screen.getByRole('navigation', { name: 'Pages des réglages' });
     const card = nav.querySelector('[data-testid="settings-nav-version"] .set-version-card');
     expect(card).toBeTruthy();
     // The mark comes first, the stacked lines second — order is the layout.
@@ -569,7 +570,7 @@ describe('SettingsPage', () => {
   it('shows a fully-clickable guided-tour progress CTA below the version card', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
 
-    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const nav = screen.getByRole('navigation', { name: 'Pages des réglages' });
     const versionCard = nav.querySelector('[data-testid="settings-nav-version"]');
     const desktopCta = versionCard?.nextElementSibling
       ?.querySelector<HTMLButtonElement>('[data-testid="settings-tour-progress"]');
@@ -581,7 +582,7 @@ describe('SettingsPage', () => {
   });
 
   it('renders skill cards after opening accordion', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" />);
     // Skills are behind an accordion — find and click the header
     const allButtons = document.querySelectorAll('.set-accordion-header');
     // Open ALL accordions to make content visible
@@ -608,7 +609,7 @@ describe('SettingsPage', () => {
   it('custom skill card exposes Edit + Delete; builtin only Delete', async () => {
     // Regression: before 2026-04-17, custom skills could only be deleted,
     // not edited — users had to delete+recreate for a typo fix.
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" />);
     const allButtons = document.querySelectorAll('.set-accordion-header');
     allButtons.forEach(btn => fireEvent.click(btn));
     await act(async () => { await new Promise(r => setTimeout(r, 0)); });
@@ -630,7 +631,7 @@ describe('SettingsPage', () => {
   });
 
   it('renders directive cards after opening accordion', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" />);
     // Directives are behind an accordion — open all
     const allButtons = document.querySelectorAll('.set-accordion-header');
     allButtons.forEach(btn => fireEvent.click(btn));
@@ -645,7 +646,7 @@ describe('SettingsPage', () => {
   });
 
   it('DB info shows all counters when > 0', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="system" />);
     const body = document.body.textContent!;
 
     // Check counter values are rendered
@@ -666,27 +667,29 @@ describe('SettingsPage', () => {
   });
 
   it('export button exists', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="system" />);
     expect(screen.getByText('Exporter')).toBeTruthy();
   });
 
   it('renders scan configuration sections in the same card', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="work" />);
     const body = document.body.textContent!;
     expect(body).toContain('Profondeur de scan');
     expect(body).toContain('Dossiers à scanner');
     expect(body).toContain('Patterns à ignorer');
   });
 
-  it('renders the Usage section in settings', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+  it('renders the Usage section in settings, folded until opened (KT-1923)', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} subPage="agents" />);
+    expect(document.querySelector('[data-testid="usage-section"]')).toBeNull();
+    fireEvent.click(screen.getByTestId('fold-settings-usage'));
     // ccusage-based card with stable test id + powered-by attribution
     expect(document.querySelector('[data-testid="usage-section"]')).toBeTruthy();
     expect(document.body.textContent!).toContain('ccusage');
   });
 
   it('renders the auto-detect button for API keys', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[sampleAgent]} />);
     expect(screen.getByText('Auto-détecter')).toBeDefined();
   });
 
@@ -696,7 +699,7 @@ describe('SettingsPage', () => {
       name: 'Vibe',
       agent_type: 'Vibe',
     };
-    await wrap(<SettingsPage {...defaultProps} agents={[vibeAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[vibeAgent]} />);
     // KT-586 — API keys live behind the agent's "Configurer" fold now.
     await act(async () => {
       fireEvent.click(screen.getByTestId('agent-configure-Vibe'));
@@ -721,23 +724,22 @@ describe('SettingsPage', () => {
     expect(body).not.toContain('Default profile per project');
   });
 
-  it('keeps Usage inside Agents instead of exposing a separate nav section', async () => {
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
-    const navButtons = document.querySelectorAll('.set-nav-btn');
-    const labels = Array.from(navButtons).map(b => b.textContent);
-    expect(labels).not.toContain('Usage');
-    expect(document.querySelector('#settings-agent-config [data-testid="usage-section"]')).toBeTruthy();
-    const defaults = document.querySelector('[data-testid="agent-defaults"]');
-    const economyGrid = document.querySelector('.set-agent-economy-grid');
-    expect(economyGrid?.querySelector('[data-testid="usage-section"]')).toBeTruthy();
-    expect(defaults?.nextElementSibling).toBe(economyGrid);
-    expect(economyGrid?.nextElementSibling).toHaveClass('set-agent-list-head');
+  it('lists Usage, compression, local models, media and the catalogue as sections of their own, after Agents (KT-1923)', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} subPage="agents" />);
+    document.querySelectorAll<HTMLButtonElement>('[data-testid^="fold-"]').forEach(button => fireEvent.click(button));
+    expect(document.querySelector('#settings-agent-config [data-testid="usage-section"]')).toBeNull();
+    expect(document.querySelector('#settings-usage [data-testid="usage-section"]')).toBeTruthy();
+    expect(document.querySelector('#settings-catalogue [data-testid="model-catalog-section"]')).toBeTruthy();
+    expect(document.querySelector('#settings-compression .set-compression')).toBeTruthy();
+    expect(document.querySelector('#settings-media [data-testid="comfyui-card"]')).toBeTruthy();
+    expect(document.querySelector('.set-agent-economy-grid')).toBeNull();
+    expect(document.querySelector('#settings-agent-config .set-agent-list-head')).toBeTruthy();
     expect(document.querySelector('.set-agents-section')?.lastElementChild).toHaveClass('set-best-practices');
   });
 
   it('shows add key form when clicking Ajouter une cle', async () => {
     // ClaudeCode has a token field (anthropic), so the "Ajouter une cle" button should appear
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[sampleAgent]} />);
     // KT-586 — API keys live behind the agent's "Configurer" fold now.
     await act(async () => {
       fireEvent.click(screen.getByTestId('agent-configure-ClaudeCode'));
@@ -759,7 +761,9 @@ describe('SettingsPage', () => {
   });
 
   it('renders Usage section with always-visible period toggle', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" />);
+    fireEvent.click(screen.getByTestId('fold-settings-usage'));
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
     // Daily / Weekly / Monthly period filter is in the head (always visible)
     expect(document.querySelector('[data-testid="usage-period-daily"]')).toBeTruthy();
     expect(document.querySelector('[data-testid="usage-period-weekly"]')).toBeTruthy();
@@ -782,7 +786,7 @@ describe('SettingsPage', () => {
       name: 'GitHub Copilot',
       agent_type: 'CopilotCli' as const,
     };
-    await wrap(<SettingsPage {...defaultProps} agents={[copilotAgent]} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" agents={[copilotAgent]} />);
     const body = document.body.textContent!;
     expect(body).toContain('GitHub Copilot');
   });
@@ -793,7 +797,7 @@ describe('SettingsPage', () => {
     // persisted. Pin: explicit revert + visible error toast.
     const { config } = await import('../../lib/api');
     (config.setServerConfig as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" />);
 
     const slider = screen.getByLabelText('Agents locaux simultanés max') as HTMLInputElement;
     // Seeded from the getServerConfig mock (max_concurrent_agents: 5).
@@ -807,19 +811,19 @@ describe('SettingsPage', () => {
   });
 
   it('loads and persists the absolute agent execution timeout independently', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" />);
 
     const globalSlider = screen.getByLabelText("Durée maximale d'une exécution agent") as HTMLInputElement;
     const localGlobalSlider = screen.getByLabelText('Durée maximale des agents locaux (Ollama)') as HTMLInputElement;
     const stallSlider = screen.getByLabelText("Timeout d'inactivité agent") as HTMLInputElement;
     const concurrencySlider = screen.getByLabelText('Agents locaux simultanés max') as HTMLInputElement;
     const agentsCard = document.getElementById('settings-agent-config');
-    const serverCard = document.getElementById('settings-server');
     expect(agentsCard).toContainElement(concurrencySlider);
     expect(agentsCard).toContainElement(globalSlider);
     expect(agentsCard).toContainElement(localGlobalSlider);
     expect(agentsCard).toContainElement(stallSlider);
-    expect(serverCard).not.toContainElement(globalSlider);
+    // The server settings are on the Security sub-page (KT-1923).
+    expect(document.getElementById('settings-server')).toBeNull();
     expect(globalSlider.value).toBe('30');
     expect(localGlobalSlider.value).toBe('240');
     expect(stallSlider.value).toBe('5');
@@ -842,7 +846,7 @@ describe('SettingsPage', () => {
 
   it('loads and persists the global execution-value retention policy', async () => {
     (configApi.setServerConfig as ReturnType<typeof vi.fn>).mockClear();
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="system" />);
 
     const select = screen.getByLabelText('Conservation des valeurs d’exécution') as HTMLSelectElement;
     expect(select.value).toBe('30');
@@ -867,7 +871,7 @@ describe('SettingsPage', () => {
       auth_enabled: true, discussion_notes_enabled: true, execution_variable_retention_days: 30,
       run_payload_retention_days: 90,
     });
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="system" />);
 
     const select = screen.getByLabelText('Sorties des étapes des runs terminés') as HTMLSelectElement;
     await waitFor(() => expect(select.value).toBe('90'));
@@ -905,7 +909,7 @@ describe('SettingsPage', () => {
       // overwrite `answer` so the retention request would never resolve.
       const pending = new Promise(resolve => { answer = resolve; });
       getServerConfig.mockImplementation(() => pending);
-      await wrap(<SettingsPage {...defaultProps} />);
+      await wrap(<SettingsPage {...defaultProps} subPage="system" />);
       const select = screen.getByLabelText(label) as HTMLSelectElement;
       expect(select).toBeDisabled();
       expect(select.value).toBe('');
@@ -920,7 +924,7 @@ describe('SettingsPage', () => {
 
     it('reads a server without the field as off, never as 30 days', async () => {
       getServerConfig.mockResolvedValue({ ...base });
-      await wrap(<SettingsPage {...defaultProps} />);
+      await wrap(<SettingsPage {...defaultProps} subPage="system" />);
       const select = screen.getByLabelText(label) as HTMLSelectElement;
       await waitFor(() => expect(select).toBeEnabled());
       expect(select.value).toBe('0');
@@ -930,7 +934,7 @@ describe('SettingsPage', () => {
 
     it('shows an error, not a guessed value, when the load fails', async () => {
       getServerConfig.mockRejectedValue(new Error('offline'));
-      await wrap(<SettingsPage {...defaultProps} />);
+      await wrap(<SettingsPage {...defaultProps} subPage="system" />);
       const select = screen.getByLabelText(label) as HTMLSelectElement;
       expect(await screen.findByText(/réglage de rétention n.a pas pu être chargé/)).toBeInTheDocument();
       expect(select).toBeDisabled();
@@ -940,7 +944,7 @@ describe('SettingsPage', () => {
 
     it('writes 30 when the suggested value is chosen', async () => {
       getServerConfig.mockResolvedValue({ ...base, run_payload_retention_days: 0 });
-      await wrap(<SettingsPage {...defaultProps} />);
+      await wrap(<SettingsPage {...defaultProps} subPage="system" />);
       const select = screen.getByLabelText(label) as HTMLSelectElement;
       await waitFor(() => expect(select).toBeEnabled());
       await screen.findByTestId('run-retention-banner');
@@ -962,7 +966,7 @@ describe('SettingsPage', () => {
       auth_enabled: true,
       discussion_notes_enabled: true,
     });
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="agents" />);
 
     expect(document.body.textContent).toContain(
       "le plafond global interrompra l'agent avant le timeout d'inactivité",
@@ -978,21 +982,21 @@ describe('SettingsPage — security and system', () => {
   afterEach(() => { vi.mocked(configApi.getNetworkExposure).mockResolvedValue(notExposed); });
 
   it('orders the security cards recovery, authenticator, trust levels, then server, in the index and on the page', async () => {
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="security" />);
     await screen.findByTestId('trust-proof-section');
 
-    const sectionIds = [...(document.querySelector('.set-content')?.children ?? [])].map(child => child.id).filter(Boolean);
+    const sectionIds = [...(document.querySelector('[data-subpage="security"]')?.children ?? [])].map(child => child.id).filter(Boolean);
     const at = sectionIds.indexOf('settings-recovery');
     expect(sectionIds.slice(at, at + 4)).toEqual([
       'settings-recovery', 'settings-authenticator', 'settings-trust', 'settings-server',
     ]);
-    const nav = screen.getByRole('navigation', { name: 'Sections' });
-    const hrefs = [...nav.querySelectorAll<HTMLAnchorElement>('.set-nav-btn')].map(link => link.getAttribute('href'));
-    const navAt = hrefs.indexOf('/config#settings-recovery');
-    expect(hrefs.slice(navAt, navAt + 4)).toEqual([
-      '/config#settings-recovery', '/config#settings-authenticator', '/config#settings-trust', '/config#settings-server',
+    // KT-1923 — the links to the sections, under the sub-page's name.
+    const links = document.querySelector('[data-subpage="security"] .set-subpage-links')!;
+    const hrefs = [...links.querySelectorAll<HTMLAnchorElement>('a')].map(link => link.getAttribute('href'));
+    expect(hrefs.slice(0, 4)).toEqual([
+      '/config/security#settings-recovery', '/config/security#settings-authenticator', '/config/security#settings-trust', '/config/security#settings-server',
     ]);
-    expect(nav.querySelector('a[href="/config#settings-authenticator"]')?.textContent).toContain('Authentificateur');
+    expect(links.querySelector('a[href="/config/security#settings-authenticator"]')?.textContent).toContain('Authentificateur');
     // The admin secret path comes from the server, not from a guessed Linux path.
     expect(screen.getByTestId('trust-proof-admin-secret-path').textContent)
       .toBe('cat "/Users/romu/Library/Application Support/com.kronn.kronn/human-admin-secret"');
@@ -1000,7 +1004,7 @@ describe('SettingsPage — security and system', () => {
 
   it('badges the network token from the server even when this browser holds no copy', async () => {
     exposeWithToken();
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="security" />);
     const badge = await screen.findByTestId('settings-auth-badge');
     expect(badge).toHaveAttribute('data-on', 'true');
     expect(badge.textContent).toBe('actif');
@@ -1011,7 +1015,7 @@ describe('SettingsPage — security and system', () => {
 
   it('asks before it replaces the token, and the server decides the badge, not the stored copy', async () => {
     localStorage.setItem('kronn_auth_token', 'stale-token');
-    await wrap(<SettingsPage {...defaultProps} />);
+    await wrap(<SettingsPage {...defaultProps} subPage="security" />);
     const badge = await screen.findByTestId('settings-auth-badge');
     expect(badge).toHaveAttribute('data-on', 'idle');
     expect(badge.textContent).toBe('non créé');
@@ -1029,7 +1033,7 @@ describe('SettingsPage — security and system', () => {
     const originalConfirm = window.confirm;
     window.confirm = vi.fn().mockReturnValue(true);
     try {
-      await wrap(<SettingsPage {...defaultProps} />);
+      await wrap(<SettingsPage {...defaultProps} subPage="security" />);
       await act(async () => { fireEvent.click(await screen.findByTestId('settings-auth-replace')); });
       await waitFor(() => expect(configApi.regenerateAuthToken).toHaveBeenCalled());
       expect(toastFn).not.toHaveBeenCalledWith(expect.anything(), 'error');
@@ -1044,7 +1048,7 @@ describe('SettingsPage — security and system', () => {
     const originalConfirm = window.confirm;
     window.confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     try {
-      await wrap(<SettingsPage {...defaultProps} />);
+      await wrap(<SettingsPage {...defaultProps} subPage="security" />);
       fireEvent.click(await screen.findByTestId('settings-auth-replace'));
       expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('Remplacer le token'));
       expect(configApi.regenerateAuthToken).not.toHaveBeenCalled();

@@ -4,7 +4,7 @@ Kronn's **Settings → Agents → External API mode** manages named connections 
 OpenAI-compatible chat services. LiteLLM, NVIDIA and OpenRouter provide endpoint
 presets; `Other` uses the same contract for an operator-supplied service. Every
 connection owns a display name, a unique discussion alias, an endpoint and
-optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1949-1965#ExternalApiSection]
+optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1998-2014#ExternalApiSection]
 [src: file: backend/src/models/external_api_connection.rs:11-20#ExternalApiConnection]
 
 The required HTTP surface is `GET /v1/models` plus
@@ -204,9 +204,9 @@ their endpoint and Economy, Default and Reasoning models. Saving either card
 immediately refreshes the global agent selectors, and startup projects any
 previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
-stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2152-2156#sync_runtime_config]
-[src: file: backend/src/db/external_api_connections.rs:44-69#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1962-1967#onModelTiersChanged]
+stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2125-2129#sync_runtime_config]
+[src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:2013-2018#onModelTiersChanged]
 
 The former standalone LiteLLM settings card (`LiteLlmCard`) and its frontend
 client were removed (KT-668): nothing mounted them, and the named connection

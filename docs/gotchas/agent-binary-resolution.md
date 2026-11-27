@@ -18,7 +18,7 @@ also clears cached fallback versions.
 [src: file: backend/src/agents/mod.rs:1593-1620#version_from_output]
 [src: file: backend/src/agents/mod.rs:441-448#detect_all_cached]
 [src: file: backend/src/agents/mod.rs:623-631#invalidate_detect_cache]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1221-1234#fallback_command]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1268-1281#fallback_command]
 
 A direct CLI spawn failure can also trigger npx. The launch records the fallback
 command and measured version in runtime provenance and emits a warning log;

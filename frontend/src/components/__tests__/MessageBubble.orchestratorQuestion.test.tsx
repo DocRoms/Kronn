@@ -106,7 +106,7 @@ describe('orchestrator decision cards (KT-1433)', () => {
     expect(card).toContainElement(hint);
     expect(hint).toHaveTextContent(/Niveaux de confiance/);
     const link = screen.getByTestId('disc-question-trust-link');
-    expect(link.getAttribute('href')).toBe('/config#settings-trust');
+    expect(link.getAttribute('href')).toBe('/config/security#settings-trust');
   });
 
   // A plain click stays in the app (no document reload); the modified clicks
@@ -122,7 +122,7 @@ describe('orchestrator decision cards (KT-1433)', () => {
     render(<I18nProvider><MessageBubble {...noopProps} onNavigate={onNavigate} msg={orchestratorMessage(content)} /></I18nProvider>);
 
     const link = await screen.findByTestId('disc-question-trust-link');
-    expect(link.getAttribute('href')).toBe('/config#settings-trust');
+    expect(link.getAttribute('href')).toBe('/config/security#settings-trust');
     const plain = fireEvent.click(link);
     expect(plain, 'the browser does not follow the link').toBe(false);
     expect(onNavigate).toHaveBeenCalledWith('settings', { scrollTo: 'settings-trust' });

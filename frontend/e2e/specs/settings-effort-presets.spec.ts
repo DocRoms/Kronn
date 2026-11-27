@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/kronn-fixture';
+import { DashboardPage } from '../pages/DashboardPage';
 import { SettingsPage } from '../pages/SettingsPage';
 
 for (const width of [1440, 390]) {
@@ -38,7 +39,7 @@ for (const width of [1440, 390]) {
       const settings = new SettingsPage(page);
       const open = async () => {
         await page.goto('/');
-        await page.locator('[data-tour-id="nav-settings"]').click();
+        await new DashboardPage(page).openSettings('agents');
         await settings.openAgentConfiguration(agent);
       };
       await open();

@@ -10,6 +10,9 @@
  * what opened (`include`), so a dialog or a form is held to the same bar
  * as the page around it. Their baseline keys are `<Page> › <state>`.
  *
+ * KT-1923: Settings is five sub-pages; each is scanned with its folds
+ * open, all against the one `Settings` baseline entry.
+ *
  * # What this catches
  *
  *   • Form inputs missing labels (the form sweep is complete; this
@@ -36,6 +39,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { UsageReport } from '../../src/types/generated';
+import { DashboardPage, SETTINGS_SUB_PAGES, type SettingsSubPage } from '../pages/DashboardPage';
 
 const baselinePath = join(fileURLToPath(import.meta.url), '..', '..', 'fixtures', 'a11y-baseline.json');
 type BaselineEntry = Record<string, number>;
@@ -56,6 +60,9 @@ interface PageRoute {
   /** Embedded live-page documents are user-authored, not app chrome. */
   excludeSelectors?: string[];
   enablePages?: boolean;
+  /** KT-1923 — a page made of sub-pages (Settings): each is scanned, its
+   *  folds open, against the page's one baseline entry. */
+  subPages?: readonly SettingsSubPage[];
   /** KT-1887 — the dialog and the form this page opens for the scan. */
   states: OpenState[];
 }
@@ -84,6 +91,24 @@ async function openContextHelp(page: Page): Promise<string> {
 async function opened(page: Page, selector: string): Promise<string> {
   await expect(page.locator(selector).first()).toBeVisible();
   return selector;
+}
+
+/**
+ * KT-1923 — Settings is five sub-pages and its tab opens the first. Shows
+ * one, opens its folds (catalogue, usage, API call log, debug log viewer) so
+ * axe scans what they hold, and waits for the usage report on the agents
+ * sub-page (the fixture of `openRoute`).
+ */
+async function showSettingsSubPage(page: Page, subPage: SettingsSubPage): Promise<void> {
+  const dashboard = new DashboardPage(page);
+  await dashboard.selectSettingsSubPage(subPage);
+  await dashboard.openSettingsFolds();
+  if (subPage === 'agents') {
+    await expect(page.getByTestId('usage-total-cost')).toBeVisible();
+    await expect(page.getByTestId('usage-agent-filter')).toBeVisible();
+    await expect(page.getByTestId('usage-model-filter')).toBeVisible();
+  }
+  await page.waitForLoadState('networkidle', { timeout: 10_000 });
 }
 
 const BOOTSTRAP_MODAL = '[role="dialog"][aria-labelledby="bootstrap-modal-title"]';
@@ -212,13 +237,24 @@ const ROUTES: PageRoute[] = [
     ],
   },
   {
-    name: 'Settings', navTourId: 'nav-settings', readySelector: '.settings-page',
+    name: 'Settings', navTourId: 'nav-settings', readySelector: '.settings-page', subPages: SETTINGS_SUB_PAGES,
     states: [
-      { name: 'help dialog', kind: ['dialog'], open: openContextHelp },
       {
-        // ExternalApiSection.tsx — "add a connection" opens its form.
+        // IdentitySection.tsx — the help of the bio field, on « Vous »,
+        // the first help of the page as on the single page.
+        name: 'help dialog', kind: ['dialog'],
+        open: async page => {
+          await showSettingsSubPage(page, 'you');
+          await page.locator('.set-subpage:not([hidden]) .kr-context-help-trigger').first().click();
+          return opened(page, '.kr-context-help-panel[role="dialog"]');
+        },
+      },
+      {
+        // ExternalApiSection.tsx — "add a connection" opens its form; it is
+        // in the agents section, on « Agents et modèles ».
         name: 'connection form', kind: ['form'],
         open: async page => {
+          await showSettingsSubPage(page, 'agents');
           const add = page.getByTestId('ext-api-add-connection');
           await add.scrollIntoViewIfNeeded();
           await add.click();
@@ -307,11 +343,6 @@ async function openRoute(page: Page, route: PageRoute): Promise<void> {
   const readySelector = route.readySelector;
   if (!readySelector) throw new Error(`Missing readiness selector for ${route.name}`);
   await expect(page.locator(readySelector)).toBeVisible();
-  if (route.name === 'Settings') {
-    await expect(page.getByTestId('usage-total-cost')).toBeVisible();
-    await expect(page.getByTestId('usage-agent-filter')).toBeVisible();
-    await expect(page.getByTestId('usage-model-filter')).toBeVisible();
-  }
   // The shell selector proves that the lazy route mounted. The bounded
   // network-idle wait is fail-closed so axe never scans partial data.
   await page.waitForLoadState('networkidle', { timeout: 10_000 });
@@ -321,8 +352,8 @@ type Violations = Awaited<ReturnType<typeof scanPage>>['violations'];
 
 /** Logs a scan and fails on a serious/critical rule beyond the baseline of
  *  `name` (a page, or `<Page> › <state>`). */
-async function checkAgainstBaseline(name: string, violations: Violations): Promise<void> {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+async function checkAgainstBaseline(name: string, violations: Violations, label = name): Promise<void> {
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const seriousOrCritical = violations.filter(v => v.impact === 'serious' || v.impact === 'critical');
   const moderate = violations.filter(v => v.impact === 'moderate');
   const minor = violations.filter(v => v.impact === 'minor');
@@ -331,7 +362,7 @@ async function checkAgainstBaseline(name: string, violations: Violations): Promi
   // serious/critical bucket. Moderate and minor are surfaced in
   // the test output so a per-PR axe-diff is possible.
   // eslint-disable-next-line no-console
-  console.log(`[a11y] ${name}: serious/critical=${seriousOrCritical.length}, moderate=${moderate.length}, minor=${minor.length}`);
+  console.log(`[a11y] ${label}: serious/critical=${seriousOrCritical.length}, moderate=${moderate.length}, minor=${minor.length}`);
   for (const v of seriousOrCritical) {
     // eslint-disable-next-line no-console
     console.log(`  ✗ ${v.id} (${v.impact}) — ${v.nodes} node(s): ${v.targets.join(', ')}`);
@@ -369,17 +400,30 @@ async function checkAgainstBaseline(name: string, violations: Violations): Promi
     const seen = ruleCount[rule] ?? 0;
     if (seen < allowed) {
       // eslint-disable-next-line no-console
-      console.log(`  📉 ${name}: ${rule} dropped to ${seen} (baseline=${allowed}). Lower the baseline when this PR ships.`);
+      console.log(`  📉 ${label}: ${rule} dropped to ${seen} (baseline=${allowed}). Lower the baseline when this PR ships.`);
     }
   }
   expect(
     regressions,
-    `${name} regressed past the a11y baseline:\n  ${regressions.join('\n  ')}`,
+    `${label} regressed past the a11y baseline:\n  ${regressions.join('\n  ')}`,
   ).toEqual([]);
 }
 
 test.describe('a11y — axe-core scans main pages, fails on serious/critical', () => {
   for (const route of ROUTES) {
+    if (route.subPages) {
+      // KT-1923 — every sub-page, folds open, each held to the page's baseline.
+      for (const subPage of route.subPages) {
+        const label = `${route.name} › ${subPage}`;
+        test(`${label} has no serious/critical a11y violations`, async ({ page }) => {
+          await openRoute(page, route);
+          await showSettingsSubPage(page, subPage);
+          const { violations } = await scanPage(page, route.excludeSelectors);
+          await checkAgainstBaseline(route.name, violations, label);
+        });
+      }
+      continue;
+    }
     test(`${route.name} has no serious/critical a11y violations`, async ({ page }) => {
       await openRoute(page, route);
       const { violations } = await scanPage(page, route.excludeSelectors);

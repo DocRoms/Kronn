@@ -3,6 +3,23 @@
 /* ── Page frame ────────────────────────────────────────── */
 .settings-page {
   --set-nav-width: 220px;
+  /* KT-2017 — the band of section links sticks right under the app's top bar,
+     whose height useAppBarHeight measures and publishes (51px until then). */
+  --set-band-top: var(--app-bar-h, 51px);
+  /* The band's own height: one line at every width (SettingsNav.css). */
+  --set-band-height: 44px;
+  /* Where an anchor stops: under the top bar and the band, plus a breath. */
+  --set-anchor-offset: calc(var(--set-band-top) + var(--set-band-height) + var(--kr-space-4));
+}
+
+/* KT-1923 — every anchor Settings can land on (a section, a group or a field
+   inside it, a fold, an agent's row) stops below the fixed top bar, so the
+   heading that takes the focus is never covered: one rule, not one per card.
+   KT-2017 — below the band too; a target of the guided tour reads the same
+   margin to keep its spotlight out from under the band. */
+.settings-page [data-tour-id],
+.settings-page [id] {
+  scroll-margin-top: var(--set-anchor-offset);
 }
 
 .set-page-header {
@@ -362,7 +379,6 @@
   border-radius: var(--kr-r-xl);
   margin-bottom: var(--kr-sp-5);
   box-shadow: var(--kr-shadow-sm);
-  scroll-margin-top: 84px;
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
 }
 
@@ -1709,9 +1725,6 @@
 
 .set-agent-handoff-card {
   grid-column: 1 / -1;
-  /* Deep links land below the fixed application header instead of hiding the
-     card title underneath it. Mirrors the offset used by top-level cards. */
-  scroll-margin-top: 84px;
 }
 
 .set-agent-handoff-toggle {
@@ -6523,6 +6536,24 @@
     padding-right: var(--kr-sp-5);
   }
 
+  /* KT-1923 — on a narrow window the list of Settings goes above the content:
+     the search on top, the sub-pages on one wrapping row, then the hits. */
+  .set-subnav {
+    position: static;
+    flex-direction: column;
+    overflow: visible;
+  }
+
+  .set-subnav .set-subnav-pages {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .set-subnav-apart {
+    margin-top: var(--kr-sp-2);
+    padding-top: var(--kr-sp-2);
+  }
+
   .set-nav-btn[aria-current="location"]::before {
     inset: auto 7px 0;
     width: auto;
@@ -6530,13 +6561,6 @@
     border-radius: var(--kr-r-xs) var(--kr-r-xs) 0 0;
   }
 
-  .set-card {
-    scroll-margin-top: 112px;
-  }
-
-  .set-agent-handoff-card {
-    scroll-margin-top: 112px;
-  }
 }
 
 @media (max-width: 700px) {

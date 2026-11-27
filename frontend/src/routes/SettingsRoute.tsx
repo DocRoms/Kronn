@@ -1,10 +1,20 @@
 import { useEffect, useState } from 'react';
-import { Navigate, useLocation } from 'react-router';
-import type { EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
+import { Navigate, useLocation, useParams } from 'react-router';
+import { EXTERNAL_CONTENT_SECTION_ID, type EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
 import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { useDashboardContext } from '../lib/dashboardContext';
 import { embedSettingsOrigin } from '../lib/live-page-navigation';
-import { EMBED_SETTINGS_PATH, designSystemPath, legacyDesignSystemLocation, type SettingsIntent } from '../lib/routes';
+import {
+  DEFAULT_SETTINGS_SUB_PAGE,
+  EMBED_SETTINGS_PATH,
+  anchorOfHash,
+  designSystemPath,
+  legacyDesignSystemLocation,
+  settingsRedirectPath,
+  settingsSectionOf,
+  settingsSubPageFromSegment,
+  type SettingsIntent,
+} from '../lib/routes';
 import { revealWhenSettled } from '../lib/revealWhenSettled';
 import { SettingsPage } from '../pages/SettingsPage';
 import { useLocationIntent } from './useLocationIntent';
@@ -12,15 +22,17 @@ import { useLocationIntent } from './useLocationIntent';
 export function SettingsRoute() {
   const ctx = useDashboardContext();
   const nav = useKronnNavigate();
+  const { settingsSubPage } = useParams();
   // A model error points at one agent's tier: a one-shot arrival intent.
   const [intent, consumeIntent] = useLocationIntent<SettingsIntent>();
   // A blocked embed links to the allowed-sites section with its site typed in
   // (`/config/artifacts?origin=…`), from this tab or from a standalone Page.
   // The address is an arrival: it types its site in once, then gives way to
-  // `/config`, so neither a reload nor a Back replays it. Each arrival bumps
-  // the nonce, so asking again for the same site refocuses it. Arrivals are
-  // told apart by stepping onto the address, not by its history key: an entry
-  // pushed from outside the router carries none.
+  // the section's own address (`/config/work#settings-artifacts`), so neither
+  // a reload nor a Back replays it. Each arrival bumps the nonce, so asking
+  // again for the same site refocuses it. Arrivals are told apart by stepping
+  // onto the address, not by its history key: an entry pushed from outside
+  // the router carries none.
   const location = useLocation();
   const onEmbedSettings = location.pathname.replace(/\/+$/, '') === EMBED_SETTINGS_PATH;
   const [embedOriginPrefill, setEmbedOriginPrefill] = useState<EmbedOriginPrefill | null>(null);
@@ -32,14 +44,14 @@ export function SettingsRoute() {
     }
   }
   useEffect(() => {
-    if (onEmbedSettings) nav.toPage('settings', { replace: true });
+    if (onEmbedSettings) nav.toSettingsSection(EXTERNAL_CONTENT_SECTION_ID, {}, { replace: true });
   }, [onEmbedSettings, nav]);
-  // `/config#<anchor>`: each arrival brings the anchor (a section, or a field
-  // such as `#run-payload-retention`) into view once the page has settled, so
-  // the sections still loading above it do not push it away. Not the address
-  // the page's own link has just set: the page has already scrolled there.
-  // That is said for that one move only, and kept in memory, never in the
-  // history entry: a reload, Back and Forward to the entry are arrivals.
+  // `/config/<sub-page>#<anchor>`: each arrival brings the anchor (a section,
+  // or a field such as `#run-payload-retention`) into view once the page has
+  // settled, so the sections still loading above it do not push it away. Not
+  // the address the page's own link has just set: the page has already
+  // scrolled there. That is said for that one move only, and kept in memory,
+  // never in the history entry: a reload, Back and Forward to the entry are arrivals.
   const { hash, key: arrival } = location;
   const [inPageMove, setInPageMove] = useState<{ anchor: string; key: string | null } | null>(null);
   if (inPageMove) {
@@ -50,20 +62,22 @@ export function SettingsRoute() {
     }
   }
   const scrolledByPage = inPageMove !== null && (inPageMove.key === null || inPageMove.key === arrival);
-  let arrivalAnchor: string | null = null;
-  if (!scrolledByPage) {
-    try { arrivalAnchor = decodeURIComponent(hash.slice(1)) || null; } catch { arrivalAnchor = null; }
-  }
+  const hashAnchor = anchorOfHash(hash);
   // KT-1987 — the design system left this page for its own sub-page: its old
   // address (`#design-system`) and the anchors of its entries land there, on
   // the tab and the entry they name.
-  const designSystem = legacyDesignSystemLocation(arrivalAnchor);
-  if (designSystem) arrivalAnchor = null;
+  const designSystem = legacyDesignSystemLocation(hashAnchor);
+  const redirect = designSystem || onEmbedSettings ? null : settingsRedirectPath(location.pathname, hash, settingsSubPage);
+  const arrivalAnchor = scrolledByPage || designSystem || redirect ? null : hashAnchor;
   useEffect(() => {
     if (!arrivalAnchor) return undefined;
     return revealWhenSettled(arrivalAnchor);
   }, [arrivalAnchor, arrival]);
   if (designSystem) return <Navigate to={designSystemPath(designSystem)} replace />;
+  if (redirect) return <Navigate to={redirect} replace state={location.state} />;
+  const subPage = onEmbedSettings
+    ? settingsSectionOf(EXTERNAL_CONTENT_SECTION_ID)?.page ?? DEFAULT_SETTINGS_SUB_PAGE
+    : settingsSubPageFromSegment(settingsSubPage) ?? DEFAULT_SETTINGS_SUB_PAGE;
   return (
     <SettingsPage
       agents={ctx.agents}
@@ -77,8 +91,12 @@ export function SettingsRoute() {
       refetchDiscussions={ctx.refetchDiscussions}
       onReset={ctx.onReset}
       onNavigateDiscussion={nav.toDiscussion}
-      // A link to one of the page's own anchors moves the address in place:
-      // a step inside one page is not a step Back has to walk through.
+      subPage={subPage}
+      // Another sub-page, or an anchor of another one: a step Back can undo.
+      onOpenSubPage={page => nav.toSettingsSubPage(page)}
+      onOpenAnchor={anchor => nav.toSettingsSection(anchor)}
+      // A link to one of the sub-page's own anchors moves the address in
+      // place: a step inside one page is not a step Back has to walk through.
       onAnchorFollowed={anchorId => {
         setInPageMove({ anchor: anchorId, key: null });
         nav.toSettingsSection(anchorId, {}, { replace: true });

@@ -78,31 +78,49 @@ afterEach(() => {
   cleanup();
 });
 
-function renderCard(props?: Partial<Parameters<typeof DebugSection>[0]>) {
+/** Renders the card with its log viewer opened (KT-1923: folded by default),
+ *  unless `folded` keeps it as the page draws it. */
+function renderCard(props?: Partial<Parameters<typeof DebugSection>[0]>, { folded = false } = {}) {
   const setServerDebugMode = vi.fn();
   const setDebugModeNeedsRestart = vi.fn();
   const setDiscussionNotesEnabled = vi.fn();
   const toast = vi.fn();
-  return {
-    setServerDebugMode,
-    setDebugModeNeedsRestart,
-    setDiscussionNotesEnabled,
-    toast,
-    ...render(
-      <DebugSection
-        serverDebugMode={false}
-        setServerDebugMode={setServerDebugMode}
-        debugModeNeedsRestart={false}
-        setDebugModeNeedsRestart={setDebugModeNeedsRestart}
-        discussionNotesEnabled={true}
-        setDiscussionNotesEnabled={setDiscussionNotesEnabled}
-        toast={toast}
-        t={t}
-        {...props}
-      />,
-    ),
-  };
+  const rendered = render(
+    <DebugSection
+      serverDebugMode={false}
+      setServerDebugMode={setServerDebugMode}
+      debugModeNeedsRestart={false}
+      setDebugModeNeedsRestart={setDebugModeNeedsRestart}
+      discussionNotesEnabled={true}
+      setDiscussionNotesEnabled={setDiscussionNotesEnabled}
+      toast={toast}
+      t={t}
+      {...props}
+    />,
+  );
+  if (!folded) fireEvent.click(screen.getByTestId('fold-settings-debug-logs'));
+  return { setServerDebugMode, setDebugModeNeedsRestart, setDiscussionNotesEnabled, toast, ...rendered };
 }
+
+describe('DebugSection — the log viewer is folded (KT-1923)', () => {
+  it('reads the logs at once but shows the viewer only once opened, and keeps it mounted when folded again', async () => {
+    renderCard(undefined, { folded: true });
+    await waitFor(() => expect(debugApi.getLogs).toHaveBeenCalledTimes(1));
+    const toggle = screen.getByTestId('fold-settings-debug-logs');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(document.querySelector('.set-debug-viewer')).toBeNull();
+    expect(document.getElementById('settings-debug-logs')).not.toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(screen.getByText(/line1/)).toBeDefined());
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(document.querySelector('.set-debug-viewer')).not.toBeNull();
+    expect(document.getElementById(toggle.getAttribute('aria-controls')!)).toHaveAttribute('hidden');
+  });
+});
 
 describe('DebugSection — out-of-context discussion notes', () => {
   it('persists the composer toggle from the Debug card', async () => {

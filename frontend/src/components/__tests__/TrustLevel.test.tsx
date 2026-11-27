@@ -177,7 +177,7 @@ describe('TrustLevelControl', () => {
     // Right after the intro, before the effects.
     const panel = screen.getByTestId('trust-risk-panel');
     expect(panel.querySelector('.trust-dialog-intro')?.nextElementSibling).toBe(missing);
-    expect(screen.getByTestId('trust-proof-enrol-link').getAttribute('href')).toBe('/config#settings-authenticator');
+    expect(screen.getByTestId('trust-proof-enrol-link').getAttribute('href')).toBe('/config/security#settings-authenticator');
     // Nothing to confirm: no code field, no acknowledgements, no confirm button.
     expect(screen.queryByTestId('trust-proof-input')).toBeNull();
     expect(screen.queryByTestId('trust-ack')).toBeNull();
@@ -404,7 +404,7 @@ describe('TrustSection', () => {
     trustMock.instance.mockResolvedValue(view('standard', 'instance', null));
     wrap(<TrustSection />);
     expect((await screen.findByTestId('trust-need-proof')).textContent).toMatch(/configure d'abord l'authentificateur/);
-    expect(screen.getByTestId('trust-need-proof-link').getAttribute('href')).toBe('/config#settings-authenticator');
+    expect(screen.getByTestId('trust-need-proof-link').getAttribute('href')).toBe('/config/security#settings-authenticator');
     // The authenticator has its own card now.
     expect(screen.queryByTestId('trust-proof-section')).toBeNull();
     expect(await screen.findByTestId('trust-control-instance')).toBeTruthy();

@@ -13,6 +13,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import type { DiscussionAction } from '../../src/types/generated';
+import { DashboardPage, SETTINGS_SUB_PAGES, type SettingsSubPage } from '../pages/DashboardPage';
 
 const DARK_THEMES = ['dark', 'arcade', 'gotham', 'matrix'] as const;
 const SECRET_THEMES = ['arcade', 'matrix', 'sakura', 'gotham', 'euronews'];
@@ -22,6 +23,8 @@ interface Route {
   navTourId: string;
   readySelector: string;
   exclude?: string[];
+  /** KT-1923 — a page made of sub-pages (Settings): each is measured, folds open. */
+  subPages?: readonly SettingsSubPage[];
 }
 
 const ROUTES: Route[] = [
@@ -32,7 +35,7 @@ const ROUTES: Route[] = [
   { name: 'Workflows', navTourId: 'nav-workflows', readySelector: 'aside.collection-shell-sidebar' },
   // Embedded Page documents are user-authored, not app chrome.
   { name: 'Pages', navTourId: 'nav-pages', readySelector: 'aside.collection-shell-sidebar', exclude: ['iframe'] },
-  { name: 'Settings', navTourId: 'nav-settings', readySelector: '.settings-page' },
+  { name: 'Settings', navTourId: 'nav-settings', readySelector: '.settings-page', subPages: SETTINGS_SUB_PAGES },
 ];
 
 type ContrastNode = { target: string; fg?: string; bg?: string; ratio?: number; expected?: number };
@@ -279,6 +282,25 @@ test.describe.configure({ timeout: 90_000, retries: 0 });
 test.describe('a11y — no contrast violation in the dark themes', () => {
   for (const theme of DARK_THEMES) {
     for (const route of ROUTES) {
+      if (route.subPages) {
+        // KT-1923 — Settings' tab opens its first sub-page: measure all five.
+        for (const subPage of route.subPages) {
+          const label = `${theme} ${route.name} › ${subPage}`;
+          test(`${theme}: ${route.name} › ${subPage}`, async ({ page }) => {
+            await readOnly(page, theme);
+            await openRoute(page, theme, route);
+            const dashboard = new DashboardPage(page);
+            await dashboard.selectSettingsSubPage(subPage);
+            await dashboard.openSettingsFolds();
+            await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => undefined);
+
+            const nodes = await contrastViolations(page, label, route.exclude);
+            report(label, nodes);
+            expect(nodes, `${label} has contrast violations`).toEqual([]);
+          });
+        }
+        continue;
+      }
       test(`${theme}: ${route.name}`, async ({ page }) => {
         await readOnly(page, theme);
         await openRoute(page, theme, route);

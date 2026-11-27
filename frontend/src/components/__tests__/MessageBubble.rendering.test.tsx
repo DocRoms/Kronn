@@ -1245,16 +1245,16 @@ describe('MessageBubble — inline CTAs open their Configuration address in a ne
     expectNewTab('disc.overrideKey', onNavigate, '/config');
   });
 
-  it('the edit-timeout CTA opens /config#settings-server', () => {
+  it('the edit-timeout CTA opens /config/security#settings-server', () => {
     const onNavigate = vi.fn();
     renderBubble(
       makeMessage({ role: 'Agent', content: "Réponse partielle — l'agent a été interrompu." }),
       { onNavigate },
     );
-    expectNewTab('disc.editTimeout', onNavigate, '/config#settings-server');
+    expectNewTab('disc.editTimeout', onNavigate, '/config/security#settings-server');
   });
 
-  it('the model-error tier shortcut opens /config#settings-agent-config', () => {
+  it('the model-error tier shortcut opens /config/agents#settings-agent-config', () => {
     const onNavigate = vi.fn();
     const content = '[kronn:model-error]\n' + JSON.stringify({
       kind: 'model_error',
@@ -1270,6 +1270,6 @@ describe('MessageBubble — inline CTAs open their Configuration address in a ne
       model: 'model-a',
       model_tier: 'default',
     }), { onNavigate });
-    expectNewTab('disc.changeTierModel', onNavigate, '/config#settings-agent-config');
+    expectNewTab('disc.changeTierModel', onNavigate, '/config/agents#settings-agent-config');
   });
 });

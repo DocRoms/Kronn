@@ -1959,7 +1959,7 @@ describe('NewDiscussionForm — Configuration links open in a new tab', () => {
     expectConfigLink('config.restrictedAgentLink', onClose, onNavigate);
   });
 
-  it('a Ctrl-click on the collaboration settings button opens /config#settings-agent-handoffs in a new tab', async () => {
+  it('a Ctrl-click on the collaboration settings button opens /config/agents#settings-agent-handoffs in a new tab', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     const { onClose, onNavigate } = renderWith([AGENT, CODEX_AGENT], null);
     fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
@@ -1969,7 +1969,7 @@ describe('NewDiscussionForm — Configuration links open in a new tab', () => {
     fireEvent.click(await screen.findByText('disc.multiAgentCollaborationSettings'), { ctrlKey: true });
 
     expect(open).toHaveBeenCalledWith(
-      `${window.location.origin}/config#settings-agent-handoffs`, '_blank', 'noopener,noreferrer',
+      `${window.location.origin}/config/agents#settings-agent-handoffs`, '_blank', 'noopener,noreferrer',
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(onNavigate).not.toHaveBeenCalled();

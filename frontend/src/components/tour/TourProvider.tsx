@@ -5,7 +5,7 @@ import {
   type Page,
   type TourStep,
 } from './tourSteps';
-import { waitForElement } from './useTourPositioning';
+import { waitForElement, waitForStablePosition } from './useTourPositioning';
 import { loadTourProgress, saveTourProgress } from './tourProgress';
 
 const AUTO_START_DELAY = 800;
@@ -36,7 +36,8 @@ export function useTour(): TourContextValue {
 }
 
 interface TourProviderProps {
-  setPage: (page: Page) => void;
+  /** Opens a page; on Settings, the sub-page that holds `settingsSection` when the step names one. */
+  setPage: (page: Page, settingsSection?: string) => void;
   children: React.ReactNode;
 }
 
@@ -172,8 +173,9 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     }
 
     // Page navigation
-    if (toStep.page !== fromStep?.page) {
-      setPage(toStep.page);
+    const openedPage = toStep.page !== fromStep?.page || toStep.settingsSection !== fromStep?.settingsSection;
+    if (openedPage) {
+      setPage(toStep.page, toStep.settingsSection);
       await new Promise(r => setTimeout(r, 300));
     }
 
@@ -185,7 +187,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
 
     // Wait for selector
     if (toStep.selector) {
-      const el = await waitForElement(
+      let el = await waitForElement(
         toStep.selector,
         toStep.optionalWhenMissing
           ? OPTIONAL_TARGET_TIMEOUT_MS
@@ -230,6 +232,11 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
         return;
       }
       skippedStepIds = skippedStepIds.filter(id => id !== toStep.id);
+
+      // A page just opened is still being drawn and scrolled: show the step
+      // once its target holds still, so the spotlight is measured where the
+      // target ends up, not where it passed (KT-1923).
+      if (openedPage) el = await waitForStablePosition(toStep.selector) ?? el;
 
       // Setup waitForClick listener
       if (toStep.waitForClick && el) {
@@ -324,7 +331,8 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
       latestProgress.skippedStepIds,
     );
     setActive(true);
-    setPage(TOUR_STEPS[resumeStep]?.page ?? TOUR_STEPS[0].page);
+    const resumeAt = TOUR_STEPS[resumeStep] ?? TOUR_STEPS[0];
+    setPage(resumeAt.page, resumeAt.settingsSection);
     // If resuming mid-tour, drive the full navigation pipeline so the
     // target step's `beforeStep` hook (and any page switch) runs —
     // otherwise a refresh inside the profiles sub-flow would land on

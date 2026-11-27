@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/kronn-fixture';
+import { DashboardPage } from '../pages/DashboardPage';
 
 for (const width of [1440, 390]) {
   test(`Claude default alias warning is readable at ${width}px`, async ({ page }) => {
@@ -22,7 +23,9 @@ for (const width of [1440, 390]) {
       json: { success: true, data: target, error: null },
     }));
     await page.goto('/');
-    await page.locator('[data-tour-id="nav-settings"]').click();
+    await new DashboardPage(page).openSettings('agents');
+    // KT-1923 — the catalogue is folded until opened.
+    await page.getByTestId('fold-settings-catalogue').click();
     const row = page.getByTestId('model-catalog-row-agent:claude-code:default');
     const note = row.getByText('Défaut de la CLI — peut changer', { exact: true });
     await note.scrollIntoViewIfNeeded();

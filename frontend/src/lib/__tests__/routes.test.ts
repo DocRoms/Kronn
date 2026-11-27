@@ -3,6 +3,9 @@ import {
   DEFAULT_PAGE, DESIGN_SYSTEM_PATH, DESIGN_SYSTEM_TABS, PAGE_PATHS, STANDALONE_PATHS, automationEditorFromPath,
   designSystemAnchorTab, designSystemPath, designSystemTabFromSegment, legacyDesignSystemLocation, automationPath, automationTabFromPath, discussionPath, isAppPath, pathToPage,
   livePagePath, planningTaskPath, pluginPath, projectLocation, projectPath, sameAutomationSelection, settingsSectionPath, standalonePagePath, workflowPath, workflowShadowSettingsPath, type AutomationSelection, type DashboardPage,
+  DEFAULT_SETTINGS_SUB_PAGE, EMBED_SETTINGS_PATH, SETTINGS_SECTIONS, SETTINGS_SUB_PAGES, embedSettingsPath, settingsFoldOf,
+  settingsRedirectPath, settingsSectionOf, settingsSectionsOf, settingsSubPageFromSegment, settingsSubPagePath,
+  type SettingsSubPage,
 } from '../routes';
 
 describe('routes', () => {
@@ -208,10 +211,124 @@ describe('workflow wizard addresses', () => {
   });
 });
 
-describe('Configuration sections', () => {
-  it('names a section by the hash of the Configuration address', () => {
-    expect(settingsSectionPath('settings-server')).toBe('/config#settings-server');
-    expect(pathToPage(settingsSectionPath('settings-server').split('#')[0])).toBe('settings');
+describe('Configuration sections (KT-1923: five sub-pages)', () => {
+  /** Every anchor the single page had (its section index, `credentials`,
+   *  `artifacts`, the groups and fields linked from elsewhere), and the
+   *  sub-page the owner's grouping of 2026-11-21 puts it on. */
+  const FORMER_ANCHORS: readonly (readonly [string, SettingsSubPage])[] = [
+    ['settings-identity', 'you'],
+    ['settings-appearance', 'you'],
+    ['settings-languages', 'you'],
+    ['settings-voice', 'you'],
+    ['settings-user-context', 'you'],
+    ['settings-agent-config', 'agents'],
+    ['settings-agent-handoffs', 'agents'],
+    ['settings-usage', 'agents'],
+    ['settings-capabilities', 'agents'],
+    ['settings-skills', 'agents'],
+    ['settings-profiles', 'agents'],
+    ['settings-directives', 'agents'],
+    ['settings-host-mcps', 'agents'],
+    ['settings-scan', 'work'],
+    ['settings-workers', 'work'],
+    ['settings-worktrees', 'work'],
+    ['settings-sourcing', 'work'],
+    ['settings-continual-learning', 'work'],
+    ['settings-artifacts', 'work'],
+    ['settings-recovery', 'security'],
+    ['settings-authenticator', 'security'],
+    ['settings-trust', 'security'],
+    ['settings-server', 'security'],
+    ['credentials', 'security'],
+    ['settings-database', 'system'],
+    ['run-payload-retention', 'system'],
+    ['settings-disk', 'system'],
+    ['settings-api-audit', 'system'],
+    ['settings-debug', 'system'],
+    ['settings-general', 'system'],
+  ];
+  /** The sections that were nested inside Agents, listed now with their own anchor. */
+  const NEW_SECTIONS = ['settings-local-models', 'settings-media', 'settings-compression', 'settings-catalogue'];
+
+  it('has one address per sub-page under /config, with language-neutral segments', () => {
+    expect(SETTINGS_SUB_PAGES.map(page => settingsSubPagePath(page))).toEqual([
+      '/config/you', '/config/agents', '/config/work', '/config/security', '/config/system',
+    ]);
+    expect(settingsSubPagePath('agents', 'settings-usage')).toBe('/config/agents#settings-usage');
+    for (const page of SETTINGS_SUB_PAGES) {
+      expect(pathToPage(settingsSubPagePath(page))).toBe('settings');
+      expect(settingsSubPageFromSegment(page)).toBe(page);
+    }
+    expect(settingsSubPageFromSegment(undefined)).toBeNull();
+    expect(settingsSubPageFromSegment('design-system')).toBeNull();
+    expect(DEFAULT_SETTINGS_SUB_PAGE).toBe('you');
+  });
+
+  it.each(FORMER_ANCHORS)('sends the anchor %s to its sub-page (%s), with the same signature for the callers', (anchor, page) => {
+    expect(settingsSectionPath(anchor)).toBe(`/config/${page}#${anchor}`);
+    expect(settingsSectionOf(anchor)?.page).toBe(page);
+    expect(settingsRedirectPath('/config', `#${anchor}`, undefined)).toBe(`/config/${page}#${anchor}`);
+    // Already there: nothing to redirect.
+    expect(settingsRedirectPath(`/config/${page}`, `#${anchor}`, page)).toBeNull();
+  });
+
+  it('groups the sections in the order of the validated mockup', () => {
+    const ids = (page: SettingsSubPage) => settingsSectionsOf(page).map(section => section.id);
+    expect(ids('you')).toEqual(['settings-identity', 'settings-appearance', 'settings-voice', 'settings-user-context']);
+    expect(ids('agents')).toEqual([
+      'settings-agent-config', 'settings-local-models', 'settings-media', 'settings-compression',
+      'settings-catalogue', 'settings-usage', 'settings-capabilities',
+    ]);
+    expect(ids('work')).toEqual([
+      'settings-scan', 'settings-workers', 'settings-worktrees', 'settings-sourcing', 'settings-continual-learning',
+      'settings-artifacts',
+    ]);
+    expect(ids('security')).toEqual([
+      'settings-recovery', 'settings-authenticator', 'settings-trust', 'settings-server', 'credentials',
+    ]);
+    expect(ids('system')).toEqual([
+      'settings-database', 'settings-disk', 'settings-api-audit', 'settings-debug', 'settings-general',
+    ]);
+    for (const id of NEW_SECTIONS) expect(settingsSectionPath(id)).toBe(`/config/agents#${id}`);
+    // Every section is on exactly one sub-page.
+    expect(new Set(SETTINGS_SECTIONS.map(section => section.id)).size).toBe(SETTINGS_SECTIONS.length);
+  });
+
+  it('opens a folded section when an anchor lands on it', () => {
+    expect(settingsFoldOf('settings-catalogue')).toBe('settings-catalogue');
+    expect(settingsFoldOf('settings-usage')).toBe('settings-usage');
+    expect(settingsFoldOf('settings-api-audit')).toBe('settings-api-audit');
+    expect(settingsFoldOf('settings-debug-logs')).toBe('settings-debug-logs');
+    expect(settingsSectionPath('settings-debug-logs')).toBe('/config/system#settings-debug-logs');
+    expect(settingsFoldOf('settings-debug')).toBeNull();
+    expect(settingsFoldOf('settings-server')).toBeNull();
+    expect(settingsFoldOf('nope')).toBeNull();
+    expect(settingsFoldOf(null)).toBeNull();
+  });
+
+  it('keeps an old alias, the rows drawn per agent, and an unknown anchor without an error', () => {
+    expect(settingsSectionPath('artifacts')).toBe('/config/work#settings-artifacts');
+    expect(settingsSectionPath('agent-config-ClaudeCode')).toBe('/config/agents#agent-config-ClaudeCode');
+    expect(settingsSectionOf('agent-config-')).toBeNull();
+    // No section names it: Configuration itself, which opens its first sub-page.
+    expect(settingsSectionPath('nope')).toBe('/config#nope');
+    expect(settingsRedirectPath('/config', '#nope', undefined)).toBe('/config/you');
+    expect(settingsRedirectPath('/config', '', undefined)).toBe('/config/you');
+    expect(settingsRedirectPath('/config/', '', undefined)).toBe('/config/you');
+    expect(settingsRedirectPath('/config/elsewhere', '', 'elsewhere')).toBe('/config/you');
+    expect(settingsRedirectPath('/config/work', '#nope', 'work')).toBeNull();
+    expect(settingsRedirectPath('/config/work', '#%E0%A4%A', 'work')).toBeNull();
+    // An anchor asked on another sub-page's address moves to its own.
+    expect(settingsRedirectPath('/config/system', '#settings-usage', 'system')).toBe('/config/agents#settings-usage');
+    expect(settingsRedirectPath('/config/work', '#artifacts', 'work')).toBe('/config/work#settings-artifacts');
+  });
+
+  it('leaves the embedded Settings address and the design system addresses as they were', () => {
+    expect(EMBED_SETTINGS_PATH).toBe('/config/artifacts');
+    expect(embedSettingsPath('https://vimeo.com')).toBe('/config/artifacts?origin=https%3A%2F%2Fvimeo.com');
+    expect(DESIGN_SYSTEM_PATH).toBe('/config/design-system');
+    expect(settingsSubPageFromSegment('artifacts')).toBeNull();
+    expect(legacyDesignSystemLocation('settings-appearance')).toBeNull();
   });
 });
 

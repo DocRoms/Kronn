@@ -145,12 +145,14 @@ describe('dashboard route table', () => {
     ['/workflows', 'workflows'],
     ['/pages', 'pages'],
     ['/plugins', 'mcps'],
-    ['/config', 'settings'],
-  ])('renders %s as the %s page', async (path, name) => {
+    // KT-1923 — `/config` alone opens the first sub-page of Settings.
+    ['/config', 'settings', '/config/you'],
+    ['/config/security', 'settings'],
+  ])('renders %s as the %s page', async (path, name, landed = path) => {
     await open(path);
 
     expect(screen.getByTestId(`${name}-page`)).toBeInTheDocument();
-    expect(window.location.pathname).toBe(path);
+    expect(window.location.pathname).toBe(landed);
   });
 
   it('keeps the hash and the query of a bare address it redirects', async () => {
@@ -418,7 +420,7 @@ describe('Projects route', () => {
     ['discussions', '/discussions'],
     ['mcps', '/plugins'],
     ['workflows', '/workflows'],
-    ['settings', '/config'],
+    ['settings', '/config/you'],
   ])('navigates to %s', async (target, path) => {
     const ctx = await open('/projects');
 
@@ -737,7 +739,7 @@ describe('Workflows route', () => {
     ['a discussion to run', (p: ComponentProps<typeof WorkflowsPage>) => p.onNavigateDiscussion?.('disc-1'), '/discussions/disc-1'],
     ['an Artifact', (p: ComponentProps<typeof WorkflowsPage>) => p.onNavigatePage?.('page-7'), '/pages/page-7'],
     ['Plugins', (p: ComponentProps<typeof WorkflowsPage>) => p.onNavigateMcp?.(), '/plugins'],
-    ['Settings', (p: ComponentProps<typeof WorkflowsPage>) => p.onNavigateSettings?.(), '/config'],
+    ['Settings', (p: ComponentProps<typeof WorkflowsPage>) => p.onNavigateSettings?.(), '/config/you'],
   ])('jumps to %s', async (_label, jump, path) => {
     await open('/workflows');
 
@@ -950,8 +952,9 @@ describe('Discussions route', () => {
       modelTier: { agentType: 'LiteLlm', tier: 'default' },
     }));
 
-    expect(window.location.pathname).toBe('/config');
+    expect(window.location.pathname).toBe('/config/agents');
     expect(window.location.hash).toBe('#settings-agent-config');
+    expect(received.settings().subPage).toBe('agents');
     expect(received.settings().modelTierTarget).toEqual({ agentType: 'LiteLlm', tier: 'default' });
     // Acknowledged: a reload or a Back never points at it again.
     await act(async () => received.settings().onModelTierTargetConsumed?.());
@@ -967,7 +970,7 @@ describe('Discussions route', () => {
     document.body.appendChild(anchor);
     try {
       await act(async () => received.discussions().onNavigate('settings', { scrollTo: 'settings-server' }));
-      expect(window.location.pathname).toBe('/config');
+      expect(window.location.pathname).toBe('/config/security');
       expect(window.location.hash).toBe('#settings-server');
 
       await waitFor(() => expect(anchor.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' }));
@@ -977,7 +980,8 @@ describe('Discussions route', () => {
   });
 
   it('waits for a section that renders late, then scrolls to it', async () => {
-    await open('/config#settings-late');
+    // An anchor no section of the table names, on a sub-page's address, stays.
+    await open('/config/work#settings-late');
     const anchor = document.createElement('div');
     anchor.id = 'settings-late';
     anchor.scrollIntoView = vi.fn();
@@ -1006,6 +1010,52 @@ describe('Discussions route', () => {
 });
 
 describe('Settings route', () => {
+  it('moves between sub-pages and onto an anchor of another one, steps Back undoes (KT-1923)', async () => {
+    await open('/config');
+    expect(window.location.pathname).toBe('/config/you');
+    expect(received.settings().subPage).toBe('you');
+
+    await act(async () => received.settings().onOpenSubPage?.('system'));
+    expect(window.location.pathname).toBe('/config/system');
+    expect(received.settings().subPage).toBe('system');
+
+    await act(async () => received.settings().onOpenAnchor?.('settings-usage'));
+    expect(window.location.pathname).toBe('/config/agents');
+    expect(window.location.hash).toBe('#settings-usage');
+    expect(received.settings().subPage).toBe('agents');
+    expect(received.settings().arrivalAnchor).toBe('settings-usage');
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(window.location.pathname).toBe('/config/system'));
+  });
+
+  it.each([
+    ['/config', '/config/you', ''],
+    ['/config/', '/config/you', ''],
+    ['/config/nope', '/config/you', ''],
+    ['/config#nope', '/config/you', ''],
+    ['/config/system#settings-usage', '/config/agents', '#settings-usage'],
+    ['/config#artifacts', '/config/work', '#settings-artifacts'],
+    ['/config/work#artifacts', '/config/work', '#settings-artifacts'],
+    ['/config#run-payload-retention', '/config/system', '#run-payload-retention'],
+    ['/config#agent-config-ClaudeCode', '/config/agents', '#agent-config-ClaudeCode'],
+  ])('lands %s on %s%s, without an error (KT-1923)', async (from, pathname, hash) => {
+    await open(from);
+
+    expect(await screen.findByTestId('settings-page')).toBeInTheDocument();
+    expect(window.location.pathname).toBe(pathname);
+    expect(window.location.hash).toBe(hash);
+  });
+
+  it('keeps the embedded Settings address: the site typed in, then the artifacts section (KT-1923)', async () => {
+    await open('/config/artifacts?origin=https%3A%2F%2Fexample.com');
+
+    await waitFor(() => expect(window.location.pathname).toBe('/config/work'));
+    expect(window.location.hash).toBe('#settings-artifacts');
+    expect(received.settings().subPage).toBe('work');
+    expect(received.settings().embedOriginPrefill?.nonce).toBe(1);
+  });
+
   it('jumps to a discussion and resets through the shell', async () => {
     const ctx = await open('/config');
 
@@ -1069,7 +1119,7 @@ describe('Design system route (KT-1987)', () => {
     document.body.appendChild(anchor);
     try {
       await act(async () => received.designSystem().onBack?.());
-      expect(window.location.pathname).toBe('/config');
+      expect(window.location.pathname).toBe('/config/you');
       expect(window.location.hash).toBe('#settings-appearance');
       expect(await screen.findByTestId('settings-page')).toBeInTheDocument();
       await waitFor(() => expect(anchor.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' }));
@@ -1116,12 +1166,14 @@ describe('Design system route (KT-1987)', () => {
     await waitFor(() => expect(window.location.pathname).toBe('/projects'));
   });
 
-  it('keeps the anchors of Configuration itself on Configuration', async () => {
+  it('keeps the anchors of Configuration itself on Configuration, on their sub-page (KT-1923)', async () => {
     await open('/config#settings-server');
 
     expect(await screen.findByTestId('settings-page')).toBeInTheDocument();
-    expect(window.location.pathname).toBe('/config');
+    expect(window.location.pathname).toBe('/config/security');
     expect(window.location.hash).toBe('#settings-server');
+    expect(received.settings().subPage).toBe('security');
+    expect(received.settings().arrivalAnchor).toBe('settings-server');
   });
 
   it('brings an entry into view on arrival, on the tab its address names', async () => {

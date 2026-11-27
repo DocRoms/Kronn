@@ -12,7 +12,7 @@ snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:123-186#catalogModelOptions]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:103-106#catalogModelProvenance]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:892-917#renderSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:921-946#renderSelect]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
 the editor rereads it and merges only the selected agent/tier, guarded against
@@ -20,7 +20,7 @@ synchronous re-entry. It updates its displayed state after a successful write,
 not optimistically. This preserves edits already saved by another card, but is
 not a server-side compare-and-swap guarantee against another client writing
 between that GET and POST.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:233-278#saveTierPreference]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:263-308#saveTierPreference]
 
 The component regressions cover dynamic IDs, runtime separation, OpenCode,
 manual Kiro/Vibe entries, unavailable/cache metadata, empty/error recovery,

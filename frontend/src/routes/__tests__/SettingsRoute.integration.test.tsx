@@ -104,12 +104,16 @@ async function reload() {
   await renderDashboard(address, entry);
 }
 
-const sectionLink = (id: string) => waitFor(() => {
-  const found = document.querySelector<HTMLAnchorElement>(`nav.set-nav a[href="/config#${id}"]`);
+// KT-1923 — a section's link sits under the name of its sub-page.
+const sectionLink = (id: string, page = 'security') => waitFor(() => {
+  const found = document.querySelector<HTMLAnchorElement>(
+    `.set-subpage:not([hidden]) .set-subpage-links a[href="/config/${page}#${id}"]`,
+  );
   expect(found).not.toBeNull();
   return found!;
 });
-const highlighted = () => document.querySelector('nav.set-nav a[aria-current="location"]')?.getAttribute('href');
+/** The sub-page the list marks as the one shown. */
+const highlighted = () => document.querySelector('nav.set-subnav a[aria-current="page"]')?.getAttribute('href');
 
 const retentionSetting = () => document.getElementById('run-payload-retention') as HTMLSelectElement | null;
 const retentionLink = () => screen.getAllByTestId('run-retention-banner')[0].querySelector<HTMLAnchorElement>('a.rr-btn')!;
@@ -137,11 +141,11 @@ describe('Configuration anchors — the run-retention setting', () => {
   it('Automation\'s banner links to the setting\'s address, which centres and focuses it once loaded', async () => {
     await renderDashboard('/workflows');
     const link = await waitFor(() => retentionLink());
-    expect(link).toHaveAttribute('href', '/config#run-payload-retention');
+    expect(link).toHaveAttribute('href', '/config/system#run-payload-retention');
 
     await act(async () => { fireEvent.click(link); });
 
-    await waitFor(() => expect(window.location.pathname).toBe('/config'));
+    await waitFor(() => expect(window.location.pathname).toBe('/config/system'));
     expect(window.location.hash).toBe('#run-payload-retention');
     // No hand-off through storage: the address carries the target.
     expect(sessionStorage.length).toBe(0);
@@ -166,27 +170,16 @@ describe('Configuration anchors — the run-retention setting', () => {
     await waitFor(() => expect(document.activeElement).toBe(retentionSetting()), { timeout: 3000 });
   });
 
-  it('highlights the setting\'s own section in the side menu, until the reader scrolls', async () => {
+  it('lands the old address on the System sub-page, marked in the list, the field focused (KT-1923)', async () => {
     await renderDashboard('/config#run-payload-retention');
+    await waitFor(() => expect(window.location.pathname).toBe('/config/system'));
+    expect(window.location.hash).toBe('#run-payload-retention');
     await waitFor(() => expect(document.activeElement).toBe(retentionSetting()), { timeout: 3000 });
-    const current = () => document.querySelector('nav.set-nav a[aria-current="location"]')?.getAttribute('href');
-
-    // The scroll that brought the setting in ends at the bottom of the page,
-    // where the spy alone would name the last section.
-    await act(async () => { window.dispatchEvent(new Event('scroll')); });
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
-    expect(current()).toBe('/config#settings-database');
-
-    // The reader scrolls on their own: the spy follows the page again.
-    await act(async () => {
-      window.dispatchEvent(new Event('wheel'));
-      window.dispatchEvent(new Event('scroll'));
-    });
-    await waitFor(() => expect(current()).toBe('/config#settings-general'));
+    expect(highlighted()).toBe('/config/system');
   });
 
   it('Configuration\'s own banner moves the address in place and points at the setting', async () => {
-    await renderDashboard('/config');
+    await renderDashboard('/config/system');
     const depth = window.history.length;
     const link = await waitFor(() => retentionLink());
 
@@ -198,16 +191,11 @@ describe('Configuration anchors — the run-retention setting', () => {
   });
 });
 
-describe('Configuration anchors — the side menu', () => {
+describe('Configuration anchors — the links to the sections of a sub-page', () => {
   it('makes every section a link to its address; a plain click scrolls here and replaces the address', async () => {
-    await renderDashboard('/config');
+    await renderDashboard('/config/security');
     const depth = window.history.length;
-    const server = await waitFor(() => {
-      const found = document.querySelector<HTMLAnchorElement>('nav.set-nav a[href="/config#settings-server"]');
-      expect(found).not.toBeNull();
-      return found;
-    });
-    expect(server).not.toBeNull();
+    const server = await sectionLink('settings-server');
 
     await act(async () => { fireEvent.click(server!); });
     expect(window.location.hash).toBe('#settings-server');
@@ -225,19 +213,19 @@ describe('Configuration anchors — the side menu', () => {
 
   // Review #227 — the page's own scroll is said for that one move only: the
   // entry it leaves behind is an address like any other.
-  it('brings the section back into view on a reload after a click, highlighted', async () => {
-    await renderDashboard('/config');
+  it('brings the section back into view on a reload after a click, its sub-page marked', async () => {
+    await renderDashboard('/config/security');
     await act(async () => { fireEvent.click(await sectionLink('settings-server')); });
     expect(window.location.hash).toBe('#settings-server');
 
     await reload();
 
     await waitFor(() => expect(scrolled).toHaveBeenCalledWith('settings-server', { behavior: 'smooth', block: 'start' }), { timeout: 3000 });
-    await waitFor(() => expect(highlighted()).toBe('/config#settings-server'));
+    await waitFor(() => expect(highlighted()).toBe('/config/security'));
   });
 
   it('brings the section back into view on a reload while the page is still loading', async () => {
-    await renderDashboard('/config');
+    await renderDashboard('/config/security');
     await act(async () => { fireEvent.click(await sectionLink('settings-server')); });
 
     let deliver!: (value: ServerConfigPublic) => void;
@@ -248,22 +236,112 @@ describe('Configuration anchors — the side menu', () => {
     });
 
     await waitFor(() => expect(scrolled).toHaveBeenCalledWith('settings-server', { behavior: 'smooth', block: 'start' }), { timeout: 3000 });
-    await waitFor(() => expect(highlighted()).toBe('/config#settings-server'));
+    await waitFor(() => expect(highlighted()).toBe('/config/security'));
   });
 
   it('brings the section into view again when Back then Forward return to it', async () => {
     await renderDashboard('/planning');
     await act(async () => { fireEvent.click(document.querySelector<HTMLElement>('[data-tour-id="nav-settings"]')!); });
-    await waitFor(() => expect(window.location.pathname).toBe('/config'));
+    await waitFor(() => expect(window.location.pathname).toBe('/config/you'));
+    await act(async () => { fireEvent.click(await waitFor(() => screen.getByTestId('settings-subpage-security'))); });
+    await waitFor(() => expect(window.location.pathname).toBe('/config/security'));
     await act(async () => { fireEvent.click(await sectionLink('settings-server')); });
     expect(window.location.hash).toBe('#settings-server');
 
     await act(async () => { window.history.back(); });
-    await waitFor(() => expect(window.location.pathname).toBe('/planning'));
+    await waitFor(() => expect(window.location.pathname).toBe('/config/you'));
     scrolled.mockReset();
     await act(async () => { window.history.forward(); });
     await waitFor(() => expect(window.location.hash).toBe('#settings-server'));
 
     await waitFor(() => expect(scrolled).toHaveBeenCalledWith('settings-server', { behavior: 'smooth', block: 'start' }), { timeout: 3000 });
+  });
+});
+
+describe('Configuration anchors — the old single page lands on the sub-pages (KT-1923)', () => {
+  // The anchors of the single page, with the sub-page each lands on. Two
+  // cards are drawn only from data this simulation does not hold (an API
+  // plugin with a config; the authenticator's status): their address lands,
+  // their card is not drawn, as on the single page.
+  const DRAWN_FROM_DATA = ['settings-api-audit', 'settings-authenticator'];
+  it.each([
+    ['settings-identity', 'you'],
+    ['settings-appearance', 'you'],
+    ['settings-languages', 'you'],
+    ['settings-voice', 'you'],
+    ['settings-user-context', 'you'],
+    ['settings-agent-config', 'agents'],
+    ['settings-agent-handoffs', 'agents'],
+    ['settings-usage', 'agents'],
+    ['settings-capabilities', 'agents'],
+    ['settings-skills', 'agents'],
+    ['settings-host-mcps', 'agents'],
+    ['settings-scan', 'work'],
+    ['settings-workers', 'work'],
+    ['settings-worktrees', 'work'],
+    ['settings-sourcing', 'work'],
+    ['settings-continual-learning', 'work'],
+    ['settings-artifacts', 'work'],
+    ['settings-recovery', 'security'],
+    ['settings-authenticator', 'security'],
+    ['settings-trust', 'security'],
+    ['settings-server', 'security'],
+    ['credentials', 'security'],
+    ['settings-database', 'system'],
+    ['settings-disk', 'system'],
+    ['settings-api-audit', 'system'],
+    ['settings-debug', 'system'],
+    ['settings-general', 'system'],
+  ])('/config#%s lands on /config/%s, on that section', async (anchor, page) => {
+    await renderDashboard(`/config#${anchor}`);
+
+    await waitFor(() => expect(window.location.pathname).toBe(`/config/${page}`));
+    expect(window.location.hash).toBe(`#${anchor}`);
+    expect(highlighted()).toBe(`/config/${page}`);
+    if (DRAWN_FROM_DATA.includes(anchor)) return;
+    const target = await waitFor(() => {
+      const found = document.getElementById(anchor);
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(target.closest('.set-subpage')).toHaveAttribute('data-subpage', page);
+    expect(target.closest('[hidden]')).toBeNull();
+  });
+
+  it('opens the folded section the address lands on, and moves the focus to its heading', async () => {
+    await renderDashboard('/config#settings-usage');
+
+    await waitFor(() => expect(window.location.pathname).toBe('/config/agents'));
+    expect(await screen.findByTestId('fold-settings-usage')).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('fold-settings-catalogue')).toHaveAttribute('aria-expanded', 'false');
+    await waitFor(() => expect(document.activeElement?.tagName).toBe('H3'));
+    expect(document.getElementById('settings-usage')).toContainElement(document.activeElement as HTMLElement);
+    await waitFor(() => expect(scrolled).toHaveBeenCalledWith('settings-usage', { behavior: 'smooth', block: 'start' }), { timeout: 3000 });
+  });
+
+  it('opens the first sub-page on an unknown anchor, without an error', async () => {
+    await renderDashboard('/config#no-such-section');
+
+    await waitFor(() => expect(window.location.pathname).toBe('/config/you'));
+    expect(window.location.hash).toBe('');
+    expect(highlighted()).toBe('/config/you');
+  });
+
+  it('takes a search hit of another sub-page to its section: an address Back can undo, the fold opened', async () => {
+    await renderDashboard('/config/you');
+    const depth = window.history.length;
+    const field = await screen.findByRole('searchbox', { name: 'Rechercher un réglage' });
+
+    fireEvent.change(field, { target: { value: 'catalogue de modèles' } });
+    fireEvent.keyDown(field, { key: 'ArrowDown' });
+    const hit = document.activeElement as HTMLAnchorElement;
+    expect(hit).toHaveAttribute('href', '/config/agents#settings-catalogue');
+    await act(async () => { fireEvent.click(hit); });
+
+    await waitFor(() => expect(window.location.pathname).toBe('/config/agents'));
+    expect(window.location.hash).toBe('#settings-catalogue');
+    expect(window.history.length).toBe(depth + 1);
+    expect(screen.getByTestId('fold-settings-catalogue')).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(document.getElementById('settings-catalogue')).toContainElement(document.activeElement as HTMLElement));
   });
 });

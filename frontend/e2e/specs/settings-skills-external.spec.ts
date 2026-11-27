@@ -40,7 +40,7 @@ test.describe('Settings — vendored external skills', () => {
       const settings = new SettingsPage(page);
 
       await dashboard.goto();
-      await dashboard.clickSettings();
+      await dashboard.openSettings('agents');
       await settings.openSkillsAccordion();
 
       const card = settings.skillCard(skillName);
@@ -67,7 +67,7 @@ test.describe('Settings — vendored external skills', () => {
     const settings = new SettingsPage(page);
 
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('agents');
     await settings.openSkillsAccordion();
 
     const card = settings.skillCard('test-driven-development');

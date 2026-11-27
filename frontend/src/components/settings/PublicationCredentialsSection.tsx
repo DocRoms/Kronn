@@ -165,7 +165,8 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
   };
 
   return (
-    <section className="settings-section" aria-labelledby="credentials-heading">
+    // KT-1923 — `credentials`: its anchor in Settings > Security.
+    <section id="credentials" className="settings-section" aria-labelledby="credentials-heading">
       <h2 id="credentials-heading">
         <KeyRound size={18} aria-hidden="true" /> {t('settings.credentials.title')}
       </h2>

@@ -41,7 +41,8 @@ test('Vibe installed without auth shows the setup action', async ({ page }) => {
 
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
-  await dashboard.clickSettings();
+  // KT-1923 — the agents are on the « Agents et modèles » sub-page.
+  await dashboard.openSettings('agents');
 
   const agents = page.locator('#settings-agent-config');
   const vibe = agents.locator('.set-agent-row[data-agent-type="Vibe"]');

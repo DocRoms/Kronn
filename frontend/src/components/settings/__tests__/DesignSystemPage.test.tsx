@@ -43,7 +43,7 @@ describe('DesignSystemPage — its own page, two tabs (KT-1987)', () => {
     expect(within(header).getByText('designSystem.hint')).toBeInTheDocument();
     // Back to the Settings section that holds the link, not to the top of Settings.
     const back = within(header).getByRole('link', { name: 'designSystem.back' });
-    expect(back).toHaveAttribute('href', '/config#settings-appearance');
+    expect(back).toHaveAttribute('href', '/config/you#settings-appearance');
     await userEvent.click(back);
     expect(onBack).toHaveBeenCalledTimes(1);
 

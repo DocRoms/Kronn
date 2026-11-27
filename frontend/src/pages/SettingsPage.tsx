@@ -1,6 +1,18 @@
 import { exportAndDownload } from '../lib/exportDownload';
-import { Fragment, useState, useEffect, useCallback, useRef } from 'react';
-import type { SettingsIntent } from '../lib/routes';
+import { Fragment, useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
+import {
+  DEFAULT_SETTINGS_SUB_PAGE,
+  SETTINGS_SUB_PAGES,
+  settingsFoldOf,
+  settingsSectionOf,
+  type SettingsIntent,
+  type SettingsSubPage,
+} from '../lib/routes';
+import { visibleSettingsSections, type SettingsSearchAgent } from '../lib/settingsSearch';
+import { SettingsNav } from '../components/settings/SettingsNav';
+import { SettingsFoldContext, type SettingsFoldState } from '../components/settings/settingsFoldContext';
+import { SettingsListedSection, SettingsSubPageHead } from '../components/settings/SettingsSection';
+import { prefersReducedMotion } from '../components/settings/useSubPageBand';
 import { useKonamiCode } from '../hooks/useKonamiCode';
 import { version as appVersion } from '../../package.json';
 import { ApiCallLogsPage } from './ApiCallLogsPage';
@@ -17,7 +29,7 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink, Gamepad2,
-  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge, FolderInput, Bot, KeyRound, Palette,
+  Minimize2, Maximize2, Maximize, Settings2, Palette,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
@@ -139,28 +151,39 @@ const LANGUAGES: { code: string; label: string; flag: string }[] = [
   { code: 'br', label: 'Brezhoneg', flag: 'BR' },
 ];
 
-const SETTINGS_SECTION_IDS = [
-  'settings-identity',
-  'settings-agent-config',
-  'settings-sourcing',
-  'settings-continual-learning',
-  'settings-capabilities',
-  'settings-appearance',
-  'settings-voice',
-  'settings-scan',
-  'settings-workers',
-  'settings-user-context',
-  'settings-recovery',
-  'settings-authenticator',
-  'settings-trust',
-  'settings-server',
-  'settings-debug',
-  'settings-api-audit',
-  'settings-worktrees',
-  'settings-disk',
-  'settings-database',
-  'settings-general',
-] as const;
+/** KT-1923 — gives the focus to the heading of the section an anchor names
+ *  (the anchor itself when it has none), without scrolling: the caller
+ *  scrolls. A field anchor (`run-payload-retention`) is focused by
+ *  `revealWhenSettled`, not here. */
+function focusSectionHeading(target: HTMLElement) {
+  if (target.matches('input, select, textarea, button')) return;
+  const heading = target.matches('h1, h2, h3, h4')
+    ? target
+    : target.querySelector<HTMLElement>('h2, h3, h4, .set-section-header-lg, .set-accordion-header') ?? target;
+  if (!heading.matches('a[href], button, input, select, textarea, [tabindex]')) heading.setAttribute('tabindex', '-1');
+  heading.setAttribute('data-settings-focus', '');
+  heading.focus({ preventScroll: true });
+}
+
+/** The agent an anchor names a row of (`agent-config-ClaudeCode` → `ClaudeCode`), or null. */
+function agentOfAnchor(anchor: string | null | undefined): string | null {
+  const prefix = 'agent-config-';
+  return anchor?.startsWith(prefix) && anchor.length > prefix.length ? anchor.slice(prefix.length) : null;
+}
+
+/** Focuses the heading of an anchor once it is drawn on the visible sub-page;
+ *  returns a cancel function (an effect's cleanup). */
+function focusSectionHeadingWhenDrawn(anchor: string): () => void {
+  let frame = 0;
+  const deadline = Date.now() + 3000;
+  const attempt = () => {
+    const target = document.getElementById(anchor);
+    if (target && !target.closest('[hidden]')) { focusSectionHeading(target); return; }
+    if (Date.now() < deadline) frame = requestAnimationFrame(attempt);
+  };
+  attempt();
+  return () => cancelAnimationFrame(frame);
+}
 
 interface SettingsPageProps {
   agents: AgentDetection[];
@@ -189,10 +212,19 @@ interface SettingsPageProps {
   onAnchorFollowed?: (anchorId: string) => void;
   /** A plain click on the Design system link: its sub-page, in this tab. */
   onOpenDesignSystem?: () => void;
-  /** The anchor an arrival on `/config#<anchor>` brings into view (the route
-   *  scrolls to it), renewed by `arrivalToken` on every arrival. */
+  /** The anchor an arrival on `/config/<sub-page>#<anchor>` brings into view
+   *  (the route scrolls to it), renewed by `arrivalToken` on every arrival:
+   *  its fold opens and its heading takes the focus. */
   arrivalAnchor?: string | null;
   arrivalToken?: unknown;
+  /** KT-1923 — the sub-page shown, when the address holds it. Without it the
+   *  page holds its own, from the first. */
+  subPage?: SettingsSubPage;
+  /** A plain click on another sub-page in the list. */
+  onOpenSubPage?: (page: SettingsSubPage) => void;
+  /** A plain click on an anchor of another sub-page (a search hit): its
+   *  address, as an arrival. Without it the page switches by itself. */
+  onOpenAnchor?: (anchor: string) => void;
 }
 
 export function SettingsPage({
@@ -215,6 +247,9 @@ export function SettingsPage({
   arrivalAnchor = null,
   arrivalToken,
   onModelTierTargetConsumed,
+  subPage,
+  onOpenSubPage,
+  onOpenAnchor,
 }: SettingsPageProps) {
   const { t, locale, setLocale } = useT();
   const { theme, setTheme, unlockedThemes, unlockTheme } = useTheme();
@@ -307,50 +342,90 @@ export function SettingsPage({
   const [scanIgnore, setScanIgnore] = useState<string[]>([]);
   const [newScanPath, setNewScanPath] = useState('');
   const [newIgnorePattern, setNewIgnorePattern] = useState('');
-  const [activeSettingsSection, setActiveSettingsSection] = useState('settings-identity');
-  const scrollSpyPausedUntil = useRef(0);
-  // An anchor brought into view on purpose (an arrival, the retention banner)
-  // keeps its own section highlighted until the reader scrolls: a setting at
-  // the bottom of the page ends the scroll there, where the spy would
-  // otherwise name the last section instead.
-  const holdSectionOf = useCallback((anchorId: string) => {
-    let frame = 0;
-    const deadline = Date.now() + 3000;
-    const hold = () => {
-      const anchor = document.getElementById(anchorId);
-      const section = (SETTINGS_SECTION_IDS as readonly string[]).includes(anchorId)
-        ? anchorId
-        : anchor?.closest(SETTINGS_SECTION_IDS.map(id => `#${id}`).join(','))?.id;
-      if (section) {
-        setActiveSettingsSection(section);
-        scrollSpyPausedUntil.current = Number.POSITIVE_INFINITY;
-      } else if (Date.now() < deadline) {
-        frame = requestAnimationFrame(hold);
-      }
-    };
-    hold();
-    return () => cancelAnimationFrame(frame);
+  // KT-1923 — five sub-pages. Each is drawn on its first visit and kept
+  // afterwards, hidden while another is shown: an edit in progress (a skill
+  // being written, a path being typed) is still there on the way back.
+  const [ownSubPage, setOwnSubPage] = useState<SettingsSubPage>(subPage ?? DEFAULT_SETTINGS_SUB_PAGE);
+  const current = subPage ?? ownSubPage;
+  const [visited, setVisited] = useState<ReadonlySet<SettingsSubPage>>(() => new Set([current]));
+  if (!visited.has(current)) setVisited(new Set([...visited, current]));
+
+  // The folds the reader opened, and the ones an address or a search hit opened.
+  const [openFolds, setOpenFolds] = useState<ReadonlySet<string>>(() => {
+    const fold = settingsFoldOf(arrivalAnchor);
+    return new Set(fold ? [fold] : []);
+  });
+  const foldState = useMemo<SettingsFoldState>(() => ({
+    isOpen: id => openFolds.has(id),
+    setOpen: (id, open) => setOpenFolds(previous => {
+      if (previous.has(id) === open) return previous;
+      const next = new Set(previous);
+      if (open) next.add(id); else next.delete(id);
+      return next;
+    }),
+  }), [openFolds]);
+  const openFoldOf = useCallback((anchor: string) => {
+    const fold = settingsFoldOf(anchor);
+    if (fold) setOpenFolds(previous => (previous.has(fold) ? previous : new Set([...previous, fold])));
   }, []);
-  useEffect(() => {
-    const resume = () => {
-      if (scrollSpyPausedUntil.current === Number.POSITIVE_INFINITY) scrollSpyPausedUntil.current = 0;
-    };
-    const readerEvents = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
-    readerEvents.forEach(type => window.addEventListener(type, resume, { passive: true, capture: true }));
-    return () => readerEvents.forEach(type => window.removeEventListener(type, resume, { capture: true }));
+
+  // Each arrival on an anchor (an address, Back, a link from another page)
+  // opens the fold it lands on and gives its heading the focus; the route
+  // brings it into view.
+  // An anchor on an agent's row (`agent-config-<agent>`) opens its card.
+  const [agentReveal, setAgentReveal] = useState<{ agentType: string; token: number } | null>(() => {
+    const agentType = agentOfAnchor(arrivalAnchor);
+    return agentType ? { agentType, token: 0 } : null;
+  });
+  const revealAgentOf = useCallback((anchor: string | null) => {
+    const agentType = agentOfAnchor(anchor);
+    if (agentType) setAgentReveal(previous => ({ agentType, token: (previous?.token ?? 0) + 1 }));
   }, []);
+  const [takenArrival, setTakenArrival] = useState({ anchor: arrivalAnchor, token: arrivalToken });
+  if (takenArrival.anchor !== arrivalAnchor || takenArrival.token !== arrivalToken) {
+    setTakenArrival({ anchor: arrivalAnchor, token: arrivalToken });
+    const fold = settingsFoldOf(arrivalAnchor);
+    if (fold && !openFolds.has(fold)) setOpenFolds(new Set([...openFolds, fold]));
+    revealAgentOf(arrivalAnchor);
+  }
   useEffect(() => {
     if (!arrivalAnchor) return undefined;
-    return holdSectionOf(arrivalAnchor);
-  }, [arrivalAnchor, arrivalToken, holdSectionOf]);
+    return focusSectionHeadingWhenDrawn(arrivalAnchor);
+  }, [arrivalAnchor, arrivalToken]);
+
+  // A jump inside Settings (a section link, a search hit): the sub-page that
+  // holds the anchor, its fold opened, the anchor in view, the focus on its heading.
+  const [jump, setJump] = useState<{ anchor: string; count: number } | null>(null);
+  useEffect(() => {
+    if (!jump) return undefined;
+    const target = document.getElementById(jump.anchor);
+    target?.scrollIntoView?.({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' });
+    return focusSectionHeadingWhenDrawn(jump.anchor);
+  }, [jump]);
+  const goTo = useCallback((anchor: string) => {
+    const section = settingsSectionOf(anchor);
+    if (!section) return;
+    openFoldOf(anchor);
+    revealAgentOf(anchor);
+    if (section.page !== current) {
+      if (onOpenAnchor) { onOpenAnchor(anchor); return; }
+      setOwnSubPage(section.page);
+    }
+    setJump(previous => ({ anchor, count: (previous?.count ?? 0) + 1 }));
+    onAnchorFollowed?.(anchor);
+  }, [current, onAnchorFollowed, onOpenAnchor, openFoldOf, revealAgentOf]);
+  const selectSubPage = (page: SettingsSubPage) => {
+    if (page === current) return;
+    if (onOpenSubPage) onOpenSubPage(page); else setOwnSubPage(page);
+  };
+
   // The retention banner on this page: the setting is centred and focused
-  // once ready, and the address names it (`/config#run-payload-retention`,
+  // once ready, and the address names it (`/config/system#run-payload-retention`,
   // the same address another page's banner links to).
   const focusRetentionSetting = useCallback(() => {
     revealWhenSettled(RETENTION_FOCUS_TARGET);
-    holdSectionOf(RETENTION_FOCUS_TARGET);
     onAnchorFollowed?.(RETENTION_FOCUS_TARGET);
-  }, [holdSectionOf, onAnchorFollowed]);
+  }, [onAnchorFollowed]);
   const [configAccordion, setConfigAccordion] = useState<Set<string>>(() => new Set());
   const [capabilityOriginFilter, setCapabilityOriginFilter] = useState<CapabilityOrigin | 'all'>('all');
   const [capabilityTypeFilter, setCapabilityTypeFilter] = useState<'all' | 'skill' | 'profile' | 'directive'>('all');
@@ -473,41 +548,6 @@ export function SettingsPage({
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
   }, []);
 
-  // The settings page is intentionally exhaustive. Keep the section index in
-  // sync with the reader's position so the long page still feels navigable.
-  useEffect(() => {
-    let frame = 0;
-    const updateActiveSection = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        if (Date.now() < scrollSpyPausedUntil.current) return;
-        const available = SETTINGS_SECTION_IDS
-          .map(id => document.getElementById(id))
-          .filter((section): section is HTMLElement => section != null);
-        if (available.length === 0) return;
-
-        const marker = window.innerHeight * 0.45;
-        let current = available[0].id;
-        for (const section of available) {
-          if (section.getBoundingClientRect().top <= marker) current = section.id;
-          else break;
-        }
-        const atPageEnd = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
-        if (atPageEnd) current = available[available.length - 1].id;
-        setActiveSettingsSection(current);
-      });
-    };
-
-    updateActiveSection();
-    window.addEventListener('scroll', updateActiveSection, { passive: true });
-    window.addEventListener('resize', updateActiveSection);
-    return () => {
-      cancelAnimationFrame(frame);
-      window.removeEventListener('scroll', updateActiveSection);
-      window.removeEventListener('resize', updateActiveSection);
-    };
-  }, [hasConfiguredApi]);
-
   const filteredSkills = availableSkills.filter(skill => {
     const origin: CapabilityOrigin = skill.external ? 'external' : skill.is_builtin ? 'kronn' : 'personal';
     return capabilityOriginFilter === 'all' || capabilityOriginFilter === origin;
@@ -517,106 +557,29 @@ export function SettingsPage({
     return capabilityOriginFilter === 'all' || capabilityOriginFilter === origin;
   });
 
-  const settingsSections = [
-    { id: 'settings-identity', label: t('settings.identity'), icon: <MessageSquare size={15} />, group: t('config.coreSettings') },
-    { id: 'settings-agent-config', label: t('config.agents'), icon: <Cpu size={15} /> },
-    { id: 'settings-sourcing', label: t('config.sourcing'), icon: <Shield size={15} /> },
-    { id: 'settings-continual-learning', label: t('config.learning'), icon: <BookOpen size={15} /> },
-    { id: 'settings-capabilities', label: t('config.capabilities'), icon: <Zap size={15} /> },
-    { id: 'settings-appearance', label: t('config.preferences'), icon: <Settings2 size={15} /> },
-    { id: 'settings-voice', label: t('settings.voice'), icon: <Mic size={15} />, group: t('config.workspaceSettings') },
-    { id: EXTERNAL_CONTENT_SECTION_ID, label: t('config.artifacts'), icon: <AppWindow size={15} /> },
-    { id: 'settings-scan', label: t('config.scan'), icon: <FolderSearch size={15} /> },
-    { id: 'settings-workers', label: t('config.workers.title'), icon: <Bot size={15} /> },
-    { id: 'settings-user-context', label: t('userContext.title'), icon: <FileText size={15} /> },
-    { id: 'settings-recovery', label: t('settings.recovery.title'), icon: <Key size={15} />, group: t('config.systemSettings') },
-    { id: 'settings-authenticator', label: t('trust.proof.nav'), icon: <KeyRound size={15} /> },
-    { id: 'settings-trust', label: t('trust.nav'), icon: <Shield size={15} /> },
-    { id: 'settings-server', label: t('config.server'), icon: <Server size={15} /> },
-    { id: 'settings-debug', label: t('settings.debugSection'), icon: <Terminal size={15} />, live: serverDebugMode },
-    ...(hasConfiguredApi
-      ? [{ id: 'settings-api-audit', label: t('apiCallLogs.title'), icon: <Globe size={15} /> }]
-      : []),
-    { id: 'settings-worktrees', label: t('settings.worktrees.title'), icon: <FolderInput size={15} /> },
-    { id: 'settings-disk', label: t('settings.disk.title'), icon: <Gauge size={15} /> },
-    { id: 'settings-database', label: t('config.database'), icon: <HardDrive size={15} /> },
-    { id: 'settings-general', label: t('config.general'), icon: <Settings2 size={15} /> },
-  ];
-
-  return (
-    <div className="settings-page">
-      <header className="set-page-header">
-        <div>
-          <div className="set-page-eyebrow">
-            <Settings2 size={13} />
-            {t('config.controlCenter')}
-          </div>
-          <h1 className="set-h1"><MatrixText text="Configuration" /></h1>
-          <p className="set-meta">{t('config.subtitle')}</p>
-        </div>
-        <div className="set-page-summary" aria-label={t('config.summary')}>
-          <span className="set-summary-chip">
-            <Cpu size={13} />
-            {t('config.agentSummary', agents.filter(agent => agent.installed && agent.enabled).length, agents.length)}
-          </span>
-          <span className="set-summary-chip">
-            <FolderSearch size={13} />
-            {t(scanPaths.length === 1 ? 'config.scanSummaryOne' : 'config.scanSummary', scanPaths.length)}
-          </span>
-        </div>
-      </header>
-
-      <div className="set-layout">
-        {/* Persistent section index on desktop; compact horizontal rail on mobile. */}
-        <nav className="set-nav" aria-label={t('config.sections')}>
-          <div className="set-nav-title">
-            <Settings2 size={13} />
-            {t('config.sections')}
-          </div>
-          {settingsSections.map(s => (
-          <Fragment key={s.id}>
-          {s.group && <div className="set-nav-group">{s.group}</div>}
-          {/* A link to the section's address: Ctrl/Cmd-click opens it in a new
-              tab and "copy link address" works; a plain click scrolls here. */}
-          <AppLink
-            to={settingsSectionPath(s.id)}
-            className="set-nav-btn"
-            aria-current={activeSettingsSection === s.id ? 'location' : undefined}
-            data-live={s.live ? 'true' : undefined}
-            onNavigate={() => {
-              setActiveSettingsSection(s.id);
-              const target = document.getElementById(s.id);
-              if (!target) { onAnchorFollowed?.(s.id); return; }
-              const farAway = Math.abs(target.getBoundingClientRect().top) > window.innerHeight * 2;
-              scrollSpyPausedUntil.current = Date.now() + (farAway ? 250 : 900);
-              target.scrollIntoView?.({
-                behavior: farAway ? 'auto' : 'smooth',
-                block: farAway ? 'center' : 'start',
-              });
-              onAnchorFollowed?.(s.id);
-            }}
-          >
-            <span className="set-nav-icon">{s.icon}</span>
-            {s.label}
-            {s.live && <span className="set-nav-live-dot" aria-hidden="true" />}
-          </AppLink>
-          </Fragment>
-        ))}
-          <div className="set-nav-version" data-testid="settings-nav-version">
-            <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} supportLabel={t('config.supportKronn')} />
-          </div>
-          <div className="set-nav-tour-progress">
-            <TourProgressCta />
-          </div>
-        </nav>
-
-        <div className="set-mobile-tour-progress">
-          <TourProgressCta />
-        </div>
-
-        <div className="set-content">
-
+  // KT-1923 — each section of Settings by its anchor; the sub-pages place
+  // them in the order of `SETTINGS_SECTIONS`. The parts of the agents section
+  // that are sections of their own are placed by it, right after it.
+  const sectionNodes: Partial<Record<string, ReactNode>> = {
+    'settings-identity': (
       <IdentitySection toast={toast} t={t} onExposureChange={setExposure} />
+    ),
+
+    'settings-agent-config': (
+    <AgentsSection
+      agents={agents}
+      agentAccess={agentAccess}
+      configLanguage={configLanguage}
+      refetchAgents={refetchAgents}
+      refetchAgentAccess={refetchAgentAccess}
+      toast={toast}
+      t={t}
+      inDocker={inDocker}
+      modelTierTarget={modelTierTarget}
+      onModelTierTargetConsumed={onModelTierTargetConsumed}
+      revealAgent={agentReveal}
+      sections={parts => (
+    <>
 
       <div id="settings-agent-config" className="set-card set-agent-config-card">
         <div className="set-section">
@@ -746,30 +709,43 @@ export function SettingsPage({
               )}
             </div>
           </div>
-          <AgentsSection
-            agents={agents}
-            agentAccess={agentAccess}
-            configLanguage={configLanguage}
-            refetchAgents={refetchAgents}
-            refetchAgentAccess={refetchAgentAccess}
-            toast={toast}
-            t={t}
-            usagePanel={<UsageSection onNavigateDiscussion={onNavigateDiscussion} />}
-            inDocker={inDocker}
-            modelTierTarget={modelTierTarget}
-            onModelTierTargetConsumed={onModelTierTargetConsumed}
-          />
+          {parts.agents}
         </div>
       </div>
 
-      <AntiHallucSection toast={toast} t={t} />
-      {/* KT-619 — who may publish an important card. Beside anti-hallucination
-          because both answer "what is this room allowed to assert". */}
-      <PublicationCredentialsSection toast={toast} t={t} />
+      <SettingsListedSection
+        id="settings-local-models"
+        title={t('settings.sections.localModels')}
+        description={t('config.modeLocalHint')}
+      >
+        {parts.localModels}
+      </SettingsListedSection>
+      <SettingsListedSection
+        id="settings-media"
+        title={t('settings.sections.media')}
+        description={t('settings.sections.mediaHint')}
+      >
+        {parts.media}
+      </SettingsListedSection>
+      <div id="settings-compression" className="set-listed-section">{parts.compression}</div>
+      <SettingsListedSection id="settings-catalogue" folded title={t('settings.sections.catalogue')}>
+        {parts.catalogue}
+      </SettingsListedSection>
+      <SettingsListedSection id="settings-usage" folded title={t('settings.sections.usage')}>
+        <UsageSection onNavigateDiscussion={onNavigateDiscussion} />
+      </SettingsListedSection>
+    </>
+      )}
+    />
+    ),
 
-      <ContinualLearningSection toast={toast} t={t} />
+    'settings-sourcing': <AntiHallucSection toast={toast} t={t} />,
+    // KT-619 — who may publish an important card (KT-1923: under Security).
+    credentials: <PublicationCredentialsSection toast={toast} t={t} />,
+    'settings-continual-learning': <ContinualLearningSection toast={toast} t={t} />,
 
-      {/* Capabilities shared by agents: MCPs, skills, profiles and directives. */}
+    'settings-capabilities': (
+      // Capabilities shared by agents: MCPs, skills, profiles and directives.
       <div id="settings-capabilities" className="set-card set-capabilities-card">
         <div className="set-section set-capabilities-intro">
           <div className="flex-row gap-4 set-section-header-lg">
@@ -1367,9 +1343,11 @@ export function SettingsPage({
           </div>
         </div>
 
-      </div>{/* end capabilities card */}
+      </div>
+    ),
 
-      {/* Interface preferences: appearance + UI/output languages. */}
+    'settings-appearance': (
+      // Interface preferences: appearance + UI/output languages.
       <div id="settings-appearance" className="set-card set-preferences-card">
         <div className="set-section">
           <div className="flex-row gap-4 set-section-header-lg">
@@ -1557,16 +1535,10 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+    ),
 
-      <div className="set-content-group-intro">
-        <div className="set-content-group-icon"><Mic size={16} /></div>
-        <div>
-          <h2>{t('config.workspaceSettings')}</h2>
-          <p>{t('config.workspaceSettingsHint')}</p>
-        </div>
-      </div>
-
-      {/* Voice (STT model selection) */}
+    'settings-voice': (
+      // Voice (STT model selection)
       <div id="settings-voice" className="set-card">
         <div className="set-section">
           <div className="flex-row gap-6 set-section-header-lg">
@@ -1644,11 +1616,13 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+    ),
 
-      {/* Artifacts: sites Live Pages may embed content from */}
-      <ExternalContentSection prefill={embedOriginPrefill} toast={toast} />
+    // Artifacts: sites Live Pages may embed content from
+    [EXTERNAL_CONTENT_SECTION_ID]: <ExternalContentSection prefill={embedOriginPrefill} toast={toast} />,
 
-      {/* Scan (depth + paths + ignore) */}
+    'settings-scan': (
+      // Scan (depth + paths + ignore)
       <div id="settings-scan" className="set-card">
         <div className="set-section">
           <div className="flex-row gap-4 set-section-header-lg">
@@ -1822,34 +1796,28 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+    ),
 
-      {/* User context — cross-project markdown notes injected into every agent.
-          Lives in ~/.kronn/user-context/ on disk; this editor is the
-          terminal-free entry point for operators to manage them. */}
-      {/* Workers (KT-1345): the default review-round limit */}
-      <WorkersSection t={t} />
+    // Workers (KT-1345): the default review-round limit
+    'settings-workers': <WorkersSection t={t} />,
 
+    'settings-user-context': (
+      // User context — cross-project markdown notes injected into every agent.
+      // Lives in ~/.kronn/user-context/ on disk; this editor is the
+      // terminal-free entry point for operators to manage them.
       <div id="settings-user-context" className="set-card">
         <div className="set-section">
           <UserContextEditor />
         </div>
       </div>
+    ),
 
-      <div className="set-content-group-intro">
-        <div className="set-content-group-icon"><Shield size={16} /></div>
-        <div>
-          <h2>{t('config.systemSettings')}</h2>
-          <p>{t('config.systemSettingsHint')}</p>
-        </div>
-      </div>
+    // P2 — recovery passphrase for the MCP-secrets encryption key.
+    'settings-recovery': <RecoverySection toast={toast} t={t} />,
+    'settings-authenticator': <TrustProofSection toast={toast} />,
+    'settings-trust': <TrustSection toast={toast} />,
 
-      {/* P2 — recovery passphrase for the MCP-secrets encryption key. */}
-      <RecoverySection toast={toast} t={t} />
-
-      <TrustProofSection toast={toast} />
-
-      <TrustSection toast={toast} />
-
+    'settings-server': (
       <div id="settings-server" className="set-card">
         <div className="set-section">
           <div className="flex-row gap-4 set-section-header-lg">
@@ -1947,11 +1915,13 @@ export function SettingsPage({
 
         </div>
       </div>
+    ),
 
-      {/* Debug — its own card so it's easy to find when diagnosing cross-platform
-          issues. Toggling the switch persists `debug_mode` in config.toml
-          (takes effect at next backend restart). The live viewer reads the
-          in-memory ringbuffer fed by every `tracing` event — no file on disk. */}
+    'settings-debug': (
+      // Debug — its own card so it's easy to find when diagnosing cross-platform
+      // issues. Toggling the switch persists `debug_mode` in config.toml
+      // (takes effect at next backend restart). The live viewer reads the
+      // in-memory ringbuffer fed by every `tracing` event — no file on disk.
       <DebugSection
         serverDebugMode={serverDebugMode}
         setServerDebugMode={setServerDebugMode}
@@ -1962,25 +1932,24 @@ export function SettingsPage({
         toast={toast}
         t={t}
       />
+    ),
 
-      {/* 0.8.6 — API audit log panel (filters + table + drawer).
-          Conditional : only renders when at least one API plugin has a
-          config (computed upstream in Dashboard from mcpOverview). Sits
-          between Debug and Database — it's a debug/audit surface, not
-          something to bury or hoist into the nav. */}
-      {hasConfiguredApi && (
-        <div id="settings-api-audit" className="set-card">
-          <ApiCallLogsPage />
-        </div>
-      )}
+    // 0.8.6 — API audit log panel (filters + table + drawer). Only once at
+    // least one API plugin has a config (computed upstream in Dashboard from
+    // mcpOverview); KT-1923: folded until opened.
+    'settings-api-audit': hasConfiguredApi ? (
+      <SettingsListedSection id="settings-api-audit" folded title={t('apiCallLogs.title')}>
+        <ApiCallLogsPage />
+      </SettingsListedSection>
+    ) : null,
 
-      {/* KT-1438 — what a task worktree is seeded with besides the tracked files */}
-      <WorktreesSection toast={toast} t={t} />
+    // KT-1438 — what a task worktree is seeded with besides the tracked files
+    'settings-worktrees': <WorktreesSection toast={toast} t={t} />,
 
-      {/* KT-1318 — what Kronn keeps on the disk, and its purge */}
-      <DiskSection toast={toast} t={t} />
+    // KT-1318 — what Kronn keeps on the disk, and its purge
+    'settings-disk': <DiskSection toast={toast} t={t} />,
 
-      {/* Database */}
+    'settings-database': (
       <div id="settings-database" className="set-card">
         <div className="set-section">
           <div className="flex-row gap-4 set-section-header-lg">
@@ -2086,13 +2055,10 @@ export function SettingsPage({
             <AlertTriangle size={14} />
             <span>
               {t('config.exportApiWarning')}{' '}
-              <a
-                href="#settings-server"
-                onClick={(e) => {
-                  e.preventDefault();
-                  document.getElementById('settings-server')?.scrollIntoView({ behavior: 'smooth' });
-                }}
-              >{t('config.exportApiWarningLink')}</a>
+              {/* KT-1923 — the server settings are on the Security sub-page. */}
+              <AppLink to={settingsSectionPath('settings-server')} onNavigate={() => goTo('settings-server')}>
+                {t('config.exportApiWarningLink')}
+              </AppLink>
             </span>
           </div>
           <div className="flex-row gap-4">
@@ -2176,8 +2142,9 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+    ),
 
-      {/* General */}
+    'settings-general': (
       <div id="settings-general" className="set-card mt-8">
         <div className="set-section">
           <div className="flex-row gap-4 set-section-header-lg">
@@ -2208,11 +2175,87 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+    ),
+  };
+
+  const searchAgents: SettingsSearchAgent[] = agents.map(agent => ({
+    agent_type: agent.agent_type,
+    name: agent.name,
+    configurable: agent.installed || agent.runtime_available,
+  }));
+
+  return (
+    <SettingsFoldContext.Provider value={foldState}>
+    <div className="settings-page">
+      <header className="set-page-header">
+        <div>
+          <div className="set-page-eyebrow">
+            <Settings2 size={13} />
+            {t('config.controlCenter')}
+          </div>
+          <h1 className="set-h1"><MatrixText text="Configuration" /></h1>
+          <p className="set-meta">{t('config.subtitle')}</p>
+        </div>
+        <div className="set-page-summary" aria-label={t('config.summary')}>
+          <span className="set-summary-chip">
+            <Cpu size={13} />
+            {t('config.agentSummary', agents.filter(agent => agent.installed && agent.enabled).length, agents.length)}
+          </span>
+          <span className="set-summary-chip">
+            <FolderSearch size={13} />
+            {t(scanPaths.length === 1 ? 'config.scanSummaryOne' : 'config.scanSummary', scanPaths.length)}
+          </span>
+        </div>
+      </header>
+
+      <div className="set-layout">
+        {/* KT-1923 — the list: the search, the five sub-pages, the design system apart. */}
+        <SettingsNav
+          current={current}
+          hasConfiguredApi={hasConfiguredApi}
+          agents={searchAgents}
+          livePages={serverDebugMode ? ['system'] : []}
+          onSubPage={selectSubPage}
+          onHit={hit => goTo(hit.anchor)}
+          onOpenDesignSystem={onOpenDesignSystem}
+          footer={(
+            <>
+              <div className="set-nav-version" data-testid="settings-nav-version">
+                <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} supportLabel={t('config.supportKronn')} />
+              </div>
+              <div className="set-nav-tour-progress">
+                <TourProgressCta />
+              </div>
+            </>
+          )}
+        />
+
+        <div className="set-mobile-tour-progress">
+          <TourProgressCta />
+        </div>
+
+        <div className="set-content">
+          {SETTINGS_SUB_PAGES.filter(page => visited.has(page)).map(page => {
+            const sections = visibleSettingsSections(page, hasConfiguredApi);
+            return (
+              <div
+                key={page}
+                className="set-subpage"
+                data-subpage={page}
+                data-testid={`settings-subpage-content-${page}`}
+                hidden={page !== current}
+              >
+                <SettingsSubPageHead page={page} sections={sections} active={page === current} onSection={goTo} />
+                {sections.map(section => <Fragment key={section.id}>{sectionNodes[section.id]}</Fragment>)}
+              </div>
+            );
+          })}
         </div>
       </div>
       <div className="set-footer">
         <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} supportLabel={t('config.supportKronn')} />
       </div>
     </div>
+    </SettingsFoldContext.Provider>
   );
 }

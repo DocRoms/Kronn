@@ -417,7 +417,7 @@ gradients or pseudo-elements, and walks keyboard focus. It answers every non-GET
 with 503 and stubs the WebSocket, so it may run read-only against a live backend.
 `[src: file: frontend/src/styles/themeAudit.ts:54-59#textFloor]` `[src: file: frontend/src/styles/themeAudit.ts:192-207#measureTextContrast]` `[src: file: frontend/src/styles/themeAudit.ts:220-233#undefinedTokenUsages]`
 `[src: file: frontend/src/styles/themeAudit.ts:238-254#forcedTextOnTokenBackground]` `[src: file: frontend/src/styles/themeAudit.ts:256-282#forcedTextInInlineStyles]` `[src: file: frontend/src/styles/themeAudit.ts:299-316#undeclaredCustomProperties]`
-`[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:40-71#readOnly]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:73-76#REMEASURED]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:279-317#proposedAction]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:323-339#focusStops]`
+`[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:40-71#readOnly]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:76-79#REMEASURED]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:208-246#proposedAction]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:248-264#focusStops]`
 
 When a disposable backend runs in a container, run browser specs with local
 provider stubs in the same network namespace. Their loopback callbacks then
