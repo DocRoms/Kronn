@@ -11,8 +11,22 @@ use rusqlite::params;
 use super::agent_fallback::system_notice;
 use crate::core::agent_fallback::{self as fallback, Pin, Trigger, TurnNeeds};
 use crate::db::agent_dispatch::AgentDispatchJob;
-use crate::models::{AgentType, FallbackMode};
+use crate::models::{AgentType, FallbackMode, ModelTier};
 use crate::AppState;
+
+/// KT-2048 — the model a room turn of `agent` runs on, `""` for the CLI default.
+/// The room's own model belongs to the room's own agent only: a turn moved to
+/// another agent runs on that agent's tier model.
+pub(super) fn room_turn_model(
+    agent: &AgentType,
+    room_agent: &AgentType,
+    room_model: Option<&str>,
+    tier: ModelTier,
+    tiers: &crate::models::ModelTiersConfig,
+) -> String {
+    let model = (agent == room_agent).then_some(room_model).flatten();
+    crate::agents::runner::effective_model_flag(model, agent, tier, Some(tiers)).unwrap_or_default()
+}
 
 /// The job to run: `job` itself, or — its agent overridden and pinned — the
 /// same turn moved to the fallback. Task workers are not moved here: their
@@ -77,9 +91,20 @@ pub async fn start_on_fallback_among(
     let Some((room_agent, room_tier, room_model, targets, chars, chain_override)) = read else {
         return job;
     };
-    let agent = job.agent_override.clone().unwrap_or(room_agent);
+    let agent = job
+        .agent_override
+        .clone()
+        .unwrap_or_else(|| room_agent.clone());
     let tier = super::runtime::dispatch_target_tier(&targets, job.agent_override.as_ref(), None)
         .unwrap_or(room_tier);
+    // KT-2048 — the cooldown read is the one of the model this turn runs on.
+    let turn_model = room_turn_model(
+        &agent,
+        &room_agent,
+        room_model.as_deref(),
+        tier,
+        &agents.model_tiers,
+    );
     let mode = FallbackMode::from_tier(tier);
     let chain = fallback::effective_chain(
         &agents,
@@ -103,7 +128,16 @@ pub async fn start_on_fallback_among(
     let preferred = state
         .db
         .with_read_conn(move |conn| {
-            fallback::preferred_start(conn, &agents, &chain, &from, &usable, &needs, now)
+            fallback::preferred_start_for(
+                conn,
+                &agents,
+                &chain,
+                &from,
+                &turn_model,
+                &usable,
+                &needs,
+                now,
+            )
         })
         .await
         .ok()

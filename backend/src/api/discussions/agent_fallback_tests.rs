@@ -477,6 +477,73 @@ async fn a_turn_with_no_cooldown_anywhere_starts_where_it_always_did() {
     assert!(pin(&state, "job-1").await.is_none());
 }
 
+/// KT-2048 — the Fable refusal of 2026-11-23, verbatim.
+const FABLE: &str = "claude-fable-5-2[1m]";
+const FABLE_REFUSAL: &str = "[Agent provider error] You've hit your Fable limit · resets Nov 28 at 8pm (Europe/Paris). Switch to another model, or manage usage credits at https://claude.ai/admin-settings/usage, to continue. (HTTP 429; terminal_reason=api_error)";
+
+async fn room_on_model(state: &crate::AppState, model: &str) {
+    let model = model.to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET model = ?1 WHERE id = ?2",
+                rusqlite::params![model, ROOM],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn cooldown_for(
+    state: &crate::AppState,
+    agent: AgentType,
+    model: &'static str,
+) -> Option<fallback::Cooldown> {
+    state
+        .db
+        .with_read_conn(move |conn| {
+            fallback::active_cooldown_for(conn, &agent, model, chrono::Utc::now())
+        })
+        .await
+        .unwrap()
+}
+
+/// KT-2048 — a room on Fable refused for Fable: the room's Fable turns move to
+/// the fallback, the agent is not cooled for its other models, and a room on
+/// another model of the same agent starts where it always did.
+#[tokio::test]
+async fn a_room_refused_for_one_model_cools_that_model_and_not_the_agent() {
+    let state = state_with_chain(link(AgentType::Codex), None).await;
+    room_on_model(&state, FABLE).await;
+    let first = running_dispatch(&state, 1).await;
+    assert!(intercept_failed_turn_among(&state, &first, FABLE_REFUSAL, Some(everyone())).await);
+
+    assert!(
+        cooldown(&state, AgentType::ClaudeCode).await.is_none(),
+        "the refusal names one model: the agent is not cooled"
+    );
+    assert!(cooldown_for(&state, AgentType::ClaudeCode, FABLE)
+        .await
+        .is_some());
+
+    // The room's next Fable turn is served by the fallback, not called again.
+    settle_earlier_dispatches(&state).await;
+    let next = running_dispatch(&state, 2).await;
+    let moved = start_on_fallback_among(&state, next, Some(everyone())).await;
+    assert_eq!(moved.agent_override, Some(AgentType::Codex));
+    assert!(pin(&state, "job-2").await.is_some());
+
+    // A room on another model of Claude Code is not held by the Fable row.
+    room_on_model(&state, "claude-opus-5-5").await;
+    settle_earlier_dispatches(&state).await;
+    let opus = running_dispatch(&state, 3).await;
+    let same = start_on_fallback_among(&state, opus.clone(), Some(everyone())).await;
+    assert_eq!(same.agent_override, opus.agent_override);
+    assert!(pin(&state, "job-3").await.is_none());
+}
+
 #[tokio::test]
 async fn a_discussion_override_replaces_the_agents_chain_and_an_empty_one_cuts_it() {
     // The agent's default chain is Codex; this discussion says Gemini instead.

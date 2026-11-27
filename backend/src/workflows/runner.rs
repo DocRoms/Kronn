@@ -2943,6 +2943,7 @@ async fn execute_run_body(
                                 &state,
                                 agents_config,
                                 step,
+                                &project_path,
                             )
                             .await
                         {

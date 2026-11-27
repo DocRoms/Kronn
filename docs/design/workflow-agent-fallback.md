@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:500-522#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:5151-5160#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:5152-5161#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -255,7 +255,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:966-1123#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/disc_introspection.rs:732-931#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1993-2234#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4239-4324#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1993-2234#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4240-4325#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
@@ -292,7 +292,7 @@ fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
 [src: file: backend/src/models/workflows.rs:2349-2428#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1590-1614#WorkflowAgentAttempt]
-[src: file: backend/src/workflows/runner.rs:5409-5431#selected_attempt]
+[src: file: backend/src/workflows/runner.rs:5432-5454#selected_attempt]
 
 Persist an `AgentAttempt` record (table or versioned run JSON) with:
 
@@ -396,3 +396,53 @@ This should be several reviewable changes, not a last-minute 0.9.4 addition.
 The next implementation step is an ADR plus a no-rerouting `AgentAttempt`/
 `AgentFailure` foundation; then ship the normal workflow Agent-step MVP behind
 the default-off master switch.
+
+## Model-scoped cooldowns (KT-2048)
+
+A provider cooldown is keyed by `(agent, model)`. The model `''` is the
+agent-wide cooldown, which covers every model of the agent. Storage is the
+`agent_fallback_cooldowns` table, rebuilt with that key by
+[src: file: backend/src/db/sql/305_agent_fallback_model_cooldowns.sql:1]. Existing
+rows become agent-wide rows.
+
+Two kinds of Claude limit exist on one account, and the refusal text tells them
+apart:
+
+- **Model-scoped**: the refusal says "Switch to another model" (for example
+  "You've hit your Fable limit"). Only that model is refused; the other models of
+  the same agent keep answering. [src: file: backend/src/core/agent_fallback.rs:993]
+- **Account-wide**: session, weekly or spend limits. Every model is refused, so
+  the whole agent cools down.
+
+Which scope a refusal writes:
+
+| Surface | Refusal | Row written |
+|---|---|---|
+| Workflow Agent step | model-scoped | `(agent, the step's resolved model)` [src: file: backend/src/workflows/agent_fallback_step.rs:377] |
+| Workflow Agent step | account-wide | `(agent, '')` |
+| Room turn | model-scoped | `(agent, the turn's resolved model)` [src: file: backend/src/api/discussions/agent_fallback.rs:209] |
+| Room turn | account-wide, or a task worker's refusal | `(agent, '')` |
+
+The model a step or turn "resolves to" is the explicit model when one is set,
+else the model its tier resolves to for that agent. A step on the default tier
+is therefore not held by a Fable row.
+
+Reads, before anything leaves the configured agent:
+
+- A workflow step asks `preferred_start_for` with its own model, which reads
+  that model's row and the agent-wide row
+  [src: file: backend/src/core/agent_fallback.rs:1252].
+- A room turn does the same with the turn's model, computed by `room_turn_model`
+  [src: file: backend/src/api/discussions/agent_fallback_start.rs:20].
+- Before a step leaves its agent, the provider is asked once on that model,
+  at most once per `(agent, model)` per re-check interval (`probe_cooled_start`)
+  [src: file: backend/src/workflows/agent_fallback_step.rs:250]. An answer that
+  clears the cooldown lets the step run as configured.
+- A run waiting on a quota is re-checked on the waiting step's model, never on
+  the CLI default [src: file: backend/src/workflows/quota_wait.rs:648].
+
+The fallback notice carries the reset date when it is not on the current UTC
+day, e.g. `until 28/11 19:00 UTC` [src: file: backend/src/core/agent_fallback.rs:977].
+
+Known limit: a turn or step that is refused once still moves to the fallback.
+Only later starts consult the scoped row.

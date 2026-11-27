@@ -440,12 +440,15 @@ pub trait QuotaProbe: Send + Sync {
     /// `Some(true)`: the provider answered a minimal request. `Some(false)`:
     /// it still refuses for a quota. `None`: inconclusive (the agent could not
     /// start, timed out…), so the announced reset stays the only trigger.
+    /// `model` is the model the waiting step runs (KT-2048): a provider may
+    /// refuse one model while it serves another. `None` = the CLI default.
     async fn quota_is_back(
         &self,
         agent: &crate::models::AgentType,
         project_path: &str,
         tokens: &crate::models::TokensConfig,
         full_access: bool,
+        model: Option<&str>,
     ) -> Option<bool>;
 }
 
@@ -460,14 +463,20 @@ impl QuotaProbe for AgentQuotaProbe {
         project_path: &str,
         tokens: &crate::models::TokensConfig,
         full_access: bool,
+        model: Option<&str>,
     ) -> Option<bool> {
         let attempt = async {
-            let process = crate::agents::runner::start_agent(
-                agent,
-                project_path,
-                PROBE_PROMPT,
-                tokens,
-                full_access,
+            let process = crate::agents::runner::start_agent_with_config(
+                crate::agents::runner::AgentStartConfig {
+                    full_access,
+                    model_override: model,
+                    ..crate::agents::runner::AgentStartConfig::new(
+                        agent,
+                        project_path,
+                        PROBE_PROMPT,
+                        tokens,
+                    )
+                },
             )
             .await?;
             super::steps::drive_agent_to_output(
@@ -635,8 +644,13 @@ impl QuotaRechecker {
             };
             let agent = leaf.step.agent.clone();
             let project_path = project_path_of(state, &run).await;
+            // KT-2048 — the provider is asked on the model the waiting step runs.
+            let model = {
+                let config = state.config.read().await;
+                crate::workflows::agent_fallback_step::scope_model(&leaf.step, &config.agents)
+            };
             let verdict = self
-                .verdict(state, &mut verdicts, &agent, &project_path)
+                .verdict(state, &mut verdicts, &agent, &project_path, &model)
                 .await;
             if verdict != Some(true) {
                 // KT-1518 — the provider still refuses: the step's fallback chain
@@ -703,7 +717,9 @@ impl QuotaRechecker {
                 .iter()
                 .find_map(|escalation| escalation.project_path.clone())
                 .unwrap_or_default();
-            let verdict = self.verdict(state, verdicts, &agent, &project_path).await;
+            let verdict = self
+                .verdict(state, verdicts, &agent, &project_path, "")
+                .await;
             if verdict != Some(true) {
                 // KT-1518 — still refused: the agent's chain is the alternative
                 // to waiting, through the same selection as a failing turn.
@@ -757,15 +773,17 @@ impl QuotaRechecker {
         }
     }
 
-    /// The provider's answer for `agent`, asked once per pass.
+    /// The provider's answer for `agent` on `model` (`""`: the CLI default),
+    /// asked once per pass.
     async fn verdict(
         &self,
         state: &AppState,
         verdicts: &mut std::collections::HashMap<String, Option<bool>>,
         agent: &crate::models::AgentType,
         project_path: &str,
+        model: &str,
     ) -> Option<bool> {
-        let key = format!("{agent:?}");
+        let key = format!("{agent:?}|{model}");
         if let Some(known) = verdicts.get(&key) {
             return *known;
         }
@@ -773,9 +791,10 @@ impl QuotaRechecker {
             let config = state.config.read().await;
             (config.tokens.clone(), config.agents.full_access_for(agent))
         };
+        let model_arg = (!model.is_empty()).then_some(model);
         let verdict = self
             .probe
-            .quota_is_back(agent, project_path, &tokens, full_access)
+            .quota_is_back(agent, project_path, &tokens, full_access, model_arg)
             .await;
         // KT-1518 — the provider answers again: its agent is back in play now,
         // not when the cooldown would have run out.

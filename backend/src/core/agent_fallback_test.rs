@@ -782,7 +782,10 @@ fn a_link_on_cooldown_or_not_installed_is_skipped_for_the_next_one() {
     ) {
         Selection::Stop { why } => {
             assert!(
-                why.contains("Codex is itself unavailable until 14:00 UTC"),
+                why.contains(&format!(
+                    "Codex is itself unavailable until {}",
+                    stamp(at(14))
+                )),
                 "{why}"
             );
             assert!(
@@ -895,7 +898,10 @@ fn the_room_line_names_the_agent_the_reason_the_time_and_the_continuation() {
             &explicit,
             ModelTier::Default
         ),
-        "Codex · gpt-5.6-sol: quota exhausted until 14:00 UTC → continued with Claude Code · sonnet [CLI]"
+        format!(
+            "Codex · gpt-5.6-sol: quota exhausted until {} → continued with Claude Code · sonnet [CLI]",
+            stamp(at(14))
+        )
     );
     assert_eq!(
         notice(
@@ -1491,4 +1497,80 @@ fn a_generic_worker_skips_the_http_link_of_a_mixed_chain_for_the_cli_link() {
         ),
         Selection::Switch(link(AgentType::LiteLlm))
     );
+}
+
+/// KT-2048 — the refusal that names only its model, and the account-wide ones.
+#[test]
+fn a_model_refusal_is_told_from_an_account_wide_one() {
+    let fable = "[Agent provider error] You've hit your Fable limit · resets Nov 28 at 8pm (Europe/Paris). Switch to another model, or manage usage credits at https://claude.ai/admin-settings/usage, to continue. (HTTP 429; terminal_reason=api_error)";
+    assert!(is_model_refusal(fable));
+    assert!(!is_model_refusal(
+        "[Agent provider error]\n\nYou've hit your org's monthly spend limit · run /usage-credits to manage your plan.\n\n(HTTP 429; terminal_reason=api_error)"
+    ));
+    assert!(!is_model_refusal(
+        "You've hit your session limit · resets 4pm"
+    ));
+}
+
+/// KT-2048 — a reset on another UTC day carries its date.
+#[test]
+fn the_notice_dates_a_reset_that_is_not_today() {
+    let now = at(10);
+    let saturday = DateTime::parse_from_rfc3339("2026-11-28T19:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let today = at(19);
+    assert_eq!(stamp_from(saturday, now), "28/11 19:00 UTC");
+    assert_eq!(stamp_from(today, now), "19:00 UTC");
+}
+
+/// KT-2048 — a model-scoped cooldown is not an agent-wide one: the agent cards
+/// and the fallback choice of other links do not see it, the scoped read does.
+#[test]
+fn a_scoped_cooldown_holds_its_model_and_nothing_else() {
+    let connection = connection();
+    let now = at(10);
+    set_scoped_cooldown(
+        &connection,
+        &AgentType::ClaudeCode,
+        "claude-fable-5-2[1m]",
+        Trigger::RateLimit,
+        Some(at(20)),
+        now,
+    )
+    .unwrap();
+    assert!(list_cooldowns(&connection, now).unwrap().is_empty());
+    assert!(active_cooldown(&connection, &AgentType::ClaudeCode, now)
+        .unwrap()
+        .is_none());
+    assert!(active_cooldown_for(
+        &connection,
+        &AgentType::ClaudeCode,
+        "claude-fable-5-2[1m]",
+        now
+    )
+    .unwrap()
+    .is_some());
+    assert!(
+        active_cooldown_for(&connection, &AgentType::ClaudeCode, "claude-opus-5-5", now)
+            .unwrap()
+            .is_none()
+    );
+    assert!(any_cooldown_running(&connection, now).unwrap());
+
+    // An agent-wide cooldown covers every model of the agent.
+    set_cooldown(
+        &connection,
+        &AgentType::ClaudeCode,
+        Trigger::QuotaExhausted,
+        Some(at(22)),
+        now,
+    )
+    .unwrap();
+    assert!(
+        active_cooldown_for(&connection, &AgentType::ClaudeCode, "claude-opus-5-5", now)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(list_cooldowns(&connection, now).unwrap().len(), 1);
 }

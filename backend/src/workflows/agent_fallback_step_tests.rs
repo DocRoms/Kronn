@@ -85,6 +85,59 @@ fn outcome(status: RunStatus, output: &str) -> StepOutcome {
     }
 }
 
+/// A provider probe that records what it was asked and answers `answer`.
+struct FakeProbe {
+    answer: Option<bool>,
+    asked: std::sync::Mutex<Vec<(AgentType, Option<String>)>>,
+}
+
+impl FakeProbe {
+    fn answering(answer: Option<bool>) -> Self {
+        Self {
+            answer,
+            asked: Default::default(),
+        }
+    }
+
+    fn asked(&self) -> Vec<(AgentType, Option<String>)> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl QuotaProbe for FakeProbe {
+    async fn quota_is_back(
+        &self,
+        agent: &AgentType,
+        _project_path: &str,
+        _tokens: &crate::models::TokensConfig,
+        _full_access: bool,
+        model: Option<&str>,
+    ) -> Option<bool> {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((agent.clone(), model.map(str::to_string)));
+        self.answer
+    }
+}
+
+const FABLE: &str = "claude-fable-5-2[1m]";
+
+/// The refusal the provider sent for Fable on 2026-11-23 (KT-2048).
+const FABLE_REFUSAL: &str = "[Agent provider error] You've hit your Fable limit · resets Nov 28 at 8pm (Europe/Paris). Switch to another model, or manage usage credits at https://claude.ai/admin-settings/usage, to continue. (HTTP 429; terminal_reason=api_error)";
+
+/// A Claude Code step on `model`, the tier left at its default.
+fn claude_step_on(model: &str) -> WorkflowStep {
+    WorkflowStep {
+        agent_settings: Some(AgentSettings {
+            model: Some(model.into()),
+            ..Default::default()
+        }),
+        ..step()
+    }
+}
+
 async fn cooldown(state: &AppState, agent: AgentType) -> Option<fallback::Cooldown> {
     state
         .db
@@ -315,8 +368,9 @@ async fn a_fallback_on_its_own_row_chains_when_the_first_one_is_unavailable() {
 #[tokio::test]
 async fn a_step_starts_on_the_fallback_while_its_agent_cools_down_and_returns_after() {
     let (state, agents) = state_with(Some(link(AgentType::Codex)));
+    let silent = FakeProbe::answering(None);
     assert!(
-        start_on_fallback_among(&state, &agents, &step(), Some(everyone()))
+        start_on_fallback_with(&state, &silent, &agents, &step(), Some(everyone()), "")
             .await
             .is_none()
     );
@@ -336,9 +390,10 @@ async fn a_step_starts_on_the_fallback_while_its_agent_cools_down_and_returns_af
         })
         .await
         .unwrap();
-    let (moved, notice) = start_on_fallback_among(&state, &agents, &step(), Some(everyone()))
-        .await
-        .expect("straight to the fallback");
+    let (moved, notice) =
+        start_on_fallback_with(&state, &silent, &agents, &step(), Some(everyone()), "")
+            .await
+            .expect("straight to the fallback");
     assert_eq!(moved.agent, AgentType::Codex);
     assert!(
         notice.starts_with("Claude Code · claude-opus-4: quota exhausted until ")
@@ -359,10 +414,196 @@ async fn a_step_starts_on_the_fallback_while_its_agent_cools_down_and_returns_af
         .await
         .unwrap();
     assert!(
-        start_on_fallback_among(&state, &agents, &step(), Some(everyone()))
+        start_on_fallback_with(&state, &silent, &agents, &step(), Some(everyone()), "")
             .await
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn a_model_refusal_cools_only_the_model_it_names_and_the_other_models_run_as_configured() {
+    let (state, agents) = state_with(Some(link(AgentType::Codex)));
+    let fable = claude_step_on("claude-fable-5-2[1m]");
+    let (after, _) = rerun(
+        continue_after_among(
+            &state,
+            &agents,
+            &AgentType::ClaudeCode,
+            &fable,
+            &outcome(RunStatus::Failed, FABLE_REFUSAL),
+            Some(everyone()),
+        )
+        .await,
+    );
+    assert_eq!(after.agent, AgentType::Codex);
+
+    // The row is scoped to the refused model, not to the agent.
+    assert!(cooldown(&state, AgentType::ClaudeCode).await.is_none());
+    let refused = state
+        .db
+        .with_read_conn(|conn| {
+            fallback::active_cooldown_for(
+                conn,
+                &AgentType::ClaudeCode,
+                "claude-fable-5-2[1m]",
+                chrono::Utc::now(),
+            )
+        })
+        .await
+        .unwrap();
+    assert!(refused.is_some(), "the refused model is cooled");
+
+    // A step on another model of the same agent starts on Claude Code.
+    let probe = FakeProbe::answering(Some(false));
+    let opus = claude_step_on("claude-opus-5-5");
+    assert!(
+        start_on_fallback_with(&state, &probe, &agents, &opus, Some(everyone()), "")
+            .await
+            .is_none()
+    );
+    assert!(
+        probe.asked().is_empty(),
+        "nothing cools that model: no probe"
+    );
+
+    // The Fable step itself is asked on Fable before it leaves Claude Code.
+    let (moved, notice) =
+        start_on_fallback_with(&state, &probe, &agents, &fable, Some(everyone()), "")
+            .await
+            .expect("the refused model still refuses: the fallback");
+    assert_eq!(moved.agent, AgentType::Codex);
+    assert_eq!(
+        probe.asked(),
+        vec![(
+            AgentType::ClaudeCode,
+            Some("claude-fable-5-2[1m]".to_string())
+        )]
+    );
+    assert!(notice.contains("claude-fable-5-2[1m]"), "{notice}");
+}
+
+/// KT-2048 — a Claude Code step left on the tier default: no model and no tier
+/// named, so it resolves its model from the tier (opus on the default tier).
+#[tokio::test]
+async fn a_step_on_the_default_tier_is_not_held_by_a_fable_refusal() {
+    let (state, agents) = state_with(Some(link(AgentType::Codex)));
+    let fable = claude_step_on(FABLE);
+    rerun(
+        continue_after_among(
+            &state,
+            &agents,
+            &AgentType::ClaudeCode,
+            &fable,
+            &outcome(RunStatus::Failed, FABLE_REFUSAL),
+            Some(everyone()),
+        )
+        .await,
+    );
+
+    let default_step = WorkflowStep {
+        agent_settings: None,
+        ..step()
+    };
+    let resolved = crate::workflows::agent_fallback_step::scope_model(&default_step, &agents);
+    assert_ne!(resolved, FABLE, "the default tier is not the refused model");
+
+    // Not held: the step runs as configured, and nothing is asked or moved.
+    let probe = FakeProbe::answering(Some(false));
+    assert!(
+        start_on_fallback_with(&state, &probe, &agents, &default_step, Some(everyone()), "")
+            .await
+            .is_none()
+    );
+    assert!(probe.asked().is_empty(), "no provider question about Fable");
+}
+
+#[tokio::test]
+async fn a_step_that_would_leave_its_agent_is_asked_on_its_own_model_first() {
+    let (state, agents) = state_with(Some(link(AgentType::Codex)));
+    let model = "claude-fable-probe-a";
+    let now = chrono::Utc::now();
+    state
+        .db
+        .with_conn(move |conn| {
+            fallback::set_scoped_cooldown(
+                conn,
+                &AgentType::ClaudeCode,
+                model,
+                fallback::Trigger::QuotaExhausted,
+                Some(now + chrono::Duration::hours(2)),
+                now,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let step = claude_step_on(model);
+
+    // The provider answers on that model: the cooldown clears, the step runs as configured.
+    let answering = FakeProbe::answering(Some(true));
+    assert!(start_on_fallback_with(
+        &state,
+        &answering,
+        &agents,
+        &step,
+        Some(everyone()),
+        "/repo"
+    )
+    .await
+    .is_none());
+    assert_eq!(
+        answering.asked(),
+        vec![(AgentType::ClaudeCode, Some(model.to_string()))]
+    );
+    assert!(state
+        .db
+        .with_read_conn(move |conn| fallback::active_cooldown_for(
+            conn,
+            &AgentType::ClaudeCode,
+            model,
+            chrono::Utc::now()
+        ))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_probe_that_still_refuses_keeps_the_step_on_the_fallback_and_is_not_repeated() {
+    let (state, agents) = state_with(Some(link(AgentType::Codex)));
+    let model = "claude-fable-probe-b";
+    let now = chrono::Utc::now();
+    state
+        .db
+        .with_conn(move |conn| {
+            fallback::set_scoped_cooldown(
+                conn,
+                &AgentType::ClaudeCode,
+                model,
+                fallback::Trigger::QuotaExhausted,
+                Some(now + chrono::Duration::hours(2)),
+                now,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let step = claude_step_on(model);
+    let refusing = FakeProbe::answering(Some(false));
+    let (moved, _) =
+        start_on_fallback_with(&state, &refusing, &agents, &step, Some(everyone()), "")
+            .await
+            .expect("a refusing provider keeps the fallback");
+    assert_eq!(moved.agent, AgentType::Codex);
+    assert_eq!(refusing.asked().len(), 1);
+
+    // Asked once per interval: the next start does not ask again.
+    let again = FakeProbe::answering(Some(true));
+    let (moved, _) = start_on_fallback_with(&state, &again, &agents, &step, Some(everyone()), "")
+        .await
+        .expect("still on the fallback: the provider is not asked twice");
+    assert_eq!(moved.agent, AgentType::Codex);
+    assert!(again.asked().is_empty());
 }
 
 #[tokio::test]

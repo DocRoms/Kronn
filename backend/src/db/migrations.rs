@@ -1112,6 +1112,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "304_task_worker_processes",
         include_str!("sql/304_task_worker_processes.sql"),
     ),
+    (
+        "305_agent_fallback_model_cooldowns",
+        include_str!("sql/305_agent_fallback_model_cooldowns.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
