@@ -13,10 +13,11 @@
 //! The step keeps its tier, budget and prompt; its model is the link's own or
 //! none (a model name belongs to one provider), see `step_agents::apply_to_step`.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::core::agent_fallback::{self as fallback, Selection, Trigger, TurnNeeds};
 use crate::models::{AgentType, AgentsConfig, StepAgentOverride, StepType, WorkflowStep};
+use crate::workflows::quota_wait::{AgentQuotaProbe, QuotaProbe, RECHECK_INTERVAL};
 use crate::AppState;
 
 use super::steps::StepOutcome;
@@ -127,21 +128,39 @@ fn tier_of(step: &WorkflowStep) -> crate::models::ModelTier {
         .unwrap_or_default()
 }
 
+/// The model `step` runs on: its own model setting, else the one its tier
+/// resolves to. KT-2048 — a cooldown is scoped to this model. `""` when none is
+/// known, which makes the cooldown agent-wide.
+pub fn scope_model(step: &WorkflowStep, agents: &AgentsConfig) -> String {
+    crate::agents::runner::effective_model_flag(
+        model_of(step),
+        &step.agent,
+        tier_of(step),
+        Some(&agents.model_tiers),
+    )
+    .unwrap_or_default()
+}
+
 /// Before the first launch: `step` itself, or its copy on the fallback while
-/// its agent is on cooldown. The notice is for the step's output.
+/// its agent is on cooldown. The notice is for the step's output. `project_path`
+/// is where a provider re-check runs, when the step must leave its agent.
 pub async fn start_on_fallback(
     state: &AppState,
     agents: &AgentsConfig,
     step: &WorkflowStep,
+    project_path: &str,
 ) -> Option<(WorkflowStep, String)> {
-    start_on_fallback_among(state, agents, step, None).await
+    start_on_fallback_with(state, &AgentQuotaProbe, agents, step, None, project_path).await
 }
 
-pub async fn start_on_fallback_among(
+/// [`start_on_fallback`] with the provider probe and the usable agents given.
+pub async fn start_on_fallback_with(
     state: &AppState,
+    probe: &dyn QuotaProbe,
     agents: &AgentsConfig,
     step: &WorkflowStep,
     usable: Option<Vec<AgentType>>,
+    project_path: &str,
 ) -> Option<(WorkflowStep, String)> {
     if step.step_type != StepType::Agent || step.agent == AgentType::Custom {
         return None;
@@ -157,9 +176,8 @@ pub async fn start_on_fallback_among(
     let now = Utc::now();
     let any_cooldown = state
         .db
-        .with_read_conn(move |conn| fallback::list_cooldowns(conn, now))
+        .with_read_conn(move |conn| fallback::any_cooldown_running(conn, now))
         .await
-        .map(|cooldowns| !cooldowns.is_empty())
         .unwrap_or(false);
     if !any_cooldown {
         return None;
@@ -168,26 +186,111 @@ pub async fn start_on_fallback_among(
     let needs = needs_of(step, agents);
     let config = agents.clone();
     let agent = step.agent.clone();
+    let model = scope_model(step, agents);
+    let scoped = model.clone();
     let preferred = state
         .db
         .with_read_conn(move |conn| {
-            fallback::preferred_start(conn, &config, &chain, &agent, &usable, &needs, now)
+            fallback::preferred_start_for(
+                conn, &config, &chain, &agent, &scoped, &usable, &needs, now,
+            )
         })
         .await
         .ok()
         .flatten()?;
     let (link, cooldown) = preferred;
+    // KT-2048 — the step would leave its agent: the provider is asked first,
+    // on the model the step runs. An answer clears the cooldown; the step runs
+    // as configured.
+    if probe_cooled_start(state, probe, agents, step, &model, project_path, now).await {
+        return None;
+    }
     let next = apply(step, &link).ok()?;
     let trigger = Trigger::from_code(&cooldown.reason).unwrap_or(Trigger::QuotaExhausted);
+    let refused = if model.is_empty() {
+        model_of(step)
+    } else {
+        Some(model.as_str())
+    };
     let notice = fallback::notice(
         &step.agent,
-        model_of(step),
+        refused,
         trigger,
         Some(cooldown.until),
         &link,
         tier_of(step),
     );
     Some((next, notice))
+}
+
+/// The instances of [`probe_cooled_start`] that asked a provider, by agent and
+/// model: a provider is asked at most once per re-check interval for a model.
+static PROBE_CLAIMS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, DateTime<Utc>>>,
+> = std::sync::OnceLock::new();
+
+/// Takes the right to ask `key` now: `false` when it was asked within the
+/// re-check interval.
+fn claim_probe(key: &str, now: DateTime<Utc>) -> bool {
+    let book = PROBE_CLAIMS.get_or_init(Default::default);
+    let mut book = book.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = book.get(key) {
+        if now - *last < RECHECK_INTERVAL {
+            return false;
+        }
+    }
+    book.insert(key.to_string(), now);
+    true
+}
+
+/// KT-2048 — before a step leaves its agent for a fallback, asks the agent on
+/// the step's own `model`, once per agent and model per re-check interval. An
+/// answer clears the agent's cooldown and `true` says the step can run as
+/// configured. Any other answer, or no right to ask, is `false`.
+pub async fn probe_cooled_start(
+    state: &AppState,
+    probe: &dyn QuotaProbe,
+    agents: &AgentsConfig,
+    step: &WorkflowStep,
+    model: &str,
+    project_path: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    let agent = step.agent.clone();
+    if !claim_probe(&format!("{agent:?}|{model}"), now) {
+        return false;
+    }
+    let (tokens, full_access) = {
+        let config = state.config.read().await;
+        (config.tokens.clone(), agents.full_access_for(&agent))
+    };
+    let model_arg = (!model.is_empty()).then_some(model);
+    let answer = probe
+        .quota_is_back(&agent, project_path, &tokens, full_access, model_arg)
+        .await;
+    if answer != Some(true) {
+        return false;
+    }
+    let back = agent.clone();
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| fallback::clear_cooldown(conn, &back))
+        .await
+    {
+        tracing::warn!("agent cooldown could not be cleared: {error}");
+    }
+    true
+}
+
+/// [`start_on_fallback_with`] for the production probe and no usable-agent
+/// restriction, with no project path (a probe of the bare agent).
+pub async fn start_on_fallback_among(
+    state: &AppState,
+    agents: &AgentsConfig,
+    step: &WorkflowStep,
+    usable: Option<Vec<AgentType>>,
+) -> Option<(WorkflowStep, String)> {
+    start_on_fallback_with(state, &AgentQuotaProbe, agents, step, usable, "").await
 }
 
 /// After a launch: what to do with `outcome`. `origin` is the agent the step
@@ -269,10 +372,18 @@ pub async fn continue_after_among(
     let config = agents.clone();
     let tokens = state.config.read().await.tokens.clone();
     let refusing_step = step.clone();
+    // KT-2048 — a refusal that names only its model cools that model; any other
+    // refusal cools the whole agent.
+    let scope = if fallback::is_model_refusal(&outcome.result.output) {
+        scope_model(step, agents)
+    } else {
+        String::new()
+    };
     let selected = state
         .db
         .with_conn(move |conn| {
-            let until = fallback::set_cooldown(conn, &failing, trigger, announced, now)?;
+            let until =
+                fallback::set_scoped_cooldown(conn, &failing, &scope, trigger, announced, now)?;
             let cooling = fallback::cooling_lookup(conn, now)?;
             let lookup = |candidate: &AgentType| {
                 cooling

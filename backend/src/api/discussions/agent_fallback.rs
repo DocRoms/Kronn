@@ -203,6 +203,26 @@ async fn plan(
     };
     let failing_for_db = failing.clone();
     let origin_for_db = origin.clone();
+    // KT-2048 — a room turn refused for one model ("Switch to another model")
+    // cools that model only. The model is the one the turn ran on; a worker's
+    // refusal, or any other, cools its agent as before.
+    let refused_model = match &surface {
+        Surface::Room if fallback::is_model_refusal(response) => {
+            let explicit = match pin.as_ref() {
+                Some(pin) if pin.to_agent == failing => pin.model.clone(),
+                _ if failing == discussion.agent => discussion.model.clone(),
+                _ => None,
+            };
+            crate::agents::runner::effective_model_flag(
+                explicit.as_deref(),
+                &failing,
+                tier,
+                Some(&agents.model_tiers),
+            )
+            .filter(|model| !model.is_empty())
+        }
+        _ => None,
+    };
     let (until, selection) = state
         .db
         .with_conn(move |conn| {
@@ -210,6 +230,8 @@ async fn plan(
             // its provider: no cooldown, so its rooms keep using it.
             let until = if trigger.is_launch_stop() {
                 now
+            } else if let Some(model) = &refused_model {
+                fallback::set_scoped_cooldown(conn, &failing_for_db, model, trigger, announced, now)?
             } else {
                 fallback::set_cooldown(conn, &failing_for_db, trigger, announced, now)?
             };

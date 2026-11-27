@@ -972,9 +972,26 @@ pub fn select_refusing(
     }
 }
 
-/// `14:00 UTC`, the way the room says when an agent is back.
+/// `14:00 UTC`, the way the room says when an agent is back. A reset on another
+/// UTC day carries its date (`28/11 19:00 UTC`): a bare hour reads as today.
 pub fn stamp(at: DateTime<Utc>) -> String {
-    at.format("%H:%M UTC").to_string()
+    stamp_from(at, Utc::now())
+}
+
+/// [`stamp`] as seen from `now`.
+pub fn stamp_from(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    if at.date_naive() == now.date_naive() {
+        at.format("%H:%M UTC").to_string()
+    } else {
+        at.format("%d/%m %H:%M UTC").to_string()
+    }
+}
+
+/// KT-2048 — a refusal that names only its model: the provider says to switch
+/// to another model. The other models of the same account are not refused by
+/// it. Any other refusal (session, weekly, spend limit) is account-wide.
+pub fn is_model_refusal(error: &str) -> bool {
+    error.to_lowercase().contains("switch to another model")
 }
 
 /// « Codex · gpt-5.6-sol: quota exhausted until 14:00 UTC → continued with
@@ -1056,12 +1073,25 @@ fn key(agent: &AgentType) -> String {
     crate::db::orchestration::agent_type_to_db(agent)
 }
 
-/// Starts (or renews) the cooldown of `agent`. `until` is the provider's
-/// announced reset, else the trigger's re-try window from `now`. Returns the
-/// instant stored.
+/// Starts (or renews) the cooldown of `agent`, every model of it. `until` is
+/// the provider's announced reset, else the trigger's re-try window from `now`.
+/// Returns the instant stored.
 pub fn set_cooldown(
     conn: &Connection,
     agent: &AgentType,
+    trigger: Trigger,
+    announced: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<DateTime<Utc>> {
+    set_scoped_cooldown(conn, agent, "", trigger, announced, now)
+}
+
+/// KT-2048 — starts (or renews) the cooldown of one model of `agent`: the
+/// model the provider refused. `model` `""` is the agent-wide cooldown.
+pub fn set_scoped_cooldown(
+    conn: &Connection,
+    agent: &AgentType,
+    model: &str,
     trigger: Trigger,
     announced: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
@@ -1070,12 +1100,13 @@ pub fn set_cooldown(
         .filter(|at| *at > now)
         .unwrap_or_else(|| now + trigger.default_cooldown());
     conn.execute(
-        "INSERT INTO agent_fallback_cooldowns (agent, until, reason, noted_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(agent) DO UPDATE SET until = excluded.until,
+        "INSERT INTO agent_fallback_cooldowns (agent, model, until, reason, noted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent, model) DO UPDATE SET until = excluded.until,
              reason = excluded.reason, noted_at = excluded.noted_at",
         params![
             key(agent),
+            model,
             until.to_rfc3339(),
             trigger.code(),
             now.to_rfc3339()
@@ -1091,29 +1122,58 @@ pub fn active_cooldown(
     agent: &AgentType,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Option<Cooldown>> {
-    let row: Option<(String, String)> = conn
-        .query_row(
-            "SELECT until, reason FROM agent_fallback_cooldowns WHERE agent = ?1",
-            [key(agent)],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    Ok(row.and_then(|(until, reason)| {
-        let until = DateTime::parse_from_rfc3339(&until)
-            .ok()?
-            .with_timezone(&Utc);
-        (until > now).then(|| Cooldown {
-            agent: agent.clone(),
-            until,
-            reason,
+    active_cooldown_for(conn, agent, "", now)
+}
+
+/// KT-2048 — until when `model` of `agent` is left alone: the agent-wide
+/// cooldown or the one of that model, whichever runs longer. `""` reads the
+/// agent-wide one only.
+pub fn active_cooldown_for(
+    conn: &Connection,
+    agent: &AgentType,
+    model: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<Cooldown>> {
+    let mut statement = conn.prepare(
+        "SELECT until, reason FROM agent_fallback_cooldowns
+         WHERE agent = ?1 AND model IN ('', ?2)",
+    )?;
+    let rows = statement
+        .query_map(params![key(agent), model], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(until, reason)| {
+            let until = DateTime::parse_from_rfc3339(&until)
+                .ok()?
+                .with_timezone(&Utc);
+            (until > now).then_some(Cooldown {
+                agent: agent.clone(),
+                until,
+                reason,
+            })
         })
+        .max_by_key(|cooldown| cooldown.until))
+}
+
+/// Whether any cooldown, agent-wide or scoped to a model, is still running.
+pub fn any_cooldown_running(conn: &Connection, now: DateTime<Utc>) -> anyhow::Result<bool> {
+    let mut statement = conn.prepare("SELECT until FROM agent_fallback_cooldowns")?;
+    let untils = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(untils.iter().any(|until| {
+        DateTime::parse_from_rfc3339(until).is_ok_and(|until| until.with_timezone(&Utc) > now)
     }))
 }
 
-/// Every cooldown still running, for the agent cards.
+/// Every agent-wide cooldown still running, for the agent cards. A model-scoped
+/// one is not an agent-wide one: the other models of the agent keep answering.
 pub fn list_cooldowns(conn: &Connection, now: DateTime<Utc>) -> anyhow::Result<Vec<Cooldown>> {
     let mut statement =
-        conn.prepare("SELECT agent, until, reason FROM agent_fallback_cooldowns")?;
+        conn.prepare("SELECT agent, until, reason FROM agent_fallback_cooldowns WHERE model = ''")?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -1149,6 +1209,20 @@ pub fn clear_cooldown(conn: &Connection, agent: &AgentType) -> anyhow::Result<()
     Ok(())
 }
 
+/// KT-2048 — the provider answers for `model` again: its own cooldown goes,
+/// the agent-wide one (if any) stays until the provider says otherwise.
+pub fn clear_model_cooldown(
+    conn: &Connection,
+    agent: &AgentType,
+    model: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM agent_fallback_cooldowns WHERE agent = ?1 AND model = ?2",
+        params![key(agent), model],
+    )?;
+    Ok(())
+}
+
 /// An account changed (a new key, another login): no agent is held back on the
 /// strength of the old one.
 pub fn clear_all_cooldowns(conn: &Connection) -> anyhow::Result<()> {
@@ -1169,7 +1243,23 @@ pub fn preferred_start(
     needs: &TurnNeeds,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Option<(AgentFallback, Cooldown)>> {
-    let Some(cooldown) = active_cooldown(conn, agent, now)? else {
+    preferred_start_for(conn, agents, chain, agent, "", usable, needs, now)
+}
+
+/// KT-2048 — [`preferred_start`] for `model` of `agent`: a cooldown of that
+/// model, or the agent-wide one, moves the start to a link.
+#[allow(clippy::too_many_arguments)]
+pub fn preferred_start_for(
+    conn: &Connection,
+    agents: &AgentsConfig,
+    chain: &[AgentFallback],
+    agent: &AgentType,
+    model: &str,
+    usable: &[AgentType],
+    needs: &TurnNeeds,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<(AgentFallback, Cooldown)>> {
+    let Some(cooldown) = active_cooldown_for(conn, agent, model, now)? else {
         return Ok(None);
     };
     let cooling = cooling_lookup(conn, now)?;

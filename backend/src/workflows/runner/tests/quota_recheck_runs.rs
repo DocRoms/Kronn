@@ -36,6 +36,7 @@ impl QuotaProbe for StubProbe {
         _project_path: &str,
         _tokens: &crate::models::TokensConfig,
         _full_access: bool,
+        _model: Option<&str>,
     ) -> Option<bool> {
         self.asked.lock().unwrap().push(agent.clone());
         self.verdict
@@ -245,6 +246,70 @@ async fn the_refused_step_can_be_moved_to_another_agent_and_the_recheck_asks_tha
     assert!(context
         .get(crate::workflows::step_agents::TRIGGER_CONTEXT_KEY)
         .is_none());
+}
+
+/// KT-2048 — answers the CLI default (no model) and refuses every named model,
+/// as the provider did for Fable while the default model still answered.
+struct CliDefaultOnlyProbe {
+    asked: Mutex<Vec<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl QuotaProbe for CliDefaultOnlyProbe {
+    async fn quota_is_back(
+        &self,
+        _agent: &AgentType,
+        _project_path: &str,
+        _tokens: &crate::models::TokensConfig,
+        _full_access: bool,
+        model: Option<&str>,
+    ) -> Option<bool> {
+        self.asked.lock().unwrap().push(model.map(str::to_string));
+        Some(model.is_none())
+    }
+}
+
+/// KT-2048 DoD 4 — the CLI default answers, the waiting step's own model
+/// refuses: the run stays WaitingQuota and its step is not relaunched.
+#[tokio::test]
+async fn a_run_waiting_on_a_refused_model_is_not_released_by_the_cli_default() {
+    const FABLE: &str = "claude-fable-5-2[1m]";
+    const FABLE_LIMIT: &str = "[Agent provider error] You've hit your Fable limit · resets Nov 28 at 8pm (Europe/Paris). Switch to another model, or manage usage credits at https://claude.ai/admin-settings/usage, to continue. (HTTP 429; terminal_reason=api_error)";
+    let mut fx = fixture("recheck-fable", FABLE_LIMIT, 1, THREE_DAYS).await;
+    fx.workflow.steps[1].agent_settings = Some(crate::models::AgentSettings {
+        model: Some(FABLE.into()),
+        ..Default::default()
+    });
+    let parked = run_until_paused(&fx, "run-recheck-fable").await;
+    assert_eq!(parked.status, RunStatus::WaitingQuota);
+    let state = restarted(&fx.state);
+
+    let probe = Arc::new(CliDefaultOnlyProbe {
+        asked: Mutex::new(Vec::new()),
+    });
+    let rechecker = QuotaRechecker::new(probe.clone(), Duration::minutes(20));
+    let t0 = Utc::now();
+    rechecker.recheck_due(&state, t0).await;
+    let resumed = rechecker
+        .recheck_due(&state, t0 + Duration::minutes(21))
+        .await;
+
+    assert!(
+        resumed.is_empty(),
+        "the refused model keeps the run waiting"
+    );
+    assert_eq!(
+        *probe.asked.lock().unwrap(),
+        vec![Some(FABLE.to_string())],
+        "asked on the step's model, never on the CLI default"
+    );
+    let still = stored(&state, "run-recheck-fable").await;
+    assert_eq!(still.status, RunStatus::WaitingQuota);
+    assert_eq!(
+        fx.prompt_markers(),
+        vec!["prepare", "analyse"],
+        "no relaunch"
+    );
 }
 
 #[tokio::test]

@@ -16459,6 +16459,7 @@ impl crate::workflows::quota_wait::QuotaProbe for StubQuotaProbe {
         _project_path: &str,
         _tokens: &crate::models::TokensConfig,
         _full_access: bool,
+        _model: Option<&str>,
     ) -> Option<bool> {
         self.asked.lock().unwrap().push(agent.clone());
         self.verdict

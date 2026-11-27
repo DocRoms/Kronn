@@ -1,6 +1,57 @@
 use super::*;
 use std::collections::HashMap;
 
+/// KT-2048 — answers the CLI default and refuses every named model.
+struct ModelProbe {
+    asked: std::sync::Mutex<Vec<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl QuotaProbe for ModelProbe {
+    async fn quota_is_back(
+        &self,
+        _agent: &crate::models::AgentType,
+        _project_path: &str,
+        _tokens: &crate::models::TokensConfig,
+        _full_access: bool,
+        model: Option<&str>,
+    ) -> Option<bool> {
+        self.asked.lock().unwrap().push(model.map(str::to_string));
+        Some(model.is_none())
+    }
+}
+
+/// KT-2048 — the re-check of a waiting step asks the step's own model: a CLI
+/// default that answers does not release a run whose model still refuses.
+#[tokio::test]
+async fn a_waiting_step_is_re_checked_on_its_own_model_not_the_cli_default() {
+    let config = crate::core::config::default_config();
+    let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+    let state = AppState::new_defaults(
+        std::sync::Arc::new(tokio::sync::RwLock::new(config)),
+        db,
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let probe = std::sync::Arc::new(ModelProbe {
+        asked: Default::default(),
+    });
+    let rechecker = QuotaRechecker::new(probe.clone(), RECHECK_INTERVAL);
+    let mut verdicts = HashMap::new();
+    let agent = crate::models::AgentType::ClaudeCode;
+    let refused = rechecker
+        .verdict(&state, &mut verdicts, &agent, "", "claude-fable-5-2[1m]")
+        .await;
+    assert_eq!(refused, Some(false));
+    let default = rechecker
+        .verdict(&state, &mut verdicts, &agent, "", "")
+        .await;
+    assert_eq!(default, Some(true));
+    assert_eq!(
+        *probe.asked.lock().unwrap(),
+        vec![Some("claude-fable-5-2[1m]".to_string()), None]
+    );
+}
+
 fn utc(stamp: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(stamp)
         .unwrap()
