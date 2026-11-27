@@ -5736,7 +5736,13 @@ dependency_dirs?: Array<string>,
  * one project, set in its workspace settings: no agent tool writes it and the
  * global entry is not read for it. A shell is never accepted.
  */
-validation_executables?: Array<string>, };
+validation_executables?: Array<string>,
+/**
+ * KT-2129 — the longest, in seconds, one validation or Exec command of this
+ * project may run; unset follows Settings > Workers. A project's own
+ * setting: the global value lives in `WorkersConfig`.
+ */
+validation_max_timeout_secs?: number, };
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**
@@ -13243,6 +13249,12 @@ background_priority: boolean,
  * behind them, so it cannot bound the machine load on its own.
  */
 max_concurrent_task_workers: number,
+/**
+ * KT-2129 — the longest, in seconds, a task validation, an integration gate
+ * or a workflow Exec command may run (60 to 14400); a project may set its
+ * own. Runs of the same project are cut at it.
+ */
+validation_max_timeout_secs: number,
 /**
  * KT-1525 — a workflow step output above this many KB is shown as a
  * « heavy output » warning in the run view and on the workflow card.

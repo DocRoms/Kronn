@@ -45,6 +45,27 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     }));
   });
 
+  it('KT-2129 — sets the project validation ceiling, refuses values outside 60-14400 and stores it with the override', async () => {
+    getMock.mockResolvedValue({ hooks: {}, lane_warm: {} });
+    setMock.mockResolvedValue(true);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-ceiling')).not.toBeDisabled());
+    const input = screen.getByTestId('project-lane-warm-ceiling');
+    expect(input).toHaveValue(null);
+
+    fireEvent.change(input, { target: { value: '30' } });
+    expect(screen.getByTestId('project-lane-warm-ceiling-invalid'))
+      .toHaveTextContent('laneWarm.validationCeilingInvalid:60,14400');
+    expect(screen.getByTestId('project-lane-warm-save')).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: '7200' } });
+    fireEvent.click(screen.getByTestId('project-lane-warm-save'));
+    await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', {
+      hooks: {},
+      lane_warm: { validation_max_timeout_secs: 7200 },
+    }));
+  });
+
   it('keeps the commit identity and the managed roots when it saves the warm-up', async () => {
     const commit = { name: 'Bot', email: 'bot@corp.example', signoff: 'always' };
     getMock.mockResolvedValue({
@@ -188,7 +209,7 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     await waitFor(() => expect(screen.getByTestId('project-lane-warm-command')).not.toBeDisabled());
 
     const groups = screen.getByTestId('project-lane-warm-fields').querySelectorAll(':scope > .lane-warm-group');
-    expect(groups).toHaveLength(6);
+    expect(groups).toHaveLength(7);
     for (const group of Array.from(groups)) {
       expect(group.querySelectorAll('label')).toHaveLength(1);
       expect(group.querySelector('p.text-faint')).not.toBeNull();

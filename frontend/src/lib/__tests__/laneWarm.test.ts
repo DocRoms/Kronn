@@ -95,4 +95,18 @@ describe('validation executables (KT-1751 review)', () => {
       './gradlew', 'composer', 'vendor/bin/phpunit',
     ]);
   });
+
+  it('KT-2129 — a project ceiling is a draft field, bounded to 60-14400 and left out when blank', () => {
+    expect(draftOf({ validation_max_timeout_secs: 7200 }).validationCeiling).toBe('7200');
+    expect(configOf(draftOf({ validation_max_timeout_secs: 7200 }))).toEqual({ validation_max_timeout_secs: 7200 });
+    expect(configOf({ ...EMPTY_LANE_WARM_DRAFT, validationCeiling: '  ' })).toEqual({});
+    const base = { ...EMPTY_LANE_WARM_DRAFT };
+    for (const bad of ['59', '14401', '1.5', 'abc']) {
+      expect(draftProblem({ ...base, validationCeiling: bad })).toBe('ceiling');
+    }
+    for (const good of ['60', '14400', '1800']) {
+      expect(draftProblem({ ...base, validationCeiling: good })).toBeNull();
+    }
+    expect(sameDraft(base, { ...base, validationCeiling: '3600' })).toBe(false);
+  });
 });

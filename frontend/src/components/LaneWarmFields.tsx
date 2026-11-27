@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { config as configApi } from '../lib/api';
 import type { LaneWarmDraft, SeedAlignmentChoice, EnvMode } from '../lib/laneWarm';
+import { MAX_VALIDATION_CEILING_SECS, MIN_VALIDATION_CEILING_SECS } from '../lib/validationCeiling';
 import { DEFAULT_FIRST_BUILD_TIMEOUT_MIN, MAX_FIRST_BUILD_TIMEOUT_MIN, draftProblem } from '../lib/laneWarm';
 
 interface Props {
@@ -159,6 +160,34 @@ export function LaneWarmFields({ draft, onChange, scope, disabled = false, idPre
           {problem === 'executables' && (
             <p role="alert" className="default-docs-dir-error" data-testid={`${idPrefix}-executables-invalid`}>
               {t('laneWarm.executablesInvalid')}
+            </p>
+          )}
+        </div>
+      )}
+
+      {scope === 'project' && (
+        <div className="lane-warm-group">
+          <label className="lane-warm-field" htmlFor={`${idPrefix}-ceiling`}>
+            <span className="label">{t('laneWarm.validationCeiling')}</span>
+            <input
+              id={`${idPrefix}-ceiling`}
+              type="number"
+              className="set-input set-input-sm"
+              min={MIN_VALIDATION_CEILING_SECS}
+              max={MAX_VALIDATION_CEILING_SECS}
+              placeholder={t('laneWarm.inherit')}
+              value={draft.validationCeiling}
+              disabled={disabled}
+              onChange={event => set({ validationCeiling: event.target.value })}
+              data-testid={`${idPrefix}-ceiling`}
+            />
+          </label>
+          <p className="text-sm text-faint">
+            {t('laneWarm.validationCeilingHelp', MIN_VALIDATION_CEILING_SECS, MAX_VALIDATION_CEILING_SECS)}
+          </p>
+          {problem === 'ceiling' && (
+            <p role="alert" className="default-docs-dir-error" data-testid={`${idPrefix}-ceiling-invalid`}>
+              {t('laneWarm.validationCeilingInvalid', MIN_VALIDATION_CEILING_SECS, MAX_VALIDATION_CEILING_SECS)}
             </p>
           )}
         </div>

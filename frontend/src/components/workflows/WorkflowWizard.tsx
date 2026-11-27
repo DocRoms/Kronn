@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { MAX_VALIDATION_CEILING_SECS } from '../../lib/validationCeiling';
 import { AppLink } from '../AppLink';
 import { newTabClickProps } from '../../lib/newTabNavigation';
 import { PAGE_PATHS, livePagePath } from '../../lib/routes';
@@ -3058,7 +3059,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         <input
                           type="number"
                           min={1}
-                          max={1800}
+                          max={MAX_VALIDATION_CEILING_SECS}
                           className="wf-input text-sm"
                           style={{ width: 100 }}
                           value={step.exec_timeout_secs ?? ''}

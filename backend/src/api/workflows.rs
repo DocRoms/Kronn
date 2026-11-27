@@ -1275,6 +1275,27 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
     validate_exec_steps_keeping(steps, allowlist, &[], false)
 }
 
+/// KT-2129 — the ceiling an Exec step of a workflow of `project_id` may ask for:
+/// the project's own, else Settings > Workers'.
+async fn exec_ceiling_for(state: &AppState, project_id: Option<&str>) -> u32 {
+    let Some(id) = project_id.map(str::to_string) else {
+        return crate::core::task_worker_lane_settings::global_validation_ceiling_secs() as u32;
+    };
+    let path = state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+        .ok()
+        .flatten()
+        .map(|project| project.path);
+    match path {
+        Some(path) => crate::core::task_worker_lane_settings::validation_ceiling_for_project(
+            std::path::Path::new(&path),
+        ) as u32,
+        None => crate::core::task_worker_lane_settings::global_validation_ceiling_secs() as u32,
+    }
+}
+
 /// An unsafe command line already stored in a workflow, with its exact
 /// place: chain (`on_failure`), step position, the line itself, then the
 /// step's declared script files (KT-918), so a changed hash is not "unchanged".
@@ -1372,7 +1393,20 @@ fn validate_exec_steps_keeping(
     kept: &[KeptLine],
     rollback: bool,
 ) -> Result<(), String> {
+    // Paths that do not know the project accept the highest ceiling any scope holds.
+    let ceiling = crate::core::task_worker_lane_settings::intake_validation_ceiling() as u32;
+    validate_exec_steps_under(steps, allowlist, kept, rollback, ceiling)
+}
+
+fn validate_exec_steps_under(
+    steps: &[WorkflowStep],
+    allowlist: &[String],
+    kept: &[KeptLine],
+    rollback: bool,
+    ceiling: u32,
+) -> Result<(), String> {
     const MAX_ARGS: usize = 64;
+    // Collector Quick Execs keep their own bound.
     const MAX_TIMEOUT_SECS: u32 = 1800;
     for (index, s) in steps.iter().enumerate() {
         if !s.exec_script_files.is_empty() {
@@ -1617,10 +1651,16 @@ fn validate_exec_steps_keeping(
             }
         }
         if let Some(t) = s.exec_timeout_secs {
-            if t == 0 || t > MAX_TIMEOUT_SECS {
+            if t == 0 || t > ceiling {
                 return Err(format!(
-                    "Step Exec « {} » : `exec_timeout_secs` doit être entre 1 et {} (reçu : {}).",
-                    s.name, MAX_TIMEOUT_SECS, t
+                    "Step Exec « {} » : `exec_timeout_secs` doit être entre 1 et {} (reçu : {}). \
+                     Le plafond est de {} s : relevez-le dans Paramètres > Workers, ou dans les \
+                     réglages du projet du workflow (au plus {} s).",
+                    s.name,
+                    ceiling,
+                    t,
+                    ceiling,
+                    crate::models::MAX_VALIDATION_MAX_TIMEOUT_SECS
                 ));
             }
         }
@@ -3119,10 +3159,19 @@ async fn create_written(
         return Json(ApiResponse::err(e));
     }
 
-    if let Err(e) = validate_exec_steps(&req.steps, &req.exec_allowlist) {
+    let exec_ceiling = exec_ceiling_for(&state, req.project_id.as_deref()).await;
+    if let Err(e) =
+        validate_exec_steps_under(&req.steps, &req.exec_allowlist, &[], false, exec_ceiling)
+    {
         return Json(ApiResponse::err(e));
     }
-    if let Err(e) = validate_exec_steps(&req.on_failure, &req.exec_allowlist) {
+    if let Err(e) = validate_exec_steps_under(
+        &req.on_failure,
+        &req.exec_allowlist,
+        &[],
+        false,
+        exec_ceiling,
+    ) {
         return Json(ApiResponse::err(e));
     }
     if let Err(e) = validate_saved_quick_exec_refs(
@@ -3844,10 +3893,19 @@ async fn update_written(
         .as_ref()
         .unwrap_or(&existing.exec_allowlist);
     let stored_unsafe = kept_lines(&existing.steps, &existing.on_failure);
+    let effective_project = match &req.project_id {
+        Some(patch) => patch.clone(),
+        None => existing.project_id.clone(),
+    };
+    let exec_ceiling = exec_ceiling_for(&state, effective_project.as_deref()).await;
     if let Some(ref new_steps) = req.steps {
-        if let Err(e) =
-            validate_exec_steps_keeping(new_steps, effective_allowlist, &stored_unsafe, false)
-        {
+        if let Err(e) = validate_exec_steps_under(
+            new_steps,
+            effective_allowlist,
+            &stored_unsafe,
+            false,
+            exec_ceiling,
+        ) {
             return Json(ApiResponse::err(e));
         }
         if let Err(e) = validate_json_data_steps(new_steps) {
@@ -3862,9 +3920,13 @@ async fn update_written(
         }
     }
     if let Some(ref new_on_failure) = req.on_failure {
-        if let Err(e) =
-            validate_exec_steps_keeping(new_on_failure, effective_allowlist, &stored_unsafe, true)
-        {
+        if let Err(e) = validate_exec_steps_under(
+            new_on_failure,
+            effective_allowlist,
+            &stored_unsafe,
+            true,
+            exec_ceiling,
+        ) {
             return Json(ApiResponse::err(e));
         }
         if let Err(e) = validate_json_data_steps(new_on_failure) {
@@ -10247,6 +10309,19 @@ mod tests {
         // Edge: 1800 is allowed (the cap, inclusive).
         let chain3 = vec![mk_exec_step("test", Some("cargo"), vec![], Some(1800))];
         assert!(validate_exec_steps(&chain3, &["cargo".into()]).is_ok());
+    }
+
+    #[test]
+    fn exec_step_timeout_is_held_to_the_ceiling_in_force_and_names_the_setting() {
+        let chain = |secs| vec![mk_exec_step("e2e", Some("pnpm"), vec![], Some(secs))];
+        let allow = ["pnpm".to_string()];
+        assert!(validate_exec_steps_under(&chain(3_600), &allow, &[], false, 1_800).is_err());
+        assert!(validate_exec_steps_under(&chain(3_600), &allow, &[], false, 7_200).is_ok());
+        assert!(validate_exec_steps_under(&chain(7_200), &allow, &[], false, 7_200).is_ok());
+        let err = validate_exec_steps_under(&chain(3_600), &allow, &[], false, 1_800).unwrap_err();
+        assert!(err.contains("1800"), "{err}");
+        assert!(err.contains("Paramètres > Workers"), "{err}");
+        assert!(err.contains("projet"), "{err}");
     }
 
     #[test]

@@ -252,3 +252,41 @@ fn a_removed_folder_reached_through_a_link_is_still_forgotten_and_moved() {
     assert_eq!(moved, vec!["moved-tool".to_string()]);
     assert!(!old_left, "the old path stayed");
 }
+
+#[test]
+fn a_project_ceiling_wins_over_the_global_one_and_intake_takes_the_highest() {
+    let _owner = test_guard::exclusive();
+    let t = tree();
+    let global = |secs| crate::models::WorkersConfig {
+        validation_max_timeout_secs: secs,
+        ..crate::models::WorkersConfig::default()
+    };
+    set_global_validation_ceiling(&global(3_600));
+    set_project(
+        &t.mono,
+        Some(&LaneWarmConfig {
+            validation_max_timeout_secs: Some(7_200),
+            ..LaneWarmConfig::default()
+        }),
+    );
+    assert_eq!(validation_ceiling_for_project(&t.mono), 7_200);
+    // No entry of its own: the global value; no project at all: the same.
+    assert_eq!(validation_ceiling_for_project(&t.sub), 3_600);
+    assert_eq!(global_validation_ceiling_secs(), 3_600);
+    assert_eq!(intake_validation_ceiling(), 7_200);
+
+    // A project may also lower it below the global one.
+    set_project(
+        &t.mono,
+        Some(&LaneWarmConfig {
+            validation_max_timeout_secs: Some(120),
+            ..LaneWarmConfig::default()
+        }),
+    );
+    assert_eq!(validation_ceiling_for_project(&t.mono), 120);
+    assert_eq!(intake_validation_ceiling(), 3_600);
+
+    set_project(&t.mono, None);
+    set_global_validation_ceiling(&global(1_800));
+    assert_eq!(validation_ceiling_for_project(&t.mono), 1_800);
+}

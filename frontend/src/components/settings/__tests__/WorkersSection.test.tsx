@@ -45,7 +45,7 @@ describe('WorkersSection (KT-1345)', () => {
       review_rounds_unlimited: false,
       max_concurrent_task_workers: 2,
       background_priority: true,
-      heavy_output_kb: 256,
+      heavy_output_kb: 256, validation_max_timeout_secs: 1800,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
       os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
@@ -74,7 +74,7 @@ describe('WorkersSection (KT-1345)', () => {
       review_rounds_unlimited: true,
       max_concurrent_task_workers: 2,
       background_priority: true,
-      heavy_output_kb: 256,
+      heavy_output_kb: 256, validation_max_timeout_secs: 1800,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
       os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
@@ -133,7 +133,7 @@ describe('WorkersSection (KT-1345)', () => {
       review_rounds_unlimited: false,
       max_concurrent_task_workers: 3,
       background_priority: true,
-      heavy_output_kb: 256,
+      heavy_output_kb: 256, validation_max_timeout_secs: 1800,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
       os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
@@ -182,7 +182,7 @@ describe('WorkersSection (KT-1345)', () => {
       review_rounds_unlimited: false,
       max_concurrent_task_workers: 2,
       background_priority: false,
-      heavy_output_kb: 256,
+      heavy_output_kb: 256, validation_max_timeout_secs: 1800,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
       os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
@@ -209,7 +209,7 @@ describe('WorkersSection (KT-1345)', () => {
   });
 
   it('KT-1525 — shows the heavy-output threshold, saves a new one and refuses 0 or too many', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, validation_max_timeout_secs: 1800, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, heavy_output_kb: 512 });
     render(<WorkersSection t={t} />);
@@ -232,8 +232,33 @@ describe('WorkersSection (KT-1345)', () => {
       .toHaveTextContent('config.workers.heavyOutputCurrent(512)'));
   });
 
+  it('KT-2129 — shows the validation ceiling, saves a new one and refuses values outside 60-14400', async () => {
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, validation_max_timeout_secs: 1800, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] };
+    getMock.mockResolvedValue(saved);
+    saveMock.mockResolvedValue({ ...saved, validation_max_timeout_secs: 5400 });
+    render(<WorkersSection t={t} />);
+    const input = await screen.findByTestId('workers-ceiling-input');
+    await waitFor(() => expect(input).toHaveValue(1800));
+    expect(screen.getByTestId('workers-ceiling-current')).toHaveTextContent('config.workers.validationCeilingCurrent(1800)');
+    expect(screen.getByTestId('workers-ceiling-hint')).toHaveTextContent('config.workers.validationCeilingHint(14400)');
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+
+    for (const bad of ['59', '14401', '0', '']) {
+      fireEvent.change(input, { target: { value: bad } });
+      expect(screen.getByTestId('workers-ceiling-invalid')).toHaveTextContent('config.workers.validationCeilingInvalid(60,14400)');
+      expect(screen.getByTestId('workers-save')).toBeDisabled();
+    }
+
+    fireEvent.change(input, { target: { value: '5400' } });
+    expect(screen.queryByTestId('workers-ceiling-invalid')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('workers-save'));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, validation_max_timeout_secs: 5400, lane_warm: {} }));
+    await waitFor(() => expect(screen.getByTestId('workers-ceiling-current'))
+      .toHaveTextContent('config.workers.validationCeilingCurrent(5400)'));
+  });
+
   it('KT-1748 — lists the managed worktree folders, refuses relative or root paths, saves one per line', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: ['/srv/lanes'] };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, validation_max_timeout_secs: 1800, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: ['/srv/lanes'] };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, managed_worktree_roots: ['/srv/lanes', '/Users/me/wt'] });
     render(<WorkersSection t={t} />);
@@ -257,7 +282,7 @@ describe('WorkersSection (KT-1345)', () => {
   });
 
   it('KT-1718 — shows the per-command cap next to the generation limit, saves new limits and refuses a default above the maximum', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, validation_max_timeout_secs: 1800, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, bash_max_timeout_min: 90 });
     getServerMock.mockResolvedValue({ agent_global_timeout_min: 120 });
@@ -293,7 +318,7 @@ describe('WorkersSection (KT-1345)', () => {
       .toHaveTextContent('config.workers.shellTimeoutsSummary(15,90,120)'));
   });
   it('KT-1750 — edits the OS junk list, refuses what git would read as something else, and resets it', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [], lane_warm: {} };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, validation_max_timeout_secs: 1800, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [], lane_warm: {} };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, os_junk_patterns: ['.DS_Store', '*.swp'] });
     render(<WorkersSection t={t} />);
@@ -317,7 +342,7 @@ describe('WorkersSection (KT-1345)', () => {
   });
 
   it('KT-1750 — an empty OS junk field saves an empty list (no pattern)', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store'], managed_worktree_roots: [], lane_warm: {} };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, validation_max_timeout_secs: 1800, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store'], managed_worktree_roots: [], lane_warm: {} };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, os_junk_patterns: [] });
     render(<WorkersSection t={t} />);
@@ -330,7 +355,7 @@ describe('WorkersSection (KT-1345)', () => {
 
   const withCommit = (commit?: Record<string, unknown>) => ({
     default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true,
-    heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60,
+    heavy_output_kb: 256, validation_max_timeout_secs: 1800, bash_default_timeout_min: 15, bash_max_timeout_min: 60,
     os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
     managed_worktree_roots: [],
     lane_warm: {},
@@ -387,7 +412,7 @@ describe('WorkersSection (KT-1345)', () => {
 });
 
 describe('WorkersSection lane warm-up (KT-1742)', () => {
-  const base = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] };
+  const base = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, validation_max_timeout_secs: 1800, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'], managed_worktree_roots: [] };
 
   it('shows what is saved and starts on the detected defaults', async () => {
     getMock.mockResolvedValue({ ...base, lane_warm: { seed_alignment: false, first_build_command: 'npm ci', first_build_timeout_min: 90 } });

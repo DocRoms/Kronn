@@ -1487,6 +1487,10 @@ const es: TranslationDict = {
   'config.workers.heavyOutputCurrent': 'Actual: {0} KB',
   'config.workers.heavyOutputHint': 'La salida de un step de workflow por encima de este tamaño se señala como «salida pesada» en la vista del run y en la tarjeta del workflow, con el nombre del step. El run nunca se rechaza.',
   'config.workers.heavyOutputInvalid': 'Introduce un número entero de KB entre {0} y {1}.',
+  'config.workers.validationCeiling': 'Duración máxima de una validación o comando Exec (segundos)',
+  'config.workers.validationCeilingCurrent': 'Actual: {0} s',
+  'config.workers.validationCeilingHint': 'Una validación de tarea, una puerta de integración o un paso Exec de workflow se detiene tras este número de segundos, y un plazo superior se rechaza. Por defecto 1800 (30 min), como máximo {0} (4 h). Un proyecto puede fijar el suyo en sus ajustes; una validación detenida en el límite se notifica como tiempo agotado, no como fallo de la entrega.',
+  'config.workers.validationCeilingInvalid': 'Introduzca un entero de segundos entre {0} y {1}.',
   'config.workers.shellTimeouts': 'Límites de los comandos de shell (workers de Claude)',
   'config.workers.shellTimeoutsHint': 'Claude Code detiene un comando de shell a los 10 minutos, y una compilación de pruebas en frío tarda más: se mata el compilador y el worker pierde su turno. Kronn da estos límites a cada worker de Claude, sea cual sea el shell desde el que se lanzó Kronn.',
   'config.workers.bashDefault': 'Por defecto, por comando (min)',
@@ -7938,6 +7942,9 @@ Termina con [SIGNAL: OK].`,
   'laneWarm.timeoutHelp': 'Por defecto {0}. Este campo prevalece sobre la variable KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS del host, que solo se usa si está vacío.',
   'laneWarm.timeoutEnvNotice': 'También definido por la variable KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS (= {0} min): solo se usa si este campo está vacío.',
   'laneWarm.timeoutInvalid': 'Entre {0} y {1} minutos.',
+  'laneWarm.validationCeiling': 'Duración máxima de una validación o comando Exec (segundos)',
+  'laneWarm.validationCeilingHelp': 'Deje vacío para seguir Ajustes > Workers. Entre {0} y {1} segundos. Una validación de tarea, una puerta de integración o un paso Exec de workflow de este proyecto se detiene tras este plazo.',
+  'laneWarm.validationCeilingInvalid': 'Entre {0} y {1} segundos.',
 };
 
 export default es;
