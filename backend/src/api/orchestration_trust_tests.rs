@@ -68,9 +68,10 @@ fn full_access_by_a_level_launches_under_the_level_sandbox_never_unconfined() {
         Some(TrustApproval::ValidationsUnconfined),
     );
     assert_eq!(by_level.launch(), ValidationReachLaunch::TrustHost);
-    let launch = launch_for_reach(by_level.launch(), &std::env::temp_dir()).unwrap();
+    let tree = tempfile::tempdir().unwrap();
+    let launch = launch_for_reach(by_level.launch(), tree.path()).unwrap();
     assert!(
-        !matches!(launch, ValidationLaunch::Unconfined),
+        matches!(&launch, ValidationLaunch::InLane(lane) if lane.under_a_level()),
         "the unconfined validation a level opened ran with no sandbox"
     );
     let (program, args) = spawned(&launch);
@@ -95,13 +96,114 @@ fn full_access_by_a_level_launches_under_the_level_sandbox_never_unconfined() {
 
 #[test]
 #[serial_test::serial]
-fn a_project_s_own_full_access_is_a_humans_choice_and_stays_as_it_was() {
+fn a_project_s_own_full_access_runs_without_a_sandbox_in_its_lane() {
     let by_human = reach(ValidationsAccess::Full, None, None);
     assert_eq!(by_human.launch(), ValidationReachLaunch::Host);
+    let tree = tempfile::tempdir().unwrap();
     assert!(matches!(
-        launch_for_reach(by_human.launch(), &std::env::temp_dir()),
-        Ok(ValidationLaunch::Unconfined)
+        launch_for_reach(by_human.launch(), tree.path()),
+        Ok(ValidationLaunch::InLane(lane)) if !lane.under_a_level()
     ));
+}
+
+/// The environment the process of a launch gets, as built for a parent that
+/// exports its own target directory (a dev server started by a launcher).
+fn env_under_a_server_target(
+    launch: &ValidationLaunch,
+) -> std::collections::BTreeMap<String, String> {
+    use crate::core::child_env::{probe, ChildRoute};
+    let confinement = launch.confinement().expect("a shipped launch");
+    let command = crate::core::child_env::with_parent_env(
+        &[("PATH", "/usr/bin"), ("CARGO_TARGET_DIR", "/server/target")],
+        || confinement.command(&probe_of("true"), ChildRoute::QuickExec),
+    );
+    probe::env_of(command.as_std())
+}
+
+/// KT-2024 — the reach changes the sandbox, never where a validation builds: at
+/// every reach the command gets the lane's own target and data directories, not
+/// the target the backend process inherited. Only the sandbox is offline.
+#[test]
+#[serial_test::serial]
+fn a_validation_builds_in_its_lane_at_every_reach() {
+    with_data_dir_present();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().canonicalize().unwrap();
+    let lane = root
+        .join(".kronn")
+        .join("worktrees")
+        .join("task-kt-2024-reach");
+    std::fs::create_dir_all(&lane).unwrap();
+    let target = root.join("target").join("wt-kt-2024-reach");
+    let mut reaches = vec![
+        ("full access", ValidationReachLaunch::Host),
+        ("a trust level", ValidationReachLaunch::TrustHost),
+    ];
+    if let Some(mechanism) = Mechanism::of_host() {
+        test_validation_mechanisms()
+            .lock()
+            .unwrap()
+            .insert(lane.clone(), Some(mechanism));
+        reaches.push(("the lane sandbox", ValidationReachLaunch::Sandbox));
+    }
+    for (name, reach) in reaches {
+        let sandboxed = reach == ValidationReachLaunch::Sandbox;
+        let launch = launch_for_reach(reach, &lane).unwrap();
+        let env = env_under_a_server_target(&launch);
+        assert_eq!(
+            env.get("CARGO_TARGET_DIR").map(std::path::PathBuf::from),
+            Some(target.clone()),
+            "{name}"
+        );
+        assert!(
+            env.get("KRONN_DATA_DIR")
+                .is_some_and(|dir| std::path::Path::new(dir).starts_with(&root)),
+            "{name}: {:?}",
+            env.get("KRONN_DATA_DIR")
+        );
+        // A launch left unconfined keeps its network.
+        assert_eq!(env.contains_key("CARGO_NET_OFFLINE"), sandboxed, "{name}");
+        assert_eq!(
+            env.contains_key("KRONN_E2E_CHROMIUM_SINGLE_PROCESS"),
+            sandboxed,
+            "{name}"
+        );
+    }
+    test_validation_mechanisms().lock().unwrap().remove(&lane);
+}
+
+/// KT-2024 — the target lookup that gates a validation asks Cargo in the same
+/// environment, so the disk it measures is the lane's; a `--target-dir` of the
+/// validation itself still wins.
+#[test]
+#[serial_test::serial]
+fn the_target_lookup_of_an_unsandboxed_validation_reads_the_lane() {
+    use crate::core::child_env::probe;
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().canonicalize().unwrap();
+    let lane = root
+        .join(".kronn")
+        .join("worktrees")
+        .join("task-kt-2024-lookup");
+    std::fs::create_dir_all(&lane).unwrap();
+    let launch = launch_for_reach(ValidationReachLaunch::Host, &lane).unwrap();
+    let target_of = |words: &[&str]| {
+        let command = crate::core::child_env::with_parent_env(
+            &[("PATH", "/usr/bin"), ("CARGO_TARGET_DIR", "/server/target")],
+            || validation_metadata_command(words, &lane, &launch).unwrap(),
+        );
+        probe::env_of(command.as_std())
+            .get("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+    };
+    assert_eq!(
+        target_of(&["test", "--lib"]),
+        Some(root.join("target").join("wt-kt-2024-lookup"))
+    );
+    assert_eq!(
+        target_of(&["test", "--target-dir", "/elsewhere"]),
+        Some(std::path::PathBuf::from("/elsewhere"))
+    );
 }
 
 #[test]
@@ -210,15 +312,18 @@ async fn a_docker_volume_naming_the_data_dir_is_refused_before_it_runs() {
 #[test]
 #[serial_test::serial]
 fn a_host_with_no_sandbox_does_not_refuse_the_reach_a_level_opened() {
+    let tree = tempfile::tempdir().unwrap();
+    let as_the_user =
+        |launch| matches!(launch, Ok(ValidationLaunch::InLane(lane)) if !lane.under_a_level());
     crate::core::trust_sandbox::set_test_unavailable(Some("no sandbox here"));
-    let launch = launch_for_reach(ValidationReachLaunch::TrustHost, &std::env::temp_dir());
+    let launch = launch_for_reach(ValidationReachLaunch::TrustHost, tree.path());
     crate::core::trust_sandbox::set_test_unavailable(None);
-    assert!(matches!(launch, Ok(ValidationLaunch::Unconfined)));
+    assert!(as_the_user(launch));
 
     crate::core::trust_sandbox::set_protect_vault(false);
-    let launch = launch_for_reach(ValidationReachLaunch::TrustHost, &std::env::temp_dir());
+    let launch = launch_for_reach(ValidationReachLaunch::TrustHost, tree.path());
     crate::core::trust_sandbox::set_protect_vault(true);
-    assert!(matches!(launch, Ok(ValidationLaunch::Unconfined)));
+    assert!(as_the_user(launch));
 }
 
 #[tokio::test]

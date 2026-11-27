@@ -25,6 +25,13 @@ itself is stopped.
   sandbox only (default), Docker allowed (the sandbox plus the resolved Docker
   socket, nothing else), or full access (no sandbox, behind a warning).
   [src: file: backend/src/models/projects.rs:166-174#ValidationsAccess]
+- The reach changes the sandbox, never where a validation builds (KT-2024):
+  at every reach the command gets the environment of its lane (its build and
+  data directories, ports and build budget), whatever target directory the
+  Kronn process itself was started with. What exists only because the sandbox
+  refuses something (the offline switch, caches moved out of the home) is
+  left out of a validation that runs without it.
+  [src: file: backend/src/api/orchestration.rs:8432-8455#launch_for_reach]
 - The socket comes from `DOCKER_HOST` (Unix only), then `docker context
   inspect`, then the known OrbStack, Docker Desktop, Colima and `/var/run`
   paths. A TCP endpoint is refused.

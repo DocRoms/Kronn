@@ -792,18 +792,11 @@ impl Confinement {
     /// `probe` under the OS sandbox, with the lane's environment beneath its
     /// own: a value the probe sets (a `--target-dir` override) wins. Pure.
     pub fn wrap(&self, probe: &ProbeCommand) -> ProbeCommand {
-        let mut env: Vec<(String, OsString)> = self
-            .lane_env
-            .iter()
-            .filter(|(name, _)| !probe.env.iter().any(|(set, _)| set == name))
-            .cloned()
-            .collect();
-        env.extend(probe.env.iter().cloned());
         confine(
             self.mechanism,
             &self.policy,
             &ProbeCommand {
-                env,
+                env: beneath(&self.lane_env, probe),
                 ..probe.clone()
             },
         )
@@ -825,6 +818,73 @@ impl Confinement {
         #[cfg(unix)]
         crate::core::task_worker_env::detach_from_terminal(command.as_std_mut());
         command
+    }
+}
+
+/// `lane_env` beneath what `probe` sets itself: the probe's own value wins.
+fn beneath(lane_env: &[(String, OsString)], probe: &ProbeCommand) -> Vec<(String, OsString)> {
+    let mut env: Vec<(String, OsString)> = lane_env
+        .iter()
+        .filter(|(name, _)| !probe.env.iter().any(|(set, _)| set == name))
+        .cloned()
+        .collect();
+    env.extend(probe.env.iter().cloned());
+    env
+}
+
+/// KT-2024 — a command started in a worker's lane without the lane's sandbox: the
+/// lane's environment over what the backend inherited, then the level's sandbox if any.
+pub struct LaneOnly {
+    lane_env: Vec<(String, OsString)>,
+    level: Option<crate::core::trust_sandbox::LevelConfinement>,
+}
+
+impl LaneOnly {
+    /// The lane of `work_dir`, provisioned as a sandboxed launch provisions it.
+    pub fn for_worktree(
+        work_dir: &Path,
+        level: Option<crate::core::trust_sandbox::LevelConfinement>,
+    ) -> Result<Self, String> {
+        let (lane, provisioned) = prepare_launch(work_dir)?;
+        for warning in &provisioned.warnings {
+            tracing::warn!(lane = %lane.name, "task worker lane: {warning}");
+        }
+        let lane_env = lane
+            .unconfined_env(&provisioned)
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect();
+        Ok(Self { lane_env, level })
+    }
+
+    /// Whether the sandbox of a trust level is applied on top.
+    pub fn under_a_level(&self) -> bool {
+        self.level.is_some()
+    }
+}
+
+impl CommandConfinement for LaneOnly {
+    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
+        let probe = ProbeCommand {
+            env: beneath(&self.lane_env, probe),
+            ..probe.clone()
+        };
+        match &self.level {
+            Some(level) => level.command(&probe, route),
+            None => {
+                let mut command =
+                    crate::core::cmd::async_cmd_with(&probe.program, route, probe.priority);
+                command.args(&probe.args).current_dir(&probe.cwd);
+                for (name, value) in &probe.env {
+                    command.env(name, value);
+                }
+                crate::core::child_env::seal(command.as_std_mut(), route, &[]);
+                // Its own group, as the other confinements: a timeout takes the whole tree.
+                #[cfg(unix)]
+                crate::core::task_worker_env::detach_from_terminal(command.as_std_mut());
+                command
+            }
+        }
     }
 }
 
