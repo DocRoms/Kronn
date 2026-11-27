@@ -284,7 +284,8 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
         | "heavy_output_kb"
         | "bash_default_timeout_min"
         | "bash_max_timeout_min"
-        | "rate_limit_wait_max_min"] => Number,
+        | "rate_limit_wait_max_min"
+        | "validation_max_timeout_secs"] => Number,
         ["workers", "os_junk_patterns", "[]"] => Text,
         ["workers", "commit", "name" | "email" | "signoff"] => Text,
         ["workers", "review_rounds_unlimited"] => Flag,

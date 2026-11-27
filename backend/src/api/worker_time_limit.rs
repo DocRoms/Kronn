@@ -153,7 +153,12 @@ pub fn time_limit_clock(limit: Duration, elapsed: Duration, started: DateTime<Ut
         .ok()
         .and_then(|limit| started.checked_add_signed(limit))
         .unwrap_or(started);
-    clock["ends_at"] = json!(crate::core::agent_fallback::stamp(ends_at));
+    // "Now" is the start plus the elapsed time, so the clock reads the same in a test.
+    let now = chrono::Duration::from_std(elapsed)
+        .ok()
+        .and_then(|elapsed| started.checked_add_signed(elapsed))
+        .unwrap_or(started);
+    clock["ends_at"] = json!(crate::core::agent_fallback::stamp_from(ends_at, now));
     clock
 }
 
