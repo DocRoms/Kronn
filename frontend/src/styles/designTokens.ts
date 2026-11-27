@@ -15,6 +15,7 @@ export type DesignScale =
   | 'duration'
   | 'weight'
   | 'controlHeight'
+  | 'overlayWidth'
   | 'textRole'
   | 'semanticColour';
 
@@ -93,7 +94,15 @@ export const DESIGN_TOKEN_GROUPS: readonly DesignTokenGroup[] = [
     title: 'designSystem.scale.controlHeight',
     preview: 'height',
     match: /^--kr-control-h-/,
-    tokens: tokens(['--kr-control-h-sm', '--kr-control-h-md', '--kr-control-h-lg']),
+    tokens: tokens(['--kr-control-h-sm', '--kr-control-h-md', '--kr-control-h-touch', '--kr-control-h-lg']),
+  },
+  {
+    // KT-1881 — the three widths of a Dialog and a Drawer (components/ui/).
+    scale: 'overlayWidth',
+    title: 'designSystem.scale.overlayWidth',
+    preview: 'width',
+    match: /^--kr-overlay-w-/,
+    tokens: tokens(['--kr-overlay-w-sm', '--kr-overlay-w-md', '--kr-overlay-w-lg']),
   },
   {
     scale: 'textRole',
@@ -126,6 +135,10 @@ export const DESIGN_TOKENS: readonly DesignToken[] = DESIGN_TOKEN_GROUPS.flatMap
  *  A breakpoint is the first width of the wider layout, as in `useIsMobile(bp)`
  *  (narrower than bp): a stylesheet writes `@media (max-width: <bp - 1>px)`. */
 export const BREAKPOINTS = { sm: 640, md: 768, lg: 900 } as const;
+
+/** The widths of a Dialog and a Drawer in px (`--kr-overlay-w-*`, checked by
+ *  the test), for the gallery's captions. */
+export const OVERLAY_WIDTHS = { sm: 480, md: 640, lg: 960 } as const;
 
 /** The root size the rem text scale is written against. */
 export const ROOT_FONT_PX = 16;

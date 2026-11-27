@@ -23,7 +23,7 @@
 
 .btn-primary {
   background: var(--kr-accent);
-  color: var(--kr-bg-base);
+  color: var(--kr-text-on-accent);
   border-color: transparent;
   font-weight: 700;
 }

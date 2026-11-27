@@ -76,7 +76,7 @@
       },
       "run": {
         "exécutions?": 82,
-        "lancements?": 51
+        "lancements?": 50
       },
       "settings": {
         "configs?": 75,
@@ -119,7 +119,7 @@
         "repos?": 19
       },
       "run": {
-        "lanzamientos?": 28,
+        "lanzamientos?": 27,
         "runs?": 60
       },
       "settings": {
@@ -1024,7 +1024,6 @@
       "qp.batch.failed": ["20123c11","term:run:lancements?"],
       "qp.batch.worktreeNoProject": ["1a409d5f","term:repository:repos?"],
       "qp.createWithAIHint": ["561c1967","term:plugin:MCPs?","register:fr:tu"],
-      "qp.history.deleteConfirm": ["5adcd876","term:run:lancements?"],
       "qp.improveCatalogIntro": ["d78ef85d","register:fr:tu"],
       "qp.metrics.chipTooltip": ["1f79e1e9","term:run:lancements?"],
       "readiness.checking": ["5def1ea6","term:token:jetons?"],
@@ -1804,7 +1803,6 @@
       "qp.batch.worktreeNoProject": ["b7939657","term:repository:repos?"],
       "qp.compareAgents.tooltip": ["95e76690","term:discussion:conversaci(?:ón|ones)"],
       "qp.createWithAIHint": ["fe7a4198","term:plugin:MCPs?"],
-      "qp.history.deleteConfirm": ["cb284241","term:run:lanzamientos?"],
       "qp.metrics.chipTooltip": ["97f7e0f1","term:run:lanzamientos?"],
       "readiness.reason.full_access_required": ["27ef6189","term:settings:configuraci(?:ón|ones)"],
       "readiness.servers": ["970426e7","term:plugin:MCPs?"],

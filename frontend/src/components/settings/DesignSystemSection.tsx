@@ -1,6 +1,8 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { Palette } from 'lucide-react';
 import { DESIGN_TOKEN_GROUPS, ROOT_FONT_PX, remToPx, type TokenPreview } from '../../styles/designTokens';
+import { DesignSystemComponents } from './DesignSystemComponents';
+import { GALLERY_COMPONENTS, TOKENS_ANCHOR, componentAnchor } from './designSystemGallery';
 import './DesignSystemSection.css';
 
 /** The address of this section: `settingsSectionPath(DESIGN_SYSTEM_SECTION_ID)`. */
@@ -59,12 +61,27 @@ interface Props {
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
+/** Scrolls to a heading of the page and gives it focus, without touching the
+ *  address: the section's own address is `#design-system`. */
+function goTo(anchor: string) {
+  const target = document.getElementById(anchor);
+  if (!target) return;
+  target.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  target.focus({ preventScroll: true });
+}
+
 /** KT-1878 — Settings > Design system: each token of the design scales with
- *  its name, its value in the current theme and one line on its use. Linked
- *  from the appearance settings, absent from the section index. The table it
- *  renders is src/styles/designTokens.ts, held equal to tokens.css by a test. */
+ *  its name, its value in the current theme and one line on its use; KT-1880
+ *  adds the components of components/ui/, each under its own heading, and an
+ *  index of the headings. Linked from the appearance settings, absent from
+ *  the section index. The token table it renders is src/styles/designTokens.ts,
+ *  held equal to tokens.css by a test. */
 export function DesignSystemSection({ t }: Props) {
   const { root, tokens } = useTokenValues();
+  const index = [
+    { anchor: TOKENS_ANCHOR, label: t('designSystem.tokens') },
+    ...GALLERY_COMPONENTS.map(c => ({ anchor: componentAnchor(c.id), label: c.name })),
+  ];
   return (
     <div id={DESIGN_SYSTEM_SECTION_ID} className="set-card ds-card" data-testid="design-system-section">
       <div className="set-section">
@@ -73,38 +90,55 @@ export function DesignSystemSection({ t }: Props) {
           <h2 className="ds-title">{t('designSystem.title')}</h2>
         </div>
         <p className="set-hint">{t('designSystem.hint')}</p>
-        {DESIGN_TOKEN_GROUPS.map(group => (
-          <section key={group.scale} className="ds-group" data-scale={group.scale} aria-labelledby={`ds-${group.scale}`}>
-            <h3 id={`ds-${group.scale}`} className="ds-group-title">{t(group.title)}</h3>
-            <table className="ds-table">
-              <thead>
-                <tr>
-                  <th scope="col">{t('designSystem.column.token')}</th>
-                  <th scope="col">{t('designSystem.column.value')}</th>
-                  <th scope="col">{t('designSystem.column.use')}</th>
-                  <th scope="col"><span className="ds-sr-only">{t('designSystem.column.preview')}</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                {group.tokens.map(token => {
-                  const value = tokens[token.name] ?? '';
-                  const px = group.scale === 'text' ? remToPx(value, root) : null;
-                  return (
-                    <tr key={token.name} data-token={token.name}>
-                      <th scope="row"><code>{token.name}</code></th>
-                      <td className="ds-value" data-testid={`ds-value-${token.name}`}>
-                        {value || '—'}
-                        {px !== null && <span className="ds-px"> · {Number(px.toFixed(2))}px</span>}
-                      </td>
-                      <td className="ds-use">{t(token.use)}</td>
-                      <td className="ds-preview-cell"><Preview kind={group.preview} name={token.name} /></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </section>
-        ))}
+        <nav className="ds-index" aria-label={t('designSystem.index')}>
+          <ul>
+            {index.map(entry => (
+              <li key={entry.anchor}>
+                <a href={`#${entry.anchor}`} onClick={e => { e.preventDefault(); goTo(entry.anchor); }}>{entry.label}</a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+        <section className="ds-part" aria-labelledby={TOKENS_ANCHOR}>
+          <h3 id={TOKENS_ANCHOR} className="ds-part-title" tabIndex={-1}>{t('designSystem.tokens')}</h3>
+          {DESIGN_TOKEN_GROUPS.map(group => (
+            <section key={group.scale} className="ds-group" data-scale={group.scale} aria-labelledby={`ds-${group.scale}`}>
+              <h4 id={`ds-${group.scale}`} className="ds-group-title">{t(group.title)}</h4>
+              <table className="ds-table">
+                <thead>
+                  <tr>
+                    <th scope="col">{t('designSystem.column.token')}</th>
+                    <th scope="col">{t('designSystem.column.value')}</th>
+                    <th scope="col">{t('designSystem.column.use')}</th>
+                    <th scope="col"><span className="ds-sr-only">{t('designSystem.column.preview')}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.tokens.map(token => {
+                    const value = tokens[token.name] ?? '';
+                    const px = group.scale === 'text' ? remToPx(value, root) : null;
+                    return (
+                      <tr key={token.name} data-token={token.name}>
+                        <th scope="row"><code>{token.name}</code></th>
+                        <td className="ds-value" data-testid={`ds-value-${token.name}`}>
+                          {value || '—'}
+                          {px !== null && <span className="ds-px"> · {Number(px.toFixed(2))}px</span>}
+                        </td>
+                        <td className="ds-use">{t(token.use)}</td>
+                        <td className="ds-preview-cell"><Preview kind={group.preview} name={token.name} /></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </section>
+          ))}
+        </section>
+        <section className="ds-part" aria-labelledby="ds-components">
+          <h3 id="ds-components" className="ds-part-title">{t('designSystem.components')}</h3>
+          <p className="set-hint">{t('designSystem.componentsHint')}</p>
+          <DesignSystemComponents t={t} />
+        </section>
       </div>
     </div>
   );

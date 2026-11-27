@@ -145,15 +145,178 @@
   white-space: nowrap;
 }
 
-/* Narrower than --kr-bp-md (768px): a custom property cannot be read in @media. */
+/* ── Index of the headings (KT-1880) ─────────────────────────────────── */
+.ds-index {
+  margin-top: var(--kr-space-4);
+  padding: var(--kr-space-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-radius-surface);
+}
+
+.ds-index ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-space-1) var(--kr-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ds-index a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--kr-control-h-sm);
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ds-part {
+  margin-top: var(--kr-space-7);
+}
+
+.ds-part-title {
+  margin: 0 0 var(--kr-space-2);
+  font-size: var(--kr-type-xl);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+/* ── Components (KT-1880) ────────────────────────────────────────────── */
+.ds-component {
+  margin-top: var(--kr-space-6);
+  padding-top: var(--kr-space-4);
+  border-top: 1px solid var(--kr-border-light);
+}
+
+.ds-component-title {
+  margin: 0;
+  font-size: var(--kr-type-md);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+.ds-component-title code {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-type-md);
+}
+
+.ds-caption,
+.ds-demo-note {
+  margin: var(--kr-space-1) 0 var(--kr-space-3);
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-secondary);
+}
+
+.ds-demo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-3);
+}
+
+.ds-demo-row {
+  display: grid;
+  grid-template-columns: calc(var(--kr-space-8) * 2) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--kr-space-3);
+}
+
+.ds-demo-label {
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-muted);
+}
+
+.ds-demo-items {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-space-2);
+  min-width: 0;
+}
+
+.ds-demo-items > .ui-tabs,
+.ds-demo-items > .ui-search-field {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 8);
+}
+
+/* KT-1881 — the content of the Dialog and Drawer demos. */
+.ds-demo-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  font-size: var(--kr-type-md);
+  color: var(--kr-text-secondary);
+}
+
+.ds-demo-field input {
+  min-height: var(--kr-control-h-md);
+  padding: 0 var(--kr-space-3);
+  font: inherit;
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-input);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+}
+
+.ds-demo-list {
+  margin: 0;
+  padding-left: var(--kr-space-4);
+  line-height: 1.6;
+  color: var(--kr-text-primary);
+}
+
+/* Narrower than --kr-bp-md (768px): a custom property cannot be read in @media.
+   Each token becomes a small block: its name on one unbroken line, then its
+   value, its use and its preview. */
 @media (max-width: 767px) {
-  .ds-preview-cell,
-  .ds-table thead th:last-child {
-    display: none;
+  .ds-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .ds-table,
+  .ds-table tbody {
+    display: block;
+  }
+  .ds-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--kr-space-1) var(--kr-space-3);
+    padding: var(--kr-space-2) 0;
+    border-bottom: 1px solid var(--kr-border-light);
   }
   .ds-table tbody th,
+  .ds-table tbody td {
+    display: block;
+    padding: 0;
+    border-bottom: 0;
+  }
+  .ds-table tbody th {
+    grid-column: 1 / -1;
+    white-space: nowrap;
+  }
   .ds-value {
-    white-space: normal;
-    overflow-wrap: anywhere;
+    grid-column: 1;
+  }
+  .ds-use {
+    grid-column: 1;
+  }
+  .ds-preview-cell {
+    grid-column: 2;
+    grid-row: 2 / span 2;
+    width: auto;
+    align-self: center;
+    max-width: calc(var(--kr-space-8) * 3);
+    overflow: hidden;
+  }
+  .ds-demo-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--kr-space-1);
   }
 }

@@ -13,6 +13,7 @@ import { automationPath, workflowPath, workflowShadowSettingsPath } from '../lib
 import { skillBaseId, skillPinnedVersion } from '../lib/automationSkills';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { AppLink } from './AppLink';
+import { useConfirm } from './ui/useConfirm';
 import SkillHistoryDrawer from './SkillHistoryDrawer';
 import QPHistoryDrawer from './QPHistoryDrawer';
 import { useVersions, MAX_SHADOWS } from './workflows/shadowEditorModel';
@@ -74,6 +75,7 @@ export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
   const [promoting, setPromoting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => {
     let cancelled = false;
@@ -103,10 +105,16 @@ export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
 
   const promote = useAsyncGuard(async (resource: LivePageResource, use: StepUse, label: string, shadowId: string) => {
     const isSkill = resource.kind === 'skill';
-    const confirmText = isSkill
-      ? t('pages.resources.promoteSkillConfirm', resource.name, label, use.workflowName, use.step)
-      : t('pages.resources.promoteQpConfirm', resource.name, label, use.workflowName, use.step);
-    if (!window.confirm(confirmText)) return;
+    // KT-1881 (KT-1456) — a ConfirmDialog in place of window.confirm.
+    const confirmed = await confirm({
+      title: t('pages.resources.promoteConfirmTitle', resource.name, label),
+      message: isSkill
+        ? t('pages.resources.promoteSkillConfirm', resource.name, label, use.workflowName, use.step)
+        : t('pages.resources.promoteQpConfirm', resource.name, label, use.workflowName, use.step),
+      confirmLabel: t('pages.resources.promote', label),
+      tone: 'primary',
+    });
+    if (!confirmed) return;
     setPromoting(`${use.workflowId}:${use.step}:${resource.kind}:${resource.id}`);
     setError(null);
     setDone(null);
@@ -194,6 +202,7 @@ export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
           </AppLink>
         </p>
       )}
+      {confirmDialog}
     </details>
   );
 }

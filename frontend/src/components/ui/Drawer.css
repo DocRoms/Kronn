@@ -1,0 +1,44 @@
+/* KT-1881 — Drawer: the full height of the window at its end edge, in one of
+   three widths. It fills the screen under the first breakpoint (--kr-bp-sm,
+   640px: max-width 639px, see design-tokens.md). */
+
+.ui-overlay[data-kind="drawer"] {
+  align-items: stretch;
+  justify-content: flex-end;
+}
+
+.ui-drawer {
+  width: var(--kr-overlay-w-md);
+  height: 100%;
+  border-width: 0 0 0 1px;
+  border-radius: var(--kr-radius-overlay) 0 0 var(--kr-radius-overlay);
+  animation: ui-drawer-in var(--kr-duration-slow) ease-out;
+}
+
+.ui-drawer[data-size="sm"] {
+  width: var(--kr-overlay-w-sm);
+}
+
+.ui-drawer[data-size="md"] {
+  width: var(--kr-overlay-w-md);
+}
+
+.ui-drawer[data-size="lg"] {
+  width: var(--kr-overlay-w-lg);
+}
+
+@keyframes ui-drawer-in {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+
+@media (max-width: 639px) {
+  .ui-drawer,
+  .ui-drawer[data-size="sm"],
+  .ui-drawer[data-size="md"],
+  .ui-drawer[data-size="lg"] {
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+  }
+}

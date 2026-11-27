@@ -3,9 +3,13 @@
 // scale that tokens.css declares but the page does not show fails here.
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DesignSystemSection, DESIGN_SYSTEM_SECTION_ID } from '../DesignSystemSection';
+import { GALLERY_COMPONENTS } from '../designSystemGallery';
+import { STATUS_TONES } from '../../ui/statusTones';
 import { DESIGN_TOKEN_GROUPS, DESIGN_TOKENS } from '../../../styles/designTokens';
 import { loadThemes } from '../../../styles/themeAudit';
 import { dictionaries } from '../../../lib/i18n/testing';
@@ -46,7 +50,8 @@ describe('DesignSystemSection', () => {
 
   it('groups the tokens by scale, each under its title, in order', () => {
     render(<DesignSystemSection t={t} />);
-    const titles = screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent);
+    const tokensPart = screen.getByRole('region', { name: 'designSystem.tokens' });
+    const titles = within(tokensPart).getAllByRole('heading', { level: 4 }).map(h => h.textContent);
     expect(titles).toEqual(DESIGN_TOKEN_GROUPS.map(g => g.title));
     for (const group of DESIGN_TOKEN_GROUPS) {
       const section = document.querySelector(`section[data-scale="${group.scale}"]`) as HTMLElement;
@@ -77,16 +82,132 @@ describe('DesignSystemSection', () => {
     await waitFor(() => expect(screen.getByTestId('ds-value---kr-status-success')).toHaveTextContent('#15803d'));
   });
 
-  it('labels every scale and every use in the four locales', () => {
+  it('labels every scale, every use and every component caption in the four locales', () => {
     const keys = [
       'designSystem.link', 'designSystem.title', 'designSystem.hint',
       'designSystem.column.token', 'designSystem.column.value', 'designSystem.column.use', 'designSystem.column.preview',
+      'designSystem.index', 'designSystem.tokens', 'designSystem.components', 'designSystem.componentsHint',
+      'ui.searchField.clear', 'ui.overlay.close', 'ui.confirm.cancel',
       ...DESIGN_TOKEN_GROUPS.map(g => g.title),
       ...DESIGN_TOKENS.map(token => token.use),
+      ...GALLERY_COMPONENTS.map(c => c.caption),
+      ...['primary', 'neutral', 'ghost', 'danger'].map(v => `designSystem.demo.variant.${v}`),
+      ...['sm', 'md', 'lg'].map(s => `designSystem.demo.size.${s}`),
+      ...STATUS_TONES.map(tone => `designSystem.demo.status.${tone}`),
+      ...['overview', 'activity', 'archived'].map(tab => `designSystem.demo.tab.${tab}`),
     ];
+    // The demo keys the gallery reads literally, from its source.
+    const gallery = readFileSync(join(SRC, 'components', 'settings', 'DesignSystemComponents.tsx'), 'utf8');
+    const literal = [...gallery.matchAll(/t\('(designSystem\.demo\.[\w.]+)'/g)].map(m => m[1]);
+    expect(literal.length).toBeGreaterThan(10);
     for (const [locale, dict] of Object.entries(dictionaries)) {
-      const missing = keys.filter(key => !(key in dict) || !dict[key].trim());
+      const missing = [...keys, ...literal].filter(key => !(key in dict) || !dict[key].trim());
       expect(missing, `${locale} labels`).toEqual([]);
     }
+  });
+});
+
+describe('DesignSystemSection — index and components (KT-1880)', () => {
+  const UI_DIR = join(SRC, 'components', 'ui');
+
+  it('shows every component of components/ui/, under its own heading, in the index order', () => {
+    const inFolder = readdirSync(UI_DIR).filter(f => /^[A-Z]\w+\.tsx$/.test(f)).map(f => f.replace('.tsx', ''));
+    expect(GALLERY_COMPONENTS.map(c => c.name).sort()).toEqual(inFolder.sort());
+
+    render(<DesignSystemSection t={t} />);
+    const part = screen.getByRole('region', { name: 'designSystem.components' });
+    const headings = within(part).getAllByRole('heading', { level: 4 });
+    expect(headings.map(h => h.textContent)).toEqual(GALLERY_COMPONENTS.map(c => c.name));
+    for (const component of GALLERY_COMPONENTS) {
+      const section = screen.getByRole('region', { name: component.name });
+      expect(within(section).getByText(component.caption)).toBeInTheDocument();
+    }
+  });
+
+  it('lists the tokens, then each component, in an index whose links reach their heading', async () => {
+    render(<DesignSystemSection t={t} />);
+    const index = screen.getByRole('navigation', { name: 'designSystem.index' });
+    const links = within(index).getAllByRole('link');
+    expect(links.map(l => l.textContent)).toEqual(['designSystem.tokens', ...GALLERY_COMPONENTS.map(c => c.name)]);
+    for (const link of links) {
+      const target = document.getElementById(link.getAttribute('href')!.slice(1));
+      expect(target, link.textContent!).toBeTruthy();
+      expect(target!.tagName).toMatch(/^H[34]$/);
+    }
+    await userEvent.click(within(index).getByRole('link', { name: 'Menu' }));
+    expect(screen.getByRole('heading', { name: 'Menu' })).toHaveFocus();
+    expect(window.location.hash).not.toBe('#ds-c-menu');
+  });
+
+  it('shows Button and IconButton in their four variants, three sizes and disabled', () => {
+    render(<DesignSystemSection t={t} />);
+    for (const name of ['Button', 'IconButton']) {
+      const section = screen.getByRole('region', { name });
+      const buttons = within(section).getAllByRole('button');
+      for (const variant of ['primary', 'neutral', 'ghost', 'danger']) {
+        const ofVariant = buttons.filter(b => b.getAttribute('data-variant') === variant);
+        expect(new Set(ofVariant.map(b => b.getAttribute('data-size'))), `${name} ${variant}`).toEqual(new Set(['sm', 'md', 'lg']));
+        expect(ofVariant.some(b => (b as HTMLButtonElement).disabled), `${name} ${variant} disabled`).toBe(true);
+      }
+      for (const button of buttons) expect(button).toHaveAccessibleName();
+    }
+  });
+
+  it('shows a working Menu, the five status tones, Tabs with roles, a SearchField and a Tooltip', async () => {
+    const user = userEvent.setup();
+    render(<DesignSystemSection t={t} />);
+
+    const menu = screen.getByRole('region', { name: 'Menu' });
+    await user.click(within(menu).getByRole('button', { name: 'designSystem.demo.menuLabel' }));
+    const items = screen.getAllByRole('menuitem');
+    expect(items.at(-1)).toHaveTextContent('designSystem.demo.delete');
+    await user.click(items[0]);
+    expect(screen.getByTestId('ds-menu-chosen')).toHaveTextContent('designSystem.demo.chosen');
+
+    const badges = screen.getByRole('region', { name: 'StatusBadge' }).querySelectorAll('[data-tone]');
+    expect([...badges].map(b => b.getAttribute('data-tone'))).toEqual([...STATUS_TONES]);
+
+    const tabs = screen.getByRole('region', { name: 'Tabs' });
+    expect(within(tabs).getAllByRole('tablist', { name: 'designSystem.demo.tabs' })).toHaveLength(2);
+    expect(within(tabs).getByRole('tabpanel')).toBeInTheDocument();
+
+    const search = screen.getByRole('region', { name: 'SearchField' });
+    await user.type(within(search).getAllByRole('searchbox')[0], 'menu');
+    expect(within(search).getByRole('button', { name: 'ui.searchField.clear' })).toBeInTheDocument();
+
+    const tooltip = screen.getByRole('region', { name: 'Tooltip' });
+    within(tooltip).getByRole('button', { name: 'designSystem.demo.schedule' });
+    await user.hover(within(tooltip).getByRole('button'));
+    expect(document.querySelector('[role="tooltip"]')).toHaveTextContent('designSystem.demo.tooltipText');
+  });
+
+  it.each([
+    ['Dialog', 'dialog'],
+    ['Drawer', 'dialog'],
+    ['ConfirmDialog', 'alertdialog'],
+  ] as const)('opens %s from a button in each of the three sizes, and Escape gives the focus back (KT-1881)', async (name, role) => {
+    const user = userEvent.setup();
+    render(<DesignSystemSection t={t} />);
+    const section = screen.getByRole('region', { name });
+    for (const size of ['sm', 'md', 'lg']) {
+      const opener = section.querySelector(`button[data-size-demo="${size}"]`) as HTMLButtonElement;
+      expect(opener, `${name} ${size}`).toBeTruthy();
+      await user.click(opener);
+      const layer = screen.getByRole(role);
+      expect(layer).toHaveAttribute('data-size', size);
+      expect(layer).toHaveAccessibleName();
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole(role)).toBeNull();
+      expect(opener).toHaveFocus();
+    }
+  });
+
+  it('turns each token row into a block under md, keeping its preview and its name on one line', () => {
+    const css = readFileSync(join(SRC, 'components', 'settings', 'DesignSystemSection.css'), 'utf8');
+    const narrow = css.slice(css.indexOf('@media (max-width: 767px)'));
+    expect(narrow).not.toMatch(/\.ds-preview-cell[^{]*\{[^}]*display:\s*none/);
+    expect(narrow).toMatch(/\.ds-table tbody tr\s*\{[^}]*display:\s*grid/);
+    expect(narrow).toMatch(/\.ds-table tbody th\s*\{[^}]*white-space:\s*nowrap/);
+    expect(narrow).not.toMatch(/overflow-wrap:\s*anywhere/);
   });
 });

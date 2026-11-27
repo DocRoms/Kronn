@@ -24,6 +24,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { useConfirm } from './ui/useConfirm';
 import { useT } from '../lib/I18nContext';
 import { quickPrompts as quickPromptsApi } from '../lib/api';
 import type { QuickPromptVersion, QuickPromptVersionMetrics } from '../types/generated';
@@ -109,6 +110,7 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
   const [expandedVersion, setExpandedVersion] = useState<number | null>(null);
   const [diffOpen, setDiffOpen] = useState<number | null>(null);
   const [deletingVersion, setDeletingVersion] = useState<number | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const requestKey = `${qpId}:${refreshTrigger ?? 0}`;
   const loadIsCurrent = drawerOpen && historyLoad?.key === requestKey;
   const history = loadIsCurrent ? historyLoad.history : EMPTY_QP_HISTORY;
@@ -124,7 +126,12 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
    * recompute against the new "previous" sibling.
    */
   const handleDeleteVersion = useAsyncGuard(async (version_index: number) => {
-    const ok = window.confirm(t('qp.history.deleteConfirm', version_index));
+    // KT-1881 (KT-1456) — a ConfirmDialog in place of window.confirm.
+    const ok = await confirm({
+      title: t('qp.history.deleteConfirmTitle', version_index),
+      message: t('qp.history.deleteConfirm', version_index),
+      confirmLabel: t('qp.history.deleteAria', version_index),
+    });
     if (!ok) return;
     setDeletingVersion(version_index);
     try {
@@ -414,6 +421,7 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
         </>,
         document.body,
       )}
+      {confirmDialog}
     </>
   );
 }

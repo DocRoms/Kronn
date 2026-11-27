@@ -1,0 +1,87 @@
+/* KT-1880 — SearchField. */
+
+.ui-search-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  min-width: 0;
+}
+
+.ui-search-field-label {
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-text-secondary);
+}
+
+.ui-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ui-search-field-control {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.ui-search-field-icon {
+  position: absolute;
+  left: var(--kr-space-2);
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
+  color: var(--kr-text-muted);
+  pointer-events: none;
+}
+
+.ui-search-field-input {
+  width: 100%;
+  min-height: var(--kr-control-h-md);
+  padding: 0 var(--kr-control-h-md) 0 var(--kr-space-7);
+  font-family: inherit;
+  font-size: var(--kr-type-md);
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-input);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+  transition: border-color var(--kr-duration-fast) ease-out;
+}
+
+.ui-search-field-input::placeholder {
+  color: var(--kr-text-muted);
+}
+
+.ui-search-field-input:hover {
+  border-color: var(--kr-border-strong);
+}
+
+/* The browser's own clear cross would be a second one. */
+.ui-search-field-input::-webkit-search-cancel-button,
+.ui-search-field-input::-webkit-search-decoration {
+  appearance: none;
+}
+
+.ui-search-field[data-size="sm"] .ui-search-field-input {
+  min-height: var(--kr-control-h-sm);
+  font-size: var(--kr-type-sm);
+}
+
+.ui-search-field-clear.ui-icon-button {
+  position: absolute;
+  right: var(--kr-space-1);
+}
+
+@media (pointer: coarse) {
+  .ui-search-field-input,
+  .ui-search-field[data-size="sm"] .ui-search-field-input {
+    min-height: var(--kr-control-h-touch);
+    padding-right: var(--kr-control-h-touch);
+  }
+  .ui-search-field-clear.ui-icon-button {
+    right: 0;
+  }
+}

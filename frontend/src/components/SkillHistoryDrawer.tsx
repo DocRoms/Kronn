@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { useDialogFocus } from '../hooks/useDialogFocus';
+import { useConfirm } from './ui/useConfirm';
 import { useT } from '../lib/I18nContext';
 import { skills as skillsApi } from '../lib/api';
 import type { SkillVersion } from '../types/generated';
@@ -55,6 +56,7 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
   const [reloads, setReloads] = useState(0);
   const key = `${skillId}:${refreshKey}:${reloads}`;
   const dialogRef = useDialogFocus<HTMLElement>({ active: open, onEscape: () => setOpen(false) });
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const current = open && load?.key === key;
   const history = current ? load.history : EMPTY;
   const loading = open && !current;
@@ -78,7 +80,14 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
   }, [skillId, key]);
 
   const restore = useAsyncGuard(async (index: number) => {
-    if (!window.confirm(t('skills.history.restoreConfirm', index))) return;
+    // KT-1881 (KT-1456) — a ConfirmDialog in place of window.confirm.
+    const confirmed = await confirm({
+      title: t('skills.history.restoreConfirmTitle', index),
+      message: t('skills.history.restoreConfirm', index),
+      confirmLabel: t('skills.history.restoreAria', index),
+      tone: 'primary',
+    });
+    if (!confirmed) return;
     setRestoring(index);
     setActionError(null);
     setRestored(null);
@@ -240,6 +249,7 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
         </>,
         document.body,
       )}
+      {confirmDialog}
     </>
   );
 }

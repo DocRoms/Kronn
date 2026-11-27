@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   appSources, composite, contrastRatio, cssRules, declarations, loadThemes, resolveValue, themeColor,
 } from '../themeAudit';
-import { BREAKPOINTS, DESIGN_TOKEN_GROUPS, DESIGN_TOKENS, remToPx } from '../designTokens';
+import { BREAKPOINTS, DESIGN_TOKEN_GROUPS, DESIGN_TOKENS, OVERLAY_WIDTHS, remToPx } from '../designTokens';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const THEMES = loadThemes(SRC);
@@ -23,7 +23,7 @@ const resolved = (theme: string, name: string) => resolveValue(THEMES.get(theme)
 describe('design scales (KT-1878)', () => {
   it('lists every scale the page shows, in order', () => {
     expect(DESIGN_TOKEN_GROUPS.map(g => g.scale)).toEqual([
-      'text', 'spacing', 'radius', 'breakpoint', 'duration', 'weight', 'controlHeight', 'textRole', 'semanticColour',
+      'text', 'spacing', 'radius', 'breakpoint', 'duration', 'weight', 'controlHeight', 'overlayWidth', 'textRole', 'semanticColour',
     ]);
     for (const group of DESIGN_TOKEN_GROUPS) expect(group.tokens.length, group.scale).toBeGreaterThan(0);
     expect(new Set(DESIGN_TOKENS.map(t => t.name)).size).toBe(DESIGN_TOKENS.length);
@@ -75,10 +75,15 @@ describe('design scales (KT-1878)', () => {
       Object.values(BREAKPOINTS).map(px => `${px}px`));
   });
 
+  it('keeps the overlay widths of scripts equal to the tokens (KT-1881)', () => {
+    expect(names('overlayWidth').map(n => BASE.get(n))).toEqual(
+      Object.values(OVERLAY_WIDTHS).map(px => `${px}px`));
+  });
+
   it('keeps spacing on a 4px grid and every scale strictly increasing', () => {
     const numeric = (scale: string) => names(scale).map(n => parseFloat(resolved('dark', n)));
     expect(numeric('spacing').every(v => v % 4 === 0)).toBe(true);
-    for (const scale of ['spacing', 'radius', 'breakpoint', 'duration', 'weight', 'controlHeight']) {
+    for (const scale of ['spacing', 'radius', 'breakpoint', 'duration', 'weight', 'controlHeight', 'overlayWidth']) {
       const values = numeric(scale);
       expect(values.every(Number.isFinite), scale).toBe(true);
       expect(values, `${scale} increases`).toEqual([...values].sort((a, b) => a - b));

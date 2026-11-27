@@ -1,0 +1,47 @@
+/* KT-1881 — Dialog: centred, in one of three widths, never taller than the
+   window (its body scrolls). It fills the screen under the first breakpoint
+   (--kr-bp-sm, 640px: max-width 639px, see design-tokens.md), but for a
+   ConfirmDialog, a short question that stays a card (ConfirmDialog.css). */
+
+.ui-dialog {
+  width: var(--kr-overlay-w-md);
+  max-height: calc(100dvh - 2 * var(--kr-space-7));
+  margin: var(--kr-space-7) var(--kr-space-4);
+  border-radius: var(--kr-radius-overlay);
+  animation: ui-dialog-in var(--kr-duration-slow) ease-out;
+}
+
+.ui-dialog[data-size="sm"] {
+  width: var(--kr-overlay-w-sm);
+}
+
+.ui-dialog[data-size="md"] {
+  width: var(--kr-overlay-w-md);
+}
+
+.ui-dialog[data-size="lg"] {
+  width: var(--kr-overlay-w-lg);
+}
+
+.ui-dialog > .ui-overlay-footer {
+  border-radius: 0 0 var(--kr-radius-overlay) var(--kr-radius-overlay);
+}
+
+@keyframes ui-dialog-in {
+  from { opacity: 0; transform: translateY(var(--kr-space-2)); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (max-width: 639px) {
+  .ui-dialog:not(.ui-confirm-dialog),
+  .ui-dialog[data-size="sm"]:not(.ui-confirm-dialog),
+  .ui-dialog[data-size="md"]:not(.ui-confirm-dialog),
+  .ui-dialog[data-size="lg"]:not(.ui-confirm-dialog) {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+}

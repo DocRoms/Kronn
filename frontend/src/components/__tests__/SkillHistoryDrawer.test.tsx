@@ -1,7 +1,7 @@
 // KT-1434 — SkillHistoryDrawer: the version count, the timeline, the diff of
 // two neighbours, and a restore that asks first and reloads the skill.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import type { ReactElement } from 'react';
 import type { SkillVersion } from '../../types/generated';
@@ -49,23 +49,30 @@ describe('SkillHistoryDrawer (KT-1434)', () => {
   });
 
   it('restores an old version only after confirmation, then reloads the skill', async () => {
+    // KT-1881 (KT-1456) — a ConfirmDialog above the drawer, not window.confirm.
     const onRestored = vi.fn();
-    const confirm = vi.fn();
-    vi.stubGlobal('confirm', confirm);
+    const nativeConfirm = vi.fn();
+    vi.stubGlobal('confirm', nativeConfirm);
     wrap(<SkillHistoryDrawer skillId="custom-review" skillName="Review" refreshKey="a" onRestored={onRestored} />);
     fireEvent.click(screen.getByTestId('skill-history-toggle'));
     const restore = await screen.findByTestId('skill-history-restore-1');
 
-    confirm.mockReturnValueOnce(false);
     fireEvent.click(restore);
+    let ask = await screen.findByRole('alertdialog', { name: 'Restaurer la version 1 ?' });
+    expect(ask).toHaveAccessibleDescription(/rien n’est perdu/);
+    // Escape answers no and closes the question only: the drawer stays open.
+    fireEvent.keyDown(within(ask).getByRole('button', { name: 'Annuler' }), { key: 'Escape' });
+    await act(async () => {});
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.getByTestId('skill-history-drawer')).toBeInTheDocument();
     expect(skillsApi.restoreVersion).not.toHaveBeenCalled();
 
-    await act(async () => {});
-    confirm.mockReturnValue(true);
     vi.mocked(skillsApi.restoreVersion).mockResolvedValue(version(3, 'rule one', true));
     const before = vi.mocked(skillsApi.history).mock.calls.length;
     fireEvent.click(restore);
     fireEvent.click(restore);
+    ask = await screen.findByRole('alertdialog');
+    fireEvent.click(within(ask).getByRole('button', { name: 'Restaurer la version 1' }));
     await waitFor(() => expect(skillsApi.restoreVersion).toHaveBeenCalledWith('custom-review', 1));
     expect(skillsApi.restoreVersion).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(onRestored).toHaveBeenCalled());
@@ -73,6 +80,7 @@ describe('SkillHistoryDrawer (KT-1434)', () => {
     expect(await screen.findByTestId('skill-history-restored')).toHaveTextContent('v1 restaurée');
     expect(screen.getByTestId('skill-history-restored')).toHaveTextContent('v3');
     await waitFor(() => expect(vi.mocked(skillsApi.history).mock.calls.length).toBeGreaterThan(before));
+    expect(nativeConfirm).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 });

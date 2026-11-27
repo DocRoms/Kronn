@@ -161,7 +161,14 @@
   /* Control heights, as min-height so a larger text size grows the control. */
   --kr-control-h-sm: 28px;   /* dense toolbars, inline actions */
   --kr-control-h-md: 34px;   /* default buttons and inputs */
+  --kr-control-h-touch: 40px; /* least height (and icon-button width) on a coarse pointer */
   --kr-control-h-lg: 44px;   /* primary actions, touch targets */
+
+  /* Overlay widths (KT-1881): the three sizes of a Dialog and a Drawer
+     (components/ui/). Under --kr-bp-sm both fill the screen. */
+  --kr-overlay-w-sm: 480px;  /* a confirmation, a short form */
+  --kr-overlay-w-md: 640px;  /* a form, a detail */
+  --kr-overlay-w-lg: 960px;  /* a table, a comparison, a preview */
 
   /* ── Spacing scale (legacy names) ─────────────────────────────────────── */
   --kr-sp-1: 2px;

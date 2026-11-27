@@ -1,0 +1,42 @@
+/* KT-1880 — StatusBadge. The label is in --kr-text-primary, so it reads at
+   4.5:1 in every theme; the tone is carried by the dot (or icon) in the
+   --kr-status-* colour, and by the border and the fill, the same colour at low
+   opacity from its rgb triple. A status colour is never the label's colour:
+   several themes print it under 4.5:1 on its own tint. */
+
+.ui-status-badge {
+  --ui-status-rgb: var(--kr-text-rgb);
+  --ui-status-colour: var(--kr-status-neutral);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  padding: 0 var(--kr-space-2);
+  min-height: var(--kr-control-h-sm);
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  line-height: 1.2;
+  white-space: nowrap;
+  color: var(--kr-text-primary);
+  background-color: rgba(var(--ui-status-rgb), 0.1);
+  border: 1px solid rgba(var(--ui-status-rgb), 0.28);
+  border-radius: var(--kr-radius-pill);
+}
+
+.ui-status-badge[data-tone="success"] { --ui-status-rgb: var(--kr-success-rgb); --ui-status-colour: var(--kr-status-success); }
+.ui-status-badge[data-tone="warning"] { --ui-status-rgb: var(--kr-warning-rgb); --ui-status-colour: var(--kr-status-warning); }
+.ui-status-badge[data-tone="danger"] { --ui-status-rgb: var(--kr-danger-rgb); --ui-status-colour: var(--kr-status-danger); }
+.ui-status-badge[data-tone="info"] { --ui-status-rgb: var(--kr-info-rgb); --ui-status-colour: var(--kr-status-info); }
+
+.ui-status-badge-dot {
+  width: var(--kr-space-2);
+  height: var(--kr-space-2);
+  flex-shrink: 0;
+  border-radius: var(--kr-radius-pill);
+  background-color: var(--ui-status-colour);
+}
+
+.ui-status-badge-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--ui-status-colour);
+}

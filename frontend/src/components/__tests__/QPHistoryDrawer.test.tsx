@@ -11,7 +11,7 @@
 //   - Δ% chip is rendered when both versions have ≥ 3 launches.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import type { ReactElement } from 'react';
 import type { QuickPromptVersion, QuickPromptVersionMetrics } from '../../types/generated';
@@ -226,14 +226,15 @@ describe('QPHistoryDrawer (0.8.5)', () => {
       .mockResolvedValue([mkVersion(2, 'current')]);                          // any later calls
     (quickPromptsApi.metrics as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     (quickPromptsApi.deleteVersion as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
-    // Auto-confirm the window.confirm so the test runs synchronously.
-    const origConfirm = window.confirm;
-    window.confirm = vi.fn(() => true);
-
+    // KT-1881 (KT-1456) — a ConfirmDialog, not window.confirm.
     wrap(<QPHistoryDrawer qpId="qp-del" qpName="Del" />);
     fireEvent.click(await screen.findByTestId('qp-history-toggle'));
     await screen.findByTestId('qp-history-drawer');
     fireEvent.click(screen.getByTestId('qp-history-delete-1'));
+    const ask = await screen.findByRole('alertdialog', { name: 'Supprimer la version v1 ?' });
+    const action = within(ask).getByRole('button', { name: 'Supprimer la version 1' });
+    expect(action).toHaveAttribute('data-variant', 'danger');
+    fireEvent.click(action);
 
     await waitFor(() => {
       expect(quickPromptsApi.deleteVersion).toHaveBeenCalledWith('qp-del', 1);
@@ -241,8 +242,6 @@ describe('QPHistoryDrawer (0.8.5)', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('qp-history-version-1')).toBeNull();
     });
-
-    window.confirm = origConfirm;
   });
 
   it('declining the confirm dialog does NOT call deleteVersion', async () => {
@@ -251,15 +250,19 @@ describe('QPHistoryDrawer (0.8.5)', () => {
       mkVersion(1, 'old'),
     ]);
     (quickPromptsApi.metrics as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    const origConfirm = window.confirm;
-    window.confirm = vi.fn(() => false);
     wrap(<QPHistoryDrawer qpId="qp-noop" qpName="Noop" />);
     fireEvent.click(await screen.findByTestId('qp-history-toggle'));
     await screen.findByTestId('qp-history-drawer');
     fireEvent.click(screen.getByTestId('qp-history-delete-1'));
+    const ask = await screen.findByRole('alertdialog');
+    // The focus starts on Cancel; Escape answers no and leaves the drawer open.
+    const cancel = within(ask).getByRole('button', { name: 'Annuler' });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(screen.getByTestId('qp-history-drawer')).toBeInTheDocument();
     // No deletion call should fire.
     expect(quickPromptsApi.deleteVersion).not.toHaveBeenCalled();
-    window.confirm = origConfirm;
   });
 
   it('expanding a version reveals the diff toggle when a previous version exists', async () => {

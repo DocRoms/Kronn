@@ -1,0 +1,137 @@
+{
+  "src/components/AssistantConversationList.tsx": {
+    "no-restricted-properties": {
+      "count": 1
+    }
+  },
+  "src/components/DiscussionNotesPanel.tsx": {
+    "no-restricted-globals": {
+      "count": 1
+    }
+  },
+  "src/components/DiscussionSidebar.tsx": {
+    "no-restricted-globals": {
+      "count": 4
+    }
+  },
+  "src/components/LivePageDatasetControls.tsx": {
+    "no-restricted-properties": {
+      "count": 4
+    }
+  },
+  "src/components/LivePageResources.tsx": {
+    "no-restricted-properties": {
+      "count": 1
+    }
+  },
+  "src/components/ProjectCard.tsx": {
+    "no-restricted-properties": {
+      "count": 2
+    }
+  },
+  "src/components/ProjectLinkedRepos.tsx": {
+    "no-restricted-properties": {
+      "count": 1
+    }
+  },
+  "src/components/ProjectList.tsx": {
+    "no-restricted-globals": {
+      "count": 1
+    }
+  },
+  "src/components/UserContextEditor.tsx": {
+    "no-restricted-globals": {
+      "count": 1
+    }
+  },
+  "src/components/plugins/useMcpPageState.ts": {
+    "no-restricted-globals": {
+      "count": 1
+    }
+  },
+  "src/components/plugins/usePluginListState.ts": {
+    "no-restricted-globals": {
+      "count": 1
+    }
+  },
+  "src/components/settings/AgentsSection.tsx": {
+    "no-restricted-globals": {
+      "count": 4
+    }
+  },
+  "src/components/settings/DbUsageChart.tsx": {
+    "no-restricted-properties": {
+      "count": 1
+    }
+  },
+  "src/components/settings/DiskSection.tsx": {
+    "no-restricted-properties": {
+      "count": 2
+    }
+  },
+  "src/components/settings/ExternalApiSection.tsx": {
+    "no-restricted-globals": {
+      "count": 2
+    }
+  },
+  "src/components/settings/ProfilesSection.tsx": {
+    "no-restricted-globals": {
+      "count": 1
+    }
+  },
+  "src/components/settings/PublicationCredentialsSection.tsx": {
+    "no-restricted-properties": {
+      "count": 1
+    }
+  },
+  "src/components/settings/RecoverySection.tsx": {
+    "no-restricted-properties": {
+      "count": 1
+    }
+  },
+  "src/components/workflows/AutoDisabledReview.tsx": {
+    "no-restricted-properties": {
+      "count": 2
+    }
+  },
+  "src/components/workflows/RunDetail.tsx": {
+    "no-restricted-globals": {
+      "count": 2
+    }
+  },
+  "src/components/workflows/WorkflowDetail.tsx": {
+    "no-restricted-globals": {
+      "count": 1
+    }
+  },
+  "src/components/workflows/WorkflowWizard.tsx": {
+    "no-restricted-globals": {
+      "count": 2
+    }
+  },
+  "src/pages/DiscussionsPage.tsx": {
+    "no-restricted-globals": {
+      "count": 4
+    }
+  },
+  "src/pages/PagesPage.tsx": {
+    "no-restricted-properties": {
+      "count": 1
+    }
+  },
+  "src/pages/PlanningPage.tsx": {
+    "no-restricted-globals": {
+      "count": 1
+    }
+  },
+  "src/pages/SettingsPage.tsx": {
+    "no-restricted-globals": {
+      "count": 5
+    }
+  },
+  "src/pages/WorkflowsPage.tsx": {
+    "no-restricted-globals": {
+      "count": 5
+    }
+  }
+}
