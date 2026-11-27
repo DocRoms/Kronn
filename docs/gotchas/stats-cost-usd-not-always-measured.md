@@ -19,7 +19,7 @@ which ones those are.
 measurement — but there is no column recording whether a given `ClaudeCode`
 row actually got one, or fell back to the same estimate as everyone else.
 [src: file: backend/src/agents/runner.rs:15369-15422#total_cost_usd]
-[src: file: backend/src/api/discussions/streaming.rs:5113-5139#stream_json_cost]
+[src: file: backend/src/api/discussions/streaming.rs:5116-5142#stream_json_cost]
 [src: file: backend/src/db/message_usage.rs:38-48#message_usage]
 
 So a non-null `cost_usd`, for ANY agent_type, is data whose provenance is
