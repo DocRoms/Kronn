@@ -111,19 +111,30 @@ fn a_bare_token_total_is_never_split_into_a_figure() {
 
 #[test]
 fn an_agent_whose_cache_accounting_is_unknown_yields_no_counters() {
-    for agent in [
-        "GeminiCli",
-        "Vibe",
-        "Kiro",
-        "CopilotCli",
-        "OpenCode",
-        "LiteLlm",
-    ] {
+    for agent in ["GeminiCli", "Vibe", "Kiro", "CopilotCli", "LiteLlm"] {
         assert!(
             TokenCounters::from_agent_report(agent, 1_000, 500, Some(0), Some(0)).is_none(),
             "agent={agent}"
         );
     }
+}
+
+#[test]
+fn opencode_reports_its_input_net_of_the_cache() {
+    let counters =
+        TokenCounters::from_agent_report("OpenCode", 1_000, 200, Some(80_000), Some(0)).unwrap();
+    assert_eq!(counters.input_tokens, 1_000);
+    assert_eq!(counters.cache_read_tokens, Some(80_000));
+    assert_eq!(counters.output_tokens, 200);
+    // Counters, but no rate for the model yet: unknown for that reason.
+    assert_eq!(
+        message_cost("OpenCode", Some("litellm/unlisted-model"), Some(&counters)),
+        CostOutcome::Unknown(UnknownCost::NoRateForModel)
+    );
+    assert!(matches!(
+        message_cost("OpenCode", Some("litellm/gpt-4.1"), Some(&counters)),
+        CostOutcome::Known(usd) if usd > 0.0
+    ));
 }
 
 #[test]
@@ -196,6 +207,15 @@ fn snapshot_suffixes_resolve_to_their_family_and_nothing_else_does() {
     ] {
         assert!(rates_for_model(model).is_some(), "model={model}");
     }
+    assert_eq!(
+        rates_for_model("litellm/gpt-4.1"),
+        rates_for_model("gpt-4.1")
+    );
+    assert_eq!(
+        rates_for_model("openrouter/anthropic/claude-opus-4-1-20250805"),
+        rates_for_model("claude-opus-4-1-20250805")
+    );
+    assert!(rates_for_model("litellm/unknown").is_none());
     // The dated form of one family never lands on a neighbouring one.
     assert_eq!(
         rates_for_model("gpt-4.1-mini-2025-04-14"),
