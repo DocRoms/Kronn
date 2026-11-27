@@ -18,6 +18,7 @@ import { AgentIdentity } from './ui/AgentIdentity';
 import { Tooltip } from './ui/Tooltip';
 import { agentIdentityText, agentModel, agentModelText, type AgentIdentityModel, type AgentIdentityRole } from './ui/agentIdentityKinds';
 import { ParticipantsStrip } from './ParticipantsStrip';
+import type { AgentType } from '../types/generated';
 
 /// 0.8.6 phase 2 — discussion participants header.
 ///
@@ -43,9 +44,6 @@ export interface DiscParticipantsHeaderProps {
   /** Bumped by the invite button so a fresh peer appears without waiting out
    *  the 5s poll. */
   refreshKey?: number;
-  /** The discussion's own agent: its native participant is the main agent,
-   *  shown first; another native agent is a one-off agent. */
-  mainAgent?: string;
 }
 
 // Light shape of the wire response (mirrors the Rust struct in
@@ -58,6 +56,12 @@ interface ParticipantRow {
   /// (`disc.modelDeclaredAtJoin`, a phrase in the chip's tooltip and a muted
   /// line under the id in the details' model row — see `declaredAtJoin`).
   model?: string | null;
+  /// KT-2026 — the discussion's own agent on its own connection: its run is the
+  /// principal badge's state, never a second chip. Server-derived.
+  is_main_agent?: boolean;
+  /// KT-2026 — the exact model a native run uses, when the server knows it.
+  /// `null` = not known: the header never calls it « default model ».
+  run_model?: string | null;
   conversation_id?: string | null;
   session_id: string | null;
   role: string;
@@ -89,36 +93,46 @@ interface ParticipantRow {
 // Agent-type → emoji icon. Distinct glyphs per CLI but none of them
 // should LOOK like a status indicator (green circle = "online" etc.) —
 // that's what `data-status` is for. All icons are neutral / brand-y.
-const AGENT_ICON: Record<string, string> = {
+// Typed on every AgentType: a new agent kind fails the type check here until
+// it has an icon, so no known agent silently falls back to the generic one.
+const AGENT_ICON: Record<AgentType | 'Unknown', string> = {
   ClaudeCode: '🤖',
   Codex: '💠',
+  OpenCode: '🧩',
+  Vibe: '🐱',
   GeminiCli: '✨',
   Kiro: '🐙',
   CopilotCli: '💻',
-  Vibe: '🐱',
   Ollama: '🦙',
+  LiteLlm: '🔀',
+  Nvidia: '⚡',
   Custom: '⚙️',
   Unknown: '👤',
 };
 
-const iconFor = (agentType: string) => AGENT_ICON[agentType] ?? '👤';
+/** The icon of a known agent kind; the generic one only for a value Kronn does not know. */
+const iconFor = (agentType: string) => AGENT_ICON[agentType as AgentType] ?? AGENT_ICON.Unknown;
 
 /** A participant Kronn wakes itself (no CLI session of its own). */
 const isNative = (p: ParticipantRow) => p.wake_mode === 'native_dispatch'
   || p.role === 'native_resume' || p.role === 'obligation';
 
 /** KT-1936 — the participant's role chip: a workflow step, the main agent, a
- *  one-off agent Kronn wakes, or a joined CLI session. */
-function participantRole(p: ParticipantRow, mainAgent?: string): AgentIdentityRole {
+ *  one-off agent Kronn wakes, or a joined CLI session. The main agent is the
+ *  server's word (`is_main_agent`): its name alone does not decide it. */
+function participantRole(p: ParticipantRow): AgentIdentityRole {
   if (p.workflow_step) return 'workflowStep';
-  if (isNative(p)) return mainAgent && p.agent_type === mainAgent ? 'main' : 'oneOff';
+  if (isNative(p)) return p.is_main_agent ? 'main' : 'oneOff';
   return 'cli';
 }
 
-/** The model a participant declared, else « model not declared » for a joined
- *  CLI session and « default model of <agent> » for a native one. */
+/** The model a participant uses. A joined CLI session shows what it declared
+ *  at join (else « model not declared »). A native run shows the exact model it
+ *  runs on when the server knows it, else « model not recorded »: never
+ *  « default model » for a run that resolved another model (KT-2026). */
 function participantModel(p: ParticipantRow): AgentIdentityModel {
-  return agentModel(p.model, isNative(p) || p.workflow_step ? 'providerDefault' : 'notDeclared');
+  if (isNative(p)) return agentModel(p.run_model ?? p.model, 'notRecorded');
+  return agentModel(p.model, p.workflow_step ? 'providerDefault' : 'notDeclared');
 }
 
 /** KT-2015 — the model a joined CLI session declared at join, if any. It was
@@ -206,7 +220,7 @@ function ParticipantDetailsLayer({ anchorRef, onClose, children, ...props }: {
   );
 }
 
-export function DiscParticipantsHeader({ discId, t, refreshKey = 0, mainAgent }: DiscParticipantsHeaderProps) {
+export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscParticipantsHeaderProps) {
   // AgentIdentity's own words (roles, unknown models) come from the locale.
   const { t: tUi, tp } = useT();
   const [participants, setParticipants] = useState<ParticipantRow[]>([]);
@@ -290,16 +304,77 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0, mainAgent }:
     : null;
   const selectedDeclaredModel = selectedParticipant ? declaredAtJoin(selectedParticipant) : null;
   const selectedDisplayName = selectedParticipant ? mentionOf(selectedParticipant.agent_type) : null;
-  // The main agent first; the others keep the server's order.
-  const ordered = [...participants].sort((a, b) =>
-    Number(participantRole(b, mainAgent) === 'main') - Number(participantRole(a, mainAgent) === 'main'));
+  // KT-2026 — the discussion's own agent's run is the principal badge's state,
+  // not a chip: one identity for the main agent. The other rows keep the
+  // server's order.
+  const mainRun = participants.find(p => isNative(p) && p.is_main_agent) ?? null;
+  const ordered = participants.filter(p => p !== mainRun);
   const identityOf = (p: ParticipantRow) => ({
     name: mentionOf(p.agent_type),
     model: participantModel(p),
-    role: participantRole(p, mainAgent),
+    role: participantRole(p),
   });
   const selectedIdentityLabel = selectedParticipant
     ? agentIdentityText(identityOf(selectedParticipant), tUi)
+    : null;
+  const mainPresence = mainRun
+    ? honestPresenceState(
+        mainRun.presence_state,
+        mainRun.status,
+        mainRun.activity,
+        mainRun.last_seen,
+        awayAfterMs,
+      )
+    : null;
+  const mainLabel = mainRun && mainPresence ? presenceLabel(mainRun, mainPresence, t) : null;
+  const mainSince = mainRun?.resume_since ? new Date(mainRun.resume_since).toLocaleString() : null;
+
+  // KT-2026 — the main run's state is the strip's first entry: the strip counts
+  // it in « +N » and lists it there with its details, at any width. Outside the
+  // strip it was invisible to that count (the review's 400 px finding).
+  const mainEntry = mainRun && mainPresence && mainLabel
+    ? {
+        key: mainRun.id,
+        chip: (
+          <Tooltip
+            content={[
+              agentIdentityText(identityOf(mainRun), tUi),
+              mainLabel,
+              mainRun.resume_reason,
+              mainSince,
+            ].filter(Boolean).join(' — ')}
+          >
+            <button
+              ref={selectedParticipantId === mainRun.id ? selectedChipRef : undefined}
+              type="button"
+              className="disc-main-run-state"
+              data-testid="disc-main-run-state"
+              data-presence={mainPresence}
+              data-wake-mode={mainRun.wake_mode}
+              aria-expanded={selectedParticipantId === mainRun.id}
+              aria-haspopup="dialog"
+              aria-controls={selectedParticipantId === mainRun.id ? `disc-participant-details-${mainRun.id}` : undefined}
+              // WCAG 2.5.3: the name starts with the visible state, so « répond » works as a voice command.
+              aria-label={t('disc.participantStateDetails', mainLabel, agentIdentityText(identityOf(mainRun), tUi))}
+              onClick={() => setSelectedParticipantId(current => current === mainRun.id ? null : mainRun.id)}
+            >
+              {mainPresence === 'running' ? (
+                <Loader2 aria-hidden size={10} className="disc-participant-running spin" />
+              ) : (
+                <span aria-hidden className="disc-participant-presence-dot" data-presence={mainPresence} />
+              )}
+              <span className="disc-main-run-label">{mainLabel}</span>
+            </button>
+          </Tooltip>
+        ),
+        row: (
+          <span className="disc-main-run-row">
+            <span className="disc-main-run-label">{mainLabel}</span>
+            <AgentIdentity icon={iconFor(mainRun.agent_type)} {...identityOf(mainRun)} color={agentTextColor(mainRun.agent_type)} />
+          </span>
+        ),
+        onSelect: () => setSelectedParticipantId(mainRun.id),
+      }
     : null;
 
   return (
@@ -307,12 +382,13 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0, mainAgent }:
       <ParticipantsStrip
         moreLabel={total => tp('disc.participantsMore', total)}
         allLabel={t('disc.participantsAll')}
+        // Shown only when nothing is listed, the main run's state included.
         empty={(
           <span className="disc-participants-empty">
             {t('disc.participantsEmpty')}
           </span>
         )}
-        entries={ordered.map(p => {
+        entries={[...(mainEntry ? [mainEntry] : []), ...ordered.map(p => {
           const presence = honestPresenceState(
             p.presence_state,
             p.status,
@@ -395,7 +471,7 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0, mainAgent }:
             row: <AgentIdentity icon={iconFor(p.agent_type)} {...identity} color={agentTextColor(p.agent_type)} />,
             onSelect: () => setSelectedParticipantId(p.id),
           };
-        })}
+        })]}
       />
       {selectedParticipant && selectedDisplayName && selectedPresenceLabel && (
           <ParticipantDetailsLayer

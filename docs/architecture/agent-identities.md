@@ -141,7 +141,7 @@ context the short alias stays free (both identities may be wanted).
   `next_poll_at`. Eligibility = unexpired lease or next_poll grace. A
   session identified only by its session id (provider unknown) keeps
   full presence via the agent type stored on its row.
-  [src: file: backend/src/api/disc_invite.rs:1352-1365#ACTIVITY_LISTENING_MARGIN_SECS] [src: file: backend/src/api/disc_invite.rs:1438-1440#presence_agent] [src: file: backend/src/db/discussion_sessions.rs:1253-1278#RESPONDER_ELIGIBLE_PREDICATE]
+  [src: file: backend/src/api/disc_invite.rs:1326-1339#ACTIVITY_LISTENING_MARGIN_SECS] [src: file: backend/src/api/disc_invite.rs:1412-1414#presence_agent] [src: file: backend/src/db/discussion_sessions.rs:1435-1460#RESPONDER_ELIGIBLE_PREDICATE]
 - **Untargeted human turn**: in a room with a native agent it always
   belongs to the configured discussion agent, whatever the CLI presence
   (target identity, not presence, decides ownership); the turn reaches the

@@ -137,8 +137,8 @@ entry is an arrival like any other.
   `[src: file: frontend/src/main.tsx:53-58#useTransitions]`
   `[src: file: frontend/src/routes/DiscussionsRoute.tsx:31-46#addressed]`
   `[src: file: frontend/src/routes/DiscussionsRoute.tsx:92#addressToken]`
-  `[src: file: frontend/src/pages/DiscussionsPage.tsx:391-395#addressToken]`
-  `[src: file: frontend/src/pages/DiscussionsPage.tsx:2375-2384#addressToken]`
+  `[src: file: frontend/src/pages/DiscussionsPage.tsx:187-191#addressToken]`
+  `[src: file: frontend/src/pages/DiscussionsPage.tsx:2177-2186#addressToken]`
 - **Open in a new tab** — anything that opens a view with an address opens it
   in a new tab on Ctrl/Cmd/Shift-click or a middle click, and in this tab on a
   plain click. The dashboard tabs, the run-card links and an Artifact's
@@ -327,7 +327,7 @@ separator; each page keeps ownership of its header layout and spacing. The
 content pane sits inside the full-bleed page shell with the shared compact inset,
 border and radius; Discussions and Pages apply that frame directly to their
 long-lived right pane so their internal scroll areas remain stable.
-`[src: file: frontend/src/pages/DiscussionsPage.css:1941-1954#disc-chat-area]`
+`[src: file: frontend/src/pages/DiscussionsPage.css:1879-1892#disc-chat-area]`
 `[src: file: frontend/src/pages/PagesPage.css:76-89#live-pages-viewer]`
 Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
@@ -400,7 +400,7 @@ readable while new events use `[kronn:agent-error]`.
 rendered in its source turn with an explicit queued/running state and a compact
 Stop action. The action addresses the dispatch id, not the discussion or the
 agent type, so cancelling an older response preserves later responses from the
-same agent. `[src: file: frontend/src/pages/DiscussionsPage.tsx:206-228#disc-pending-agent-stop]`
+same agent. `[src: file: frontend/src/components/MessageVariants.tsx:17-32#StopReplyButton]`
 `[src: file: backend/src/api/discussions/messaging.rs:1592-1682#stop_agent_dispatch]`
 
 **Message deletion and authorship:** deleting an individual discussion message
@@ -416,8 +416,8 @@ note. The first meaningful line stays visible as a compact summary while the
 full operational payload is collapsed behind “Show details” by default; that
 toggle lives in the fixed card header so expanding it never moves the pointer
 target. `[src: file: backend/src/db/discussions.rs:3312-3388#tombstone_message]`
-`[src: file: frontend/src/components/MessageBubble.tsx:487-499#orchestratorPreview]`
-`[src: file: frontend/src/components/MessageBubble.tsx:989-1001#disc-msg-orchestrator-toggle]`
+`[src: file: frontend/src/components/MessageBubble.tsx:497-509#orchestratorPreview]`
+`[src: file: frontend/src/components/MessageBubble.tsx:984-996#disc-msg-orchestrator-toggle]`
 
 **Attachment preview:** message attachments and the Assets panel share the
 same carousel for images, videos and disk-backed text files (including JSON

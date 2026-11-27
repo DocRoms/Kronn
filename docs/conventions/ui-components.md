@@ -620,8 +620,8 @@ native one) or a joined CLI session.
 `[src: file: frontend/src/components/HeaderScrollLine.tsx:27#HeaderScrollLine]`
 `[src: file: frontend/src/lib/stripOverflow.ts:5#measureStripOverflow]`
 `[src: file: frontend/src/lib/stripOverflow.ts:15#measureChipsOutOfView]`
-`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:110-112#participantRole]`
-`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:173-184#ParticipantDetailsLayer]`
+`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:120-123#participantRole]`
+`[src: file: frontend/src/components/DiscParticipantsHeader.tsx:187-198#ParticipantDetailsLayer]`
 
 ## The one agent picker
 

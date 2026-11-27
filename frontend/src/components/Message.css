@@ -1,0 +1,146 @@
+/* KT-1902 — the message component. The row and bubble frames stay in
+   DiscussionsPage.css (`.disc-msg-row`, `.disc-msg-bubble[data-role]`); this
+   file holds what the component adds: the footer split, the actions, the fold
+   and the queued variant. */
+
+/* Footer: the facts on the left, the actions on the right. Both wrap as whole
+   items: a chip or an action never breaks its label over two lines. */
+.disc-msg-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-2) var(--kr-sp-3);
+  margin-top: var(--kr-sp-2);
+}
+
+.disc-msg-footer-info {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2) var(--kr-sp-3);
+  min-width: 0;
+}
+
+.disc-msg-footer-info > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.kr-message-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  margin-left: auto;
+}
+
+.kr-message-action {
+  color: var(--kr-text-dim);
+}
+
+.kr-message-action[data-state="copied"] {
+  color: var(--kr-success);
+}
+
+.kr-message-action[data-action="delete"]:hover:not(:disabled),
+.kr-message-action[data-action="delete"]:focus-visible:not(:disabled) {
+  background: rgba(var(--kr-error-rgb), 0.1);
+  color: var(--kr-error);
+}
+
+/* The time closes the header, after its controls. */
+.disc-msg-header-actions .disc-msg-time {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+/* The identity shrinks inside the header, the #id pill and the time never
+   do: the line wraps as whole pieces (the role chip, the workflow step, the
+   CLI and session notes), and the model id truncates with an ellipsis, its
+   full name in the line's tooltip. It keeps 8ch and grows to its whole name
+   when the row has room. */
+.disc-msg-header-main > .disc-msg-agent-label {
+  min-width: 0;
+}
+
+.disc-msg-header-main .disc-msg-agent-identity-line {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  row-gap: 0;
+}
+
+.disc-msg-header-main .disc-msg-agent-identity-line > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.disc-msg-header-main .disc-msg-agent-identity-line > :not(.ui-agent-identity) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-msg-header-main .ui-agent-identity {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.disc-msg-header-main .ui-agent-identity-model {
+  flex: 1 1 8ch;
+  min-width: 0;
+  max-width: max-content;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Fold: a tall message shows its start; « Show more » opens the rest. */
+.kr-message-body[data-folded="true"] {
+  max-height: 24rem;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, var(--kr-text-primary) 75%, transparent);
+}
+
+.kr-message-fold-toggle {
+  margin-top: var(--kr-sp-2);
+}
+
+/* Queued: the outbox, one bubble on the user's side, a line per part. */
+.disc-msg-bubble[data-role="user"][data-variant="queued"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+  max-width: 80%;
+  padding: var(--kr-sp-3) var(--kr-sp-5);
+  border: 1px dashed rgba(var(--kr-accent-rgb), 0.45);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  box-shadow: none;
+  animation: disc-queued-pulse 1.6s ease-in-out infinite;
+}
+
+.disc-msg-bubble[data-role="user"][data-variant="queued"] .disc-msg-header-row {
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.disc-msg-bubble[data-role="user"][data-variant="queued"] .kr-message-actions {
+  margin-left: 0;
+}
+
+/* Streaming and pending replies: the elapsed time and Stop sit in the header. */
+.disc-msg-bubble[data-variant="streaming"] .disc-msg-header-row,
+.disc-msg-bubble[data-variant="pending"] .disc-msg-header-row,
+.disc-msg-bubble[data-variant="failed"] .disc-msg-header-row {
+  align-items: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disc-msg-bubble[data-role="user"][data-variant="queued"] { animation: none; }
+}

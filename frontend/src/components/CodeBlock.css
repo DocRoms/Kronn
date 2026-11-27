@@ -1,0 +1,77 @@
+/* KT-1902 — a message's code block, on the code tokens (KT-1878). */
+.kr-code-block {
+  margin: var(--kr-sp-3) 0;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-code-surface);
+  overflow: hidden;
+}
+
+.kr-code-block-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-1) var(--kr-sp-1) var(--kr-sp-1) var(--kr-sp-4);
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-hover);
+}
+
+.kr-code-block-language {
+  color: var(--kr-text-tertiary);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-type-sm);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.kr-code-block-copy {
+  margin-left: auto;
+}
+
+/* The code scrolls inside the block: a long line never widens the bubble. */
+.kr-code-block-pre {
+  margin: 0;
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  overflow-x: auto;
+  color: var(--kr-code-text);
+  background: transparent;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.kr-code-block-pre:focus-visible {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: -2px;
+}
+
+.kr-code-block .kr-code-block-pre code {
+  padding: 0;
+  background: none;
+  color: inherit;
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-type-sm);
+}
+
+.kr-code-block .hljs-comment,
+.kr-code-block .hljs-quote { color: var(--kr-code-comment); font-style: italic; }
+.kr-code-block .hljs-keyword,
+.kr-code-block .hljs-selector-tag,
+.kr-code-block .hljs-type,
+.kr-code-block .hljs-built_in { color: var(--kr-code-keyword); }
+.kr-code-block .hljs-string,
+.kr-code-block .hljs-regexp,
+.kr-code-block .hljs-attr,
+.kr-code-block .hljs-meta { color: var(--kr-code-string); }
+.kr-code-block .hljs-number,
+.kr-code-block .hljs-literal,
+.kr-code-block .hljs-doctag { color: var(--kr-code-number); }
+.kr-code-block .hljs-title,
+.kr-code-block .hljs-section,
+.kr-code-block .hljs-name { color: var(--kr-code-function); }
+.kr-code-block .hljs-params,
+.kr-code-block .hljs-variable { color: var(--kr-code-variable); }
+.kr-code-block .hljs-symbol,
+.kr-code-block .hljs-bullet,
+.kr-code-block .hljs-link { color: var(--kr-code-symbol); }

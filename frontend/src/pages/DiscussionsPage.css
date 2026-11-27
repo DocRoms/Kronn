@@ -1525,27 +1525,6 @@
    Ghost "outbox" bubbles at the scrollable transcript tail while the agent streams.
    User-aligned (right), dashed + accent-tinted to read as "pending, not yet
    sent", with a subtle pulse on the newest one. */
-.disc-queued-msgs {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 0 0;
-  align-items: flex-end;
-}
-/* One growing bubble — a column of lines, one per queued part. */
-.disc-queued-bubble {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  max-width: 80%;
-  padding: 6px 10px;
-  border-radius: var(--kr-r-md);
-  background: rgba(var(--kr-accent-rgb), 0.08);
-  border: 1px dashed rgba(var(--kr-accent-rgb), 0.45);
-  color: var(--kr-text-secondary);
-  font-size: var(--kr-fs-sm);
-  animation: disc-queued-pulse 1.6s ease-in-out infinite;
-}
 .disc-queued-head {
   display: flex;
   align-items: center;
@@ -1602,47 +1581,6 @@
 }
 .disc-queued-line[data-status='failed'] .disc-queued-status {
   color: var(--kr-error-soft);
-}
-.disc-queued-retry {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-  border: 0;
-  background: transparent;
-  color: var(--kr-accent);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--kr-fs-xs);
-  padding: 2px 3px;
-}
-.disc-queued-retry:hover { text-decoration: underline; }
-.disc-queued-cancel {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  color: var(--kr-text-ghost);
-  cursor: pointer;
-  padding: 2px;
-  border-radius: var(--kr-r-sm);
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-.disc-queued-line:hover .disc-queued-cancel { opacity: 1; }
-.disc-queued-cancel:hover {
-  color: var(--kr-error-soft);
-  background: rgba(var(--kr-error-rgb), 0.12);
-}
-.disc-queued-cancel:disabled {
-  cursor: default;
-  opacity: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .disc-queued-bubble { animation: none; }
 }
 
 .disc-unseen-badge {
@@ -3506,63 +3444,6 @@ button.disc-contact-open {
   cursor: default;
 }
 
-.disc-reply-action {
-  gap: 4px;
-  padding: 2px 6px;
-  color: var(--kr-text-dim);
-  font-size: 10px;
-}
-
-.disc-tool-calls-group[data-search-current="true"] {
-  border-radius: var(--kr-r-sm);
-  box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.32);
-}
-
-.disc-reply-header {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 100%;
-  margin: 4px 0 8px;
-  padding: 6px 8px;
-  border: 0;
-  border-left: 2px solid var(--kr-accent);
-  border-radius: 0 var(--kr-r-sm) var(--kr-r-sm) 0;
-  background: var(--kr-bg-hover);
-  color: var(--kr-text-tertiary);
-  font: inherit;
-  font-size: var(--kr-fs-xs);
-  text-align: left;
-  cursor: pointer;
-}
-
-.disc-reply-header:hover:not(:disabled) {
-  background: var(--kr-accent-bg);
-  color: var(--kr-accent-ink);
-}
-
-.disc-reply-header code {
-  flex-shrink: 0;
-  padding: 1px 4px;
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-sm);
-  color: var(--kr-text-secondary);
-  font-size: 10px;
-}
-
-.disc-reply-header[data-missing="true"] {
-  border-left-color: var(--kr-text-ghost);
-  opacity: 0.7;
-  cursor: default;
-}
-
-.disc-reply-action {
-  gap: 4px;
-  padding: 2px 6px;
-  color: var(--kr-text-dim);
-  font-size: 10px;
-}
-
 .disc-tool-calls-group[data-search-current="true"] {
   border-radius: var(--kr-r-sm);
   box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.32);
@@ -3779,32 +3660,6 @@ button.disc-contact-open {
   color: var(--kr-text-tertiary);
   margin-top: 4px;
   text-align: right;
-}
-
-.disc-msg-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 4px;
-}
-
-.disc-msg-footer-right {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-3);
-}
-
-.disc-delete-message-action:hover:not(:disabled),
-.disc-delete-message-action:focus-visible:not(:disabled) {
-  background: rgba(var(--kr-error-rgb), 0.1);
-  color: var(--kr-error);
-}
-
-.disc-msg-time-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--kr-sp-3);
 }
 
 .disc-reply-backlink {
@@ -4110,6 +3965,26 @@ button.disc-contact-open {
   font-size: var(--kr-fs-base);
   color: var(--kr-text-muted);
   font-style: italic;
+}
+
+.disc-orch-systems {
+  margin: var(--kr-sp-3) 0 0;
+  padding-left: 18px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-orch-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-sm);
+  font-style: italic;
+}
+
+.disc-streaming-logs {
+  margin-top: var(--kr-sp-3);
 }
 
 /* ── CTA banners (briefing, validation, bootstrap) ────── */
@@ -7295,42 +7170,6 @@ button.disc-contact-open {
   flex-shrink: 0;
 }
 
-/* ── Copy button in messages ──────────────────────────── */
-.disc-copy-btn {
-  background: none;
-  border: none;
-  padding: 1px 4px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: var(--kr-fs-2xs);
-  transition: color 0.15s;
-}
-
-.disc-copy-btn[data-copied="true"] {
-  color: var(--kr-success);
-}
-
-.disc-copy-btn[data-copied="false"] {
-  color: var(--kr-text-ghost);
-}
-
-/* ── TTS button in message ────────────────────────────── */
-.disc-tts-btn {
-  background: none;
-  border: none;
-  border-radius: var(--kr-r-sm);
-  padding: 2px 6px;
-  cursor: pointer;
-  color: var(--kr-text-ghost);
-  font-size: var(--kr-fs-xs);
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  margin-top: 4px;
-}
-
 /* ── Edit message area ────────────────────────────────── */
 .disc-edit-layout {
   display: flex;
@@ -7505,8 +7344,6 @@ button.disc-contact-open {
 .disc-md ol { margin: 4px 0; padding-left: 20px; }
 .disc-md li { margin: 2px 0; }
 .disc-md code { background: var(--kr-bg-active); padding: 1px 5px; border-radius: 4px; font-size: 12px; font-family: monospace; }
-.disc-md pre { background: var(--kr-bg-code); color: var(--kr-text-on-dark); padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 6px 0; border: 1px solid var(--kr-border-light); --kr-accent: #c8ff00; }
-.disc-md pre code, .disc-md-pre-code { background: none; padding: 0; font-size: 12px; font-family: monospace; color: var(--kr-accent); }
 .disc-md table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
 .disc-md th { border: 1px solid var(--kr-border-strong); padding: 6px 10px; background: var(--kr-bg-hover); font-weight: 600; text-align: left; }
 .disc-md td { border: 1px solid var(--kr-border); padding: 5px 10px; }
@@ -7515,30 +7352,11 @@ button.disc-contact-open {
 .disc-md a { color: var(--kr-accent); text-decoration: underline; }
 .disc-md strong { font-weight: 700; color: var(--kr-text-primary); }
 
-/* ── Copyable block overlay button ────────────────────── */
+/* ── A table's named Copy, over its corner ────────────── */
 .disc-copyable-block-btn {
   position: absolute;
   top: 4px;
   right: 4px;
-  background: var(--kr-bg-overlay);
-  border: 1px solid var(--kr-border-medium);
-  border-radius: var(--kr-r-sm);
-  padding: 2px 6px;
-  cursor: pointer;
-  font-size: var(--kr-fs-2xs);
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  transition: color 0.15s, opacity 0.15s;
-  opacity: 0.6;
-}
-
-.disc-copyable-block-btn[data-copied="true"] {
-  color: var(--kr-success);
-}
-
-.disc-copyable-block-btn[data-copied="false"] {
-  color: var(--kr-text-muted);
 }
 
 /* keyframes spin + pulse defined globally in reset.css */
@@ -8124,12 +7942,21 @@ button.disc-contact-open {
 /* Out-of-context discussion notes stay in their real chronological position
    and are filtered from the composer toolbar instead of floating over the
    message stream. */
-.disc-note-row {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--kr-sp-2);
+/* A note is the `note` variant of the message: a strip across the thread,
+   not a bubble on one side. */
+.disc-msg-row[data-role="note"] {
   width: min(92%, 860px);
   margin: var(--kr-sp-1) auto;
+}
+
+.disc-msg-bubble[data-role="note"] {
+  display: flex;
+  flex: 1;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+  max-width: none;
+  padding: 0;
+  border-radius: 0;
 }
 
 .disc-note {
@@ -8193,13 +8020,13 @@ button.disc-contact-open {
   font-size: var(--kr-fs-sm);
 }
 
-.disc-note-row > .disc-message-id-pill {
+.disc-msg-bubble[data-role="note"] > .disc-message-id-pill {
   flex: 0 0 auto;
   margin-top: 7px;
 }
 
 @media (max-width: 640px) {
-  .disc-note-row {
+  .disc-msg-row[data-role="note"] {
     width: 100%;
   }
 

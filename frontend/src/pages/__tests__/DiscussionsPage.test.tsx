@@ -3082,8 +3082,9 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    // Per-message TTS play button should be present on agent messages
-    const ttsPlayBtn = document.querySelector('button[title="Lire à voix haute"]');
+    // Per-message TTS play button should be present on agent messages (KT-1902:
+    // a named footer action, its name in aria-label rather than a title).
+    const ttsPlayBtn = document.querySelector('button[aria-label="Lire à voix haute"]');
     expect(ttsPlayBtn).toBeTruthy();
   });
 
@@ -3116,7 +3117,7 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    const ttsPlayBtn = document.querySelector('button[title="Lire à voix haute"]') as HTMLButtonElement;
+    const ttsPlayBtn = document.querySelector('button[aria-label="Lire à voix haute"]') as HTMLButtonElement;
     await act(async () => { fireEvent.click(ttsPlayBtn); });
 
     // speechSynthesis.cancel should be called first (to stop any ongoing speech)
@@ -4657,8 +4658,8 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    // Should find copy buttons (title attribute)
-    const copyBtns = document.querySelectorAll('[title="Copier le message"]');
+    // Should find copy buttons (KT-1902: named by aria-label, a footer action)
+    const copyBtns = document.querySelectorAll('[aria-label="Copier le message"]');
     expect(copyBtns.length).toBeGreaterThanOrEqual(1);
   });
 

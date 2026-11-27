@@ -749,10 +749,10 @@ describe('MessageBubble — agent label + copy buttons', () => {
       makeMessage({ role: 'Agent', content: 'copy me' }),
       { onCopy },
     );
-    // Two copy buttons exist for an Agent msg (label + footer); clicking
-    // either must forward the same (id, content) pair.
+    // KT-1902 — one Copy per message, in the footer actions (the header
+    // duplicate is gone).
     const btns = container.querySelectorAll('button.disc-copy-btn');
-    expect(btns.length).toBe(2);
+    expect(btns.length).toBe(1);
     fireEvent.click(btns[0]);
     expect(onCopy).toHaveBeenCalledWith('msg-test', 'copy me');
   });
@@ -760,8 +760,9 @@ describe('MessageBubble — agent label + copy buttons', () => {
   it('reflects the copied state on the copy button', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent' }), { isCopied: true });
     const btn = container.querySelector('button.disc-copy-btn');
-    expect(btn?.getAttribute('data-copied')).toBe('true');
-    expect(btn?.textContent).toContain('disc.copied');
+    expect(btn?.getAttribute('data-state')).toBe('copied');
+    // The name stays: a copy that worked does not rename the button.
+    expect(btn).toHaveAccessibleName('disc.copyMessage');
   });
 });
 
@@ -769,7 +770,7 @@ describe('MessageBubble — TTS button states (Agent only)', () => {
   it('shows the default TTS label when not active', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent' }));
     const tts = container.querySelector('button.disc-tts-btn');
-    expect(tts?.textContent).toContain('TTS');
+    expect(tts).toHaveAccessibleName('disc.tts.read');
   });
 
   it('shows the loading state', () => {
@@ -778,7 +779,7 @@ describe('MessageBubble — TTS button states (Agent only)', () => {
       { isTtsActive: true, ttsState: 'loading' },
     );
     const tts = container.querySelector('button.disc-tts-btn');
-    expect(tts?.textContent).toContain('TTS');
+    expect(tts).toHaveAccessibleName('disc.tts.loading');
     expect(tts?.querySelector('svg')).not.toBeNull();
   });
 
@@ -787,7 +788,7 @@ describe('MessageBubble — TTS button states (Agent only)', () => {
       makeMessage({ role: 'Agent' }),
       { isTtsActive: true, ttsState: 'playing' },
     );
-    expect(container.querySelector('button.disc-tts-btn')?.textContent).toContain('Pause');
+    expect(container.querySelector('button.disc-tts-btn')).toHaveAccessibleName('disc.tts.pause');
   });
 
   it('shows Reprendre while paused', () => {
@@ -795,7 +796,7 @@ describe('MessageBubble — TTS button states (Agent only)', () => {
       makeMessage({ role: 'Agent' }),
       { isTtsActive: true, ttsState: 'paused' },
     );
-    expect(container.querySelector('button.disc-tts-btn')?.textContent).toContain('Reprendre');
+    expect(container.querySelector('button.disc-tts-btn')).toHaveAccessibleName('disc.tts.resume');
   });
 
   it('invokes onTts(msgId, content, language) on click', () => {
@@ -1208,26 +1209,20 @@ describe('MarkdownContent — CopyableBlock copy paths', () => {
     });
   });
 
-  it('copies a fenced code block via the overlay button', () => {
-    const { container } = render(
-      <MarkdownContent content={'```\nconst x = 1;\n```'} />,
-    );
-    const btn = container.querySelector('button.disc-copyable-block-btn') as HTMLButtonElement;
-    expect(btn).not.toBeNull();
-    fireEvent.click(btn);
-    expect(navigator.clipboard.writeText).toHaveBeenCalled();
-    const arg = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(arg).toContain('const x = 1;');
+  // KT-1902 — the code block's Copy is a named button (CodeBlock), no longer
+  // an unnamed glyph over the corner.
+  it('copies a fenced code block via its named Copy button', async () => {
+    render(<MarkdownContent content={'```\nconst x = 1;\n```'} />);
+    fireEvent.click(screen.getByRole('button', { name: 'disc.code.copy' }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledWith('const x = 1;'));
   });
 
-  it('copies a markdown table as tab/newline-joined text (extractText TABLE path)', () => {
+  it('copies a markdown table as tab/newline-joined text (extractText TABLE path)', async () => {
     const md = '| A | B |\n| --- | --- |\n| 1 | 2 |';
     const { container } = render(<MarkdownContent content={md} />);
-    // The table is wrapped in its own CopyableBlock; grab the button
-    // inside the element that contains a <table>.
     const tableWrapper = container.querySelector('table')!.closest('.relative') as HTMLElement;
-    const btn = within(tableWrapper).getByRole('button');
-    fireEvent.click(btn);
+    fireEvent.click(within(tableWrapper).getByRole('button', { name: 'disc.table.copy' }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalled());
     const arg = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
     // Header + cells flattened with tab separators and newline between rows.
     expect(arg).toContain('A\tB');
@@ -1236,10 +1231,11 @@ describe('MarkdownContent — CopyableBlock copy paths', () => {
 });
 
 describe('MarkdownContent — fence branches (discussionId-gated)', () => {
-  it('renders a normal code block through CopyableBlock when no discussionId', () => {
+  it('renders a normal code block through CodeBlock when no discussionId', () => {
     const { container } = render(<MarkdownContent content={'```js\nfoo()\n```'} />);
     expect(container.querySelector('pre')).not.toBeNull();
-    expect(container.querySelector('button.disc-copyable-block-btn')).not.toBeNull();
+    expect(container.querySelector('.kr-code-block-language')).toHaveTextContent('JavaScript');
+    expect(screen.getByRole('button', { name: 'disc.code.copyLanguage' })).toBeInTheDocument();
   });
 
   it('falls through to a code block for a malformed kronn-doc-data fence', () => {

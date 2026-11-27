@@ -574,7 +574,10 @@ select.input option {
   color: var(--kr-text-ghost);
 }
 
-.disc-participant-chip {
+/* KT-2026 — the principal badge's run state: the chip's frame, no identity of
+ * its own (the picker badge names the agent). */
+.disc-participant-chip,
+.disc-main-run-state {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
@@ -590,7 +593,9 @@ select.input option {
 }
 
 .disc-participant-chip:hover,
-.disc-participant-chip[aria-expanded="true"] {
+.disc-participant-chip[aria-expanded="true"],
+.disc-main-run-state:hover,
+.disc-main-run-state[aria-expanded="true"] {
   border-color: var(--kr-accent-border);
   background: var(--kr-accent-bg);
   color: var(--kr-accent-ink);
@@ -599,6 +604,14 @@ select.input option {
 .disc-participant-chip[data-status="paused"] {
   background: var(--kr-bg-hover);
   opacity: 0.6;
+}
+
+/* KT-2026 — the main run's row in the « +N » list: its state, then the identity. */
+.disc-main-run-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .disc-participant-presence-dot {

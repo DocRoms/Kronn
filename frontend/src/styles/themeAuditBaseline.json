@@ -299,10 +299,10 @@
       "breakpoint": 5
     },
     "pages/DiscussionsPage.css": {
-      "radius": 43,
-      "font-size": 90,
+      "radius": 42,
+      "font-size": 86,
       "breakpoint": 9,
-      "colour": 13
+      "colour": 12
     },
     "pages/McpPage.css": {
       "colour": 3,

@@ -213,10 +213,10 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 18
+      "count": 12
     },
     "ui-guards/no-off-scale-style": {
-      "count": 17
+      "count": 15
     }
   },
   "src/components/NewDiscussionForm.tsx": {
@@ -750,10 +750,10 @@
       "count": 1
     },
     "ui-guards/no-literal-ui-string": {
-      "count": 7
+      "count": 6
     },
     "ui-guards/no-off-scale-style": {
-      "count": 4
+      "count": 2
     }
   },
   "src/pages/McpPage.tsx": {

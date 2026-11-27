@@ -114,9 +114,9 @@ card is rendered beside the folded report, visible without opening its details.
 Only a matching row with `source_kind: orchestration` enables that path; an
 orchestrator display label or ordinary notification alone renders no card and
 no false refusal notice.
-[src: file: frontend/src/components/MessageBubble.tsx:2134-2141#ImportantMessageCard]
+[src: file: frontend/src/components/MessageBubble.tsx:2156-2163#ImportantMessageCard]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:36-130#ImportantMessageCard]
-[src: file: frontend/src/components/MessageBubble.tsx:1149-1159#serverEventOnly]
+[src: file: frontend/src/components/MessageBubble.tsx:1144-1154#serverEventOnly]
 
 The bar re-fetches when the transcript's newest durable message id changes
 (`messageRevision`, the same idiom `DiscussionQuestionBanner` uses) — one
@@ -133,9 +133,9 @@ select an existing task from this discussion's plan. This does not create,
 complete or otherwise modify a task. The card's task link resolves a fresh plan
 and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
-[src: file: frontend/src/pages/DiscussionsPage.tsx:5577-5601#ImportantMessageForm]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:5290-5314#ImportantMessageForm]
 [src: file: frontend/src/components/ImportantMessageForm.tsx:90-104#taskRef]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1415-1445#openPlan]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1217-1247#openPlan]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:90-93#initialTaskId]
 
 The publication-key field appears only inside the open form. It uses the

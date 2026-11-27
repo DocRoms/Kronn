@@ -7599,6 +7599,22 @@ resume_since: string | null,
  */
 model: string | null,
 /**
+ * KT-2026 — this native row runs the discussion's OWN agent on its own
+ * connection. The header shows that run once, as the main agent's state,
+ * instead of a second chip. `false` for a joined session and for a one-off
+ * native agent (a mention, another connection). Never inferred from
+ * `agent_type` alone: two connections of one provider can differ.
+ */
+is_main_agent: boolean,
+/**
+ * KT-2026 — the exact model this native run uses, when the server knows
+ * it: a fallback pin's model, else the discussion's exact model on its own
+ * turn (the runner's `turn_exact_model` rule). `None` = not known here:
+ * the tier or the connection default decides, and the UI must not call it
+ * « default model ».
+ */
+run_model: string | null,
+/**
  * Native CLI conversation id, when the joining bridge can prove one.
  * `None` deliberately produces no resume affordance in the UI.
  */

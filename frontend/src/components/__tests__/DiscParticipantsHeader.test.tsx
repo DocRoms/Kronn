@@ -13,6 +13,7 @@ vi.mock('../../lib/api', () => ({
 import { DiscParticipantsHeader } from '../DiscParticipantsHeader';
 import { freshnessOf, DEFAULT_AWAY_AFTER_MS } from '../../lib/discPresence';
 import { discussions as discussionsApi } from '../../lib/api';
+import type { AgentType } from '../../types/generated';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}(${args.join(',')})` : key;
@@ -245,23 +246,154 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     }
   });
 
-  it('puts the main agent first, labelled main agent, and a native one-off agent apart (KT-1936)', async () => {
+  it('keeps the main run on the principal state, and a native one-off agent on its own chip (KT-1936, KT-2026)', async () => {
     (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: 1, agent_type: 'Codex', session_id: 'sess-B', role: 'peer', status: 'active' },
       { id: -2, agent_type: 'Vibe', session_id: null, role: 'native_resume', status: 'active', wake_mode: 'native_dispatch' },
-      { id: -1, agent_type: 'ClaudeCode', session_id: null, role: 'native_resume', status: 'active', wake_mode: 'native_dispatch' },
+      {
+        id: -1, agent_type: 'ClaudeCode', session_id: null, role: 'native_resume', status: 'active',
+        wake_mode: 'native_dispatch', presence_state: 'running', is_main_agent: true,
+      },
     ]);
     await act(async () => {
-      render(<DiscParticipantsHeader discId="d-main" t={t} mainAgent="ClaudeCode" />);
+      render(<DiscParticipantsHeader discId="d-main" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The own agent is not a chip: its run is the principal state.
+    const chips = Array.from(document.querySelectorAll('.disc-participant-chip'));
+    expect(chips.map(c => c.querySelector('.ui-agent-identity-name')?.textContent)).toEqual(['@codex', '@vibe']);
+    expect(chips.map(c => c.querySelector('.ui-agent-identity-role')?.textContent)).toEqual([
+      'ui.agentIdentity.role.cli', 'ui.agentIdentity.role.oneOff',
+    ]);
+    // A one-off run that names no model: « model not recorded », never « default model ».
+    expect(chips[1].querySelector('[data-testid="agent-identity-model"]')).toHaveAttribute('data-state', 'notRecorded');
+    const main = document.querySelector('[data-testid="disc-main-run-state"]');
+    expect(main).toHaveAttribute('data-presence', 'running');
+    expect(main?.querySelector('.ui-agent-identity-name')).toBeNull();
+  });
+
+  it('shows one identity for the own agent while it runs: no second chip, no « default model » (KT-2026)', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: -1, agent_type: 'OpenCode', session_id: null, role: 'native_resume', status: 'active',
+        wake_mode: 'native_dispatch', presence_state: 'running', is_main_agent: true,
+        run_model: 'opencode-go/beam-free',
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-once" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const row = document.querySelector('[data-testid="disc-participants-row"]') as HTMLElement;
+    expect(row.querySelectorAll('.disc-participant-chip')).toHaveLength(0);
+    expect(row.querySelectorAll('[data-testid="disc-main-run-state"]')).toHaveLength(1);
+    expect(row.textContent).not.toContain('disc.participantsEmpty');
+    expect(row.textContent).not.toContain('ui.agentIdentity.model.providerDefault');
+    // The run's state is reachable and named: a focusable button, opened by Enter, shown with its reason.
+    const main = screen.getByTestId('disc-main-run-state');
+    expect(main.tagName).toBe('BUTTON');
+    // Inside the strip's own list, so « +N » counts it at any width.
+    expect(main.closest('.kr-participants-strip-list')).not.toBeNull();
+    // WCAG 2.5.3: the visible state is at the start of the name.
+    expect(main.getAttribute('aria-label')).toContain(main.textContent!.trim());
+    expect(main).toHaveAttribute('aria-haspopup', 'dialog');
+    expect(main).toHaveAttribute('aria-expanded', 'false');
+    main.focus();
+    expect(main).toHaveFocus();
+    fireEvent.click(main);
+    expect(main).toHaveAttribute('aria-expanded', 'true');
+    expect(document.querySelector('.disc-participant-details')).not.toBeNull();
+  });
+
+  it('gives every agent kind Kronn knows its own icon, never the generic one (KT-2026)', async () => {
+    // Every AgentType of generated.ts, one one-off run each. The icon map is typed on
+    // AgentType, so a new kind fails the type check until it has an icon here too.
+    const kinds: AgentType[] = [
+      'ClaudeCode', 'Codex', 'OpenCode', 'Vibe', 'GeminiCli', 'Kiro',
+      'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia', 'Custom',
+    ];
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue(
+      kinds.map((agent_type, index) => ({
+        id: -(index + 1), agent_type, session_id: null, role: 'native_resume', status: 'active',
+        wake_mode: 'native_dispatch', presence_state: 'running',
+      })),
+    );
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-icons" t={t} />);
       await Promise.resolve();
       await Promise.resolve();
     });
     const chips = Array.from(document.querySelectorAll('.disc-participant-chip'));
-    expect(chips.map(c => c.querySelector('.ui-agent-identity-name')?.textContent)).toEqual(['@claude', '@codex', '@vibe']);
-    expect(chips.map(c => c.querySelector('.ui-agent-identity-role')?.textContent)).toEqual([
-      'ui.agentIdentity.role.main', 'ui.agentIdentity.role.cli', 'ui.agentIdentity.role.oneOff',
+    expect(chips.length).toBeGreaterThan(0);
+    for (const chip of chips) {
+      expect(chip.textContent).not.toContain('👤');
+    }
+  });
+
+  it('shows a stalled or quota-exhausted own run with its reason on the principal state (KT-2026)', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: -1, agent_type: 'ClaudeCode', session_id: null, role: 'native_resume', status: 'active',
+        wake_mode: 'native_dispatch', presence_state: 'quota_exhausted', is_main_agent: true,
+        resume_reason: 'quota exhausted until 18:00', resume_since: '2026-11-24T10:00:00Z',
+      },
     ]);
-    expect(chips[0].querySelector('[data-testid="agent-identity-model"]')).toHaveAttribute('data-state', 'providerDefault');
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-quota" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const main = screen.getByTestId('disc-main-run-state');
+    expect(main).toHaveAttribute('data-presence', 'quota_exhausted');
+    fireEvent.click(main);
+    const details = document.querySelector('.disc-participant-details') as HTMLElement;
+    expect(details.textContent).toContain('quota exhausted until 18:00');
+    expect(details.textContent).toContain('disc.presenceQuotaExhausted');
+    // Escape closes the layer and gives the focus back to the state.
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(document.querySelector('.disc-participant-details')).toBeNull();
+    expect(main).toHaveFocus();
+  });
+
+  it('counts the own run in « +N » and lists it when the strip has no room at narrow width (KT-2026)', async () => {
+    // jsdom has no layout: a 0 px line, as at 400 px where the principal badge
+    // takes the width. Every entry is past the edge, the own run included.
+    const restore: Array<() => void> = [];
+    const stub = (prop: 'offsetLeft' | 'offsetWidth' | 'clientWidth' | 'scrollWidth', get: (el: HTMLElement) => number) => {
+      const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, prop);
+      Object.defineProperty(HTMLElement.prototype, prop, { configurable: true, get() { return get(this as HTMLElement); } });
+      restore.push(() => { if (original) Object.defineProperty(HTMLElement.prototype, prop, original); });
+    };
+    const isList = (el: HTMLElement) => el.classList.contains('kr-participants-strip-list');
+    stub('offsetLeft', () => 0);
+    stub('offsetWidth', el => (isList(el) ? 0 : 80));
+    stub('clientWidth', el => (isList(el) ? 0 : 80));
+    stub('scrollWidth', el => (isList(el) ? 160 : 80));
+    try {
+      (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: 1, agent_type: 'Codex', session_id: 'sess-N', role: 'peer', status: 'active' },
+        {
+          id: -1, agent_type: 'ClaudeCode', session_id: null, role: 'native_resume', status: 'active',
+          wake_mode: 'native_dispatch', presence_state: 'running', is_main_agent: true,
+        },
+      ]);
+      await act(async () => {
+        render(<DiscParticipantsHeader discId="d-narrow" t={t} />);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const more = screen.getByTestId('participants-more');
+      expect(more).toHaveTextContent('+2');
+      fireEvent.click(more);
+      const all = screen.getByTestId('participants-all');
+      expect(all.querySelector('.disc-main-run-row')).not.toBeNull();
+      expect(all.textContent).toContain('disc.presenceRunning');
+      expect(all.textContent).toContain('@codex');
+    } finally {
+      restore.forEach(r => r());
+    }
   });
 
   it('copies the exact native resume command only when the CLI exposes an id', async () => {

@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, Image as ImageIcon, RotateCcw, Sparkles } from 'lucide-react';
 import { RunStatusCard } from './RunStatusCard';
+import { Message } from './Message';
 import { useT } from '../lib/I18nContext';
 import { mediaRunDetails } from '../lib/mediaRunResult';
 import { sharedRunStatusCardModel } from '../lib/runStatusCardModel';
@@ -65,14 +66,15 @@ export function InlineMediaJob({
   }, [assetId, discussionId]);
 
   return (
-    <div
-      className="disc-msg-row"
-      data-role="media"
-      data-message-id={messageId}
-      data-media-run-id={run.id}
-      data-media-asset-id={assetId}
+    <Message
+      variant="media"
+      bubbleClassName="disc-media-msg-bubble"
+      rowProps={{
+        'data-message-id': messageId,
+        'data-media-run-id': run.id,
+        'data-media-asset-id': assetId ?? undefined,
+      }}
     >
-      <article className="disc-msg-bubble disc-media-msg-bubble" data-role="media">
         <header className="disc-media-msg-header">
           <Sparkles size={15} aria-hidden="true" />
           <span>{prompt}</span>
@@ -141,7 +143,6 @@ export function InlineMediaJob({
             <span>{t('run.media.open')}</span>
           </button>
         )}
-      </article>
-    </div>
+    </Message>
   );
 }

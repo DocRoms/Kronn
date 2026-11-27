@@ -244,7 +244,7 @@ describe('composer mentions — shared exact catalogue contract', () => {
       role: 'peer', status: 'active', joined_at: '2026-09-09T00:00:00Z', left_at: null, last_seen: null, activity: null,
       presence_state: 'listening', read_live: true, write_state: 'ok', wake_mode: 'external_poll', next_poll_at: null,
       last_write_at: null, resume_reason: null, resume_since: null, model: 'cli-declared-model', conversation_id: null, cli_ordinal: 4,
-      workflow_step: null };
+      workflow_step: null, is_main_agent: false, run_model: null };
     vi.mocked(discussionsApi.participants).mockResolvedValueOnce([participant]);
     const data = snapshot();
     data.targets.push({ runtime_target_id: 'agent:codex', agent_type: 'Codex', stale: false, live_refresh_ok: true,
