@@ -64,8 +64,9 @@ function declsFor(block: string, selector: string): string {
 describe('components/ui stylesheets', () => {
   it('finds the stylesheets, so the checks below are not vacuous', () => {
     expect(CSS.map(c => c.file).sort()).toEqual([
-      'Button.css', 'ConfirmDialog.css', 'Dialog.css', 'Drawer.css', 'IconButton.css', 'Menu.css', 'SearchField.css',
-      'StatusBadge.css', 'Tabs.css', 'Tooltip.css', 'overlay.css',
+      'Button.css', 'ConfirmDialog.css', 'Dialog.css', 'Drawer.css', 'EmptyState.css', 'Field.css', 'FormFooter.css',
+      'IconButton.css', 'LoadingState.css', 'Menu.css', 'Notice.css', 'SearchField.css', 'Select.css', 'StatusBadge.css',
+      'Switch.css', 'Tabs.css', 'Tooltip.css', 'overlay.css', 'visuallyHidden.css',
     ]);
   });
 
@@ -88,7 +89,7 @@ describe('components/ui stylesheets', () => {
 
   it('write a max-width query only at a breakpoint minus one (KT-1881)', () => {
     const queries = CSS.flatMap(({ file, text }) => [...text.matchAll(BREAKPOINT_QUERY)].map(m => ({ file, px: Number(m[1]) })));
-    expect(queries.map(q => q.file)).toEqual(expect.arrayContaining(['Dialog.css', 'Drawer.css']));
+    expect(queries.map(q => q.file)).toEqual(expect.arrayContaining(['Dialog.css', 'Drawer.css', 'FormFooter.css']));
     for (const { file, px } of queries) expect(BREAKPOINT_EDGES.has(px), `${file}: max-width ${px}px`).toBe(true);
   });
 
@@ -155,6 +156,10 @@ describe('components/ui stylesheets', () => {
     ['Tabs.css', '.ui-tabs[data-size="sm"] .ui-tab', ['min-height']],
     ['SearchField.css', '.ui-search-field-input', ['min-height']],
     ['SearchField.css', '.ui-search-field[data-size="sm"] .ui-search-field-input', ['min-height']],
+    ['Field.css', '.ui-field-control', ['min-height']],
+    ['Select.css', '.ui-select-input', ['min-height']],
+    ['Select.css', '.ui-select[data-size="sm"] .ui-select-input', ['min-height']],
+    ['Switch.css', '.ui-switch-row', ['min-height']],
   ])('%s grows %s to the touch height on a coarse pointer', (file, selector, props) => {
     const text = CSS.find(c => c.file === file)!.text;
     const body = coarseBlocks(text).map(block => declsFor(block, selector)).join(';');
@@ -175,8 +180,9 @@ describe('components/ui stylesheets', () => {
   it('gives every component its stylesheet and its test, next to it', () => {
     const components = files.filter(f => /^[A-Z]\w+\.tsx$/.test(f) && !f.endsWith('.test.tsx'));
     expect(components.sort()).toEqual([
-      'Button.tsx', 'ConfirmDialog.tsx', 'Dialog.tsx', 'Drawer.tsx', 'IconButton.tsx', 'Menu.tsx', 'SearchField.tsx',
-      'StatusBadge.tsx', 'Tabs.tsx', 'Tooltip.tsx',
+      'Button.tsx', 'ConfirmDialog.tsx', 'Dialog.tsx', 'Drawer.tsx', 'EmptyState.tsx', 'Field.tsx', 'FormFooter.tsx',
+      'IconButton.tsx', 'LoadingState.tsx', 'Menu.tsx', 'Notice.tsx', 'SearchField.tsx', 'Select.tsx', 'StatusBadge.tsx',
+      'Switch.tsx', 'Tabs.tsx', 'Tooltip.tsx',
     ]);
     for (const component of components) {
       const name = component.replace(/\.tsx$/, '');

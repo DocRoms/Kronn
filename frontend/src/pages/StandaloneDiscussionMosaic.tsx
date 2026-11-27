@@ -6,6 +6,7 @@ import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS } from '../lib/constants';
 import { useDiscussionMonitor } from '../hooks/useDiscussionMonitor';
 import { useToast } from '../hooks/useToast';
+import { useAppBarHeight } from '../hooks/useAppBarHeight';
 import { DiscussionMosaicComposer } from '../components/DiscussionMosaicComposer';
 import type { DiscussionMosaicLayout } from '../lib/discussion-mosaic-navigation';
 import { livePageMosaicLayouts, standaloneDiscussionUrl } from '../lib/live-page-navigation';
@@ -112,6 +113,10 @@ export function StandaloneDiscussionMosaic({ discussionIds, layout, onLayoutChan
   const layoutId = useId();
   const { items, error, updatedAt, connectionState, refresh } = useDiscussionMonitor(discussionIds);
   const { toast, ToastContainer } = useToast();
+  // KT-1883 — this page has its own toolbar, not the app's bar: below
+  // --kr-bp-md its toasts sit just under it (toastStack.css).
+  const toolbar = useRef<HTMLElement>(null);
+  useAppBarHeight(toolbar);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedTitle = selectedId ? items.find(item => item.id === selectedId)?.preview?.title || selectedId : '';
   useEffect(() => {
@@ -120,7 +125,7 @@ export function StandaloneDiscussionMosaic({ discussionIds, layout, onLayoutChan
     return () => { document.title = previous; };
   }, [t]);
   return <main className="discussion-mosaic">
-    <header className="discussion-mosaic-toolbar">
+    <header className="discussion-mosaic-toolbar" ref={toolbar}>
       <h1>{t('disc.mosaic.title')} <span>{discussionIds.length}</span></h1>
       <label htmlFor={layoutId}>{t('pages.mosaic.chooseLayout')}</label>
       <select id={layoutId} value={layout} onChange={event => onLayoutChange(event.target.value as DiscussionMosaicLayout)}>{livePageMosaicLayouts(discussionIds.length).map(option => <option key={option} value={option}>{t(layoutKeys[option])}</option>)}</select>

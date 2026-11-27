@@ -1,0 +1,63 @@
+/* KT-1882 — FormFooter: blockers at the start, Cancel then the action at the
+   end edge, stuck to the bottom of what scrolls. Design tokens only. */
+
+.ui-form-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-space-2) var(--kr-space-4);
+  padding: var(--kr-space-3) 0;
+  border-top: 1px solid var(--kr-border-medium);
+}
+
+.ui-form-footer[data-pinned="true"] {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--kr-z-sticky);
+  background-color: var(--kr-bg-elevated);
+}
+
+.ui-form-footer-blockers {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ui-form-footer-blocker-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  margin: 0;
+  padding: 0 0 0 var(--kr-space-4);
+  font-size: var(--kr-type-sm);
+  line-height: 1.4;
+  color: var(--kr-text-secondary);
+}
+
+.ui-form-footer-blocker-list li::marker {
+  color: var(--kr-status-warning);
+}
+
+.ui-form-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--kr-space-2);
+  margin-inline-start: auto;
+}
+
+/* A held action stays focusable (aria-disabled) and looks unavailable. */
+.ui-form-footer-actions .ui-button[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background-image: none;
+}
+
+/* On a phone the two buttons share the width, the action still last. */
+@media (max-width: 639px) {
+  .ui-form-footer-actions {
+    flex: 1 1 100%;
+  }
+  .ui-form-footer-actions .ui-button {
+    flex: 1 1 0;
+  }
+}

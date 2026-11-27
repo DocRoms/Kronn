@@ -268,6 +268,49 @@
   color: var(--kr-text-primary);
 }
 
+/* KT-1882 — the form demos: a field fills its row up to a readable width; the
+   FormFooter demo is a short form that scrolls under its pinned footer. */
+.ds-demo-items > .ui-field,
+.ds-demo-items > .ui-form-footer {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 8);
+}
+
+.ds-demo-form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--kr-space-3);
+  max-width: calc(var(--kr-space-8) * 8);
+  max-height: calc(var(--kr-space-8) * 5);
+  overflow-y: auto;
+  padding: var(--kr-space-3) var(--kr-space-3) 0;
+  background-color: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-radius-surface);
+}
+
+/* KT-1883 — the feedback demos: a notice fills its row up to a readable
+   width; an empty state, a loading state at md or lg and a skeleton sit in a
+   framed box, as in the pane they are made for (the box bounds their height). */
+.ds-demo-items > .ui-notice {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 12);
+}
+
+.ds-demo-frame {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 12);
+  background-color: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-radius-surface);
+}
+
+.ds-demo-frame > .ui-loading-state[data-size="md"],
+.ds-demo-frame > .ui-loading-state[data-size="lg"] {
+  min-height: calc(var(--kr-space-8) * 5);
+}
+
 /* Narrower than --kr-bp-md (768px): a custom property cannot be read in @media.
    Each token becomes a small block: its name on one unbroken line, then its
    value, its use and its preview. */

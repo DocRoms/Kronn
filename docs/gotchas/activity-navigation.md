@@ -10,7 +10,7 @@ popovers, so there is no longer a second disclosure to keep exclusive). Tour
 anchors stay on the navigation tabs. The bell sets `aria-controls` only while its
 dialog exists. See [ui-structure.md](../architecture/ui-structure.md) § Attention
 center for what the panel lists.
-[src: file: frontend/src/pages/Dashboard.tsx:699-713#data-tour-id]
+[src: file: frontend/src/pages/Dashboard.tsx:703-717#data-tour-id]
 [src: file: frontend/src/pages/Dashboard.tsx:770-784#ActivityBell]
 [src: file: frontend/src/components/activity/ActivityBell.tsx:36-42#ActivityBell]
 

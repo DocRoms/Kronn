@@ -6,8 +6,10 @@ The initial React loading screen and lazy-route fallback reuse `KronnMark` at
 100 px, rotating the whole mark once every six seconds. Reduced-motion users
 see a static mark. Startup hints and backend timeout/retry recovery remain
 independent of that decorative animation; other spinners are unchanged.
-`[src: file: frontend/src/components/LoadingState.tsx:47]` `[src: file: frontend/src/App.tsx:188-195]`
-`[src: file: frontend/src/App.css:26-41#app-loading-mark]`
+Since KT-1883 that screen is `LoadingState` (size lg, `fullscreen`) in
+`components/ui/`, which `components/LoadingState.tsx` re-exports.
+`[src: file: frontend/src/components/ui/LoadingState.tsx:86]` `[src: file: frontend/src/App.tsx:188-195]`
+`[src: file: frontend/src/components/ui/LoadingState.css:49-53#ui-loading-mark]`
 
 Moved out of `docs/AGENTS.md` (KT-191): it weighed 53 167 bytes — 63,6 % of a
 file every session reads in full — while being needed only when actually
@@ -75,7 +77,7 @@ like any other.
   `[src: file: frontend/src/routes/appRoutes.tsx:14-31]`
   `[src: file: frontend/src/routes/dashboardRoutes.tsx:19-41#dashboardRoutes]`
   `[src: file: frontend/src/App.tsx:209-210#Outlet]`
-  `[src: file: frontend/src/pages/Dashboard.tsx:1219-1222#Outlet]`
+  `[src: file: frontend/src/pages/Dashboard.tsx:1223-1226#Outlet]`
 - **Paths** — spelled out once, in `lib/routes.ts`. Components navigate with
   `useKronnNavigate()`, never with a literal path.
   `[src: file: frontend/src/lib/routes.ts:1-8]`

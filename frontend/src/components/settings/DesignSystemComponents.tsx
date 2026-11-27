@@ -4,10 +4,17 @@ import { Button, type ButtonSize, type ButtonVariant } from '../ui/Button';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { Dialog } from '../ui/Dialog';
 import { Drawer } from '../ui/Drawer';
+import { EmptyState } from '../ui/EmptyState';
+import { Field } from '../ui/Field';
+import { FormFooter } from '../ui/FormFooter';
 import { IconButton } from '../ui/IconButton';
+import { LoadingState, Skeleton } from '../ui/LoadingState';
 import { Menu, type MenuItem } from '../ui/Menu';
+import { Notice } from '../ui/Notice';
 import { SearchField } from '../ui/SearchField';
+import { Select, type SelectOption } from '../ui/Select';
 import { StatusBadge } from '../ui/StatusBadge';
+import { Switch } from '../ui/Switch';
 import { Tabs } from '../ui/Tabs';
 import { Tooltip } from '../ui/Tooltip';
 import { STATUS_TONES } from '../ui/statusTones';
@@ -231,6 +238,259 @@ function ConfirmDialogDemo({ t }: { t: T }) {
   );
 }
 
+/** The agents the form demos offer: product names, the same in every locale. */
+const DEMO_AGENTS: readonly SelectOption[] = [
+  { value: 'claude', label: 'Claude Code' },
+  { value: 'codex', label: 'Codex' },
+  { value: 'gemini', label: 'Gemini CLI' },
+];
+
+/** KT-1882 — a Field in each of its states: empty, filled, help, error,
+ *  disabled, required, optional. */
+function FieldDemo({ t }: { t: T }) {
+  const name = t('designSystem.demo.workflowName');
+  const placeholder = t('designSystem.demo.workflowNamePlaceholder');
+  const value = t('designSystem.demo.workflowNameValue');
+  return (
+    <>
+      <Row label={t('designSystem.demo.state.empty')}>
+        <Field label={name}><input type="text" placeholder={placeholder} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.filled')}>
+        <Field label={name}><input type="text" defaultValue={value} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.help')}>
+        <Field label={name} help={t('designSystem.demo.workflowNameHelp')}><input type="text" defaultValue={value} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.error')}>
+        <Field label={name} error={t('designSystem.demo.workflowNameError')} help={t('designSystem.demo.workflowNameHelp')}>
+          <input type="text" defaultValue={value} />
+        </Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.disabled')}>
+        <Field label={name} disabled><input type="text" defaultValue={value} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.required')}>
+        <Field label={name} required><input type="text" placeholder={placeholder} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.optional')}>
+        <Field label={t('designSystem.demo.description')} optional><textarea placeholder={t('designSystem.demo.descriptionPlaceholder')} /></Field>
+      </Row>
+    </>
+  );
+}
+
+/** KT-1882 — a Select, named by its Field, in each state, and the small size. */
+function SelectDemo({ t }: { t: T }) {
+  const [empty, setEmpty] = useState('');
+  const [filled, setFilled] = useState('claude');
+  const [small, setSmall] = useState('codex');
+  const agent = t('designSystem.demo.agent');
+  const placeholder = t('designSystem.demo.agentPlaceholder');
+  const none = () => {};
+  return (
+    <>
+      <Row label={t('designSystem.demo.state.empty')}>
+        <Field label={agent}><Select value={empty} onChange={setEmpty} placeholder={placeholder} options={DEMO_AGENTS} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.filled')}>
+        <Field label={agent}><Select value={filled} onChange={setFilled} options={DEMO_AGENTS} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.help')}>
+        <Field label={agent} help={t('designSystem.demo.agentHelp')}><Select value={filled} onChange={setFilled} options={DEMO_AGENTS} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.error')}>
+        <Field label={agent} error={t('designSystem.demo.agentError')}>
+          <Select value="gemini" onChange={none} options={DEMO_AGENTS} />
+        </Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.disabled')}>
+        <Field label={agent} disabled><Select value="claude" onChange={none} options={DEMO_AGENTS} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.state.required')}>
+        <Field label={agent} required><Select value={empty} onChange={setEmpty} placeholder={placeholder} options={DEMO_AGENTS} /></Field>
+      </Row>
+      <Row label={t('designSystem.demo.size.sm')}>
+        <Field label={agent}><Select size="sm" value={small} onChange={setSmall} options={DEMO_AGENTS} /></Field>
+      </Row>
+    </>
+  );
+}
+
+/** KT-1882 — a Switch off, on, with its description, and disabled. */
+function SwitchDemo({ t }: { t: T }) {
+  const [off, setOff] = useState(false);
+  const [on, setOn] = useState(true);
+  const [described, setDescribed] = useState(false);
+  const none = () => {};
+  return (
+    <>
+      <Row label={t('designSystem.demo.state.off')}>
+        <Switch label={t('designSystem.demo.notify')} checked={off} onChange={setOff} />
+      </Row>
+      <Row label={t('designSystem.demo.state.on')}>
+        <Switch label={t('designSystem.demo.autoMerge')} checked={on} onChange={setOn} />
+      </Row>
+      <Row label={t('designSystem.demo.state.help')}>
+        <Switch
+          label={t('designSystem.demo.notify')}
+          description={t('designSystem.demo.notifyDescription')}
+          checked={described}
+          onChange={setDescribed}
+        />
+      </Row>
+      <Row label={t('designSystem.demo.state.disabled')}>
+        <Switch label={t('designSystem.demo.notify')} checked={false} disabled onChange={none} />
+        <Switch label={t('designSystem.demo.autoMerge')} checked disabled onChange={none} />
+      </Row>
+    </>
+  );
+}
+
+/** KT-1882 — a form that scrolls, its footer pinned: the action is held, with
+ *  its reasons, until the two required fields are filled. Then a busy and a
+ *  danger footer, in the flow. */
+function FormFooterDemo({ t }: { t: T }) {
+  const [name, setName] = useState('');
+  const [agent, setAgent] = useState('');
+  const [created, setCreated] = useState<string | null>(null);
+  const blockers = [
+    ...(name.trim() === '' ? [t('designSystem.demo.blockerName')] : []),
+    ...(agent === '' ? [t('designSystem.demo.blockerAgent')] : []),
+  ];
+  const reset = () => { setName(''); setAgent(''); setCreated(null); };
+  return (
+    <>
+      <Row label={t('designSystem.demo.state.pinned')}>
+        <form
+          className="ds-demo-form"
+          data-testid="ds-form-demo"
+          onSubmit={e => { e.preventDefault(); setCreated(name.trim()); }}
+        >
+          <Field label={t('designSystem.demo.workflowName')} required>
+            <input type="text" value={name} placeholder={t('designSystem.demo.workflowNamePlaceholder')} onChange={e => setName(e.target.value)} />
+          </Field>
+          <Field label={t('designSystem.demo.agent')} required>
+            <Select value={agent} onChange={setAgent} placeholder={t('designSystem.demo.agentPlaceholder')} options={DEMO_AGENTS} />
+          </Field>
+          <Field label={t('designSystem.demo.description')} optional>
+            <textarea placeholder={t('designSystem.demo.descriptionPlaceholder')} />
+          </Field>
+          <FormFooter submitLabel={t('designSystem.demo.createWorkflow')} onCancel={reset} blockers={blockers} />
+        </form>
+      </Row>
+      <p className="ds-demo-note" aria-live="polite" data-testid="ds-form-created">
+        {created ? t('designSystem.demo.created', created) : t('designSystem.demo.createdNone')}
+      </p>
+      <Row label={t('designSystem.demo.state.busy')}>
+        <FormFooter submitLabel={t('designSystem.demo.saveWorkflow')} onSubmit={() => {}} onCancel={() => {}} busy pinned={false} />
+      </Row>
+      <Row label={t('designSystem.demo.variant.danger')}>
+        <FormFooter submitLabel={t('designSystem.demo.deleteWorkflow')} tone="danger" onSubmit={() => {}} onCancel={() => {}} pinned={false} />
+      </Row>
+    </>
+  );
+}
+
+/** KT-1883 — a Notice in each of its four tones; the danger one with its
+ *  action, the success one dismissible. */
+function NoticeDemo({ t }: { t: T }) {
+  const [dismissed, setDismissed] = useState(false);
+  const [retried, setRetried] = useState(0);
+  return (
+    <>
+      <Row label={t('designSystem.demo.tone.info')}>
+        <Notice tone="info" title={t('designSystem.demo.noticeInfoTitle')}>{t('designSystem.demo.noticeInfo')}</Notice>
+      </Row>
+      <Row label={t('designSystem.demo.tone.warning')}>
+        <Notice tone="warning" title={t('designSystem.demo.noticeWarningTitle')}>{t('designSystem.demo.noticeWarning')}</Notice>
+      </Row>
+      <Row label={t('designSystem.demo.tone.danger')}>
+        <Notice
+          tone="danger"
+          title={t('designSystem.demo.noticeDangerTitle')}
+          action={{ label: t('designSystem.demo.retry'), onClick: () => setRetried(n => n + 1) }}
+        >
+          <span data-testid="ds-notice-retried" data-count={retried}>{t('designSystem.demo.noticeDanger')}</span>
+        </Notice>
+      </Row>
+      <Row label={t('designSystem.demo.tone.success')}>
+        {dismissed
+          ? <Button onClick={() => setDismissed(false)}>{t('designSystem.demo.showNoticeAgain')}</Button>
+          : (
+            <Notice tone="success" title={t('designSystem.demo.noticeSuccessTitle')} onDismiss={() => setDismissed(true)}>
+              {t('designSystem.demo.noticeSuccess')}
+            </Notice>
+          )}
+      </Row>
+    </>
+  );
+}
+
+/** KT-1883 — the three cases of an EmptyState, each with its way out. */
+function EmptyStateDemo({ t }: { t: T }) {
+  const none = () => {};
+  return (
+    <>
+      <Row label={t('designSystem.demo.empty.firstUse')}>
+        <div className="ds-demo-frame">
+          <EmptyState
+            kind="firstUse"
+            title={t('designSystem.demo.emptyFirstUseTitle')}
+            description={t('designSystem.demo.emptyFirstUse')}
+            action={{ label: t('designSystem.demo.emptyFirstUseAction'), icon: <Plus />, onClick: none }}
+          />
+        </div>
+      </Row>
+      <Row label={t('designSystem.demo.empty.noResult')}>
+        <div className="ds-demo-frame">
+          <EmptyState
+            kind="noResult"
+            title={t('designSystem.demo.emptyNoResultTitle')}
+            description={t('designSystem.demo.emptyNoResult')}
+            onClear={none}
+          />
+        </div>
+      </Row>
+      <Row label={t('designSystem.demo.empty.nothingSelected')}>
+        <div className="ds-demo-frame">
+          <EmptyState
+            kind="nothingSelected"
+            title={t('designSystem.demo.emptyNothingSelectedTitle')}
+            description={t('designSystem.demo.emptyNothingSelected')}
+          />
+        </div>
+      </Row>
+    </>
+  );
+}
+
+/** KT-1883 — LoadingState in its three sizes, then the list and detail
+ *  skeletons. The demos stay mounted: they are content, so they must not hold
+ *  the cold-start screen when Settings is the first page opened. */
+function LoadingStateDemo({ t }: { t: T }) {
+  const message = t('designSystem.demo.loadingTasks');
+  return (
+    <>
+      <Row label={t('designSystem.demo.size.sm')}>
+        <LoadingState size="sm" message={message} />
+      </Row>
+      <Row label={t('designSystem.demo.size.md')}>
+        <div className="ds-demo-frame"><LoadingState size="md" message={message} holdsBootScreen={false} /></div>
+      </Row>
+      <Row label={t('designSystem.demo.size.lg')}>
+        <div className="ds-demo-frame"><LoadingState size="lg" message={message} holdsBootScreen={false} /></div>
+      </Row>
+      <Row label={t('designSystem.demo.skeleton.list')}>
+        <div className="ds-demo-frame"><Skeleton kind="list" label={message} /></div>
+      </Row>
+      <Row label={t('designSystem.demo.skeleton.detail')}>
+        <div className="ds-demo-frame"><Skeleton kind="detail" label={message} /></div>
+      </Row>
+    </>
+  );
+}
+
 const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   button: ButtonDemo,
   iconButton: IconButtonDemo,
@@ -242,6 +502,13 @@ const DEMOS: Record<string, (props: { t: T }) => ReactNode> = {
   dialog: DialogDemo,
   drawer: DrawerDemo,
   confirmDialog: ConfirmDialogDemo,
+  field: FieldDemo,
+  select: SelectDemo,
+  switch: SwitchDemo,
+  formFooter: FormFooterDemo,
+  notice: NoticeDemo,
+  emptyState: EmptyStateDemo,
+  loadingState: LoadingStateDemo,
 };
 
 /** KT-1880 — each component of components/ui/ under its own heading, with its

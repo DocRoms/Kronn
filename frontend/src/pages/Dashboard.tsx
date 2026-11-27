@@ -6,6 +6,7 @@ import { Outlet, useLocation } from 'react-router';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
+import { useAppBarHeight } from '../hooks/useAppBarHeight';
 import type { RemoteRepo, RepoSource, DiscoverSourceError, AuditProgress, AgentType, ModelTier } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { preloadPagesWhenIdle } from '../lib/lazyPage';
@@ -57,6 +58,9 @@ export function Dashboard({ onReset }: DashboardProps) {
   // can widen the document and push a page sidebar outside the viewport.
   const isMobile = useIsMobile(1100);
   const { toast, ToastContainer } = useToast();
+  // KT-1883 — under --kr-bp-md the toast stack sits just under this bar.
+  const navRef = useRef<HTMLElement>(null);
+  useAppBarHeight(navRef);
   // The address names the page: back, forward and reload all follow it.
   const { pathname } = useLocation();
   const nav = useKronnNavigate();
@@ -667,7 +671,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       <ToastContainer />
       <TourProvider setPage={nav.toPage}>
       {/* Nav */}
-      <nav className="dash-nav">
+      <nav className="dash-nav" ref={navRef}>
         <div className="dash-nav-brand" data-mobile={isMobile}>
           <KronnMark size={20} className="dash-nav-mark" />
           {!isMobile && <span className="dash-nav-title">Kronn</span>}

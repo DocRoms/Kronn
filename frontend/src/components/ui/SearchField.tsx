@@ -2,6 +2,7 @@ import { useId, useRef, type ComponentPropsWithRef, type KeyboardEvent } from 'r
 import { Search, X } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { IconButton } from './IconButton';
+import './visuallyHidden.css';
 import './SearchField.css';
 
 export interface SearchFieldProps
