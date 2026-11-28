@@ -592,7 +592,7 @@ the reason and the previous set); nothing is relaunched and earlier validation
 results stay as evidence. It is refused while the execution is Integrating,
 Validating or Applying, once it is Done, Failed or Cancelled, and for an
 execution of a campaign run, whose gates are the campaign's shared policy.
-`[src: file: backend/src/db/orchestration.rs:8065-8158#replace_execution_validations]`
+`[src: file: backend/src/db/orchestration.rs:8183-8276#replace_execution_validations]`
 The swap is a change of `task_exec_reassign` and not a tool of its own because
 every declaration is paid for on every session (`mcp_surface_budget.py`), and
 because that tool is already the principal's amendment of a live execution:
@@ -648,8 +648,8 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:7720-7857#send_back] [src: file: backend/src/api/orchestration.rs:16152-16254#revalidate_sent_back_execution]
-[src: file: backend/src/db/orchestration.rs:5946-6019#reopen_approval_after_rework]
+[src: file: backend/src/api/orchestration.rs:7761-7898#send_back] [src: file: backend/src/api/orchestration.rs:16271-16373#revalidate_sent_back_execution]
+[src: file: backend/src/db/orchestration.rs:5970-6043#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
 review rounds, delivered `head_sha`, last error, the latest candidate's
@@ -680,8 +680,8 @@ integration refusal, campaign pause, undelivered worker, terminal state)
 address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
-`[src: file: backend/src/api/orchestration.rs:19366-19418#EXEC_WAIT_DEFAULT_SECS]`
-`[src: file: backend/src/db/orchestration.rs:6829-6871#pin_principal_cli_session]`
+`[src: file: backend/src/api/orchestration.rs:19485-19537#EXEC_WAIT_DEFAULT_SECS]`
+`[src: file: backend/src/db/orchestration.rs:6853-6895#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
@@ -824,7 +824,7 @@ worker schema contains no execution-id field; if a client nevertheless injects
 one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
-`[src: file: backend/src/api/agent_tools.rs:4206-4228#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4226-4248#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api_tests_tests_up.rs:7639-7778#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
@@ -924,7 +924,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:13972-14022#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2748-2776#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:14030-14080#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2748-2776#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5955-5987#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5985-5998#_spawned_task_worker_mode]`
 

@@ -315,8 +315,8 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
 [src: file: backend/src/core/task_worker_env.rs:849]
 [src: file: backend/src/core/task_worker_lane_warm.rs:843]
-[src: file: backend/src/agents/runner.rs:14843-14852#agent_launch_priority]
-[src: file: backend/src/core/quick_exec.rs:643-667#build_command]
+[src: file: backend/src/agents/runner.rs:14901-14910#agent_launch_priority]
+[src: file: backend/src/core/quick_exec.rs:665-689#build_command]
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
 [src: file: backend/src/core/config.rs:610-611]
@@ -996,7 +996,7 @@ load, not a performance guarantee.
 [src: file: backend/src/models/setup.rs:136-150#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:354-361#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:1048-1058#apply_bash_timeouts]
-[src: file: backend/src/agents/runner.rs:15315-15317#apply_bash_timeouts]
+[src: file: backend/src/agents/runner.rs:15373-15375#apply_bash_timeouts]
 [src: file: backend/src/core/worktree.rs:5335-5336#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:321-322#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]
@@ -1055,9 +1055,9 @@ Cargo (`pnpm tauri build`) is not detected: the rule reads binaries, not scripts
 [src: file: backend/src/core/task_worker_warm_skip.rs:81#cold_target_note]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1845#warm_worktree]
 [src: file: backend/src/core/task_worker_lane_warm.rs:507#skipped_by_validations]
-[src: file: backend/src/api/orchestration.rs:12871-12875#warm_lane_for_validations]
-[src: file: backend/src/api/orchestration.rs:13073-13076#record_toolchain_smoke_check_on]
-[src: file: backend/src/db/orchestration.rs:8141#refusal_for]
+[src: file: backend/src/api/orchestration.rs:12990-12994#warm_lane_for_validations]
+[src: file: backend/src/api/orchestration.rs:13192-13195#record_toolchain_smoke_check_on]
+[src: file: backend/src/db/orchestration.rs:8259#refusal_for]
 
 ## Maintenance command
 

@@ -145,7 +145,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:15411-15417#total_cost_usd] [src: file: backend/src/agents/runner.rs:6158-6160#usd_micros] [src: file: backend/src/agents/runner.rs:10659-10665#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:153-162#cost_usd_micros] [src: file: backend/src/agents/runner.rs:15469-15475#total_cost_usd] [src: file: backend/src/agents/runner.rs:6158-6160#usd_micros] [src: file: backend/src/agents/runner.rs:10717-10723#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
