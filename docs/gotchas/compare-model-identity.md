@@ -9,7 +9,7 @@ configuration. A comparison run from weeks ago would then silently display
 whatever model is configured *today* for that agent/tier, as if it were the
 model that actually answered. The fallback now resolves to the plain generic
 label only, never a live config lookup.
-[src: file: frontend/src/components/BatchComparePanel.tsx:197-199]
+[src: file: frontend/src/components/BatchComparePanel.tsx:202-206]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
 ## `discussion.model` is a forward override, never a record of what answered
@@ -23,8 +23,8 @@ response-attested historical fact. Both panels now derive the displayed model
 only from `answer.model` (normalized, the response that actually produced the
 compared answer) or, failing that, the last message in history that recorded
 a concrete `model` — never from `discussion.model`.
-[src: file: frontend/src/types/generated.ts:4072#model]
-[src: file: frontend/src/components/BatchComparePanel.tsx:194-198]
+[src: file: frontend/src/types/generated.ts:4119#model]
+[src: file: frontend/src/components/BatchComparePanel.tsx:199-203]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
 Both ranking card and main column now badge the model to disclose its
@@ -36,7 +36,14 @@ the final answer itself, `modelUnknown` when nothing was ever recorded and the
 generic default label is shown, and no badge at all when the final answer
 itself carries the model.
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:477-478]
-[src: file: frontend/src/components/BatchComparePanel.tsx:235-239]
+[src: file: frontend/src/components/BatchComparePanel.tsx:248-253]
+
+Since KT-1936 the main column's header writes the agent, that model and its
+mode through `AgentIdentity` (one line, the model cut with an ellipsis, the
+whole identity in the header's title); with no recorded model it writes
+AgentIdentity's « default model » state. The provenance badge stays on its
+own line under it.
+[src: file: frontend/src/components/BatchComparePanel.tsx:215-225]
 
 ### `lastRecordedModel` is bounded to strictly before the compared answer
 
@@ -52,14 +59,14 @@ message's index, so only genuinely earlier records can surface as
 stays unbounded — there's no answer's provenance to protect at that point, so
 any recorded model (e.g. from a System message documenting an attempted model
 before failing) is legitimately shown.
-[src: file: frontend/src/components/BatchComparePanel.tsx:45-59]
+[src: file: frontend/src/components/BatchComparePanel.tsx:48-62]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:47-61]
 
 Both panels also normalize model ids consistently: an empty or
 whitespace-only string is treated as absent (trimmed, `''` → `null`), the same
 as a `null`/`undefined` field, so stray whitespace from a legacy row cannot
 silently pass through as if it were a real recorded model.
-[src: file: frontend/src/components/BatchComparePanel.tsx:61-64]
+[src: file: frontend/src/components/BatchComparePanel.tsx:64-67]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:63-66]
 
 Connection identity resolution itself (`compareAgentLabel` /
@@ -70,7 +77,7 @@ still keep their own recorded model and label. Only a comparison child created
 before that identity was persisted falls back to the connection name inside its
 generated title (`QP · connection · tier`), and only for the label.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-117#discussionConnectionId]
-[src: file: frontend/src/components/BatchComparePanel.tsx:66-79#compareAgentLabel]
+[src: file: frontend/src/components/BatchComparePanel.tsx:69-82#compareAgentLabel]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:68-77#compareAgentLabel]
 
 ## Launch-target suffix must reuse the shared picker resolution
@@ -90,9 +97,9 @@ suffix bypassed entirely. The judge/improver pickers in
 The fix removes the manual `suffix` override so the Compare selector reuses
 the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3683-3697#AgentCompareSelector]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3699-3713#AgentCompareSelector]
 [src: file: frontend/src/components/AgentCompareSelector.tsx:85-111#AgentSwitchPicker]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:130-142#resolvedTier]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1315-1327#resolvedTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:13-26#resolveCatalogTier]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-359#AgentSwitchPicker]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412-428#AgentSwitchPicker]

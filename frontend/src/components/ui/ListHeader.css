@@ -1,0 +1,18 @@
+/* KT-1884 — list kind: the page title, the largest of the text scale. */
+.ui-list-header {
+  min-height: var(--kr-control-h-lg);
+  padding: var(--kr-space-4) var(--kr-space-6);
+}
+
+.ui-list-header .ui-header-title {
+  font-size: var(--kr-type-2xl);
+  font-weight: var(--kr-weight-bold);
+}
+
+.ui-list-header[data-compact] {
+  padding: var(--kr-space-2) var(--kr-space-4);
+}
+
+.ui-list-header[data-compact] .ui-header-title {
+  font-size: var(--kr-type-xl);
+}

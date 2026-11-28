@@ -1006,7 +1006,7 @@ async fn a_dispute_card_refuses_with_docs_busy_and_writes_nothing_while_the_leas
         axum::Json(
             crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
                 idempotency_key: "decline-busy".into(),
-                reason: None,
+                reason: Some("Hors sujet.".into()),
             },
         ),
     )
@@ -1048,6 +1048,41 @@ async fn a_dispute_card_refuses_with_docs_busy_and_writes_nothing_while_the_leas
     assert!(pending(&d).await.is_empty());
 }
 
+/// KT-1955 — « Refuser » without a message on a dispute card closes the card
+/// and decides nothing: no docs written, no dispute decision, so it needs no
+/// docs lease either (held here, the refusal still goes through).
+#[tokio::test]
+async fn question_cancel_a_blank_refusal_of_a_dispute_records_no_decision() {
+    let d = disputed_project().await;
+    let pid = crate::api::other_projects_fixture::PROJECT_ID;
+    let before = (sheet_of(&d), index_of(&d));
+    let _lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&d.state, pid).unwrap();
+    let (status, body) = crate::api::discussion_questions::decline(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path((d.disc_id.clone(), d.question_id.clone())),
+        axum::Json(
+            crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
+                idempotency_key: "blank".into(),
+                reason: Some("  ".into()),
+            },
+        ),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let card = body.0.data.expect("the closed card");
+    assert_eq!(
+        card.state,
+        crate::db::discussion_questions::DiscussionQuestionState::Cancelled
+    );
+    assert_eq!(
+        (sheet_of(&d), index_of(&d)),
+        before,
+        "no dispute decision reached the docs"
+    );
+    assert!(!index_of(&d).contains("left undecided by a human"));
+    assert!(crate::core::td_index::parse_sheet(&d.td_id, &sheet_of(&d)).is_active());
+}
+
 #[tokio::test]
 async fn declining_a_dispute_keeps_the_finding_and_ends_the_pending_label() {
     let d = disputed_project().await;
@@ -1057,7 +1092,7 @@ async fn declining_a_dispute_keeps_the_finding_and_ends_the_pending_label() {
         axum::Json(
             crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
                 idempotency_key: "decline".into(),
-                reason: None,
+                reason: Some("Je ne tranche pas.".into()),
             },
         ),
     )

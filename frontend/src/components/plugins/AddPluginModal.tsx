@@ -1,8 +1,11 @@
 import {
-  Puzzle, Plus, Check, X, Key, ExternalLink, Plug, Globe, Download,
+  Puzzle, Plus, Check, X, Key, ExternalLink, Download,
   Terminal, Eye,
 } from 'lucide-react';
+import { useLayoutEffect, useRef, type UIEvent } from 'react';
+import { onActivationKey } from '../../lib/keyboardActivation';
 import { pluginKind } from '../../lib/pluginKind';
+import { RegistryKindBadge } from './PluginKindBadge';
 import { pluginCredentialKeys, pluginCredentialKind } from '../../lib/pluginCredentials';
 import { CustomApiForm } from './CustomApiForm';
 import { PluginScopeEditor } from './PluginScopeEditor';
@@ -80,6 +83,18 @@ const ENV_PLACEHOLDERS: Record<string, string> = {
   BASE_URL: 'https://api.example.com',
 };
 
+/** The card and its focus ring (its scroll margin) lie inside the visible part
+ *  of the grid's scroll box, itself clipped to the window. Same rule as the
+ *  Git list's rows (KT-1989). */
+const cardInView = (card: HTMLElement, box: HTMLElement | null) => {
+  const margin = parseFloat(getComputedStyle(card).scrollMarginTop) || 0;
+  const cardRect = card.getBoundingClientRect();
+  const boxRect = box?.getBoundingClientRect();
+  const top = Math.max(boxRect?.top ?? 0, 0);
+  const bottom = Math.min(boxRect?.bottom ?? window.innerHeight, window.innerHeight);
+  return cardRect.top - margin >= top && cardRect.bottom + margin <= bottom;
+};
+
 /** Add-MCP modal — registry grid (kind filter + category pills), the
  *  import-from-JSON form, the Custom API create form, and the per-plugin
  *  env-var form for a registry pick. Extracted verbatim from the
@@ -101,6 +116,62 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
     setPortabilityMode,
     handleAddMcpFromRegistry,
   } = state;
+
+  // KT-2006 review — activating a card unmounts the grid: the step that
+  // replaces it takes the focus (its first field, `autoFocus`), and the way
+  // back to the catalogue puts the grid at the scroll offset it had, then the
+  // focus on the card that was activated (keyboard and mouse alike).
+  // The card to come back to is the selection itself (a registry id, or
+  // `api-custom`), remembered while its step is open; the grid's offset is
+  // kept as it scrolls, since the grid is gone once the step shows.
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const gridScrollTopRef = useRef(0);
+  const openedCardRef = useRef<string | null>(null);
+  const rememberGridScroll = (event: UIEvent<HTMLDivElement>) => {
+    gridScrollTopRef.current = event.currentTarget.scrollTop;
+  };
+
+  // A layout effect of this component runs after its children's mount: the
+  // card's focus wins over the search field's `autoFocus`.
+  useLayoutEffect(() => {
+    if (!showAddMcp) {
+      // Closing the form forgets the card: reopening starts at the search field.
+      openedCardRef.current = null;
+      gridScrollTopRef.current = 0;
+      return;
+    }
+    if (addMcpSelected) {
+      openedCardRef.current = addMcpSelected;
+      return;
+    }
+    const key = openedCardRef.current;
+    if (!key) return;
+    openedCardRef.current = null;
+    const grid = gridRef.current;
+    if (!grid) return;
+    grid.scrollTop = gridScrollTopRef.current;
+    const card = [...grid.querySelectorAll<HTMLElement>('[data-registry-card]')]
+      .find(el => el.dataset.registryCard === key);
+    // The card is gone (filtered out): the search field keeps its autofocus.
+    if (!card) return;
+    card.focus({ preventScroll: true });
+    // Fallback only: scroll as far as needed to show the card with its whole
+    // focus ring (its scroll margin), never to centre it.
+    if (!cardInView(card, grid)) {
+      card.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    }
+  }, [showAddMcp, addMcpSelected]);
+
+  // KT-2006 — every card is a keyboard stop (Tab, then Enter or Space), so the
+  // scrolling grid can be reached and scrolled without a mouse. `key` is the
+  // selection the card opens: the way back from its step lands on it.
+  const cardActivation = (key: string, activate: () => void) => ({
+    'data-registry-card': key,
+    role: 'button' as const,
+    tabIndex: 0,
+    onClick: activate,
+    onKeyDown: onActivationKey<HTMLDivElement>(activate),
+  });
 
   if (!showAddMcp) return null;
 
@@ -244,15 +315,15 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                     </button>
                   ))}
                 </div>
-                <div className="mcp-registry-grid">
+                <div className="mcp-registry-grid" ref={gridRef} onScroll={rememberGridScroll}>
                   {customApiVisible && (addMcpKindFilter === 'all' || addMcpKindFilter === 'api') && !selectedCategory ? (
                     <div
                       key="api-import"
                       className="mcp-registry-card mcp-registry-card-custom"
-                      onClick={() => {
+                      {...cardActivation('api-import', () => {
                         resetAddMcp();
                         setPortabilityMode('import');
-                      }}
+                      })}
                       data-testid="mcp-import-bundle-tile"
                     >
                       <div className="mcp-registry-card-top">
@@ -266,9 +337,7 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                       </div>
                       <div className="mcp-registry-card-desc">{t('mcp.custom.importTileDesc')}</div>
                       <div className="mcp-registry-card-meta">
-                        <span className="mcp-kind-badge mcp-kind-badge-api" title={t('mcp.kind.apiTooltip')}>
-                          <Globe size={9} /> {t('mcp.kind.api')}
-                        </span>
+                        <RegistryKindBadge kind="api" />
                         <span className="mcp-origin-badge mcp-origin-community">
                           {t('mcp.custom.tileBadge')}
                         </span>
@@ -279,10 +348,10 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                     <div
                       key="custom-api"
                       className="mcp-registry-card mcp-registry-card-custom"
-                      onClick={() => {
+                      {...cardActivation('api-custom', () => {
                         setAddMcpSelected('api-custom');
                         setAddMcpLabel('');
-                      }}
+                      })}
                       data-tour-id="custom-api-tile"
                     >
                       <div className="mcp-registry-card-top">
@@ -296,9 +365,7 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                       </div>
                       <div className="mcp-registry-card-desc">{t('mcp.custom.tileDesc')}</div>
                       <div className="mcp-registry-card-meta">
-                        <span className="mcp-kind-badge mcp-kind-badge-api" title={t('mcp.kind.apiTooltip')}>
-                          <Globe size={9} /> {t('mcp.kind.api')}
-                        </span>
+                        <RegistryKindBadge kind="api" />
                         <span className="mcp-origin-badge mcp-origin-community">
                           {t('mcp.custom.tileBadge')}
                         </span>
@@ -321,13 +388,13 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                           <div
                             key={m.id}
                             className={`mcp-registry-card${alreadyAdded ? ' mcp-registry-card-installed' : ''}`}
-                            onClick={() => {
+                            {...cardActivation(m.id, () => {
                               setAddMcpSelected(m.id);
                               setAddMcpLabel(alreadyAdded ? `${m.name} (${configs.filter(c => c.server_name === m.name).length + 1})` : m.name);
                               const envInit: Record<string, string> = {};
                               pluginCredentialKeys(m).forEach(k => { envInit[k] = ''; });
                               setAddMcpEnv(envInit);
-                            }}
+                            })}
                           >
                             <div className="mcp-registry-card-top">
                               <div className="mcp-registry-card-icon">
@@ -337,24 +404,23 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                                 <div className="mcp-registry-card-name">{m.name}</div>
                                 <div className="mcp-registry-card-cat">{getCategory(m.tags)}</div>
                               </div>
-                              {alreadyAdded && <Check size={14} className="text-info" />}
+                              {/* KT-2006 review — the installed state has a word:
+                                  the mark's name joins the card's name (and its
+                                  tooltip names the dashed look). */}
+                              {alreadyAdded && (
+                                <span
+                                  className="mcp-registry-card-installed-mark"
+                                  role="img"
+                                  aria-label={t('mcp.alreadyAdded')}
+                                  title={t('mcp.alreadyAdded')}
+                                >
+                                  <Check size={14} className="text-info" aria-hidden="true" />
+                                </span>
+                              )}
                             </div>
                             <div className="mcp-registry-card-desc">{m.description}</div>
                             <div className="mcp-registry-card-meta">
-                              {(() => {
-                                const kind = pluginKind(m);
-                                const label = kind === 'api'
-                                  ? t('mcp.kind.api')
-                                  : kind === 'hybrid'
-                                    ? t('mcp.kind.hybrid')
-                                    : t('mcp.kind.mcp');
-                                const Icon = kind === 'mcp' ? Plug : kind === 'api' ? Globe : Puzzle;
-                                return (
-                                  <span className={`mcp-kind-badge mcp-kind-badge-${kind}`} title={t(`mcp.kind.${kind}Tooltip`)}>
-                                    <Icon size={9} /> {label}
-                                  </span>
-                                );
-                              })()}
+                              <RegistryKindBadge kind={pluginKind(m)} />
                               <span className={`mcp-origin-badge ${m.official ? 'mcp-origin-official' : 'mcp-origin-community'}`}>
                                 {m.official ? t('mcp.official') : t('mcp.community')} — {m.publisher}
                               </span>
@@ -380,8 +446,11 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
           {/* Label */}
           <div className="mb-5">
             <label className="mcp-field-label">{t('mcp.label')}</label>
+            {/* KT-2006 review — the first field of the step that replaces the
+                grid takes the focus, so it never falls back to the page. */}
             <input
               className="input"
+              autoFocus
               value={addMcpLabel}
               onChange={(e) => setAddMcpLabel(e.target.value)}
               placeholder={selectedDef?.name ?? 'Label'}

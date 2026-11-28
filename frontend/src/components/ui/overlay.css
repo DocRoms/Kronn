@@ -1,0 +1,109 @@
+/* KT-1881 — the frame Dialog and Drawer share (overlay.tsx): a fixed layer in
+   <body>, its scrim, a panel with a header (title, one cross at the top end),
+   an optional description, a scrolling body and a footer of actions. Design
+   tokens only; no theme is named: each theme sets the tokens. */
+
+.ui-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ui-overlay[data-layer="drawer"] {
+  z-index: var(--kr-z-drawer);
+}
+
+.ui-overlay[data-layer="modal"] {
+  z-index: var(--kr-z-modal);
+}
+
+.ui-overlay[data-layer="nested"] {
+  z-index: var(--kr-z-modal-nested);
+}
+
+.ui-overlay-scrim {
+  position: absolute;
+  inset: 0;
+  background-color: var(--kr-bg-overlay);
+  animation: ui-overlay-fade var(--kr-duration-slow) ease-out;
+}
+
+.ui-overlay-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-strong);
+  box-shadow: var(--kr-shadow-modal);
+  outline: none;
+}
+
+.ui-overlay-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-space-3);
+  padding: var(--kr-space-4) var(--kr-space-4) var(--kr-space-2) var(--kr-space-6);
+}
+
+.ui-overlay-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding-top: var(--kr-space-1);
+  font-size: var(--kr-type-xl);
+  font-weight: var(--kr-weight-semibold);
+  line-height: 1.35;
+  overflow-wrap: break-word;
+}
+
+/* The same cross, at the same size and place, on every dialog and drawer. */
+.ui-overlay-close {
+  flex-shrink: 0;
+}
+
+.ui-overlay-description {
+  margin: 0;
+  padding: 0 var(--kr-space-6) var(--kr-space-3);
+  font-size: var(--kr-type-md);
+  line-height: 1.5;
+  color: var(--kr-text-secondary);
+  white-space: pre-line;
+}
+
+.ui-overlay-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--kr-space-6) var(--kr-space-4);
+  font-size: var(--kr-type-md);
+}
+
+.ui-overlay-body:empty {
+  display: none;
+}
+
+.ui-overlay-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--kr-space-2);
+  padding: var(--kr-space-3) var(--kr-space-6) var(--kr-space-4);
+  border-top: 1px solid var(--kr-border-medium);
+}
+
+@keyframes ui-overlay-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-overlay-scrim,
+  .ui-overlay-panel {
+    animation: none;
+  }
+}

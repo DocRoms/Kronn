@@ -57,6 +57,13 @@ export interface DetailHeaderShellProps {
   actions?: ReactNode;
 }
 
+/**
+ * @deprecated KT-1884 — replaced by the detail kind, `DetailHeader`
+ * (`components/ui/DetailHeader.tsx`); where each header kind goes:
+ * docs/conventions/header-kinds.md. Kept only for its two current users
+ * (`ChatHeader.tsx`, `pages/PagesPage.tsx`) until they move in lots 2-5: a
+ * test (`ui/DetailHeader.test.tsx`) fails when any other file imports it.
+ */
 export function DetailHeaderShell({
   detailsId, detailsLabel, detailsShowTitle, detailsHideTitle, toggleTestId, detailsButtonRef,
   onOpenDetails, detailsPanelOpen, className, rootProps, titleProps, leading, title, idPill,

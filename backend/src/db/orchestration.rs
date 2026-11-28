@@ -1463,10 +1463,31 @@ pub fn announce_campaign_rules(
     Ok(())
 }
 
+/// KT-1998 — a model a campaign or a task execution stores (worker, reviewer)
+/// goes through the shared rule; blank is still "no model".
+fn check_stored_model(role: &str, model: Option<&str>) -> Result<()> {
+    crate::models::setup::check_optional_model(model)
+        .map_err(|error| anyhow::anyhow!("{role} model: {error}"))
+}
+
 pub fn create_orchestration_run(
     conn: &Connection,
     input: &OrchestrationRunInput,
 ) -> Result<OrchestrationRun> {
+    check_stored_model(
+        "default worker",
+        input
+            .default_worker
+            .as_ref()
+            .and_then(|worker| worker.model.as_deref()),
+    )?;
+    check_stored_model(
+        "reviewer",
+        input
+            .reviewer
+            .as_ref()
+            .and_then(|reviewer| reviewer.model.as_deref()),
+    )?;
     if input.max_concurrent_executions == 0 {
         bail!("max_concurrent_executions must be at least 1");
     }
@@ -2216,6 +2237,7 @@ pub fn launch_single_task(
     input: &LaunchSingleTaskInput,
     actor: &OrchestrationActor,
 ) -> Result<LaunchOutcome> {
+    check_stored_model("worker", input.worker_model.as_deref())?;
     if let Some(scope) = input.worker_scope.as_ref() {
         scope.validate().map_err(anyhow::Error::msg)?;
     }
@@ -2360,6 +2382,8 @@ pub fn launch_task_in_run(
     selection: &CampaignWorkerSelection,
     actor: &OrchestrationActor,
 ) -> Result<LaunchOutcome> {
+    check_stored_model("worker", input.worker_model.as_deref())?;
+    check_stored_model("worker", selection.model.as_deref())?;
     if let Some(scope) = input.worker_scope.as_ref() {
         scope.validate().map_err(anyhow::Error::msg)?;
     }
@@ -9560,6 +9584,7 @@ pub fn reassign_execution_worker_keeping_origin(
     actor: &OrchestrationActor,
     keep_quota_origin: bool,
 ) -> Result<TaskExecution> {
+    check_stored_model("worker", selection.model.as_deref())?;
     in_savepoint(conn, |conn| {
         let mut execution = get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("unknown task execution"))?;

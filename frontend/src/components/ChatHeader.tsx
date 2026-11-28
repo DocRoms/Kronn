@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
+import { HeaderScrollLine } from './HeaderScrollLine';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { DiscussionScopeChip } from './DiscussionScope';
 import { TrustBadge } from './TrustLevel';
@@ -25,11 +26,13 @@ import { DiscInviteButton } from './DiscInviteButton';
 import { DiscussionIdPill } from './DiscussionIdPill';
 import { DetailHeaderShell } from './DetailHeaderShell';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { lastReplyModel as lastReplyModelOf } from '../lib/agentModelResolution';
 import type { AgentSwitchTarget } from './AgentSwitchPicker';
 import { ContextHelp } from './ContextHelp';
 import type { ExternalApiConnectionView } from '../lib/api';
 import {
   discussionConnectionId, externalAgentTargets, externalConnectionForDiscussion,
+  type DiscussionWithMessageTargets,
 } from '../lib/externalAgentIdentity';
 
 export interface ChatHeaderProps {
@@ -53,6 +56,9 @@ export interface ChatHeaderProps {
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
+
+/** No exact model dropped yet (one array, so the memo below holds). */
+const NO_MODELS: readonly string[] = [];
 
 export function ChatHeader({
   discussion,
@@ -115,6 +121,42 @@ export function ChatHeader({
       if (retryTimer) clearTimeout(retryTimer);
     };
   }, [discussion.id]);
+
+  // KT-1935 — when neither the catalogue nor the discussion override names a
+  // model, the header names the one the agent last replied with, else "default
+  // model of <agent>"; never the role or the tier alone.
+  const currentTier = discussion.tier ?? 'default';
+  // KT-2013 — the exact models this discussion held while shown: once one is
+  // cleared, the replies it gave are not what the next turn runs. A reply does
+  // not say it ran an exact model, so this page remembers them.
+  // Known limits, waiting for a backend field (a reply records neither whether
+  // it ran the discussion's exact model nor the connection of an inherited
+  // turn): (a) this memory is the open page's only — after a reload, and until
+  // the next reply, the header names the cleared exact model again; (b) after
+  // the discussion moves to another connection, the replies of the previous
+  // connection read as the new one's.
+  const heldExact = discussion.model?.trim() || '';
+  const [droppedExact, setDroppedExact] = useState<{ discussionId: string; models: readonly string[] }>(
+    () => ({ discussionId: discussion.id, models: heldExact ? [heldExact] : [] }),
+  );
+  if (droppedExact.discussionId !== discussion.id) {
+    setDroppedExact({ discussionId: discussion.id, models: heldExact ? [heldExact] : [] });
+  } else if (heldExact && !droppedExact.models.includes(heldExact)) {
+    setDroppedExact({ discussionId: discussion.id, models: [...droppedExact.models, heldExact] });
+  }
+  const excludedReplyModels = droppedExact.discussionId === discussion.id ? droppedExact.models : NO_MODELS;
+  const messageTargets = (discussion as DiscussionWithMessageTargets).message_targets;
+  const lastReplyModel = useMemo(
+    () => lastReplyModelOf(discussion.messages, discussion.agent, currentTier, {
+      // A reply to a mention of another connection is not this one's model.
+      connectionId: externalConnectionId,
+      messageTargets,
+      exclude: excludedReplyModels,
+    }),
+    [discussion.messages, discussion.agent, currentTier, externalConnectionId, messageTargets, excludedReplyModels],
+  );
+  // Nothing recorded: the picker writes the explicit « default model of <agent> » state.
+  const headerModelFallback = lastReplyModel ?? undefined;
 
   const installedAgentsList = agents.filter(isUsable);
   const nativeAgentDisabled = nativeAgentMode?.discussionId === discussion.id
@@ -271,10 +313,12 @@ export function ChatHeader({
           onInvited={() => setParticipantsRefresh(n => n + 1)}
         />
       }
-      sub={<>
+      sub={<HeaderScrollLine>
         {/* First position, as the row's subject: whether this discussion
             answers by itself is the thing that changes what everything else
-            on the row means. */}
+            on the row means. KT-1936 — the whole line scrolls sideways when it
+            does not fit (owner option A): the main agent stays first and
+            readable, the « +N » counter is pinned at the line's right end. */}
         <span className="disc-native-agent-control">
           {nativeAgentDisabled ? (
             <button
@@ -310,9 +354,22 @@ export function ChatHeader({
                 disabled={sending || nativeAgentDisabled === null || nativeAgentModeSaving}
                 title={t('disc.switchAgentAndTier')}
                 ariaLabel={t('disc.switchAgentAndTier')}
-                suffix={t('disc.targetDiscussionAgent')}
+                role={t('disc.targetDiscussionAgent')}
                 currentTier={discussion.tier ?? 'default'}
-                currentModel={discussion.model}
+                // KT-1994 — the discussion's exact model (KT-1993): « Personnalisé ».
+                // A refusal is shown by the picker next to the entry; the choice stays.
+                customModel={{
+                  model: discussion.model,
+                  onSelect: async (target: AgentSwitchTarget, model: string) => {
+                    await discussionsApi.update(discussion.id, {
+                      agent: target.agent,
+                      connection_id: target.connectionId ?? null,
+                      model,
+                    });
+                    onAgentSwitch(target.agent);
+                  },
+                }}
+                currentModelFallback={headerModelFallback}
                 tierLabels={{
                   economy: t('disc.tier.economy'),
                   default: t('disc.tier.default'),
@@ -326,6 +383,7 @@ export function ChatHeader({
                     : AGENT_MENTIONS.find(mention => mention.type === discussion.agent)?.trigger
                   ?? discussion.agent
                 }
+                // A mode sends its tier without a model: the server clears the exact model.
                 onTargetSelectionChange={async (target: AgentSwitchTarget, tier) => {
                   try {
                     await discussionsApi.update(discussion.id, {
@@ -369,7 +427,7 @@ export function ChatHeader({
         />
         {/* KT-1492 — never folded away: the trust level in force for this room. */}
         <TrustBadge target={{ scope: 'room', id: discussion.id }} />
-      </>}
+      </HeaderScrollLine>}
       // Before the pair, same baseline: « Détails » stays the rightmost control.
       status={<LearningsBadge t={t} toast={toast} />}
       buttonsProps={{ 'data-tour-id': 'disc-output-controls' }}

@@ -187,12 +187,31 @@ export const agentColor = (
   return isRgbHex(override) ? override : AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
 };
 
+/** KT-1936 — the theme token that writes each default agent colour as text. */
+export const AGENT_TEXT_TOKENS: Record<string, string> = {
+  ClaudeCode: '--kr-agent-claude-text',
+  'Claude Code': '--kr-agent-claude-text',
+  Codex: '--kr-agent-codex-text',
+  OpenCode: '--kr-agent-opencode-text',
+  Vibe: '--kr-agent-vibe-text',
+  GeminiCli: '--kr-agent-gemini-text',
+  'Gemini CLI': '--kr-agent-gemini-text',
+  Kiro: '--kr-agent-kiro-text',
+  CopilotCli: '--kr-agent-copilot-text',
+  'GitHub Copilot': '--kr-agent-copilot-text',
+  Ollama: '--kr-agent-ollama-text',
+  LiteLlm: '--kr-agent-litellm-text',
+  Nvidia: '--kr-agent-nvidia-text',
+};
+
 /** Text-safe companion to the agent brand palette.
  *
- * NVIDIA's official green is kept by `agentColor()` for dots, borders and
- * tinted surfaces. At small text sizes it only reaches ~3:1 on white, so
- * labels use a theme-aware AA token instead. A deliberate user override is
- * left untouched: it is their configured mention colour, not our default.
+ * The brand colours are kept by `agentColor()` for dots, borders and tinted
+ * surfaces. As small text most of them fall under 4.5:1 on some surface of
+ * some theme (KT-1936), so labels use a theme-aware AA token per agent
+ * (`--kr-agent-<agent>-text`, held by themeContrast.test.ts). A deliberate
+ * user override is left untouched: it is their configured mention colour,
+ * not our default.
  */
 export const agentTextColor = (
   agentType: string | null | undefined,
@@ -200,9 +219,7 @@ export const agentTextColor = (
 ): string => {
   const override = agentType ? overrides?.[agentType as AgentType] : undefined;
   if (isRgbHex(override)) return override;
-  return agentType === 'Nvidia'
-    ? 'var(--kr-agent-nvidia-text)'
-    : AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
+  return `var(${AGENT_TEXT_TOKENS[agentType ?? ''] ?? '--kr-agent-fallback-text'})`;
 };
 
 /**

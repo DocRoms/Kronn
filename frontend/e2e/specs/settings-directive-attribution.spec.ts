@@ -23,7 +23,7 @@ test.describe('Settings — Caveman directive attribution', () => {
     const settings = new SettingsPage(page);
 
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('agents');
     await settings.openDirectivesAccordion();
 
     const card = settings.directiveCard(/Caveman/i);
@@ -52,7 +52,7 @@ test.describe('Settings — Caveman directive attribution', () => {
     const settings = new SettingsPage(page);
 
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('agents');
     await settings.openDirectivesAccordion();
 
     const card = settings.directiveCard(/Caveman/i);

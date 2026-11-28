@@ -1893,6 +1893,13 @@ pub struct PublishPageDataWrite {
     pub key_field: Option<String>,
 }
 
+/// KT-1998 — the `model` of saved agent settings (a Quick Prompt, a workflow
+/// step) through the shared rule `models::setup::check_optional_model`.
+pub fn check_agent_settings_model(settings: Option<&AgentSettings>) -> Result<(), String> {
+    crate::models::setup::check_optional_model(settings.and_then(|s| s.model.as_deref()))
+        .map_err(|error| format!("agent_settings.model: {error}"))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentSettings {
@@ -2426,6 +2433,20 @@ pub struct WorkflowAgentAttempt {
     /// Why `cost_usd` is `null`. Absent when the cost is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_unknown_reason: Option<String>,
+}
+
+impl WorkflowAgentAttempt {
+    /// The model this attempt ran: what the runtime reported serving it, else
+    /// the one resolved at launch, unless the transport refused to apply it.
+    pub fn served_model(&self) -> Option<String> {
+        if !self.observed_models.is_empty() {
+            Some(self.observed_models.join(" / "))
+        } else if self.model_applied == Some(false) {
+            None
+        } else {
+            self.resolved_model.clone()
+        }
+    }
 }
 
 impl WorkflowAgentProvenance {

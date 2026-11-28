@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import { useT } from '../lib/I18nContext';
 import { isServerFailureMessage } from '../lib/notifications';
-import { ToastItem } from './ToastItem';
+import { ToastStack } from './ToastStack';
 import type { Toast, ToastFn, ToastType } from './toastTypes';
 
 export type { ToastFn } from './toastTypes';
@@ -15,8 +15,6 @@ const AUTO_DISMISS_MS: Record<ToastType, number> = {
   // Not used when persistent — see useToast below.
   error: 0,
 };
-
-let styleInjected = false;
 
 /** Coalesce window for identical (message, type) toasts. 1.5s is wider
  *  than the typical WS broadcast burst from a multi-agent flow but
@@ -32,6 +30,20 @@ let lastServerFailureToastAt = 0;
 /** For tests: the "see in the bell" toast may fire again. */
 export function resetServerFailureToast(): void {
   lastServerFailureToastAt = 0;
+}
+
+/** KT-1883 — at most this many transient toasts on screen; the oldest goes
+ *  first. A persistent toast (an error by default) is never evicted: it stays
+ *  until the user dismisses it, whatever comes after it. */
+export const MAX_TRANSIENT_TOASTS = 3;
+
+/** The stack once `item` is added: every persistent toast, and the newest
+ *  MAX_TRANSIENT_TOASTS transient ones, in arrival order. */
+export function withToast(prev: readonly Toast[], item: Toast): Toast[] {
+  const next = [...prev, item];
+  const transient = next.filter(t => !t.persistent);
+  const evicted = new Set(transient.slice(0, Math.max(0, transient.length - MAX_TRANSIENT_TOASTS)).map(t => t.id));
+  return next.filter(t => !evicted.has(t.id));
 }
 
 export function useToast() {
@@ -64,7 +76,7 @@ export function useToast() {
     // agent-disc-finished-toasts — multi-agent QP runs broadcast N
     // identical "batch finished" events in rapid succession from
     // multiple WS subscribers in the dashboard, each calling toast()
-    // separately. The cap-to-3 (`prev.slice(-2)` below) limited the
+    // separately. The cap-to-3 (`withToast` below) limited the
     // visible damage but didn't fix the root cause. This dedup does.
     const dedupEnabled = options?.dedup ?? true;
     if (dedupEnabled) {
@@ -85,42 +97,17 @@ export function useToast() {
     const persistent = options?.persistent ?? type === 'error';
     const copyable = options?.copyable ?? null;
 
-    setToasts(prev => [...prev.slice(-2), { id, message, type, persistent, copyable }]);
+    setToasts(prev => withToast(prev, { id, message, type, persistent, copyable }));
 
     if (!persistent) {
       window.setTimeout(() => dismiss(id), AUTO_DISMISS_MS[type]);
     }
   }, [dismiss, t]);
 
-  const ToastContainer = useCallback(() => {
-    if (!styleInjected) styleInjected = true;
-    return (
-      <>
-        <style>{`
-          @keyframes toastSlideIn {
-            from { transform: translateX(100%); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-          }
-        `}</style>
-        <div
-          style={{
-            position: 'fixed',
-            top: 16,
-            right: 16,
-            zIndex: 'var(--kr-z-toast)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-            pointerEvents: 'none',
-          }}
-        >
-          {toasts.map(item => (
-            <ToastItem key={item.id} toast={item} onDismiss={() => dismiss(item.id)} />
-          ))}
-        </div>
-      </>
-    );
-  }, [toasts, dismiss]);
+  const ToastContainer = useCallback(
+    () => <ToastStack toasts={toasts} onDismiss={dismiss} />,
+    [toasts, dismiss],
+  );
 
   return { toast, ToastContainer };
 }

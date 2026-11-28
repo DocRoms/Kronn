@@ -89,10 +89,14 @@ export function useTourPositioning(
 
     // Scroll into view if needed
     let rect = el.getBoundingClientRect();
-    const targetFitsViewport = rect.height <= window.innerHeight;
-    const isOutsideViewport = rect.bottom <= 0 || rect.top >= window.innerHeight;
+    // KT-2017 — what the page keeps covered at the top over this target (the
+    // top bar, the band of a Settings sub-page): the scroll margin its page
+    // gives it. A target under that cover counts as clipped.
+    const coveredTop = parseFloat(window.getComputedStyle(el).scrollMarginTop) || 0;
+    const targetFitsViewport = rect.height <= window.innerHeight - coveredTop;
+    const isOutsideViewport = rect.bottom <= coveredTop || rect.top >= window.innerHeight;
     const isPartlyClipped = targetFitsViewport
-      && (rect.top < 0 || rect.bottom > window.innerHeight);
+      && (rect.top < coveredTop || rect.bottom > window.innerHeight);
     if (isOutsideViewport || isPartlyClipped) {
       // An instant scroll gives the spotlight and target one authoritative
       // rectangle. Smooth scrolling left the highlight hundreds of pixels
@@ -281,6 +285,40 @@ export function useTourPositioning(
   }, [cleanupPrev, measure, selector]);
 
   return result;
+}
+
+/**
+ * Wait until the element a selector names stops moving: its rectangle holds
+ * still for `stableMs`, or `timeout` runs out. A page the tour has just opened
+ * is still being drawn and scrolled (data arriving above the target, a sub-page
+ * drawn on its first visit); a step shown before that settles measured where
+ * the target was, and the spotlight then sat beside it (KT-1923, Settings
+ * agents sub-page: 184 to 195 px off). Resolves with the element found last,
+ * or null when none is left.
+ */
+export function waitForStablePosition(
+  selector: string,
+  { stableMs = 150, timeout = 1500, interval = 50 }: { stableMs?: number; timeout?: number; interval?: number } = {},
+): Promise<HTMLElement | null> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    let lastGeometry: string | null = null;
+    let stableSince = started;
+    const check = () => {
+      const element = document.querySelector<HTMLElement>(selector);
+      const now = Date.now();
+      if (!element) { resolve(null); return; }
+      const rect = element.getBoundingClientRect();
+      const geometry = `${Math.round(rect.top)}:${Math.round(rect.left)}:${Math.round(rect.width)}:${Math.round(rect.height)}`;
+      if (geometry !== lastGeometry) {
+        lastGeometry = geometry;
+        stableSince = now;
+      }
+      if (now - stableSince >= stableMs || now - started >= timeout) { resolve(element); return; }
+      setTimeout(check, interval);
+    };
+    check();
+  });
 }
 
 /**

@@ -76,32 +76,29 @@ pub async fn start_on_fallback_among(
                 .map(|message| message.content.chars().count())
                 .sum();
             let chain_override = fallback::get_discussion_override(conn, &lookup.discussion_id)?;
-            Ok(Some((
-                discussion.agent,
-                discussion.tier,
-                discussion.model,
-                targets,
-                chars,
-                chain_override,
-            )))
+            Ok(Some((discussion, targets, chars, chain_override)))
         })
         .await
         .ok()
         .flatten();
-    let Some((room_agent, room_tier, room_model, targets, chars, chain_override)) = read else {
+    let Some((discussion, targets, chars, chain_override)) = read else {
         return job;
     };
     let agent = job
         .agent_override
         .clone()
-        .unwrap_or_else(|| room_agent.clone());
+        .unwrap_or_else(|| discussion.agent.clone());
     let tier = super::runtime::dispatch_target_tier(&targets, job.agent_override.as_ref(), None)
-        .unwrap_or(room_tier);
+        .unwrap_or(discussion.tier);
+    // KT-2012 — the model this agent was asked to run: the discussion's exact
+    // model only for its own agent, never for a mention or a participant.
+    let from_model =
+        super::agent_fallback::failing_turn_model(&discussion, &agent, &job, &targets, None);
     // KT-2048 — the cooldown read is the one of the model this turn runs on.
     let turn_model = room_turn_model(
         &agent,
-        &room_agent,
-        room_model.as_deref(),
+        &discussion.agent,
+        from_model.as_deref(),
         tier,
         &agents.model_tiers,
     );
@@ -148,7 +145,7 @@ pub async fn start_on_fallback_among(
     let trigger = Trigger::from_code(&cooldown.reason).unwrap_or(Trigger::QuotaExhausted);
     let notice = fallback::notice(
         &agent,
-        room_model.as_deref(),
+        from_model.as_deref(),
         trigger,
         Some(cooldown.until),
         &link,

@@ -6,7 +6,7 @@ settings. An empty or absent list retains the existing launch policy. This is
 an explicit per-step declaration; listing a companion project in documentation
 does not automatically grant access.
 [src: file: backend/src/models/workflows.rs:1243-1247#read_only_repos]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4678-4692#read_only_repos]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4683-4697#read_only_repos]
 
 ```json
 {
@@ -48,11 +48,11 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4712-4717#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4763-4765#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4805-4810#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4863-4865#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:1511-1521#apply]
-[src: file: backend/src/agents/runner.rs:14988-14999#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15233-15244#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:15087-15098#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15332-15343#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14849-14868#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14998-15012#is_codex]
+[src: file: backend/src/agents/runner.rs:14938-14957#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:15100-15114#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even

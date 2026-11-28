@@ -112,13 +112,15 @@ test.describe('Routing — addresses', () => {
     await expectProjectsSettled(page, request, '/projects');
     // The others keep the address they were opened at: in a fresh browser
     // context no last visit is remembered for them to restore.
-    for (const [path, nav] of [
+    for (const [path, nav, landed = path] of [
       ['/discussions', 'nav-discussions'], ['/planning', 'nav-planning'],
-      ['/workflows', 'nav-workflows'], ['/plugins', 'nav-mcps'], ['/config', 'nav-settings'],
+      ['/workflows', 'nav-workflows'], ['/plugins', 'nav-mcps'],
+      // KT-1923 — `/config` opens the first sub-page of Settings.
+      ['/config', 'nav-settings', '/config/you'],
     ] as const) {
       await page.goto(path);
       await expect(current(page, nav)).toHaveAttribute('aria-current', 'page');
-      expect(new URL(page.url()).pathname).toBe(path);
+      expect(new URL(page.url()).pathname).toBe(landed);
     }
   });
 
@@ -247,7 +249,7 @@ test.describe('Routing — addresses', () => {
     await expect(page.locator('.disc-chat-header-title')).toContainText(discA.title);
 
     await page.goto('/planning#config');
-    await page.waitForURL(/\/config$/);
+    await page.waitForURL(/\/config\/you$/);
     await expect(current(page, 'nav-settings')).toHaveAttribute('aria-current', 'page');
 
     await page.goto(`/#discussions/mosaic?discussion=${discA.id}&discussion=${discB.id}&layout=two-columns`);

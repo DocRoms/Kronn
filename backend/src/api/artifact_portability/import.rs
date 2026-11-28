@@ -296,6 +296,9 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Bu
     }
     for prompt in bundle.referenced_quick_prompts {
         validate_prompt_variables(&prompt.variables).map_err(anyhow::Error::msg)?;
+        // KT-1998 — a bundled Quick Prompt's model, like a saved one's.
+        crate::models::check_agent_settings_model(prompt.agent_settings.as_ref())
+            .map_err(|error| anyhow!("Quick Prompt `{}`: {error}", prompt.name))?;
         resources.push(Resource::new(ResourceKind::QuickPrompt, prompt)?);
     }
     for api in bundle.referenced_quick_apis {
@@ -1261,6 +1264,83 @@ pub async fn import(
             Json(ApiResponse::ok(imported))
         }
         Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod model_id_guard_tests {
+    use super::*;
+
+    fn content(model: &str) -> String {
+        let now = Utc::now();
+        serde_json::to_string(&json!({
+            "kind": BUNDLE_KIND, "version": BUNDLE_VERSION, "exported_at": now,
+            "artifact": {
+                "id": "page-1", "title": "Guarded", "slug": "guarded",
+                "html": "<h1>Guarded</h1>", "created_by_agent": null, "datasets": [],
+            },
+            "referenced_quick_prompts": [{
+                "id": "qp-src", "name": "Bundled", "icon": "✨",
+                "prompt_template": "Say hello", "variables": [], "agent": "OpenCode",
+                "agent_settings": { "model": model },
+                "created_at": now, "updated_at": now,
+            }],
+        }))
+        .unwrap()
+    }
+
+    /// KT-1998 — an Artifact import refuses a bundled Quick Prompt whose model
+    /// is bad, before its plan is committed; nothing is written.
+    #[tokio::test]
+    async fn model_id_guard_artifact_import_refuses_a_bundled_prompt_model() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let padded = format!("{}gpt-5", " ".repeat(100_000));
+        for bad in ["--help", " -c", "\ngpt-5\n", "\tgpt-5", padded.as_str()] {
+            let Json(refused) = import(
+                State(state.clone()),
+                Json(ArtifactImportRequest {
+                    content: content(bad),
+                    project_id: None,
+                    choices: vec![],
+                    approved_quick_exec_ids: vec![],
+                    preview_digest: None,
+                    allow_embed_origins: vec![],
+                    skill_choices: vec![],
+                }),
+            )
+            .await;
+            let error = refused.error.expect("refused");
+            assert!(error.contains("Quick Prompt `Bundled`"), "{bad:?}: {error}");
+            assert!(
+                error.contains("must not start with '-'") || error.contains("one line"),
+                "{bad:?}: {error}"
+            );
+        }
+        let prompts = state
+            .db
+            .with_conn(crate::db::quick_prompts::list_quick_prompts)
+            .await
+            .unwrap();
+        assert!(prompts.is_empty(), "nothing is written");
+        // The same bundle with a plain id passes this check (it then stops at
+        // the preview digest, which this test does not compute).
+        let request = ArtifactImportRequest {
+            content: content("gpt-5"),
+            project_id: None,
+            choices: vec![],
+            approved_quick_exec_ids: vec![],
+            preview_digest: None,
+            allow_embed_origins: vec![],
+            skill_choices: vec![],
+        };
+        parse_resources(&request).expect("a plain id is accepted");
     }
 }
 

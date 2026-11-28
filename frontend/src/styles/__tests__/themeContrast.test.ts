@@ -6,9 +6,11 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AGENT_COLORS, ALL_AGENT_TYPES, agentTextColor } from '../../lib/constants';
 import {
-  auditRepo, focusRingRemovals, forcedTextInInlineStyles, forcedTextOnTokenBackground, measureTextContrast,
-  parseThemes, STATUS_TOKENS, TEXT_TOKENS, undeclaredCustomProperties,
+  AGENT_TEXT_TOKENS, auditRepo, checkBaseline, DARK_THEMES, focusRingRemovals, forcedTextInInlineStyles, forcedTextOnTokenBackground,
+  loadBaseline, measureTextContrast, parseThemes, SEMANTIC_STATUS_TOKENS, STATUS_TOKENS, TEXT_TOKENS,
+  undeclaredCustomProperties,
 } from '../themeAudit';
 
 const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -28,18 +30,34 @@ describe('theme contrast', () => {
         expect(AUDIT.contrast.some(r => r.theme === theme && r.text === role), `${theme} ${role}`).toBe(true);
       }
     }
-    for (const theme of ['dark', 'arcade', 'gotham', 'matrix']) {
-      for (const role of STATUS_TOKENS) {
+    // KT-1887 — status colours in every theme, the light ones included.
+    for (const theme of themes) {
+      for (const role of [...STATUS_TOKENS, ...SEMANTIC_STATUS_TOKENS]) {
         expect(AUDIT.contrast.some(r => r.theme === theme && r.text === role), `${theme} ${role}`).toBe(true);
       }
     }
   });
 
-  it('keeps every text role and dark-theme status colour above its WCAG floor', () => {
-    const misses = AUDIT.contrast.filter(r => r.ratio < r.floor)
+  it('keeps every text role and status colour above its WCAG floor, or in the frozen baseline', () => {
+    const misses = AUDIT.baseline.newContrast
       .map(r => `  ${r.theme} ${r.text} on ${r.background}: ${r.ratio.toFixed(2)} < ${r.floor}`);
     expect(misses, `Tokens under their floor (node scripts/theme-audit.mjs):\n${misses.join('\n')}`)
       .toEqual([]);
+    expect(AUDIT.baseline.staleContrast, 'baseline cells that pass now (--prune-baseline)').toEqual([]);
+  });
+
+  it('holds the dark themes and every text role to their floor with no baseline', () => {
+    const frozen = loadBaseline(SRC).contrast.map(k => k.split(' ')[0]);
+    expect(frozen.every(theme => !DARK_THEMES.has(theme)), frozen.join(', ')).toBe(true);
+    const textMisses = AUDIT.contrast.filter(r => r.ratio < r.floor && (TEXT_TOKENS as readonly string[]).includes(r.text));
+    expect(textMisses).toEqual([]);
+  });
+
+  it('would refuse a light-theme status colour pushed under 4.5:1', () => {
+    const lighter = TOKENS.replace(/(\[data-theme="light"\][\s\S]*?--kr-error:)[^;]+;/, '$1 #ff8080;');
+    const rows = measureTextContrast(parseThemes(lighter));
+    const check = checkBaseline(loadBaseline(SRC), [], rows);
+    expect(check.newContrast.some(r => r.theme === 'light' && r.text === '--kr-error')).toBe(true);
   });
 
   it('asks 4.5:1 of every role in a dark theme and 3:1 of ghost in a light one', () => {
@@ -60,6 +78,37 @@ describe('theme contrast', () => {
       rows.find(r => r.theme === theme && r.text === text && r.background === bg)!.ratio;
     expect(at('gotham', '--kr-text-muted', '--kr-bg-elevated')).toBeCloseTo(4.02, 2);
     expect(at('matrix', '--kr-text-ghost', '--kr-bg-base')).toBeCloseTo(2.15, 2);
+  });
+
+  // KT-1936 — an agent's name is written in its colour (AgentIdentity, mention
+  // chips, pickers): every default colour written as text holds 4.5:1 on every
+  // opaque surface of every theme, with no baseline cell.
+  it('holds every default agent colour written as text to 4.5:1 in every theme', () => {
+    const tokens = [...ALL_AGENT_TYPES.map(a => agentTextColor(a)), agentTextColor('unknown')]
+      .map(v => /^var\((--kr-agent-[a-z]+-text)\)$/.exec(v)?.[1]);
+    expect(tokens.every(Boolean), tokens.join(', ')).toBe(true);
+    const measured = [...AGENT_TEXT_TOKENS, '--kr-agent-nvidia-text'];
+    for (const token of tokens) expect(measured).toContain(token);
+    for (const theme of ['arcade', 'dark', 'euronews', 'gotham', 'light', 'matrix', 'sakura']) {
+      for (const token of measured) {
+        const rows = AUDIT.contrast.filter(r => r.theme === theme && r.text === token);
+        expect(rows.length, `${theme} ${token}`).toBeGreaterThanOrEqual(5);
+        for (const r of rows) expect(r.ratio, `${theme} ${token} on ${r.background}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    expect(loadBaseline(SRC).contrast.filter(k => k.includes('--kr-agent-'))).toEqual([]);
+  });
+
+  it('would have refused the brand colours as text (Codex on light, OpenCode on dark)', () => {
+    const brand = (theme: string, colour: string) => {
+      const css = TOKENS.replace(/(:root \{[\s\S]*?)--kr-agent-claude-text:[^;]+;/, `$1--kr-agent-claude-text: ${colour};`)
+        .replace(/(:root\[data-theme="euronews"\] \{[\s\S]*?--kr-agent-claude-text:)[^;]+;/, `$1 ${colour};`);
+      return measureTextContrast(parseThemes(css))
+        .filter(r => r.theme === theme && r.text === '--kr-agent-claude-text')
+        .reduce((min, r) => Math.min(min, r.ratio), 99);
+    };
+    expect(brand('light', AGENT_COLORS.Codex)).toBeLessThan(4.5);
+    expect(brand('dark', AGENT_COLORS.OpenCode)).toBeLessThan(4.5);
   });
 
   it('holds the focus ring colour to 3:1 on every surface of every theme', () => {

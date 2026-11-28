@@ -168,10 +168,7 @@ async fn plan(
     if failing == AgentType::Custom || chain.is_empty() {
         return None;
     }
-    let from_model = pin
-        .as_ref()
-        .and_then(|pin| pin.model.clone())
-        .or_else(|| discussion.model.clone());
+    let from_model = failing_turn_model(&discussion, &failing, job, &targets, pin.as_ref());
     let hops = pin.as_ref().map_or(0, |pin| pin.hops);
     if hops as usize >= fallback::MAX_CHAIN_DEPTH {
         return None;
@@ -1058,6 +1055,31 @@ async fn post_stop(state: &AppState, job: &AgentDispatchJob, plan: &Plan, why: &
             tracing::warn!(dispatch_job_id = %job.id, "agent fallback stop notice could not be persisted: {error}");
         }
     }
+}
+
+/// KT-2012 — the model the failing agent was asked to run, named in the room
+/// line: the turn's own resolution (`streaming.rs`), so the discussion's exact
+/// model is credited only to a turn of the discussion's own agent and connection.
+/// `None` reads as the turn's mode.
+pub(super) fn failing_turn_model(
+    discussion: &crate::models::Discussion,
+    failing: &AgentType,
+    job: &AgentDispatchJob,
+    targets: &[crate::models::MessageTarget],
+    pin: Option<&Pin>,
+) -> Option<String> {
+    let own_turn = super::streaming::turn_runs_on_discussion_target(
+        &discussion.agent,
+        discussion.connection_id.as_deref(),
+        failing,
+        job.connection_id.as_deref(),
+    );
+    let tier_override = super::runtime::dispatch_target_tier(
+        targets,
+        job.agent_override.as_ref(),
+        job.connection_id.as_deref(),
+    );
+    super::streaming::turn_exact_model(discussion.model.as_deref(), own_turn, tier_override, pin)
 }
 
 #[cfg(all(test, feature = "full-tests"))]

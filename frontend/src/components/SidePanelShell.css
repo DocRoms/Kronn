@@ -24,110 +24,80 @@
   align-self: stretch;
 }
 
+/* KT-1884 — the one header (a compact `DrawerHeader`) above the rail and the
+   view. Its identity takes no width of its own: the panel is as wide as its
+   content, and a long title must ellipsize, never widen it. */
 .side-panel-shell-header {
-  min-height: 52px;
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-4);
-  padding: 8px 10px 8px 14px;
-  border-bottom: 1px solid var(--kr-border);
-  background: var(--kr-bg-surface);
 }
 
-.side-panel-shell-title {
-  /* Zero basis: a long title must not widen the panel, only ellipsize. */
-  flex: 1 1 0;
+.side-panel-shell-header .ui-header-identity {
   width: 0;
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--kr-text-primary);
-  font-size: var(--kr-fs-md);
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.side-panel-shell-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.side-panel-shell-icon {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--kr-r-sm);
-  background: transparent;
+/* The active view's name, then what that view hands to the header: inline
+   text on the compact description's one line, so the line ends with « … »
+   when it does not fit (the frame's block + `text-overflow: ellipsis`). */
+.side-panel-shell-view {
+  display: inline;
   color: var(--kr-text-secondary);
-  cursor: pointer;
+  font-weight: var(--kr-weight-semibold);
 }
 
-.side-panel-shell-icon:hover,
-.side-panel-shell-icon:focus-visible,
-.side-panel-shell-icon[aria-expanded='true'] {
-  border-color: var(--kr-border-medium);
-  background: var(--kr-bg-hover);
-  color: var(--kr-text-primary);
+.side-panel-shell-meta {
+  display: inline;
+  color: var(--kr-text-muted);
 }
 
-.side-panel-shell-icon:focus-visible,
-.side-panel-shell-tab:focus-visible,
-.side-panel-shell-menu button:focus-visible {
+/* Whatever a view hands over sits on the view name's line, in its size: no
+   box of its own (a flex or block child would be clipped, not ellipsized),
+   no margin or size a standalone header gave it (two classes: this wins
+   over a view's own one-class rule, whatever the stylesheet order). */
+.side-panel-shell-header .side-panel-shell-meta > * {
+  display: inline;
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.side-panel-shell-meta:empty {
+  display: none;
+}
+
+.side-panel-shell-meta:not(:empty)::before {
+  content: '·';
+  margin-inline-end: var(--kr-space-1);
+}
+
+/* The view's own leading control (the Git diff's way back): before the
+   title, first in the tab order. No box when the view hands none, so the
+   frame's leading zone takes no room and no gap. */
+.side-panel-shell-header .ui-header-leading {
+  display: contents;
+}
+
+.side-panel-shell-view-leading {
+  display: inline-flex;
+  align-items: center;
+}
+
+.side-panel-shell-view-leading:empty {
+  display: none;
+}
+
+.side-panel-shell-view-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+}
+
+.side-panel-shell-view-actions:empty {
+  display: none;
+}
+
+.side-panel-shell-tab:focus-visible {
   outline: 2px solid var(--kr-accent);
   outline-offset: 1px;
-}
-
-.side-panel-shell-menu-wrap { position: relative; }
-
-.side-panel-shell-menu {
-  position: absolute;
-  z-index: 2;
-  top: calc(100% + 6px);
-  right: 0;
-  width: 230px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px;
-  border: 1px solid var(--kr-border-medium);
-  border-radius: var(--kr-r-md);
-  background: var(--kr-bg-raised);
-  box-shadow: var(--kr-shadow-popover);
-}
-
-.side-panel-shell-menu button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: var(--kr-r-sm);
-  background: transparent;
-  color: var(--kr-text-secondary);
-  font-size: var(--kr-fs-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-.side-panel-shell-menu button:hover:not(:disabled) {
-  background: var(--kr-bg-hover);
-  color: var(--kr-text-primary);
-}
-
-.side-panel-shell-menu button:disabled { opacity: 0.55; cursor: progress; }
-
-.side-panel-shell-menu button[data-danger] { color: var(--kr-error); }
-
-.side-panel-shell-menu button[data-danger]:hover:not(:disabled) {
-  background: rgba(var(--kr-error-rgb), 0.12);
-  color: var(--kr-error);
 }
 
 .side-panel-shell-main {
@@ -210,6 +180,11 @@
 }
 
 .side-panel-shell-body {
+  /* KT-1884 — the view is drawn inside this box and nowhere else: positioned
+     and isolated, so a view that places itself (`position: absolute`, a
+     z-index of its own) can cover neither the header nor the rail. */
+  position: relative;
+  isolation: isolate;
   min-width: min(var(--kr-panel-w), calc(100vw - var(--side-panel-rail-w)));
   min-height: 0;
   display: flex;
@@ -218,8 +193,14 @@
 }
 
 /* A panel component keeps its own width (the Git code view widens it) but
-   drops the chrome the shell now draws. */
-.side-panel-shell-body > * {
+   drops the chrome the shell now draws, and the placement a view takes when
+   it stands alone on a narrow screen (KT-1884: the Files view was
+   `position: absolute; inset: 0; z-index: modal` under 768px, over the whole
+   shell). Two classes, so this wins over a view's own rule at every width. */
+.side-panel-shell .side-panel-shell-body > * {
+  position: relative;
+  inset: auto;
+  z-index: auto;
   flex: 1 1 auto;
   min-height: 0;
   height: auto;
@@ -228,12 +209,10 @@
   box-shadow: none;
 }
 
-@media (max-width: 760px) {
-  .side-panel-shell-body > .disc-tool-panel {
-    position: static;
-    inset: auto;
+@media (max-width: 767px) {
+  .side-panel-shell .side-panel-shell-body > * {
     width: auto;
-    box-shadow: none;
+    min-width: 0;
   }
 }
 
@@ -245,7 +224,6 @@
   }
   .side-panel-shell-spacer { display: none; }
   .side-panel-shell-body { flex: 1; min-width: 0; }
-  .side-panel-shell-body > * { width: auto; }
   .side-panel-shell-tab { min-height: 42px; }
   /* Icons only; the label stays the tab's accessible name. */
   .side-panel-shell-tab-label {

@@ -32,8 +32,8 @@ Failed refreshes keep every last-known row intact, downgrade `live` provenance
 to visibly stale `cached`, and record a normalized target-level error. A
 provider failure does not claim that an individual model disappeared.
 [src: file: backend/src/models/model_catalog.rs:1-8#Resolution]
-[src: file: backend/src/db/model_catalog.rs:556-730#reconcile_live]
-[src: file: backend/src/db/model_catalog.rs:732-761#record_refresh_failure]
+[src: file: backend/src/db/model_catalog.rs:569-743#reconcile_live]
+[src: file: backend/src/db/model_catalog.rs:745-774#record_refresh_failure]
 
 The former runtime literals are inserted once during startup and the runner's
 hot-path tier lookup is then projected from catalog rows. Editing the manual
@@ -58,14 +58,14 @@ does not make a hidden hard-coded fallback reappear.
   `http:<connection-id>`. NVIDIA capability metadata is read from its model
   records. A saved media slot never invents a capability.
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-109#discover_with_transport]
-[src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
-[src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
-[src: file: backend/src/api/external_api_connections.rs:314-481#probe_models]
-[src: file: backend/src/api/external_api_connections.rs:1416-1446#fetch_capability_catalogue]
-[src: file: backend/src/api/external_api_connections.rs:1448-1460#catalog_declares_modality]
-[src: file: backend/src/api/external_api_connections.rs:1462-1516#catalog_models_from_body]
-[src: file: backend/src/api/external_api_connections.rs:1518-1533#merge_catalog]
-[src: file: backend/src/core/model_catalog/mod.rs:762-777#reconcile_http_catalog]
+[src: file: backend/src/core/model_catalog/codex_discovery.rs:101-127#discover]
+[src: file: backend/src/core/model_catalog/codex_discovery.rs:129-214#run_handshake_and_list]
+[src: file: backend/src/api/external_api_connections.rs:333-500#probe_models]
+[src: file: backend/src/api/external_api_connections.rs:1435-1465#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1467-1479#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:1481-1535#catalog_models_from_body]
+[src: file: backend/src/api/external_api_connections.rs:1537-1552#merge_catalog]
+[src: file: backend/src/core/model_catalog/mod.rs:854-869#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
 
@@ -95,7 +95,7 @@ a project's own config — typically a local Ollama — was offered to every run
 that project and appeared in no selector. This, not a filter or a cache, is why
 models were missing: the Config UI applies no filter to what the catalogue
 holds (`catalogModelOptions`).
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:132-195#catalogModelOptions]
 
 OpenCode discovery now runs in two kinds of directory at once, inside the
 single 20 s discovery bound: the neutral one, and every registered project that
@@ -110,7 +110,7 @@ the files are never opened; at most 16 projects). The results are merged:
 - a project whose discovery fails is left out and logged by reason only; it
   does not fail the refresh. A failure of the neutral discovery is returned as
   it is, whatever the projects answered.
-[src: file: backend/src/core/model_catalog/mod.rs:473-613#OPENCODE_PROJECT_CONFIGS]
+[src: file: backend/src/core/model_catalog/mod.rs:562-702#OPENCODE_PROJECT_CONFIGS]
 
 Known gaps: a model seen only through `OPENCODE_CONFIG` set in a user's shell,
 or through an `opencode.json` above the project directory, is not found, since
@@ -128,7 +128,7 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5866-5920#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5954-6008#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1948-1957#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1963-1994#select_model]
 
@@ -147,8 +147,8 @@ model still recorded `Available`. The cached provenance and error remain visible
 this is permission to attempt execution, not proof of account access. Missing CLI,
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
-[src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4400-4446#preflight_resolve]
+[src: file: backend/src/core/model_catalog/mod.rs:1288-1324#retained_claude_model]
+[src: file: backend/src/api/discussions/streaming.rs:4459-4505#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:1766-1851#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1360-1413#preflight_workflow_launch]
 
@@ -166,12 +166,13 @@ in silence.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:44-58#unusableExternalAgentTargets]
 
 `AgentSwitchPicker` remains the common selector on discussion, QP/compare and
-workflow surfaces. It reads the shared snapshot, shows provenance, and leaves
-known unavailable choices visible but disabled. Settings exposes refresh plus
-manual create/update/delete, including chat/image/video capabilities and
-reasoning modes.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:90#useModelCatalogSnapshot]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:363-405#unavailable]
+workflow surfaces, the API assistants, the shadows' exact model and (through its
+palette) the composer's @ menu (KT-1885). It reads the shared snapshot, shows
+provenance, and leaves known unavailable choices visible but disabled. Settings
+exposes refresh plus manual create/update/delete, including chat/image/video
+capabilities and reasoning modes.
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:1302#useModelCatalogSnapshot]
+[src: file: frontend/src/lib/agentAvailability.ts:23-33#tierAvailability]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:182-211#createManual]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:212-229#deleteManual]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:327-337#capability]
@@ -186,7 +187,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:2006-2036#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:2079-2109#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -211,17 +212,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3712-3887#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3840-4015#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:14035-14052#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:14167-14198#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14124-14141#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14256-14287#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5194-5222#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5283-5311#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -258,9 +259,9 @@ was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:9-54#UnresolvedQuickPromptEffort]
 [src: file: backend/src/db/sql/176_discussion_effort_snapshots.sql:1-8#discussion_effort_snapshots]
-[src: file: backend/src/api/discussions/crud.rs:653-675#capture]
-[src: file: backend/src/api/discussions/crud.rs:817-825#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/streaming.rs:4316-4369#for_run]
+[src: file: backend/src/api/discussions/crud.rs:675-697#capture]
+[src: file: backend/src/api/discussions/crud.rs:843-851#UnresolvedQuickPromptEffort]
+[src: file: backend/src/api/discussions/streaming.rs:4375-4428#for_run]
 [src: file: backend/src/db/discussion_effort.rs:56-76#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting
@@ -268,7 +269,7 @@ or importing a QP preserves its editable `agent_settings`, while it does not
 reconstruct historic discussion launch overrides.
 [src: file: backend/src/db/discussion_effort.rs:1#Immutable]
 [src: file: backend/src/models/quick.rs:875-885#QuickPromptExportEnvelope]
-[src: file: backend/src/api/quick_prompts.rs:386-457#export_qp]
+[src: file: backend/src/api/quick_prompts.rs:394-465#export_qp]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.
 It derives choices from the selected model's catalog entry, retains an invalid saved value only as an
@@ -276,9 +277,9 @@ explained disabled option, and clears an incompatible effort in the same save
 that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. The selector sits beside each mode's
 model picker; the cards of other runtimes carry none (KT-1807).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:233-278#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:965-991#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:955-961#renderTierEfforts]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:263-308#saveTierPreference]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:994-1020#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:973-979#renderTierEfforts]
 
 ## Migration and test invariants
 
@@ -288,12 +289,12 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:2104-2138#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:2108-2142#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
-[src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
-[src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]
-[src: file: backend/src/db/model_catalog.rs:1310-1398#disappearance_downgrades_to_cached_never_deletes]
-[src: file: backend/src/db/model_catalog.rs:1503-1522#identical_http_model_ids_are_isolated_by_connection]
+[src: file: backend/src/db/model_catalog.rs:1101-1147#reconcile_live_promotes_manual_entry_preserving_overrides]
+[src: file: backend/src/db/model_catalog.rs:1149-1171#reconcile_live_is_idempotent]
+[src: file: backend/src/db/model_catalog.rs:1323-1411#disappearance_downgrades_to_cached_never_deletes]
+[src: file: backend/src/db/model_catalog.rs:1517-1536#identical_http_model_ids_are_isolated_by_connection]
 [src: file: docs/testing-quality.md:15-16#typegen]
 
 ## OpenCode Zen: cost hint and privacy note (KT-543)
@@ -313,9 +314,9 @@ operator-overridable through the same manual-entry path as
 `UpsertManualModelRequest` preserves the existing value (COALESCE) instead
 of clearing it, so an unrelated edit (e.g. a rename) cannot silently wipe an
 auto-detected or previously-confirmed assessment.
-[src: file: backend/src/db/model_catalog.rs:512-543#derive_opencode_zen_overlay]
-[src: file: backend/src/db/model_catalog.rs:371-438#update_manual]
+[src: file: backend/src/db/model_catalog.rs:525-556#derive_opencode_zen_overlay]
+[src: file: backend/src/db/model_catalog.rs:384-451#update_manual]
 [src: file: backend/src/db/sql/164_model_catalog_cost_privacy.sql:1-7#cost_hint]
-[src: file: backend/src/models/model_catalog.rs:195-226#UpsertManualModelRequest]
+[src: file: backend/src/models/model_catalog.rs:266-297#UpsertManualModelRequest]
 [src: url: https://opencode.ai/docs/zen/]
 [src: url: https://opencode.ai/zen/v1/models]

@@ -13,15 +13,18 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Bot, X, Send, Sparkles, Loader2, Minus, Maximize2, ChevronDown,
+  Bot, X, Send, Sparkles, Loader2, Minus, Maximize2,
   ClipboardPaste, Link2, MessageSquareText,
 } from 'lucide-react';
 import { assistantConversations, discussions as discussionsApi } from '../lib/api';
-import { AGENT_LABELS, agentColor } from '../lib/constants';
 import { isLocaleLoaded, loadLocale, t as translate, type UILocale } from '../lib/i18n';
 import type { AgentType, AssistantConversation, CustomApiPayload } from '../types/generated';
 import { sanitizeForAssistant, scrubSecrets } from '../lib/assistantSecrets';
 import { AssistantConversationList } from './AssistantConversationList';
+import { AssistantAgentPicker } from './AssistantAgentPicker';
+import {
+  assistantChoiceFromDiscussion, assistantDiscussionTarget, sameAssistantChoice, type AssistantAgentChoice,
+} from '../lib/assistantAgentChoice';
 import {
   notifyAssistantConversationsChanged,
   pendingFor,
@@ -92,8 +95,7 @@ export function CustomApiAiHelper({
   );
 
   const [phase, setPhase] = useState<Phase>('closed');
-  const [activeAgent, setActiveAgent] = useState<AgentType | null>(null);
-  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [activeAgent, setActiveAgent] = useState<AssistantAgentChoice | null>(null);
   const [discussionId, setDiscussionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -126,18 +128,6 @@ export function CustomApiAiHelper({
   // The conversation is kept (KT-1111): unmounting only stops the stream.
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  useEffect(() => {
-    if (!agentMenuOpen) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('.wf-apicall-ai-agent-selector')) {
-        setAgentMenuOpen(false);
-      }
-    };
-    window.addEventListener('mousedown', handler);
-    return () => window.removeEventListener('mousedown', handler);
-  }, [agentMenuOpen]);
-
   const beginSession = useCallback(() => {
     abortRef.current?.abort();
     streamingRef.current = false;
@@ -157,7 +147,6 @@ export function CustomApiAiHelper({
     setAppliedSignatures(new Set());
     setStreaming(false);
     setMinimized(false);
-    setAgentMenuOpen(false);
     setActiveAgent(null);
     setPhase('closed');
   }, [discussionId, beginSession]);
@@ -170,7 +159,7 @@ export function CustomApiAiHelper({
     setStreaming(false);
     setPhase('chatting');
     setMinimized(false);
-    setActiveAgent(conversation.agent);
+    setActiveAgent({ agent: conversation.agent, tier: null });
     setDiscussionId(conversation.discussion_id);
     setMessages([]);
     setInput('');
@@ -180,6 +169,8 @@ export function CustomApiAiHelper({
       if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
       const disc = await discussionsApi.get(conversation.discussion_id);
       if (session !== sessionRef.current) return;
+      // KT-1885 — the picker shows what the conversation runs on: its connection and its tier.
+      setActiveAgent(assistantChoiceFromDiscussion(conversation.agent, disc));
       setMessages(transcriptToChat(disc.messages, [
         agentT('mcp.custom.helper.sys.userQuestion'),
         t('mcp.custom.helper.sys.userQuestion'),
@@ -209,11 +200,10 @@ export function CustomApiAiHelper({
     }
   }, [agentLocale, agentT, t, beginSession, targetId, onConversationStarted]);
 
-  const startWithAgentRef = useRef<((agent: AgentType) => Promise<void>) | null>(null);
+  const startWithAgentRef = useRef<((agent: AssistantAgentChoice) => Promise<void>) | null>(null);
 
-  const switchAgent = useCallback((agent: AgentType) => {
-    setAgentMenuOpen(false);
-    if (agent === activeAgent || streaming) return;
+  const switchAgent = useCallback((agent: AssistantAgentChoice) => {
+    if (sameAssistantChoice(activeAgent, agent) || streaming) return;
     // The previous conversation stays kept; the new agent starts a fresh one.
     setDiscussionId(null);
     setMessages([]);
@@ -223,7 +213,7 @@ export function CustomApiAiHelper({
     void startWithAgentRef.current?.(agent);
   }, [activeAgent, streaming]);
 
-  const startWithAgent = useCallback(async (agent: AgentType) => {
+  const startWithAgent = useCallback(async (agent: AssistantAgentChoice) => {
     const session = beginSession();
     setPhase('chatting');
     setActiveAgent(agent);
@@ -237,7 +227,8 @@ export function CustomApiAiHelper({
       const disc = await discussionsApi.create({
         project_id: null,
         title: `🤖 ${t('mcp.custom.helper.discTitle')}${label ? ` · ${label}` : ''}`,
-        agent,
+        // KT-1885 — the agent or connection chosen in the shared picker, at its tier.
+        ...assistantDiscussionTarget(agent),
         language: configLanguage ?? 'fr',
         initial_prompt: buildSystemPrompt(agentT),
         assistant: {
@@ -370,7 +361,7 @@ export function CustomApiAiHelper({
               setError(t('mcp.custom.helper.noAgents'));
               return;
             }
-            void startWithAgent(installedAgents[0]);
+            void startWithAgent({ agent: installedAgents[0], tier: null });
           }}
           title={t('mcp.custom.helper.triggerHint')}
         >
@@ -401,40 +392,19 @@ export function CustomApiAiHelper({
         <div className="wf-apicall-ai-bubble" role="dialog" aria-label={t('mcp.custom.helper.bubbleTitle')}>
           <div className="wf-apicall-ai-bubble-header">
             <Bot size={13} />
+            {/* KT-1885 — the shared agent picker: installed agents, external
+                connections and tiers. */}
             <div className="wf-apicall-ai-agent-selector">
-              <button
-                type="button"
-                className="wf-apicall-ai-agent-trigger"
-                onClick={() => setAgentMenuOpen(o => !o)}
-                disabled={streaming}
-                aria-haspopup="listbox"
-                aria-expanded={agentMenuOpen}
-                title={t('mcp.custom.helper.switchAgent')}
-              >
-                <span
-                  className="wf-apicall-ai-agent-dot"
-                  style={{ background: activeAgent ? agentColor(activeAgent) : 'var(--kr-text-ghost)' }}
+              {activeAgent ? (
+                <AssistantAgentPicker
+                  installedAgents={installedAgents}
+                  current={activeAgent}
+                  onSelect={switchAgent}
+                  disabled={streaming || loading}
+                  title={t('mcp.custom.helper.switchAgent')}
+                  t={t}
                 />
-                <span>{activeAgent ? (AGENT_LABELS[activeAgent] ?? activeAgent) : t('mcp.custom.helper.bubbleTitle')}</span>
-                <ChevronDown size={11} />
-              </button>
-              {agentMenuOpen && (
-                <div className="wf-apicall-ai-agent-menu" role="listbox">
-                  {installedAgents.map(agent => (
-                    <button
-                      key={agent}
-                      type="button"
-                      role="option"
-                      aria-selected={agent === activeAgent}
-                      className={`wf-apicall-ai-agent-option${agent === activeAgent ? ' wf-apicall-ai-agent-option-active' : ''}`}
-                      onClick={() => switchAgent(agent)}
-                    >
-                      <span className="wf-apicall-ai-agent-dot" style={{ background: agentColor(agent) }} />
-                      {AGENT_LABELS[agent] ?? agent}
-                    </button>
-                  ))}
-                </div>
-              )}
+              ) : <span>{t('mcp.custom.helper.bubbleTitle')}</span>}
             </div>
             <span className="wf-apicall-ai-bubble-eph" title={t('aiHelper.keptHint')}>{t('aiHelper.kept')}</span>
             <button

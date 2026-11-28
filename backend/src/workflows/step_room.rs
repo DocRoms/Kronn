@@ -198,6 +198,7 @@ impl WorkflowStepRooms {
                     workflow_name: target.workflow_name,
                     step_key: target.step_key,
                     step_name: target.step_name,
+                    model: None,
                 },
                 agent_type: target.agent_type,
                 started_at: target.started_at,

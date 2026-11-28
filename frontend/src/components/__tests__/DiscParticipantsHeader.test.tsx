@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, act, fireEvent, cleanup } from '@testing-library/react';
+import { render, act, fireEvent, cleanup, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 
 vi.mock('../../lib/api', () => ({
@@ -12,6 +13,7 @@ vi.mock('../../lib/api', () => ({
 import { DiscParticipantsHeader } from '../DiscParticipantsHeader';
 import { freshnessOf, DEFAULT_AWAY_AFTER_MS } from '../../lib/discPresence';
 import { discussions as discussionsApi } from '../../lib/api';
+import type { AgentType } from '../../types/generated';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}(${args.join(',')})` : key;
@@ -44,14 +46,16 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     const headerCss = readFileSync('src/pages/DiscussionsPage.css', 'utf8');
     const participantCss = readFileSync('src/styles/components.css', 'utf8');
     const headerTop = headerCss.match(/\.disc-chat-header-top\s*\{([^}]*)\}/)?.[1] ?? '';
-    const stripInSub = headerCss
-      .match(/\.disc-chat-header-sub > \.disc-participants-row\s*\{([^}]*)\}/)?.[1] ?? '';
+    const lineCss = readFileSync('src/components/HeaderScrollLine.css', 'utf8');
+    const scroller = lineCss.match(/\.kr-header-line-scroller\s*\{([^}]*)\}/)?.[1] ?? '';
     const participantList = participantCss.match(/\.disc-participants-list\s*\{([^}]*)\}/)?.[1] ?? '';
 
     expect(headerTop).toContain('display: grid');
     // Two columns: title, then the invite pinned right on the same line.
     expect(headerTop).toContain('grid-template-columns: minmax(0, 1fr) auto');
-    expect(stripInSub).toContain('min-width: 0');
+    // KT-1936 review round 2 — in the room header the whole agent line
+    // scrolls sideways (HeaderScrollLine), the strip with it.
+    expect(scroller).toContain('overflow-x: auto');
     expect(participantList).toContain('flex-wrap: nowrap');
     expect(participantList).toContain('overflow-x: auto');
   });
@@ -77,11 +81,17 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     });
     const chips = document.querySelectorAll('.disc-participant-chip');
     expect(chips.length).toBe(2);
-    expect(chips[0].querySelector('.disc-participant-name')?.textContent).toBe('@claude');
-    expect(chips[1].querySelector('.disc-participant-name')?.textContent).toBe('@codex');
+    expect(chips[0].querySelector('.ui-agent-identity-name')?.textContent).toBe('@claude');
+    expect(chips[1].querySelector('.ui-agent-identity-name')?.textContent).toBe('@codex');
     expect(document.querySelector('[data-testid="disc-participant-details"]')).toBeNull();
     await openParticipant();
-    expect(document.querySelector('[data-testid="disc-participant-details"]')).not.toBeNull();
+    const details = document.querySelector<HTMLElement>('[data-testid="disc-participant-details"]');
+    expect(details).not.toBeNull();
+    // KT-1936 review round 2 — a floating layer in document.body, at a fixed
+    // place under its chip: the header's scrolling agent line cannot clip it.
+    expect(details!.parentElement).toBe(document.body);
+    expect(details!.style.position).toBe('fixed');
+    expect(chips[0].getAttribute('aria-controls')).toBe(details!.id);
     expect(chips[0].getAttribute('aria-expanded')).toBe('true');
     fireEvent.click(document.querySelector('.disc-participant-details header button') as HTMLButtonElement);
     expect(document.querySelector('[data-testid="disc-participant-details"]')).toBeNull();
@@ -115,7 +125,9 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
       .toHaveTextContent('Implementation › Orchestrate');
     await openParticipant();
     const details = document.querySelector('.disc-participant-details');
-    expect(details).toHaveTextContent('disc.targetDiscussionAgent');
+    // KT-1936 — its role chip reads « workflow step », never « discussion agent ».
+    expect(details).toHaveTextContent('ui.agentIdentity.role.workflowStep');
+    expect(details).not.toHaveTextContent('disc.targetDiscussionAgent');
     expect(details).toHaveTextContent('disc.workflowStepAgent');
     expect(details).toHaveTextContent('Implementation');
     expect(details).toHaveTextContent('Orchestrate');
@@ -123,7 +135,7 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     expect(details?.querySelector('.disc-participant-resume')).toBeNull();
   });
 
-  it('shows only an explicitly declared JOIN model and labels it as join metadata', async () => {
+  it('writes the declared JOIN model in clear on the chip, « model not declared » otherwise (KT-1936)', async () => {
     (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
         id: 1, agent_type: 'ClaudeCode', model: 'claude-sonnet-4-5',
@@ -140,12 +152,248 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
       await Promise.resolve();
     });
 
-    expect(document.querySelectorAll('.disc-participant-model')).toHaveLength(0);
+    const chips = document.querySelectorAll('.disc-participant-chip');
+    // State, icon, name, model, role: the model in clear, cut past 17 characters.
+    const chipModel = (i: number) => chips[i].querySelector('[data-testid="agent-identity-model"]');
+    expect(chips[0].querySelector('.ui-agent-identity')).not.toBeNull();
+    expect(chipModel(0)).toHaveTextContent(/^claude-sonnet-4-5$/);
+    expect(chipModel(0)).toHaveAttribute('data-truncate', 'true');
+    expect(chipModel(1)).toHaveAttribute('data-state', 'notDeclared');
+    expect(chipModel(1)).toHaveTextContent('ui.agentIdentity.model.notDeclared');
+    expect(chips[1].querySelector('.ui-agent-identity-role')).toHaveTextContent('ui.agentIdentity.role.cli');
+    // The full id is in the accessible name.
+    expect(chips[0].getAttribute('aria-label'))
+      .toBe('disc.participantDetails(@claude · claude-sonnet-4-5 · ui.agentIdentity.role.cli)');
     await openParticipant();
     const models = document.querySelectorAll('.disc-participant-model');
     expect(models).toHaveLength(1);
     expect(models[0].textContent).toContain('claude-sonnet-4-5');
+    await openParticipant(1);
+    expect(document.querySelector('.disc-participant-model')).toHaveTextContent('ui.agentIdentity.model.notDeclared');
     expect(document.body.textContent).not.toContain('undefined');
+  });
+
+  // KT-2015 — the model a joined session declared was captured once, at join:
+  // the tooltip and the details say so, so it is not read as the model of the
+  // last reply. A native agent and a workflow step declare nothing at join.
+  it('says a joined session\'s model was declared at join, in its tooltip and details; not for a native agent or a workflow step', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, agent_type: 'ClaudeCode', model: 'claude-sonnet-4-5', session_id: 'sess-A', role: 'peer', status: 'active' },
+      { id: 2, agent_type: 'Codex', model: null, session_id: 'sess-B', role: 'peer', status: 'active' },
+      {
+        id: -1, agent_type: 'Vibe', model: 'devstral', session_id: null, role: 'native_resume',
+        status: 'active', wake_mode: 'native_dispatch',
+      },
+      {
+        id: 7, agent_type: 'Kiro', model: 'kiro-model', session_id: 'step', role: 'agent', status: 'active',
+        wake_mode: 'native_dispatch',
+        workflow_step: { run_id: 'r', workflow_id: 'w', workflow_name: 'Impl', step_key: 's', step_name: 'Step' },
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-join-model" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const chips = document.querySelectorAll('.disc-participant-chip');
+    const tooltipOf = (i: number) => {
+      const anchor = chips[i].parentElement as HTMLElement;
+      fireEvent.mouseEnter(anchor);
+      const text = screen.getByRole('tooltip').textContent;
+      fireEvent.keyDown(window, { key: 'Escape' });
+      fireEvent.mouseLeave(anchor);
+      return text;
+    };
+    // The provenance is a third part of the tooltip; the id stays said once.
+    const joined = tooltipOf(0) ?? '';
+    expect(joined.split(' — ')[2]).toBe('disc.modelDeclaredAtJoin');
+    expect(joined.split('claude-sonnet-4-5')).toHaveLength(2);
+    for (const i of [1, 2, 3]) expect(tooltipOf(i)).not.toContain('disc.modelDeclaredAtJoin');
+
+    const modelRow = () => document.querySelector('.disc-participant-model');
+    const sourceLine = () => document.querySelector('.disc-participant-model-source');
+    await openParticipant(0);
+    // The value is the full id alone; the provenance is a line of its own under it.
+    expect(modelRow()).toHaveTextContent(/^claude-sonnet-4-5$/);
+    expect(modelRow()).toHaveAttribute('data-source', 'join');
+    expect(sourceLine()).toHaveTextContent(/^disc\.modelDeclaredAtJoin$/);
+    expect(sourceLine()?.tagName).toBe('DD');
+    expect(sourceLine()?.parentElement).toBe(modelRow()?.parentElement);
+    await openParticipant(1);
+    expect(modelRow()).toHaveTextContent('ui.agentIdentity.model.notDeclared');
+    expect(modelRow()).not.toHaveAttribute('data-source');
+    expect(sourceLine()).toBeNull();
+    await openParticipant(2);
+    expect(modelRow()).toHaveTextContent(/^devstral$/);
+    expect(modelRow()).not.toHaveAttribute('data-source');
+    expect(sourceLine()).toBeNull();
+    await openParticipant(3);
+    expect(modelRow()).toHaveTextContent(/^kiro-model$/);
+    expect(modelRow()).not.toHaveAttribute('data-source');
+    expect(sourceLine()).toBeNull();
+    expect(document.body.textContent).not.toContain('disc.modelDeclaredAtJoin');
+  });
+
+  it('keeps the file\'s contract on the declared JOIN model in line with the UI, in four locales (KT-2015)', () => {
+    const source = readFileSync('src/components/DiscParticipantsHeader.tsx', 'utf8');
+    expect(source).toMatch(/captured at JOIN time[\s\S]*labels it explicitly as such[\s\S]*disc\.modelDeclaredAtJoin/);
+    for (const locale of ['en', 'fr', 'es', 'zh']) {
+      const file = readFileSync(`src/lib/i18n/locales/${locale}.ts`, 'utf8');
+      // One phrase, without the id: the row and the tooltip already show it.
+      const phrase = file.match(/['"]disc\.modelDeclaredAtJoin['"]:\s*(['"])([^'"\n]+)\1/)?.[2];
+      expect(phrase, locale).toBeTruthy();
+      expect(phrase, locale).not.toContain('{0}');
+    }
+  });
+
+  it('keeps the main run on the principal state, and a native one-off agent on its own chip (KT-1936, KT-2026)', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, agent_type: 'Codex', session_id: 'sess-B', role: 'peer', status: 'active' },
+      { id: -2, agent_type: 'Vibe', session_id: null, role: 'native_resume', status: 'active', wake_mode: 'native_dispatch' },
+      {
+        id: -1, agent_type: 'ClaudeCode', session_id: null, role: 'native_resume', status: 'active',
+        wake_mode: 'native_dispatch', presence_state: 'running', is_main_agent: true,
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-main" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The own agent is not a chip: its run is the principal state.
+    const chips = Array.from(document.querySelectorAll('.disc-participant-chip'));
+    expect(chips.map(c => c.querySelector('.ui-agent-identity-name')?.textContent)).toEqual(['@codex', '@vibe']);
+    expect(chips.map(c => c.querySelector('.ui-agent-identity-role')?.textContent)).toEqual([
+      'ui.agentIdentity.role.cli', 'ui.agentIdentity.role.oneOff',
+    ]);
+    // A one-off run that names no model: « model not recorded », never « default model ».
+    expect(chips[1].querySelector('[data-testid="agent-identity-model"]')).toHaveAttribute('data-state', 'notRecorded');
+    const main = document.querySelector('[data-testid="disc-main-run-state"]');
+    expect(main).toHaveAttribute('data-presence', 'running');
+    expect(main?.querySelector('.ui-agent-identity-name')).toBeNull();
+  });
+
+  it('shows one identity for the own agent while it runs: no second chip, no « default model » (KT-2026)', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: -1, agent_type: 'OpenCode', session_id: null, role: 'native_resume', status: 'active',
+        wake_mode: 'native_dispatch', presence_state: 'running', is_main_agent: true,
+        run_model: 'opencode-go/beam-free',
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-once" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const row = document.querySelector('[data-testid="disc-participants-row"]') as HTMLElement;
+    expect(row.querySelectorAll('.disc-participant-chip')).toHaveLength(0);
+    expect(row.querySelectorAll('[data-testid="disc-main-run-state"]')).toHaveLength(1);
+    expect(row.textContent).not.toContain('disc.participantsEmpty');
+    expect(row.textContent).not.toContain('ui.agentIdentity.model.providerDefault');
+    // The run's state is reachable and named: a focusable button, opened by Enter, shown with its reason.
+    const main = screen.getByTestId('disc-main-run-state');
+    expect(main.tagName).toBe('BUTTON');
+    // Inside the strip's own list, so « +N » counts it at any width.
+    expect(main.closest('.kr-participants-strip-list')).not.toBeNull();
+    // WCAG 2.5.3: the visible state is at the start of the name.
+    expect(main.getAttribute('aria-label')).toContain(main.textContent!.trim());
+    expect(main).toHaveAttribute('aria-haspopup', 'dialog');
+    expect(main).toHaveAttribute('aria-expanded', 'false');
+    main.focus();
+    expect(main).toHaveFocus();
+    fireEvent.click(main);
+    expect(main).toHaveAttribute('aria-expanded', 'true');
+    expect(document.querySelector('.disc-participant-details')).not.toBeNull();
+  });
+
+  it('gives every agent kind Kronn knows its own icon, never the generic one (KT-2026)', async () => {
+    // Every AgentType of generated.ts, one one-off run each. The icon map is typed on
+    // AgentType, so a new kind fails the type check until it has an icon here too.
+    const kinds: AgentType[] = [
+      'ClaudeCode', 'Codex', 'OpenCode', 'Vibe', 'GeminiCli', 'Kiro',
+      'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia', 'Custom',
+    ];
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue(
+      kinds.map((agent_type, index) => ({
+        id: -(index + 1), agent_type, session_id: null, role: 'native_resume', status: 'active',
+        wake_mode: 'native_dispatch', presence_state: 'running',
+      })),
+    );
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-icons" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const chips = Array.from(document.querySelectorAll('.disc-participant-chip'));
+    expect(chips.length).toBeGreaterThan(0);
+    for (const chip of chips) {
+      expect(chip.textContent).not.toContain('👤');
+    }
+  });
+
+  it('shows a stalled or quota-exhausted own run with its reason on the principal state (KT-2026)', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: -1, agent_type: 'ClaudeCode', session_id: null, role: 'native_resume', status: 'active',
+        wake_mode: 'native_dispatch', presence_state: 'quota_exhausted', is_main_agent: true,
+        resume_reason: 'quota exhausted until 18:00', resume_since: '2026-11-24T10:00:00Z',
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-quota" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const main = screen.getByTestId('disc-main-run-state');
+    expect(main).toHaveAttribute('data-presence', 'quota_exhausted');
+    fireEvent.click(main);
+    const details = document.querySelector('.disc-participant-details') as HTMLElement;
+    expect(details.textContent).toContain('quota exhausted until 18:00');
+    expect(details.textContent).toContain('disc.presenceQuotaExhausted');
+    // Escape closes the layer and gives the focus back to the state.
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(document.querySelector('.disc-participant-details')).toBeNull();
+    expect(main).toHaveFocus();
+  });
+
+  it('counts the own run in « +N » and lists it when the strip has no room at narrow width (KT-2026)', async () => {
+    // jsdom has no layout: a 0 px line, as at 400 px where the principal badge
+    // takes the width. Every entry is past the edge, the own run included.
+    const restore: Array<() => void> = [];
+    const stub = (prop: 'offsetLeft' | 'offsetWidth' | 'clientWidth' | 'scrollWidth', get: (el: HTMLElement) => number) => {
+      const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, prop);
+      Object.defineProperty(HTMLElement.prototype, prop, { configurable: true, get() { return get(this as HTMLElement); } });
+      restore.push(() => { if (original) Object.defineProperty(HTMLElement.prototype, prop, original); });
+    };
+    const isList = (el: HTMLElement) => el.classList.contains('kr-participants-strip-list');
+    stub('offsetLeft', () => 0);
+    stub('offsetWidth', el => (isList(el) ? 0 : 80));
+    stub('clientWidth', el => (isList(el) ? 0 : 80));
+    stub('scrollWidth', el => (isList(el) ? 160 : 80));
+    try {
+      (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: 1, agent_type: 'Codex', session_id: 'sess-N', role: 'peer', status: 'active' },
+        {
+          id: -1, agent_type: 'ClaudeCode', session_id: null, role: 'native_resume', status: 'active',
+          wake_mode: 'native_dispatch', presence_state: 'running', is_main_agent: true,
+        },
+      ]);
+      await act(async () => {
+        render(<DiscParticipantsHeader discId="d-narrow" t={t} />);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const more = screen.getByTestId('participants-more');
+      expect(more).toHaveTextContent('+2');
+      fireEvent.click(more);
+      const all = screen.getByTestId('participants-all');
+      expect(all.querySelector('.disc-main-run-row')).not.toBeNull();
+      expect(all.textContent).toContain('disc.presenceRunning');
+      expect(all.textContent).toContain('@codex');
+    } finally {
+      restore.forEach(r => r());
+    }
   });
 
   it('copies the exact native resume command only when the CLI exposes an id', async () => {
@@ -483,5 +731,77 @@ describe('freshnessOf — presence thresholds aligned with PollBackoffPolicy (st
     const threeMin = 3 * 60_000;
     expect(freshnessOf(ago(2.5 * 60_000), threeMin)).toBe('idle');
     expect(freshnessOf(ago(4 * 60_000), threeMin)).toBe('away');
+  });
+});
+
+// KT-1936 review round 3 — the details layer lives in document.body, so it is
+// not next to its chip in the Tab order: it takes focus on open, keeps Tab
+// between its controls, closes on Escape (focus back on the chip) and on a
+// press outside. The same contract as the « +N » list (useAnchoredLayer).
+describe('DiscParticipantsHeader — details layer keyboard and pointer', () => {
+  async function renderResumable() {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: 4, agent_type: 'ClaudeCode', session_id: 'sess-r', role: 'peer', status: 'active',
+        conversation_id: 'conv-42', model: 'claude-fable-5-2',
+      },
+    ]);
+    await act(async () => {
+      render(
+        <div>
+          <button type="button">elsewhere</button>
+          <DiscParticipantsHeader discId="d-keys" t={t} />
+        </div>,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return document.querySelector<HTMLButtonElement>('.disc-participant-chip')!;
+  }
+  const layer = () => document.querySelector<HTMLElement>('[data-testid="disc-participant-details"]');
+
+  it('opened from its chip by keyboard, moves focus into the layer and keeps Tab between its controls', async () => {
+    const user = userEvent.setup();
+    const chip = await renderResumable();
+    chip.focus();
+    await user.keyboard('{Enter}');
+    expect(layer()).not.toBeNull();
+    expect(layer()!.contains(document.activeElement)).toBe(true);
+    const close = layer()!.querySelector<HTMLButtonElement>('header button')!;
+    const resume = layer()!.querySelector<HTMLButtonElement>('.disc-participant-resume')!;
+    expect(close).toHaveFocus();
+    await user.tab();
+    expect(resume).toHaveFocus();
+    // Past the last control, Tab comes back to the first: never out of reach.
+    await user.tab();
+    expect(close).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(resume).toHaveFocus();
+  });
+
+  it('closes on Escape and gives focus back to the chip that opened it', async () => {
+    const user = userEvent.setup();
+    const chip = await renderResumable();
+    chip.focus();
+    await user.keyboard('{Enter}');
+    expect(layer()!.contains(document.activeElement)).toBe(true);
+    await user.keyboard('{Escape}');
+    expect(layer()).toBeNull();
+    expect(chip).toHaveFocus();
+    expect(chip).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('closes on a press outside the chip and the layer', async () => {
+    const chip = await renderResumable();
+    await openParticipant();
+    expect(layer()).not.toBeNull();
+    // A press inside the layer keeps it open.
+    fireEvent.pointerDown(layer()!.querySelector('dl')!);
+    expect(layer()).not.toBeNull();
+    await act(async () => {
+      fireEvent.pointerDown(screen.getByRole('button', { name: 'elsewhere' }));
+    });
+    expect(layer()).toBeNull();
+    expect(chip).toHaveAttribute('aria-expanded', 'false');
   });
 });

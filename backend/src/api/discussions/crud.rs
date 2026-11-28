@@ -442,6 +442,16 @@ pub async fn create(
         },
         None => None,
     };
+    // KT-1993 — an exact model pinned at creation, checked by `normalize_exact_model`.
+    let explicit_model = match req
+        .model
+        .as_deref()
+        .map(crate::models::setup::normalize_exact_model)
+        .transpose()
+    {
+        Ok(model) => model,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
     // Input validation
     if req.title.len() > MAX_TITLE_LEN {
         return Json(ApiResponse::err(format!(
@@ -455,15 +465,27 @@ pub async fn create(
     // The model a Quick Prompt pins is stamped on the discussion at insert
     // (same agent + connection rule as below), so size the first prompt against
     // it exactly as `send_message` will size the next ones.
-    let pinned_model = launch_qp.as_ref().and_then(|(qp, _)| {
-        (qp.agent == req.agent && qp.connection_id == req.connection_id)
-            .then(|| {
-                qp.agent_settings
-                    .as_ref()
-                    .and_then(|settings| settings.model.clone())
-            })
-            .flatten()
+    let pinned_model = explicit_model.clone().or_else(|| {
+        launch_qp.as_ref().and_then(|(qp, _)| {
+            (qp.agent == req.agent && qp.connection_id == req.connection_id)
+                .then(|| {
+                    qp.agent_settings
+                        .as_ref()
+                        .and_then(|settings| settings.model.clone())
+                })
+                .flatten()
+        })
     });
+    // KT-2023 — the discussion's own target carries the creation mode, which
+    // is not a mode chosen for the first message: kept, it would drop the
+    // exact model the discussion was created with on its first turn.
+    drop_creation_mode_of_own_target(
+        &mut req.initial_targets,
+        &req.agent,
+        req.connection_id.as_deref(),
+        req.tier,
+        pinned_model.as_deref(),
+    );
     let prompt_limit = super::prompt_limit::resolve_for_targets(
         &state,
         &req.initial_targets,
@@ -673,10 +695,14 @@ pub async fn create(
     match state
         .db
         .with_conn(move |conn| {
-            // 0.8.10 — a QP-launched discussion inherits the QP's explicit model
-            // (agent_settings.model), so a standalone launch runs on the same
-            // model the QP is pinned to. Set it before insert; None → tier resolve.
-            if let Some((qp, _)) = &launch_qp {
+            // KT-1993 — an explicit model from the request wins over the one a
+            // Quick Prompt would hand down.
+            if let Some(model) = explicit_model {
+                disc.model = Some(model);
+            } else if let Some((qp, _)) = &launch_qp {
+                // 0.8.10 — a QP-launched discussion inherits the QP's explicit model
+                // (agent_settings.model), so a standalone launch runs on the same
+                // model the QP is pinned to. Set it before insert; None → tier resolve.
                 if qp.agent == disc.agent && qp.connection_id == disc.connection_id {
                     disc.model = qp
                         .agent_settings
@@ -828,6 +854,33 @@ pub async fn create(
     }
 }
 
+/// KT-2023 — a target's tier is a per-message mode, which drops the
+/// discussion's exact model for that turn (KT-1993). The tier a creation
+/// writes on the discussion's own target (its agent and connection) is the
+/// discussion's mode, not one chosen for the first message: when the
+/// discussion holds an exact model (`model`), that tier is removed so the first
+/// turn runs the model like every later one. A different tier on that target,
+/// a mention and a second participant keep theirs.
+pub(crate) fn drop_creation_mode_of_own_target(
+    targets: &mut [MessageTarget],
+    agent: &AgentType,
+    connection_id: Option<&str>,
+    tier: ModelTier,
+    model: Option<&str>,
+) {
+    if model.is_none() {
+        return;
+    }
+    for target in targets.iter_mut().filter(|target| {
+        target.kind == MessageTargetKind::DiscussionAgent
+            && &target.agent_type == agent
+            && target.connection_id.as_deref() == connection_id
+            && target.tier == Some(tier)
+    }) {
+        target.tier = None;
+    }
+}
+
 /// The detached worktree a review discussion runs in, and the repository it
 /// hangs off (needed to remove it again).
 struct ReviewWorkspace {
@@ -898,6 +951,15 @@ pub async fn update(
     let agent_handoffs_unlimited = req.agent_handoffs_unlimited;
     let attach_agents = req.attach_agents;
     let execution_variable_retention_days = req.execution_variable_retention_days;
+    // KT-1993 — `Some(Some(id))` is checked by `normalize_exact_model`; `Some(None)`
+    // clears; absent leaves the stored model alone.
+    let new_model = match req.model {
+        Some(Some(model)) => match crate::models::setup::normalize_exact_model(&model) {
+            Ok(model) => Some(Some(model)),
+            Err(error) => return Json(ApiResponse::err(error)),
+        },
+        other => other,
+    };
 
     // Reject conflicting directives on update
     if let Some(ref ids) = directive_ids {
@@ -1036,6 +1098,24 @@ pub async fn update(
                 updated = crate::db::discussions::update_execution_variable_retention_days(
                     conn, &id, days,
                 )? || updated;
+            }
+            // KT-1993 — applied last, so an explicit model wins over the clears the
+            // agent, connection and tier updates above just made. A tier sent
+            // without a model drops the exact model: choosing a mode is choosing
+            // the tier, not the model.
+            match (&new_model, tier.is_some()) {
+                (Some(model), _) => {
+                    updated = crate::db::discussions::update_discussion_model(
+                        conn,
+                        &id,
+                        model.as_deref(),
+                    )? || updated;
+                }
+                (None, true) => {
+                    updated = crate::db::discussions::update_discussion_model(conn, &id, None)?
+                        || updated;
+                }
+                (None, false) => {}
             }
             Ok(updated)
         })
@@ -1776,6 +1856,10 @@ pub async fn delete_message(
 }
 
 #[cfg(all(test, feature = "full-tests"))]
+#[path = "crud_exact_model_first_turn_tests.rs"]
+mod exact_model_first_turn_tests;
+
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -1960,6 +2044,845 @@ mod tests {
         assert_eq!(targets[0].tier, Some(ModelTier::Reasoning));
         assert_eq!(targets[1].agent_type, AgentType::Ollama);
         assert_eq!(targets[1].tier, Some(ModelTier::Economy));
+    }
+
+    /// Self-contained fixture for the Quick Prompt and connection cases (not the
+    /// `full-tests` one): a `general` discussion, two Custom connections, and the
+    /// `global` Quick Prompt, agent Custom with the saved model `saved-model`.
+    async fn exact_model_prompt_state() -> AppState {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        db.with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at, message_count, workspace_mode)
+                 VALUES ('general', 'General', ?1, ?1, 0, 'Direct')",
+                rusqlite::params![now],
+            )?;
+            for (id, alias) in [("saved-provider", "saved"), ("saved-provider-2", "saved2")] {
+                let connection = serde_json::from_value(serde_json::json!({
+                    "id": id, "display_name": id, "mention_alias": alias,
+                    "endpoint": "http://127.0.0.1:1", "credential_slug": alias,
+                    "origin_preset": "other",
+                    "created_at": "2026-09-22T00:00:00Z", "updated_at": "2026-09-22T00:00:00Z"
+                }))?;
+                crate::db::external_api_connections::insert(conn, &connection)?;
+            }
+            let prompt = serde_json::from_value(serde_json::json!({
+                "id": "global", "name": "Résumé", "icon": "Q", "description": "Summarize a topic",
+                "prompt_template": "Summarize {{topic}}", "project_id": null,
+                "variables": [{"name": "topic", "label": "Topic", "placeholder": "Kronn", "required": true}],
+                "agent": "Custom", "connection_id": "saved-provider", "tier": "reasoning",
+                "agent_settings": {"model": "saved-model", "reasoning_effort": "high", "max_tokens": 3210},
+                "skill_ids": [], "profile_ids": [], "directive_ids": [],
+                "created_at": "2026-09-22T00:00:00Z", "updated_at": "2026-09-22T00:00:00Z"
+            }))?;
+            crate::db::quick_prompts::insert_quick_prompt(conn, &prompt)?;
+            Ok(())
+        })
+        .await
+        .expect("prompt fixture seeded");
+        let mut config = crate::core::config::default_config();
+        config.encryption_secret = Some(crate::core::crypto::generate_secret());
+        AppState::new_defaults(
+            Arc::new(RwLock::new(config)),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    async fn exact_model_stored(state: &AppState, id: &str) -> Option<String> {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &id))
+            .await
+            .expect("discussion loaded")
+            .and_then(|discussion| discussion.model)
+    }
+
+    async fn exact_model_seed(state: &AppState, id: &str, model: &str) {
+        let (id, model) = (id.to_string(), model.to_string());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::update_discussion_model(conn, &id, Some(&model))
+            })
+            .await
+            .expect("model seeded");
+    }
+
+    async fn exact_model_update(state: &AppState, id: &str, body: serde_json::Value) -> String {
+        let request: UpdateDiscussionRequest =
+            serde_json::from_value(body).expect("valid update payload");
+        let response = update(State(state.clone()), Path(id.to_string()), Json(request)).await;
+        response.0.error.unwrap_or_default()
+    }
+
+    fn exact_model_create_request(model: Option<&str>) -> CreateDiscussionRequest {
+        serde_json::from_value(serde_json::json!({
+            "project_id": null,
+            "title": "Exact model",
+            "agent": "ClaudeCode",
+            "language": "en",
+            "initial_prompt": "hello",
+            "tier": "reasoning",
+            "model": model,
+        }))
+        .expect("valid create payload")
+    }
+
+    #[tokio::test]
+    async fn exact_model_create_pins_the_requested_model_over_the_tier() {
+        let state = state_with_disc("exact-create").await;
+        let response = create(
+            State(state.clone()),
+            Json(exact_model_create_request(Some("  claude-exact-7  "))),
+        )
+        .await;
+        let discussion = response.0.data.expect("discussion created");
+        assert_eq!(discussion.model.as_deref(), Some("claude-exact-7"));
+        assert_eq!(
+            exact_model_stored(&state, &discussion.id).await.as_deref(),
+            Some("claude-exact-7"),
+            "the trimmed exact model is persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_create_without_a_model_keeps_the_tier_only() {
+        let state = state_with_disc("exact-create-none").await;
+        let response = create(State(state.clone()), Json(exact_model_create_request(None))).await;
+        let discussion = response.0.data.expect("discussion created");
+        assert_eq!(discussion.model, None);
+        assert_eq!(exact_model_stored(&state, &discussion.id).await, None);
+    }
+
+    fn exact_model_qp_launch_request(model: Option<&str>) -> CreateDiscussionRequest {
+        let mut body = serde_json::json!({
+            "project_id": null,
+            "title": "Quick Prompt launch",
+            "agent": "Custom",
+            "connection_id": "saved-provider",
+            "language": "en",
+            "initial_prompt": "",
+            "tier": "reasoning",
+            "originating_qp_id": "global",
+            "launch_variables": { "topic": "Kronn" },
+        });
+        if let Some(model) = model {
+            body["model"] = serde_json::json!(model);
+        }
+        serde_json::from_value(body).expect("valid quick prompt launch payload")
+    }
+
+    #[tokio::test]
+    async fn exact_model_quick_prompt_launch_keeps_an_explicit_model_over_the_prompts() {
+        let state = exact_model_prompt_state().await;
+        let response = create(
+            State(state.clone()),
+            Json(exact_model_qp_launch_request(Some("request-model"))),
+        )
+        .await;
+        assert!(response.0.success, "launch refused: {:?}", response.0.error);
+        let id = response.0.data.expect("discussion created").id;
+        assert_eq!(
+            exact_model_stored(&state, &id).await.as_deref(),
+            Some("request-model"),
+            "the request's model wins over the Quick Prompt's saved model"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_quick_prompt_launch_inherits_the_prompt_model_without_one() {
+        let state = exact_model_prompt_state().await;
+        let response = create(
+            State(state.clone()),
+            Json(exact_model_qp_launch_request(None)),
+        )
+        .await;
+        assert!(response.0.success, "launch refused: {:?}", response.0.error);
+        let id = response.0.data.expect("discussion created").id;
+        assert_eq!(
+            exact_model_stored(&state, &id).await.as_deref(),
+            Some("saved-model"),
+            "without a request model, the Quick Prompt's model is inherited"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_create_refuses_an_invalid_id_and_creates_nothing() {
+        let state = state_with_disc("exact-refuse-create").await;
+        let too_long = "m".repeat(crate::models::setup::MAX_MODEL_ID_CHARS + 1);
+        for bad in [
+            "   ",
+            "bad\nmodel",
+            too_long.as_str(),
+            "--dangerously-skip-permissions",
+            " -c ",
+        ] {
+            let response = create(
+                State(state.clone()),
+                Json(exact_model_create_request(Some(bad))),
+            )
+            .await;
+            assert!(!response.0.success, "{bad:?} must be refused");
+            let error = response.0.error.unwrap_or_default();
+            assert!(error.contains("model"), "clear error: {error}");
+        }
+        let count: i64 = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM discussions WHERE title = 'Exact model'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .expect("count");
+        assert_eq!(count, 0, "a refused create persists no discussion");
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_set_keep_and_clear_follow_the_three_states() {
+        let state = state_with_disc("exact-update").await;
+        let error = exact_model_update(
+            &state,
+            "exact-update",
+            serde_json::json!({ "model": "claude-set-1" }),
+        )
+        .await;
+        assert!(error.is_empty(), "set refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "exact-update").await.as_deref(),
+            Some("claude-set-1")
+        );
+
+        // Absent field: the stored model is unchanged.
+        let error = exact_model_update(
+            &state,
+            "exact-update",
+            serde_json::json!({ "title": "Renamed" }),
+        )
+        .await;
+        assert!(error.is_empty(), "unrelated update refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "exact-update").await.as_deref(),
+            Some("claude-set-1"),
+            "an update without the field leaves the model"
+        );
+
+        // Explicit null: cleared, the tier applies again.
+        let error =
+            exact_model_update(&state, "exact-update", serde_json::json!({ "model": null })).await;
+        assert!(error.is_empty(), "clear refused: {error}");
+        assert_eq!(exact_model_stored(&state, "exact-update").await, None);
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_refuses_an_invalid_id_and_keeps_the_stored_one() {
+        let state = state_with_disc("exact-refuse-update").await;
+        exact_model_seed(&state, "exact-refuse-update", "claude-kept").await;
+        for bad in ["bad\u{7}model", "--dangerously-skip-permissions", " -c "] {
+            let error = exact_model_update(
+                &state,
+                "exact-refuse-update",
+                serde_json::json!({ "model": bad }),
+            )
+            .await;
+            assert!(error.contains("model"), "clear error for {bad:?}: {error}");
+        }
+        assert_eq!(
+            exact_model_stored(&state, "exact-refuse-update")
+                .await
+                .as_deref(),
+            Some("claude-kept"),
+            "a refused update changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_clears_it_when_the_agent_changes() {
+        let state = state_with_disc("exact-agent").await;
+        exact_model_seed(&state, "exact-agent", "claude-old").await;
+        let error = exact_model_update(
+            &state,
+            "exact-agent",
+            serde_json::json!({ "agent": "Codex" }),
+        )
+        .await;
+        assert!(error.is_empty(), "agent change refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "exact-agent").await,
+            None,
+            "an agent change without a model clears the exact model"
+        );
+
+        // An explicit `model: null` sent with an agent change leaves no model either.
+        exact_model_seed(&state, "exact-agent", "claude-again").await;
+        let error = exact_model_update(
+            &state,
+            "exact-agent",
+            serde_json::json!({ "agent": "ClaudeCode", "model": null }),
+        )
+        .await;
+        assert!(error.is_empty(), "agent change with null refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "exact-agent").await,
+            None,
+            "an explicit null with the agent change leaves no model"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_keeps_a_model_sent_with_an_agent_change() {
+        let state = state_with_disc("exact-agent-model").await;
+        exact_model_seed(&state, "exact-agent-model", "claude-old").await;
+        let error = exact_model_update(
+            &state,
+            "exact-agent-model",
+            serde_json::json!({ "agent": "Codex", "model": "codex-new" }),
+        )
+        .await;
+        assert!(error.is_empty(), "agent and model refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "exact-agent-model")
+                .await
+                .as_deref(),
+            Some("codex-new"),
+            "the model sent with the change is the one that stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_clears_it_when_the_connection_changes() {
+        let state = state_with_disc("exact-connection").await;
+        state
+            .db
+            .with_conn(|conn| {
+                // The row this id names is not needed to test the clear: the
+                // seeded id only has to be a sticky connection to change from.
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+                crate::db::discussions::update_discussion_connection(
+                    conn,
+                    "exact-connection",
+                    Some("conn-a"),
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("connection seeded");
+        exact_model_seed(&state, "exact-connection", "claude-behind-a").await;
+        let error = exact_model_update(
+            &state,
+            "exact-connection",
+            serde_json::json!({ "connection_id": null }),
+        )
+        .await;
+        assert!(error.is_empty(), "connection change refused: {error}");
+        assert_eq!(exact_model_stored(&state, "exact-connection").await, None);
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_clears_it_when_a_tier_is_chosen_without_a_model() {
+        let state = state_with_disc("exact-tier").await;
+        exact_model_seed(&state, "exact-tier", "claude-pinned").await;
+        let error = exact_model_update(
+            &state,
+            "exact-tier",
+            serde_json::json!({ "tier": "economy" }),
+        )
+        .await;
+        assert!(error.is_empty(), "tier refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "exact-tier").await,
+            None,
+            "choosing a tier means leaving the exact model"
+        );
+
+        exact_model_seed(&state, "exact-tier", "claude-again").await;
+        let error = exact_model_update(
+            &state,
+            "exact-tier",
+            serde_json::json!({ "tier": "reasoning", "model": "claude-explicit" }),
+        )
+        .await;
+        assert!(error.is_empty(), "tier and model refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "exact-tier").await.as_deref(),
+            Some("claude-explicit"),
+            "a model sent with the tier wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_clears_it_when_the_stored_tier_is_chosen_again() {
+        let state = state_with_disc("exact-same-tier").await;
+        exact_model_seed(&state, "exact-same-tier", "claude-picked").await;
+        // Read the tier the row holds now rather than assuming one.
+        let held = exact_model_loaded(&state, "exact-same-tier").await.tier;
+        let error = exact_model_update(
+            &state,
+            "exact-same-tier",
+            serde_json::json!({ "tier": serde_json::to_value(held).expect("tier serialises") }),
+        )
+        .await;
+        assert!(error.is_empty(), "same tier refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "exact-same-tier").await,
+            None,
+            "choosing the tier the discussion already has still leaves the exact model"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_keeps_a_model_sent_with_a_connection_change_and_a_repeat() {
+        // The fixture holds two Custom connections, so switching between them is
+        // a real change and not a repeat.
+        let state = exact_model_prompt_state().await;
+        let error = exact_model_update(
+            &state,
+            "general",
+            serde_json::json!({ "agent": "Custom", "connection_id": "saved-provider" }),
+        )
+        .await;
+        assert!(error.is_empty(), "custom connection refused: {error}");
+        exact_model_seed(&state, "general", "custom-old").await;
+
+        // (a) A new connection sent together with a model keeps that model.
+        let error = exact_model_update(
+            &state,
+            "general",
+            serde_json::json!({ "connection_id": "saved-provider-2", "model": "custom-new" }),
+        )
+        .await;
+        assert!(error.is_empty(), "connection and model refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "general").await.as_deref(),
+            Some("custom-new"),
+            "the model sent with a connection change is the one that stays"
+        );
+
+        // (b) The same agent and the same connection, without a model, keep it.
+        let error = exact_model_update(
+            &state,
+            "general",
+            serde_json::json!({ "agent": "Custom", "connection_id": "saved-provider-2" }),
+        )
+        .await;
+        assert!(error.is_empty(), "repeat refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "general").await.as_deref(),
+            Some("custom-new"),
+            "re-sending the same agent and connection leaves the model"
+        );
+    }
+
+    async fn exact_model_loaded(state: &AppState, id: &str) -> crate::models::Discussion {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &id))
+            .await
+            .expect("loaded")
+            .expect("discussion exists")
+    }
+
+    #[tokio::test]
+    async fn exact_model_run_resolves_the_exact_model_and_not_the_tier() {
+        use crate::api::discussions::streaming::turn_exact_model;
+        let state = state_with_disc("exact-run").await;
+        let response = create(
+            State(state.clone()),
+            Json(exact_model_create_request(Some("claude-exact-run"))),
+        )
+        .await;
+        let discussion_id = response.0.data.expect("discussion created").id;
+        let discussion = exact_model_loaded(&state, &discussion_id).await;
+        assert_eq!(discussion.tier, ModelTier::Reasoning);
+        // The dispatch's choice (streaming.rs): the discussion's exact model wins over its tier.
+        let resolved = turn_exact_model(discussion.model.as_deref(), true, None, None);
+        assert_eq!(resolved.as_deref(), Some("claude-exact-run"));
+        let tier_only = crate::agents::runner::effective_model_flag(
+            None,
+            &AgentType::ClaudeCode,
+            discussion.tier,
+            None,
+        );
+        let flag = crate::agents::runner::effective_model_flag(
+            resolved.as_deref(),
+            &AgentType::ClaudeCode,
+            discussion.tier,
+            None,
+        );
+        assert_eq!(flag.as_deref(), Some("claude-exact-run"));
+        assert_ne!(flag, tier_only, "the tier alone would run another model");
+    }
+
+    #[tokio::test]
+    async fn exact_model_run_a_per_message_tier_override_ignores_it() {
+        use crate::api::discussions::streaming::turn_exact_model;
+        let state = state_with_disc("exact-run-override").await;
+        let response = create(
+            State(state.clone()),
+            Json(exact_model_create_request(Some("claude-exact-override"))),
+        )
+        .await;
+        let discussion_id = response.0.data.expect("discussion created").id;
+        let discussion = exact_model_loaded(&state, &discussion_id).await;
+        let resolved = turn_exact_model(
+            discussion.model.as_deref(),
+            true,
+            Some(ModelTier::Economy),
+            None,
+        );
+        assert_eq!(
+            resolved, None,
+            "a one-off tier drops the exact model for this turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_run_a_fallback_pin_wins_over_the_exact_model() {
+        use crate::api::discussions::streaming::turn_exact_model;
+        use crate::core::agent_fallback::Pin;
+        let state = state_with_disc("exact-run-pin").await;
+        let response = create(
+            State(state.clone()),
+            Json(exact_model_create_request(Some("claude-exact-discussion"))),
+        )
+        .await;
+        let discussion_id = response.0.data.expect("discussion created").id;
+        let discussion = exact_model_loaded(&state, &discussion_id).await;
+        let pin = Pin {
+            from_agent: AgentType::Vibe,
+            to_agent: AgentType::ClaudeCode,
+            model: Some("claude-fallback-link".into()),
+            tier: ModelTier::Default,
+            hops: 1,
+        };
+        assert_eq!(
+            turn_exact_model(discussion.model.as_deref(), true, None, Some(&pin)).as_deref(),
+            Some("claude-fallback-link"),
+            "a continued turn runs on the link's own model"
+        );
+        assert_eq!(
+            turn_exact_model(
+                discussion.model.as_deref(),
+                true,
+                Some(ModelTier::Economy),
+                Some(&pin)
+            )
+            .as_deref(),
+            Some("claude-fallback-link"),
+            "the fallback pin outranks a tier override too"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_run_a_tier_only_pin_never_hands_the_discussion_model_on() {
+        use crate::api::discussions::streaming::turn_exact_model;
+        use crate::core::agent_fallback::Pin;
+        let state = state_with_disc("exact-run-tier-pin").await;
+        let response = create(
+            State(state.clone()),
+            Json(exact_model_create_request(Some("claude-exact-tier-pin"))),
+        )
+        .await;
+        let discussion_id = response.0.data.expect("discussion created").id;
+        let discussion = exact_model_loaded(&state, &discussion_id).await;
+        // A link that carries no model: the fallback agent must not receive
+        // the refused agent's exact model id.
+        let pin = Pin {
+            from_agent: AgentType::Vibe,
+            to_agent: AgentType::ClaudeCode,
+            model: None,
+            tier: ModelTier::Default,
+            hops: 1,
+        };
+        assert_eq!(
+            turn_exact_model(discussion.model.as_deref(), true, None, Some(&pin)),
+            None,
+            "a tier-only pin leaves the model to the tier"
+        );
+        assert_eq!(
+            turn_exact_model(
+                discussion.model.as_deref(),
+                true,
+                Some(ModelTier::Economy),
+                Some(&pin)
+            ),
+            None,
+            "a tier-only pin with a tier override is still model-free"
+        );
+    }
+
+    /// KT-2012 — an OpenCode discussion holding the exact model
+    /// `opencode-go/beam-free`, in reasoning mode, with Claude Code as a second
+    /// participant.
+    async fn exact_model_opencode_room() -> crate::models::Discussion {
+        let state = state_with_disc("exact-turn-owner").await;
+        let mut discussion = exact_model_loaded(&state, "exact-turn-owner").await;
+        discussion.agent = AgentType::OpenCode;
+        discussion.connection_id = None;
+        discussion.tier = ModelTier::Reasoning;
+        discussion.model = Some("opencode-go/beam-free".into());
+        discussion.participants = vec![AgentType::OpenCode, AgentType::ClaudeCode];
+        discussion
+    }
+
+    fn exact_model_http_connection(id: &str, preset: &str) -> ExternalApiConnection {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "display_name": id, "mention_alias": id,
+            "endpoint": "http://127.0.0.1:1", "credential_slug": id,
+            "origin_preset": preset,
+            "economy_model": format!("{id}-eco"),
+            "default_model": format!("{id}-default"),
+            "reasoning_model": format!("{id}-reasoning"),
+            "created_at": "2026-11-22T00:00:00Z", "updated_at": "2026-11-22T00:00:00Z"
+        }))
+        .expect("valid connection")
+    }
+
+    #[tokio::test]
+    async fn exact_model_turn_a_mentioned_cli_agent_runs_its_own_mode() {
+        use crate::api::discussions::streaming::resolve_turn_model;
+        let discussion = exact_model_opencode_room().await;
+        // `@claude`, no per-message mode: Claude Code's own reasoning model.
+        let resolved =
+            resolve_turn_model(&discussion, &AgentType::ClaudeCode, None, None, None, None);
+        assert_eq!(resolved, None, "the OpenCode model is never handed on");
+        let flag = crate::agents::runner::effective_model_flag(
+            resolved.as_deref(),
+            &AgentType::ClaudeCode,
+            discussion.tier,
+            None,
+        );
+        assert_eq!(
+            flag,
+            crate::agents::runner::effective_model_flag(
+                None,
+                &AgentType::ClaudeCode,
+                ModelTier::Reasoning,
+                None
+            ),
+            "Claude Code starts on its own model for the discussion's mode"
+        );
+        assert_ne!(flag.as_deref(), Some("opencode-go/beam-free"));
+
+        // `@claude` with a per-message mode: still its own model, for that mode.
+        assert_eq!(
+            resolve_turn_model(
+                &discussion,
+                &AgentType::ClaudeCode,
+                None,
+                None,
+                Some(ModelTier::Economy),
+                None
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_turn_a_second_participant_runs_its_own_mode() {
+        use crate::api::discussions::streaming::{
+            resolve_turn_model, turn_exact_model, turn_runs_on_discussion_target,
+        };
+        let discussion = exact_model_opencode_room().await;
+        let participant = discussion.participants[1].clone();
+        assert_ne!(participant, discussion.agent);
+        assert!(!turn_runs_on_discussion_target(
+            &discussion.agent,
+            None,
+            &participant,
+            None
+        ));
+        for tier_override in [None, Some(ModelTier::Default)] {
+            assert_eq!(
+                resolve_turn_model(&discussion, &participant, None, None, tier_override, None),
+                None,
+                "a second participant never receives the room's exact model ({tier_override:?})"
+            );
+            assert_eq!(
+                turn_exact_model(discussion.model.as_deref(), false, tier_override, None),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_model_turn_a_mentioned_connection_gets_its_own_model_for_the_mode() {
+        use crate::api::discussions::streaming::resolve_turn_model;
+        // A CLI discussion: `@litellm` runs on its connection, never on OpenCode's model.
+        let discussion = exact_model_opencode_room().await;
+        let litellm = exact_model_http_connection("lite", "lite_llm");
+        assert_eq!(
+            resolve_turn_model(
+                &discussion,
+                &AgentType::LiteLlm,
+                Some("lite"),
+                Some(&litellm),
+                None,
+                None
+            )
+            .as_deref(),
+            Some("lite-reasoning"),
+            "the discussion's mode on the connection's own map"
+        );
+        assert_eq!(
+            resolve_turn_model(
+                &discussion,
+                &AgentType::LiteLlm,
+                Some("lite"),
+                Some(&litellm),
+                Some(ModelTier::Economy),
+                None
+            )
+            .as_deref(),
+            Some("lite-eco"),
+            "the per-message mode on the connection's own map"
+        );
+
+        // A room on connection A with an exact model: `@b` is the same agent
+        // type on another connection, and gets B's own model.
+        let mut room = discussion.clone();
+        room.agent = AgentType::Custom;
+        room.connection_id = Some("conn-a".into());
+        room.model = Some("conn-a-exact".into());
+        let other = exact_model_http_connection("conn-b", "other");
+        assert_eq!(
+            resolve_turn_model(
+                &room,
+                &AgentType::Custom,
+                Some("conn-b"),
+                Some(&other),
+                None,
+                None
+            )
+            .as_deref(),
+            Some("conn-b-reasoning")
+        );
+        assert_eq!(
+            resolve_turn_model(
+                &room,
+                &AgentType::Custom,
+                Some("conn-b"),
+                Some(&other),
+                Some(ModelTier::Economy),
+                None
+            )
+            .as_deref(),
+            Some("conn-b-eco")
+        );
+
+        // The room's own connection, inherited or named by the dispatch, keeps it.
+        let own = exact_model_http_connection("conn-a", "other");
+        for dispatch_connection in [None, Some("conn-a")] {
+            assert_eq!(
+                resolve_turn_model(
+                    &room,
+                    &AgentType::Custom,
+                    dispatch_connection,
+                    Some(&own),
+                    None,
+                    None
+                )
+                .as_deref(),
+                Some("conn-a-exact"),
+                "{dispatch_connection:?}"
+            );
+        }
+        // …and a per-message mode drops it for the connection's own map.
+        assert_eq!(
+            resolve_turn_model(
+                &room,
+                &AgentType::Custom,
+                None,
+                Some(&own),
+                Some(ModelTier::Economy),
+                None
+            )
+            .as_deref(),
+            Some("conn-a-eco")
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_turn_of_the_discussions_own_agent_keeps_it() {
+        use crate::api::discussions::streaming::resolve_turn_model;
+        use crate::core::agent_fallback::Pin;
+        let discussion = exact_model_opencode_room().await;
+        assert_eq!(
+            resolve_turn_model(&discussion, &AgentType::OpenCode, None, None, None, None)
+                .as_deref(),
+            Some("opencode-go/beam-free")
+        );
+        assert_eq!(
+            resolve_turn_model(
+                &discussion,
+                &AgentType::OpenCode,
+                None,
+                None,
+                Some(ModelTier::Economy),
+                None
+            ),
+            None,
+            "a per-message mode still drops it"
+        );
+        // A fallback pin still wins, whoever runs the continued turn.
+        let pin = Pin {
+            from_agent: AgentType::OpenCode,
+            to_agent: AgentType::ClaudeCode,
+            model: Some("claude-link".into()),
+            tier: ModelTier::Reasoning,
+            hops: 1,
+        };
+        for agent in [AgentType::OpenCode, AgentType::ClaudeCode] {
+            assert_eq!(
+                resolve_turn_model(&discussion, &agent, None, None, None, Some(&pin)).as_deref(),
+                Some("claude-link")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_model_update_clears_it_when_switching_between_two_connections() {
+        let state = exact_model_prompt_state().await;
+        let error = exact_model_update(
+            &state,
+            "general",
+            serde_json::json!({ "agent": "Custom", "connection_id": "saved-provider" }),
+        )
+        .await;
+        assert!(error.is_empty(), "custom connection refused: {error}");
+        exact_model_seed(&state, "general", "custom-of-a").await;
+        let error = exact_model_update(
+            &state,
+            "general",
+            serde_json::json!({ "connection_id": "saved-provider-2" }),
+        )
+        .await;
+        assert!(error.is_empty(), "connection switch refused: {error}");
+        assert_eq!(
+            exact_model_stored(&state, "general").await,
+            None,
+            "the previous connection's model does not follow onto the new one"
+        );
+    }
+
+    #[test]
+    fn exact_model_normalize_refuses_a_leading_dash_and_keeps_inner_spaces() {
+        use crate::models::setup::normalize_exact_model;
+        for bad in ["-c", "--dangerously-skip-permissions", "  -c  "] {
+            let error = normalize_exact_model(bad).expect_err("a dash-led id is refused");
+            assert!(error.contains("'-'"), "clear error: {error}");
+        }
+        assert_eq!(
+            normalize_exact_model("  model with space  ").as_deref(),
+            Ok("model with space"),
+            "inner spaces are one argv token, kept"
+        );
     }
 
     #[tokio::test]

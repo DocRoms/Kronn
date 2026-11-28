@@ -1525,27 +1525,6 @@
    Ghost "outbox" bubbles at the scrollable transcript tail while the agent streams.
    User-aligned (right), dashed + accent-tinted to read as "pending, not yet
    sent", with a subtle pulse on the newest one. */
-.disc-queued-msgs {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 0 0;
-  align-items: flex-end;
-}
-/* One growing bubble — a column of lines, one per queued part. */
-.disc-queued-bubble {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  max-width: 80%;
-  padding: 6px 10px;
-  border-radius: var(--kr-r-md);
-  background: rgba(var(--kr-accent-rgb), 0.08);
-  border: 1px dashed rgba(var(--kr-accent-rgb), 0.45);
-  color: var(--kr-text-secondary);
-  font-size: var(--kr-fs-sm);
-  animation: disc-queued-pulse 1.6s ease-in-out infinite;
-}
 .disc-queued-head {
   display: flex;
   align-items: center;
@@ -1602,47 +1581,6 @@
 }
 .disc-queued-line[data-status='failed'] .disc-queued-status {
   color: var(--kr-error-soft);
-}
-.disc-queued-retry {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-  border: 0;
-  background: transparent;
-  color: var(--kr-accent);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--kr-fs-xs);
-  padding: 2px 3px;
-}
-.disc-queued-retry:hover { text-decoration: underline; }
-.disc-queued-cancel {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  color: var(--kr-text-ghost);
-  cursor: pointer;
-  padding: 2px;
-  border-radius: var(--kr-r-sm);
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-.disc-queued-line:hover .disc-queued-cancel { opacity: 1; }
-.disc-queued-cancel:hover {
-  color: var(--kr-error-soft);
-  background: rgba(var(--kr-error-rgb), 0.12);
-}
-.disc-queued-cancel:disabled {
-  cursor: default;
-  opacity: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .disc-queued-bubble { animation: none; }
 }
 
 .disc-unseen-badge {
@@ -2009,12 +1947,36 @@ button.disc-contact-open {
   white-space: nowrap;
 }
 
-/* The chip strip shares row 2 with the agent control and the details toggle,
-   so it takes the space those two leave and scrolls inside it. */
-.disc-chat-header-sub > .disc-participants-row {
-  flex: 1 1 auto;
-  min-width: 0;
-  width: auto;
+/* KT-1936 review round 2 — the room header's agent line is ONE line that
+   scrolls sideways (HeaderScrollLine): the main agent's trigger first, then
+   its toggle, the participant chips, the scope and the trust chips; the
+   « +N » counter is pinned at its right end, outside what scrolls.
+
+   The trigger has a floor it never goes under: its name whole, its mode icon,
+   its role chip whole, and its model cut no shorter than 8 characters before
+   the ellipsis (9ch with it; an unknown state follows the same rule). Above
+   that floor the model gives way first: its width follows the line's (cqw,
+   the line is the container), from 17 characters on a wide line down to the
+   floor on a narrow one. What the floor does not fit, the line scrolls. */
+.kr-header-line .disc-native-agent-control,
+.kr-header-line .kr-agent-switch,
+.kr-header-line .kr-agent-switch-static,
+.kr-header-line .kr-agent-switch-btn,
+.kr-header-line .kr-agent-switch-identity,
+.kr-header-line .kr-agent-switch-custom {
+  flex-shrink: 0;
+  max-width: none;
+}
+
+.kr-header-line .kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-name,
+.kr-header-line .kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-role {
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.kr-header-line .kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-model {
+  flex-shrink: 0;
+  max-width: clamp(9ch, 100cqw - 18rem, 17ch);
 }
 
 /* 0.8.5 — short disc-id pill in ChatHeader. Click → copy full UUID
@@ -2272,9 +2234,10 @@ button.disc-contact-open {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  /* Visible, not scrollable: the participant popover opens downwards out of
-     this row, and an `overflow` here clipped it. The chip strip does its own
-     scrolling instead. */
+  /* Visible, not scrollable: the row itself never clips. In the room header
+     its content is a HeaderScrollLine, which does the scrolling, and every
+     layer opened from it (participant details, +N list, picker) is a floating
+     layer in document.body (KT-1936). */
   overflow: visible;
   white-space: nowrap;
 }
@@ -2350,6 +2313,7 @@ button.disc-contact-open {
 
 .disc-native-agent-toggle {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   width: 20px;
@@ -3480,63 +3444,6 @@ button.disc-contact-open {
   cursor: default;
 }
 
-.disc-reply-action {
-  gap: 4px;
-  padding: 2px 6px;
-  color: var(--kr-text-dim);
-  font-size: 10px;
-}
-
-.disc-tool-calls-group[data-search-current="true"] {
-  border-radius: var(--kr-r-sm);
-  box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.32);
-}
-
-.disc-reply-header {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 100%;
-  margin: 4px 0 8px;
-  padding: 6px 8px;
-  border: 0;
-  border-left: 2px solid var(--kr-accent);
-  border-radius: 0 var(--kr-r-sm) var(--kr-r-sm) 0;
-  background: var(--kr-bg-hover);
-  color: var(--kr-text-tertiary);
-  font: inherit;
-  font-size: var(--kr-fs-xs);
-  text-align: left;
-  cursor: pointer;
-}
-
-.disc-reply-header:hover:not(:disabled) {
-  background: var(--kr-accent-bg);
-  color: var(--kr-accent-ink);
-}
-
-.disc-reply-header code {
-  flex-shrink: 0;
-  padding: 1px 4px;
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-sm);
-  color: var(--kr-text-secondary);
-  font-size: 10px;
-}
-
-.disc-reply-header[data-missing="true"] {
-  border-left-color: var(--kr-text-ghost);
-  opacity: 0.7;
-  cursor: default;
-}
-
-.disc-reply-action {
-  gap: 4px;
-  padding: 2px 6px;
-  color: var(--kr-text-dim);
-  font-size: 10px;
-}
-
 .disc-tool-calls-group[data-search-current="true"] {
   border-radius: var(--kr-r-sm);
   box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.32);
@@ -3753,32 +3660,6 @@ button.disc-contact-open {
   color: var(--kr-text-tertiary);
   margin-top: 4px;
   text-align: right;
-}
-
-.disc-msg-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 4px;
-}
-
-.disc-msg-footer-right {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-3);
-}
-
-.disc-delete-message-action:hover:not(:disabled),
-.disc-delete-message-action:focus-visible:not(:disabled) {
-  background: rgba(var(--kr-error-rgb), 0.1);
-  color: var(--kr-error);
-}
-
-.disc-msg-time-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--kr-sp-3);
 }
 
 .disc-reply-backlink {
@@ -4084,6 +3965,26 @@ button.disc-contact-open {
   font-size: var(--kr-fs-base);
   color: var(--kr-text-muted);
   font-style: italic;
+}
+
+.disc-orch-systems {
+  margin: var(--kr-sp-3) 0 0;
+  padding-left: 18px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-orch-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-sm);
+  font-style: italic;
+}
+
+.disc-streaming-logs {
+  margin-top: var(--kr-sp-3);
 }
 
 /* ── CTA banners (briefing, validation, bootstrap) ────── */
@@ -5463,6 +5364,33 @@ button.disc-contact-open {
   z-index: 10;
 }
 
+/* KT-1885 — the @ menu is the shared agent picker's palette: its rows, tier
+   choices and availability badges; it only keeps its place above the field.
+   Its height is measured (ChatInput's `boundary`): from the composer's top to
+   the message list's top, so it never slides under the header or a banner,
+   and it scrolls inside. This cap only holds until that measure runs. The
+   new discussion form measures its own room against its layout.
+   KT-1994 — its width never exceeds its anchor's (`100%`: the composer, the
+   new discussion's prompt field, both `position: relative`), so it cannot
+   pass the column that clips it (`.disc-messages-col`, overflow hidden);
+   no floor wider than the anchor: the three tier columns hold at 368px. */
+.disc-mention-popover.kr-agent-switch-palette {
+  width: min(520px, 100%, calc(100vw - 2 * var(--kr-space-4)));
+  max-height: calc(100vh - 2 * var(--kr-space-8));
+  overflow-y: auto;
+  background: var(--kr-bg-elevated);
+}
+
+/* KT-1994 — from 768px the menu may take up to 760px when its anchor (the
+   composer, the prompt field) is that wide, so each tier's model id fits on
+   one line beside its agent (the tracks are measured in
+   AgentSwitchPicker.css). */
+@media (min-width: 768px) {
+  .disc-mention-popover.kr-agent-switch-palette {
+    width: min(760px, 100%, calc(100vw - 2 * var(--kr-space-4)));
+  }
+}
+
 .disc-mention-item {
   display: flex;
   align-items: center;
@@ -5475,93 +5403,12 @@ button.disc-contact-open {
   text-align: left;
 }
 
-.disc-mention-main {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-4);
-  min-width: 0;
-  flex: 1;
-  padding: 8px 6px 8px 12px;
-  color: inherit;
-  background: transparent;
-  border: 0;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
 .disc-mention-item[data-highlighted="true"] {
   background: rgba(var(--kr-accent-rgb), 0.1);
 }
 
 .disc-mention-item[data-highlighted="false"] {
   background: transparent;
-}
-
-.disc-mention-item-disabled {
-  gap: var(--kr-sp-4);
-  padding: 8px 12px;
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.disc-mention-tier-choices {
-  display: inline-flex;
-  gap: 2px;
-  padding-right: 8px;
-}
-
-.disc-mention-tier-choice {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-width: 26px;
-  min-height: 24px;
-  padding: 2px;
-  color: var(--kr-text-muted);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--kr-r-md);
-  cursor: pointer;
-}
-
-.disc-mention-catalog-meta {
-  font-size: 8px;
-  line-height: 1.2;
-  max-width: 72px;
-  overflow-wrap: anywhere;
-}
-
-.disc-mention-catalog-meta[data-catalog-warning='true'] {
-  color: var(--kr-warning);
-}
-
-.disc-mention-tier-choice:disabled,
-.disc-mention-main:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.disc-mention-tier-choice:hover,
-.disc-mention-tier-choice:focus-visible {
-  background: var(--kr-bg-subtle);
-  border-color: var(--kr-border-subtle);
-}
-
-.disc-mention-tier-choice[data-current="true"] {
-  background: rgba(var(--kr-accent-rgb), 0.12);
-  border-color: rgba(var(--kr-accent-rgb), 0.3);
-}
-
-/* The tier the user is moving through with Left/Right, as opposed to
-   `data-current` which is the tier already in effect for that row. Both can be
-   visible at once — the reader needs to see where they came from and where they
-   are — so this one is a ring rather than a fill. */
-.disc-mention-tier-choice[data-keyboard-selected="true"] {
-  color: var(--kr-text-primary);
-  border-color: rgba(var(--kr-accent-rgb), 0.85);
-  box-shadow: 0 0 0 1px rgba(var(--kr-accent-rgb), 0.45) inset;
 }
 
 .disc-mention-routing-mode {
@@ -5577,21 +5424,6 @@ button.disc-contact-open {
   border: 1px solid var(--kr-border-faint);
   border-radius: var(--kr-r-pill);
   font-size: var(--kr-fs-sm);
-}
-
-.disc-mention-group {
-  padding: var(--kr-sp-6) var(--kr-sp-12) var(--kr-sp-4);
-  color: var(--kr-text-faint);
-  background: var(--kr-bg-subtle);
-  border-top: 1px solid var(--kr-border-faint);
-  font-size: var(--kr-fs-xs);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.disc-mention-group:first-child {
-  border-top: 0;
 }
 
 .disc-routing-help-content p {
@@ -6483,7 +6315,8 @@ button.disc-contact-open {
 
 .disc-restricted-warn-text {
   font-size: var(--kr-fs-xs);
-  color: rgba(var(--kr-warning-rgb), 0.7);
+  /* As in Notice: the tone is on the icon and the frame, the text stays AA. */
+  color: var(--kr-text-secondary);
   line-height: 1.4;
 }
 
@@ -6498,9 +6331,6 @@ button.disc-contact-open {
   display: flex;
   align-items: center;
   gap: var(--kr-sp-3);
-}
-.disc-rtk-warn .disc-restricted-warn-text {
-  color: rgba(var(--kr-error-rgb), 0.85);
 }
 
 /* ── Workspace mode toggle ────────────────────────────── */
@@ -7338,42 +7168,6 @@ button.disc-contact-open {
   flex-shrink: 0;
 }
 
-/* ── Copy button in messages ──────────────────────────── */
-.disc-copy-btn {
-  background: none;
-  border: none;
-  padding: 1px 4px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: var(--kr-fs-2xs);
-  transition: color 0.15s;
-}
-
-.disc-copy-btn[data-copied="true"] {
-  color: var(--kr-success);
-}
-
-.disc-copy-btn[data-copied="false"] {
-  color: var(--kr-text-ghost);
-}
-
-/* ── TTS button in message ────────────────────────────── */
-.disc-tts-btn {
-  background: none;
-  border: none;
-  border-radius: var(--kr-r-sm);
-  padding: 2px 6px;
-  cursor: pointer;
-  color: var(--kr-text-ghost);
-  font-size: var(--kr-fs-xs);
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  margin-top: 4px;
-}
-
 /* ── Edit message area ────────────────────────────────── */
 .disc-edit-layout {
   display: flex;
@@ -7548,8 +7342,6 @@ button.disc-contact-open {
 .disc-md ol { margin: 4px 0; padding-left: 20px; }
 .disc-md li { margin: 2px 0; }
 .disc-md code { background: var(--kr-bg-active); padding: 1px 5px; border-radius: 4px; font-size: 12px; font-family: monospace; }
-.disc-md pre { background: var(--kr-bg-code); color: var(--kr-text-on-dark); padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 6px 0; border: 1px solid var(--kr-border-light); --kr-accent: #c8ff00; }
-.disc-md pre code, .disc-md-pre-code { background: none; padding: 0; font-size: 12px; font-family: monospace; color: var(--kr-accent); }
 .disc-md table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
 .disc-md th { border: 1px solid var(--kr-border-strong); padding: 6px 10px; background: var(--kr-bg-hover); font-weight: 600; text-align: left; }
 .disc-md td { border: 1px solid var(--kr-border); padding: 5px 10px; }
@@ -7558,30 +7350,11 @@ button.disc-contact-open {
 .disc-md a { color: var(--kr-accent); text-decoration: underline; }
 .disc-md strong { font-weight: 700; color: var(--kr-text-primary); }
 
-/* ── Copyable block overlay button ────────────────────── */
+/* ── A table's named Copy, over its corner ────────────── */
 .disc-copyable-block-btn {
   position: absolute;
   top: 4px;
   right: 4px;
-  background: var(--kr-bg-overlay);
-  border: 1px solid var(--kr-border-medium);
-  border-radius: var(--kr-r-sm);
-  padding: 2px 6px;
-  cursor: pointer;
-  font-size: var(--kr-fs-2xs);
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  transition: color 0.15s, opacity 0.15s;
-  opacity: 0.6;
-}
-
-.disc-copyable-block-btn[data-copied="true"] {
-  color: var(--kr-success);
-}
-
-.disc-copyable-block-btn[data-copied="false"] {
-  color: var(--kr-text-muted);
 }
 
 /* keyframes spin + pulse defined globally in reset.css */
@@ -8001,7 +7774,7 @@ button.disc-contact-open {
   border: none;
   cursor: pointer;
   text-align: left;
-  font-size: var(--kr-fs-xs, 11px);
+  font-size: var(--kr-fs-xs);
   color: var(--kr-text-tertiary, #888);
 }
 .disc-injected-context-toggle:hover { background: rgba(var(--kr-accent-rgb, 99,102,241), 0.07); }
@@ -8167,12 +7940,21 @@ button.disc-contact-open {
 /* Out-of-context discussion notes stay in their real chronological position
    and are filtered from the composer toolbar instead of floating over the
    message stream. */
-.disc-note-row {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--kr-sp-2);
+/* A note is the `note` variant of the message: a strip across the thread,
+   not a bubble on one side. */
+.disc-msg-row[data-role="note"] {
   width: min(92%, 860px);
   margin: var(--kr-sp-1) auto;
+}
+
+.disc-msg-bubble[data-role="note"] {
+  display: flex;
+  flex: 1;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+  max-width: none;
+  padding: 0;
+  border-radius: 0;
 }
 
 .disc-note {
@@ -8236,13 +8018,13 @@ button.disc-contact-open {
   font-size: var(--kr-fs-sm);
 }
 
-.disc-note-row > .disc-message-id-pill {
+.disc-msg-bubble[data-role="note"] > .disc-message-id-pill {
   flex: 0 0 auto;
   margin-top: 7px;
 }
 
 @media (max-width: 640px) {
-  .disc-note-row {
+  .disc-msg-row[data-role="note"] {
     width: 100%;
   }
 

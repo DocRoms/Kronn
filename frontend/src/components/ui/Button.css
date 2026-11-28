@@ -1,0 +1,112 @@
+/* KT-1880 — Button and IconButton share this base. Design tokens only; no
+   theme is named: each theme sets the tokens. */
+
+.ui-button,
+.ui-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-space-1);
+  min-height: var(--kr-control-h-md);
+  padding: 0 var(--kr-space-3);
+  font-family: inherit;
+  font-size: var(--kr-type-md);
+  font-weight: var(--kr-weight-medium);
+  line-height: 1.2;
+  white-space: nowrap;
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+  cursor: pointer;
+  transition:
+    background-color var(--kr-duration-fast) ease-out,
+    border-color var(--kr-duration-fast) ease-out,
+    color var(--kr-duration-fast) ease-out;
+}
+
+/* Hover and press lay the theme's hover tint over the fill, whatever it is:
+   on an accent fill the tint moves away from --kr-text-on-accent. */
+.ui-button:hover:not(:disabled),
+.ui-icon-button:hover:not(:disabled) {
+  background-image: linear-gradient(var(--kr-bg-hover), var(--kr-bg-hover));
+}
+
+.ui-button:active:not(:disabled),
+.ui-icon-button:active:not(:disabled) {
+  background-image: linear-gradient(var(--kr-bg-hover-strong), var(--kr-bg-hover-strong));
+}
+
+.ui-button:disabled,
+.ui-icon-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Variants ─────────────────────────────────────────────────────────── */
+.ui-button[data-variant="primary"],
+.ui-icon-button[data-variant="primary"] {
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent);
+  border-color: var(--kr-accent);
+  font-weight: var(--kr-weight-semibold);
+}
+
+.ui-button[data-variant="ghost"],
+.ui-icon-button[data-variant="ghost"] {
+  color: var(--kr-text-secondary);
+  background-color: transparent;
+  border-color: transparent;
+}
+
+.ui-button[data-variant="ghost"]:hover:not(:disabled),
+.ui-icon-button[data-variant="ghost"]:hover:not(:disabled) {
+  color: var(--kr-text-primary);
+}
+
+.ui-button[data-variant="danger"],
+.ui-icon-button[data-variant="danger"] {
+  color: var(--kr-status-danger);
+  background-color: rgba(var(--kr-danger-rgb), 0.08);
+  border-color: rgba(var(--kr-danger-rgb), 0.4);
+}
+
+/* ── Sizes ────────────────────────────────────────────────────────────── */
+.ui-button[data-size="sm"],
+.ui-icon-button[data-size="sm"] {
+  min-height: var(--kr-control-h-sm);
+  padding: 0 var(--kr-space-2);
+  font-size: var(--kr-type-sm);
+}
+
+.ui-button[data-size="lg"],
+.ui-icon-button[data-size="lg"] {
+  min-height: var(--kr-control-h-lg);
+  padding: 0 var(--kr-space-4);
+  font-size: var(--kr-type-lg);
+}
+
+.ui-button-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* An icon follows the text size of its button. */
+.ui-button-icon svg {
+  width: 1.25em;
+  height: 1.25em;
+}
+
+.ui-button-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A finger needs a larger target than a pointer: every size grows to the
+   touch height on a coarse pointer. */
+@media (pointer: coarse) {
+  .ui-button,
+  .ui-button[data-size="sm"] {
+    min-height: var(--kr-control-h-touch);
+  }
+}

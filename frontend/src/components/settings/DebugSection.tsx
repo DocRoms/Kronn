@@ -21,7 +21,11 @@ import type { ToastFn } from '../../hooks/useToast';
 // `ExternalLink` for the GitHub-issue CTA. Brand icons live in
 // `simple-icons` if we ever want to re-add them.
 import { AlertTriangle, Bug, Copy, ExternalLink, HardDrive, MessageSquare, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { SettingsFold } from './SettingsFold';
 import '../../pages/SettingsPage.css';
+
+/** KT-1923 — the anchor and the fold of the log viewer (`settings-debug-logs` in lib/routes). */
+const DEBUG_LOGS_FOLD_ID = 'settings-debug-logs';
 
 export interface DebugSectionProps {
   serverDebugMode: boolean;
@@ -403,11 +407,12 @@ export function DebugSection({
           </div>
         )}
 
-        {/* Live viewer — always visible (we capture at info even when
-            debug_mode is off, so there's always SOMETHING useful to show). */}
+        {/* Live viewer — the logs are read at once (we capture at info even
+            when debug_mode is off, and the bug report sends them); KT-1923:
+            the viewer itself is folded until opened. */}
         <div className="mt-8">
+          <SettingsFold id={DEBUG_LOGS_FOLD_ID} title={t('settings.debugLogsTitle')} anchored>
           <div className="flex-row gap-4 mb-3" style={{ alignItems: 'center' }}>
-            <span className="label" style={{ marginBottom: 0 }}>{t('settings.debugLogsTitle')}</span>
             <div className="flex-row gap-2" style={{ marginLeft: 'auto', alignItems: 'center' }}>
               <button
                 type="button"
@@ -475,6 +480,7 @@ export function DebugSection({
           <div className="set-hint-xs">
             {t('settings.debugLogsHint')}
           </div>
+          </SettingsFold>
 
           {/* Report-a-bug CTA — visually distinct so it stands out from
               the refresh/copy/clear row above (those act on the viewer;

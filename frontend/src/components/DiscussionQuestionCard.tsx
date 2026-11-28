@@ -5,7 +5,7 @@
 // had already scrolled past. This card stays until it is answered, says which
 // lot it blocks, and records the answer as a durable message so whoever picks
 // the work up later reads the decision rather than asking again.
-import { useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { AlertOctagon, CheckCircle2, Loader2, MinusCircle } from 'lucide-react';
 import { discussions as discussionsApi } from '../lib/api';
 import {
@@ -20,6 +20,7 @@ import { userError } from '../lib/userError';
 import type { DiscussionQuestion, DiscussionQuestionAnswer } from '../types/generated';
 import { AppLink } from './AppLink';
 import { TRUST_SETTINGS_SECTION } from './TrustLevel';
+import './ui/visuallyHidden.css';
 import './DiscussionQuestionCard.css';
 
 export interface DiscussionQuestionCardProps {
@@ -132,11 +133,33 @@ function QuestionBody({
   /// both read it as false and both post. A decision is not something to send
   /// twice because a mouse bounced.
   const inFlight = useRef(false);
+  const declineHintId = useId();
+  // KT-1955 — where the keyboard lands once a refusal settles. Success
+  // unmounts the button, which would drop the focus to <body> and send a
+  // keyboard user refusing several stale cards back to the top of the page;
+  // failure re-enables it after Chromium's focus fixup has already blurred it.
+  const sectionRef = useRef<HTMLElement>(null);
+  const declineButtonRef = useRef<HTMLButtonElement>(null);
+  const [declineFocus, setDeclineFocus] = useState<'card' | 'button' | null>(null);
 
   const answered = question.state === 'answered' && question.answer !== null;
   // A refusal resolves the question too: the card must stop offering to decide.
   const declined = question.state === 'declined';
+  // KT-1955 — refused without a message: closed, no answer, nothing launched.
+  const cancelled = question.state === 'cancelled';
   const items = question.items ?? [];
+
+  useEffect(() => {
+    if (declineFocus === null || sending) return;
+    if (declineFocus === 'card') {
+      if (!declined && !cancelled) return;
+      sectionRef.current?.focus();
+    } else {
+      // The read-back may show the card was settled meanwhile: no button then.
+      (declineButtonRef.current ?? sectionRef.current)?.focus();
+    }
+    setDeclineFocus(null);
+  }, [declineFocus, sending, declined, cancelled]);
   const hasItems = items.length > 0;
   const canSend = hasItems
     ? items.every(item => itemSelections[item.id] !== undefined)
@@ -195,14 +218,18 @@ function QuestionBody({
     setError('');
     try {
       // The free-text field doubles as the reason — the operator has usually
-      // already typed why they will not decide.
+      // already typed why they will not decide. Left empty, the server only
+      // closes the card (KT-1955): nobody is told, nothing is launched. No
+      // confirmation either way: the card shows at once who refused and when.
       const updated = await discussionsApi.declineQuestion(discussionId, question.id, {
         reason: text.trim() || null,
         idempotency_key: idempotencyKey.current,
       });
+      setDeclineFocus('card');
       applyAnsweredQuestion(discussionId, updated);
     } catch (cause) {
       setError(userError(cause));
+      setDeclineFocus('button');
       refreshDiscussionQuestions(discussionId);
     } finally {
       inFlight.current = false;
@@ -245,17 +272,21 @@ function QuestionBody({
 
   return (
     <section
+      ref={sectionRef}
+      // Focusable by script only, so a refusal can land the keyboard on its result.
+      tabIndex={-1}
       className="disc-question-card"
-      data-state={answered ? 'answered' : declined ? 'declined' : 'pending'}
+      data-state={answered ? 'answered' : declined ? 'declined' : cancelled ? 'cancelled' : 'pending'}
       data-testid={`disc-question-${question.id}`}
     >
       <header className="disc-question-head">
         {answered ? <CheckCircle2 size={13} />
-          : declined ? <MinusCircle size={13} />
+          : declined || cancelled ? <MinusCircle size={13} />
           : <AlertOctagon size={13} />}
         <span className="disc-question-kind">
           {t(answered ? 'disc.question.answeredTitle'
-            : declined ? 'disc.question.declinedTitle'
+            // Refused without a message reads as a refusal: same title.
+            : declined || cancelled ? 'disc.question.declinedTitle'
             : 'disc.question.pendingTitle')}
         </span>
         {question.task_ref && (
@@ -289,7 +320,7 @@ function QuestionBody({
           <span className="disc-question-td-errors-text">{question.td_errors}</span>
         </p>
       )}
-      {question.requester_workflow_step &&!question.requester_workflow_step.active && (
+      {!cancelled && question.requester_workflow_step && !question.requester_workflow_step.active && (
         <p
           className="disc-question-unread-warning"
           data-testid="disc-question-finished-step-warning"
@@ -304,7 +335,9 @@ function QuestionBody({
         </p>
       )}
 
-      {question.answer ? (
+      {cancelled ? (
+        <CancelledSummary question={question} />
+      ) : question.answer ? (
         <AnsweredSummary question={question} answer={question.answer} declined={declined} />
       ) : (
         <>
@@ -418,21 +451,60 @@ function QuestionBody({
               {t('disc.question.comment')}
             </button>
             {/* Refusing needs no selection: not deciding IS the decision, and
-                until now the only way to clear a question was to answer it. */}
+                until now the only way to clear a question was to answer it.
+                KT-1955 — its description says both outcomes: with a message
+                the agent receives it; without one the card only closes. */}
             <button
               type="button"
               className="disc-question-decline"
+              ref={declineButtonRef}
               onClick={() => void decline()}
               disabled={sending}
               title={t('disc.question.declineHint')}
+              aria-describedby={declineHintId}
               data-testid="disc-question-decline"
             >
               {t('disc.question.decline')}
             </button>
+            <span id={declineHintId} className="ui-visually-hidden">
+              {t('disc.question.declineHint')}
+            </span>
           </div>
         </>
       )}
     </section>
+  );
+}
+
+/** A card refused without a message (KT-1955): that the agent was not told and
+ *  nothing was launched, who refused it and when, and — when something was
+ *  parked on it — that it does not resume. When it was the last card of an
+ *  ended step's message, the earlier answers waited for it and were passed on
+ *  then (KT-1401): the card says so instead of claiming nothing was sent. */
+function CancelledSummary({ question }: { question: DiscussionQuestion }) {
+  const { t } = useT();
+  const parked = question.resume !== null || question.task_ref !== null || isElevationCard(question);
+  const relayed = question.cancellation?.relayed_answers === true;
+  return (
+    <div className="disc-question-answer" data-testid="disc-question-cancelled">
+      <p className="disc-question-answer-text">
+        {t(relayed ? 'disc.question.declinedSilentlyRelayed' : 'disc.question.declinedSilently')}
+      </p>
+      {question.cancellation && (
+        <p className="disc-question-answer-meta" data-testid="disc-question-cancelled-by">
+          {t(
+            'disc.question.declinedBy',
+            question.cancellation.author_pseudo,
+            new Date(question.cancellation.cancelled_at).toLocaleString(),
+          )}
+        </p>
+      )}
+      {parked && (
+        <p className="disc-question-context" data-testid="disc-question-cancelled-parked">
+          {t('disc.question.declinedParked')}
+        </p>
+      )}
+    </div>
   );
 }
 

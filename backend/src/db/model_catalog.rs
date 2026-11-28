@@ -84,13 +84,12 @@ fn validate_runtime_target_projection(
 
 fn validate_manual_fields(req: &UpsertManualModelRequest) -> Result<()> {
     validate_runtime_target_projection(&req.runtime_target_id, &req.agent_type)?;
-    for (name, value) in [
-        ("model_id", req.model_id.as_str()),
-        ("display_name", req.display_name.as_str()),
-    ] {
-        if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-            anyhow::bail!("{name} must contain 1 to 256 printable characters");
-        }
+    // KT-1998 — the shared model id rule, the one every other save uses.
+    crate::models::setup::check_model_id(&req.model_id)
+        .map_err(|error| anyhow::anyhow!("model_id: {error}"))?;
+    let name = req.display_name.as_str();
+    if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+        anyhow::bail!("display_name must contain 1 to 256 printable characters");
     }
     if req.capabilities.len() > 16 || req.reasoning_modes.len() > 16 {
         anyhow::bail!("capabilities and reasoning modes are limited to 16 values");
@@ -231,14 +230,29 @@ fn parse_cost_hint(s: &str) -> Option<ModelCostHint> {
     }
 }
 
+/// The English sentence the reconciliation stores for a model absent from the
+/// latest successful live catalogue (read back as a code, KT-2003).
+pub const DISAPPEARED_DETAIL: &str = "absent from the latest successful live catalog";
+
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> {
     let capabilities_json: String = row.get(10)?;
     let reasoning_modes_json: String = row.get(11)?;
+    let model_id: String = row.get(3)?;
+    let unavailable_reason = row
+        .get::<_, Option<String>>(8)?
+        .as_deref()
+        .map(parse_reason);
+    let unavailable_detail: Option<String> = row.get(9)?;
+    let unavailable_code = crate::core::model_catalog::entry_reason_code(
+        &model_id,
+        unavailable_reason,
+        unavailable_detail.as_deref(),
+    );
     Ok(CatalogModelEntry {
         id: row.get(0)?,
         runtime_target_id: row.get(1)?,
         agent_type: parse_agent_type(&row.get::<_, String>(2)?)?,
-        model_id: row.get(3)?,
+        model_id,
         display_name: row.get(4)?,
         resolved_model: row.get(22)?,
         description: row.get(23)?,
@@ -249,11 +263,9 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
         } else {
             ModelAvailability::Unavailable
         },
-        unavailable_reason: row
-            .get::<_, Option<String>>(8)?
-            .as_deref()
-            .map(parse_reason),
-        unavailable_detail: row.get(9)?,
+        unavailable_reason,
+        unavailable_detail,
+        unavailable_code,
         capabilities: serde_json::from_str(&capabilities_json).unwrap_or_default(),
         reasoning_modes: serde_json::from_str(&reasoning_modes_json).unwrap_or_default(),
         default_reasoning_mode: row.get(12)?,
@@ -689,7 +701,7 @@ pub fn reconcile_listing(
                         "UPDATE model_catalog_entries SET provenance = 'cached', availability = 'unavailable', \
                          unavailable_reason = 'disappeared', unavailable_detail = ?1, last_checked_at = ?2, \
                          updated_at = ?2 WHERE id = ?3",
-                        params!["absent from the latest successful live catalog", now, entry.id],
+                        params![DISAPPEARED_DETAIL, now, entry.id],
                     )?;
                 }
             }
@@ -1483,6 +1495,7 @@ mod tests {
             availability: ModelAvailability::Available,
             unavailable_reason: None,
             unavailable_detail: None,
+            unavailable_code: None,
             capabilities: vec![],
             reasoning_modes: vec![],
             default_reasoning_mode: None,

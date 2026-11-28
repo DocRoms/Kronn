@@ -288,7 +288,7 @@ describe('WorkflowWizard — navigation', () => {
     fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'Named' } });
     fireEvent.click(screen.getByText('wiz.next'));
     // Simple step 1 exposes the agent picker.
-    expect(screen.getByLabelText('wiz.agentAndTierLabel')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ })).toBeInTheDocument();
   });
 
   it('Previous walks back to the name step', () => {
@@ -610,7 +610,7 @@ describe('WorkflowWizard — step list handlers', () => {
     toStepsPage([mkStep({ multi_agent_review: reviewer }), mkStep({ name: 'beta' })]);
     fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
 
-    const picker = screen.getByRole('button', { name: 'wiz.multiReview.reviewer' });
+    const picker = screen.getByRole('button', { name: /^wiz\.multiReview\.reviewer( — |$)/ });
     fireEvent.click(picker);
     expect(screen.getByRole('searchbox', { name: 'agentPicker.search' })).toHaveFocus();
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -629,7 +629,7 @@ describe('WorkflowWizard — step list handlers', () => {
       reviewer_agent: 'Codex', reviewer_tier: null, debate_prompt: 'Review the result.', max_rounds: 3,
     } }), mkStep({ name: 'beta' })]);
     fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
-    fireEvent.click(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' }));
+    fireEvent.click(screen.getByRole('button', { name: /^wiz\.multiReview\.reviewer( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Codex · disc.tier.reasoning' }));
     fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
     fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
@@ -644,7 +644,7 @@ describe('WorkflowWizard — step list handlers', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
     fireEvent.click(screen.getByText('wiz.multiReview.toggle'));
-    expect(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' })).toHaveTextContent('Codex');
+    expect(screen.getByRole('button', { name: /^wiz\.multiReview\.reviewer( — |$)/ })).toHaveTextContent('Codex');
     expect(screen.getByLabelText('wiz.multiReview.rounds')).toHaveValue(3);
     expect(screen.getByLabelText('wiz.multiReview.prompt')).toHaveValue('wiz.multiReview.defaultPrompt');
     fireEvent.click(screen.getByText('wiz.next'));
@@ -662,7 +662,7 @@ describe('WorkflowWizard — step list handlers', () => {
       reviewer_agent: 'Codex', reviewer_tier: 'reasoning', debate_prompt: 'Review the result.', max_rounds: 3,
     } }), mkStep({ name: 'beta' })]);
     fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
-    fireEvent.click(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' }));
+    fireEvent.click(screen.getByRole('button', { name: /^wiz\.multiReview\.reviewer( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Codex · config.defaultModel' }));
     fireEvent.click(screen.getByText('wiz.next'));
     fireEvent.click(screen.getByText('wiz.next'));
@@ -763,9 +763,9 @@ describe('WorkflowWizard — save handler', () => {
     renderWizard({ installedAgentTypes: ['ClaudeCode', 'OpenCode'] });
     fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'OpenCode workflow' } });
     fireEvent.click(screen.getByText('wiz.next'));
-    fireEvent.click(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(screen.getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'OpenCode · disc.tier.default' }));
-    expect(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' })).toHaveTextContent('OpenCode');
+    expect(screen.getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ })).toHaveTextContent('OpenCode');
     fireEvent.change(screen.getByLabelText('wiz.promptLabel'), { target: { value: 'review the repository' } });
     fireEvent.click(screen.getByText('wiz.next'));
     fireEvent.click(screen.getByText('wiz.create'));
@@ -801,7 +801,7 @@ describe('WorkflowWizard — save handler', () => {
       steps: [mkStep({ agent: 'LiteLlm', agent_settings: settings })],
     }) });
     fireEvent.click(screen.getByText('wiz.next'));
-    fireEvent.click(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(screen.getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: label }));
     fireEvent.click(screen.getByText('wiz.next'));
     fireEvent.click(screen.getByText('wiz.save'));
@@ -833,9 +833,9 @@ describe('WorkflowWizard — save handler', () => {
       } })] }),
     });
     fireEvent.click(screen.getByText('wiz.next'));
-    fireEvent.click(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(screen.getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Team Two · disc.tier.default' }));
-    expect(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' })).toHaveTextContent('Team Two');
+    expect(screen.getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ })).toHaveTextContent('Team Two');
     fireEvent.click(screen.getByText('wiz.next'));
     fireEvent.click(screen.getByText('wiz.save'));
     await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
@@ -1451,7 +1451,7 @@ describe('WorkflowWizard — simple task page', () => {
     renderWizard({ installedAgentTypes: ['ClaudeCode', 'Codex'] });
     fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'TaskWF' } });
     fireEvent.click(screen.getByText('wiz.next'));
-    const agentPicker = screen.getByLabelText('wiz.agentAndTierLabel');
+    const agentPicker = screen.getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ });
     fireEvent.click(agentPicker);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.reasoning' }));
     expect(agentPicker).toHaveTextContent('Codex');

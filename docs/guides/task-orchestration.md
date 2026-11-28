@@ -235,9 +235,9 @@ guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
 [src: file: backend/src/models/setup.rs:1179-1195#agent_handoff_paid_limit]
-[src: file: backend/src/db/discussions.rs:1703-1704#MAX_AGENT_HANDOFF_DEPTH]
-[src: file: backend/src/db/discussions.rs:1711-1746#agent_handoff_root]
-[src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
+[src: file: backend/src/db/discussions.rs:1713-1714#MAX_AGENT_HANDOFF_DEPTH]
+[src: file: backend/src/db/discussions.rs:1721-1756#agent_handoff_root]
+[src: file: backend/src/db/discussions.rs:1931-1971#cli_mention_targets]
 [src: file: backend/src/db/discussions.rs:2020-2063#already_scheduled]
 
 ### Warming, queueing and which clock applies
@@ -258,7 +258,7 @@ The activity clock default is 20 minutes
 (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
 wins). A tool call in flight (a cold build run by the worker itself) is activity
 up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
-[src: file: backend/src/db/orchestration.rs:8604-8609#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8632-8637#DEFAULT_ACTIVITY_TIMEOUT_SECS]
 
 **Queue deadline.** An execution queued longer than the queue deadline is
 reported, never interrupted: the principal room receives one orchestration
@@ -269,8 +269,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8636-8639#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8647-8649#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8660-8663#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8671-8673#queue_wait_reported]
 
 ### Highlight a message without changing the task
 

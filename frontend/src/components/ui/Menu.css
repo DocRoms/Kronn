@@ -1,0 +1,85 @@
+/* KT-1880 — Menu. Rendered in <body> at a fixed position (anchor.ts). */
+
+.ui-menu {
+  z-index: var(--kr-z-popover);
+  display: flex;
+  flex-direction: column;
+  min-width: calc(var(--kr-space-8) * 4);
+  max-width: calc(var(--kr-space-8) * 7);
+  /* anchor.ts sets a max-height when the window has less room than the menu. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--kr-space-1);
+  background-color: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-radius-surface);
+  box-shadow: var(--kr-shadow-popover);
+  animation: ui-menu-in var(--kr-duration-base) ease-out;
+}
+
+@keyframes ui-menu-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.ui-menu-item {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: var(--kr-space-2);
+  width: 100%;
+  min-height: var(--kr-control-h-md);
+  padding: 0 var(--kr-space-3);
+  font-family: inherit;
+  font-size: var(--kr-type-md);
+  text-align: left;
+  color: var(--kr-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--kr-radius-control);
+  cursor: pointer;
+  transition: background-color var(--kr-duration-fast) ease-out;
+}
+
+.ui-menu-item:hover:not(:disabled),
+.ui-menu-item:focus-visible {
+  background-color: var(--kr-bg-hover-strong);
+}
+
+.ui-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ui-menu-item[data-destructive] {
+  color: var(--kr-status-danger);
+}
+
+.ui-menu-item-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.ui-menu-item-icon svg {
+  width: 1.25em;
+  height: 1.25em;
+}
+
+.ui-menu-separator {
+  flex-shrink: 0;
+  height: 1px;
+  margin: var(--kr-space-1) 0;
+  background-color: var(--kr-border-medium);
+}
+
+@media (pointer: coarse) {
+  .ui-menu-item {
+    min-height: var(--kr-control-h-touch);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-menu {
+    animation: none;
+  }
+}

@@ -120,6 +120,9 @@ function* walk(dir) {
 const usedKeys = new Map(); // key → first file:line where it was used
 let dynamicCount = 0;
 const T_LITERAL = /\bt\(\s*['"]([\w.\-:]+)['"]/g;
+// `tp('key', count)` / `tPlural(locale, 'key', count)` read `key.one` and
+// `key.other` (docs/conventions/ui-text.md): both forms count as used and must exist.
+const TP_LITERAL = /\b(?:tp\(|tPlural\(\s*[\w.]+\s*,)\s*['"]([\w.\-:]+)['"]/g;
 const T_TEMPLATE = /\bt\(\s*`/g;
 const T_VAR = /\bt\(\s*[a-zA-Z_$][\w$]*\s*[,)]/g;
 for (const file of walk(SRC)) {
@@ -132,6 +135,16 @@ for (const file of walk(SRC)) {
     if (!usedKeys.has(key)) {
       const line = text.slice(0, m.index).split('\n').length;
       usedKeys.set(key, `${relative(ROOT, file)}:${line}`);
+    }
+  }
+  TP_LITERAL.lastIndex = 0;
+  while ((m = TP_LITERAL.exec(text))) {
+    for (const form of ['one', 'other']) {
+      const key = `${m[1]}.${form}`;
+      if (!usedKeys.has(key)) {
+        const line = text.slice(0, m.index).split('\n').length;
+        usedKeys.set(key, `${relative(ROOT, file)}:${line}`);
+      }
     }
   }
   // Count dynamic usages once per file (rough proxy for "key set is broader than what we statically see").

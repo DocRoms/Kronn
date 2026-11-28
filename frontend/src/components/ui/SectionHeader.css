@@ -1,0 +1,18 @@
+/* KT-1884 — section kind: a title over its content, no line of its own. */
+.ui-section-header {
+  min-height: var(--kr-control-h-sm);
+  padding: 0 0 var(--kr-space-2);
+}
+
+.ui-section-header .ui-header-title {
+  font-size: var(--kr-type-lg);
+}
+
+.ui-section-header[data-compact] {
+  padding: 0 0 var(--kr-space-1);
+}
+
+.ui-section-header[data-compact] .ui-header-title {
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-type-md);
+}

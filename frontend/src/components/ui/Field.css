@@ -1,0 +1,111 @@
+/* KT-1882 — Field: label above, control, help line, error line.
+   Design tokens only; no theme is named. */
+
+.ui-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  min-width: 0;
+}
+
+.ui-field-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--kr-space-1);
+  font-size: var(--kr-type-md);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-text-primary);
+}
+
+/* The asterisk means required, nothing else. */
+.ui-field-required {
+  color: var(--kr-status-danger);
+  font-weight: var(--kr-weight-bold);
+}
+
+.ui-field-optional {
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-regular);
+  color: var(--kr-text-muted);
+}
+
+.ui-field-help {
+  margin: 0;
+  font-size: var(--kr-type-sm);
+  line-height: 1.4;
+  color: var(--kr-text-secondary);
+}
+
+/* Present from the start so the error is announced when it appears; empty, it
+   takes no room. */
+.ui-field-error-slot:empty {
+  display: none;
+}
+
+.ui-field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-space-1);
+  margin: 0;
+  font-size: var(--kr-type-sm);
+  line-height: 1.4;
+  color: var(--kr-text-primary);
+}
+
+.ui-field-error-icon {
+  flex-shrink: 0;
+  width: 1.4em;
+  height: 1.4em;
+  color: var(--kr-status-danger);
+}
+
+/* ── A native text control inside a Field ─────────────────────────────── */
+.ui-field-control {
+  width: 100%;
+  min-height: var(--kr-control-h-md);
+  padding: 0 var(--kr-space-3);
+  font-family: inherit;
+  font-size: var(--kr-type-md);
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-input);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+  transition: border-color var(--kr-duration-fast) ease-out;
+}
+
+textarea.ui-field-control {
+  min-height: calc(var(--kr-control-h-md) * 2);
+  padding: var(--kr-space-2) var(--kr-space-3);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.ui-field-control::placeholder {
+  color: var(--kr-text-muted);
+}
+
+.ui-field-control:hover:not(:disabled) {
+  border-color: var(--kr-border-strong);
+}
+
+.ui-field-control[aria-invalid="true"] {
+  border-color: var(--kr-status-danger);
+}
+
+.ui-field-control:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ui-field[data-disabled="true"] .ui-field-label {
+  color: var(--kr-text-muted);
+}
+
+/* A finger needs a larger target, and a phone zooms into a field written
+   under 16px when it takes the focus: 16px text on a coarse pointer. */
+@media (pointer: coarse) {
+  .ui-field-control {
+    min-height: var(--kr-control-h-touch);
+    font-size: var(--kr-type-xl);
+  }
+}

@@ -269,25 +269,32 @@
   color: var(--kr-text-secondary);
 }
 
+/* KT-2006 — `--kr-accent-ink` rather than `--kr-accent`: the accent falls to
+   3.8:1 on its own tint in euronews, the ink holds 5:1 or more in every theme. */
 .mcp-cat-pill-active {
   border-color: var(--kr-accent);
   background: rgba(var(--kr-accent-rgb), 0.12);
-  color: var(--kr-accent);
+  color: var(--kr-accent-ink);
 }
 
+/* KT-2006 — the count keeps the colour of its pill (`--kr-text-muted`, or the
+   accent ink once active); an opacity halved that colour under 4.5:1. */
 .mcp-cat-pill-count {
   font-size: var(--kr-fs-2xs);
-  opacity: 0.5;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Registry grid ─────────────────────────────────────── */
+/* KT-2006 — the cards are keyboard stops; the padding leaves room for the
+   2 px ring, its 2 px offset and halo inside the scrolling box. */
 .mcp-registry-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: var(--kr-sp-4);
   max-height: 450px;
   overflow-y: auto;
-  padding: var(--kr-sp-2);
+  padding: var(--kr-space-2);
 }
 
 .mcp-registry-card {
@@ -300,6 +307,16 @@
   background: var(--kr-bg-hover);
   cursor: pointer;
   transition: border-color 0.15s, transform 0.1s;
+  /* KT-2006 review — a card scrolled into view (Tab, or the way back from
+     its step) keeps its whole focus ring (2px offset + 2px outline, 4px
+     halo) inside the grid: the browser otherwise scrolls it flush to the
+     edge of the scroll box. */
+  scroll-margin: var(--kr-sp-4);
+}
+
+.mcp-registry-card-installed-mark {
+  display: inline-flex;
+  flex-shrink: 0;
 }
 
 .mcp-registry-card:hover {
@@ -307,12 +324,25 @@
   transform: translateY(-1px);
 }
 
+.mcp-registry-card:focus-visible {
+  border-color: var(--kr-accent-border);
+  border-radius: var(--kr-r-lg);
+}
+
+/* KT-2006 — an installed plugin rests on the panel itself, with a dashed
+   border and a faded icon, beside its check mark. No opacity on the text:
+   it took every label of the card under 4.5:1. */
 .mcp-registry-card-installed {
+  background: transparent;
+  border-style: dashed;
+}
+
+.mcp-registry-card-installed .mcp-registry-card-icon {
   opacity: 0.6;
 }
 
 .mcp-registry-card-installed:hover {
-  opacity: 1;
+  border-style: solid;
 }
 
 .mcp-registry-card-custom {
@@ -360,9 +390,11 @@
   line-height: 1.2;
 }
 
+/* KT-2006 — `--kr-text-muted`, not faint: faint is 3.3–3.8:1 on the card in
+   sakura and euronews. */
 .mcp-registry-card-cat {
   font-size: var(--kr-fs-2xs);
-  color: var(--kr-text-faint);
+  color: var(--kr-text-muted);
   margin-top: 1px;
 }
 
@@ -381,23 +413,26 @@
   align-items: center;
   gap: var(--kr-sp-2);
   font-size: var(--kr-fs-2xs);
-  color: var(--kr-text-faint);
+  color: var(--kr-text-muted);
   margin-top: auto;
   flex-wrap: wrap;
 }
 
+/* KT-2006 — the label reads in `--kr-text-secondary`; the credential hue
+   moves to the icon (`--kr-warning` was 4.3:1 as text on a card in light). */
 .mcp-credential-kind {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   font-weight: 650;
+  color: var(--kr-text-secondary);
 }
 
-.mcp-credential-kind[data-kind="cli"] {
+.mcp-credential-kind[data-kind="cli"] svg {
   color: var(--kr-warning);
 }
 
-.mcp-credential-kind[data-kind="api"] {
+.mcp-credential-kind[data-kind="api"] svg {
   color: var(--kr-cyan);
 }
 

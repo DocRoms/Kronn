@@ -2,8 +2,9 @@
 // person turned into Artifacts, with the batch-folder interaction of the
 // Discussions sidebar: the header opens the folder, its « … » menu opens the
 // renders in a mosaic or deletes the folder.
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { LivePage, StepArtifactFolder, StepArtifactLink } from '../../types/generated';
 import { visibleRunFolders } from '../../lib/stepArtifacts';
 import { ArtifactRunFolders } from '../ArtifactRunFolders';
@@ -83,6 +84,104 @@ describe('ArtifactRunFolders', () => {
     fireEvent.click(screen.getByTestId('artifact-run-folder-menu-run-1'));
     fireEvent.click(screen.getByTestId('artifact-run-folder-delete-run-1'));
     expect(onDeleteFolder).toHaveBeenCalledWith(folder);
+  });
+
+  // KT-2033 — the menu item that opened the delete question is gone when the
+  // question closes: the focus comes back to the folders, never to the page body.
+  // The harness is the library's flow: a confirmed delete drops the folder from
+  // `views` (a re-render) before it resolves, as PagesPage's refresh does.
+  describe('focus after the delete question', () => {
+    const second: StepArtifactFolder = {
+      ...folder, run_id: 'run-2', run_number: 4,
+      artifacts: [{ ...link('p-second', '', 'opus'), run_id: 'run-2' }],
+    };
+    const all = new Map(pages);
+    all.set('p-second', page('p-second'));
+    const section = (name: string) => (
+      <div className="disc-sidebar-section">
+        <button type="button" className="disc-group-btn">{name}</button>
+      </div>
+    );
+    function Library({ folders, confirmed, before, after, search }: {
+      folders: StepArtifactFolder[];
+      confirmed: boolean;
+      before?: boolean;
+      after?: boolean;
+      search?: boolean;
+    }) {
+      const [current, setCurrent] = useState(folders);
+      return (
+        <aside className="collection-shell-sidebar">
+          {search && <input className="collection-shell-search-input" aria-label="search" />}
+          <div className="disc-sidebar-list">
+            {before && section('before')}
+            <ArtifactRunFolders
+              views={visibleRunFolders(current, all, () => true)}
+              selectedId={null}
+              renderRow={({ page: p }) => <div key={p.id} />}
+              onDeleteFolder={async deleted => {
+                if (!confirmed) return false;
+                setCurrent(list => list.filter(f => f.run_id !== deleted.run_id));
+                await Promise.resolve();
+                return true;
+              }}
+              collapsed={false}
+              onToggleSection={() => {}}
+              t={t}
+            />
+            {after && section('after')}
+          </div>
+        </aside>
+      );
+    }
+    const deleteFrom = (runId: string) => {
+      fireEvent.click(screen.getByTestId(`artifact-run-folder-menu-${runId}`));
+      fireEvent.click(screen.getByTestId(`artifact-run-folder-delete-${runId}`));
+    };
+
+    it('comes back to the folder menu trigger when the delete is cancelled', async () => {
+      render(<Library folders={[folder, second]} confirmed={false} />);
+      deleteFrom('run-1');
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('artifact-run-folder-menu-run-1')));
+      expect(screen.getByTestId('artifact-run-folder-run-1')).toBeTruthy();
+    });
+
+    it('goes to the next folder header once the folder is deleted', async () => {
+      render(<Library folders={[folder, second]} confirmed />);
+      deleteFrom('run-1');
+      await waitFor(() => expect(screen.queryByTestId('artifact-run-folder-run-1')).toBeNull());
+      const next = within(screen.getByTestId('artifact-run-folder-run-2')).getByRole('button', { name: /pages\.runFolders\.folder:Jeux,4/ });
+      await waitFor(() => expect(document.activeElement).toBe(next));
+    });
+
+    it('goes to the previous folder header when the deleted folder was the last one', async () => {
+      render(<Library folders={[folder, second]} confirmed />);
+      deleteFrom('run-2');
+      await waitFor(() => expect(screen.queryByTestId('artifact-run-folder-run-2')).toBeNull());
+      const previous = within(screen.getByTestId('artifact-run-folder-run-1')).getByRole('button', { name: /pages\.runFolders\.folder:Jeux,3/ });
+      await waitFor(() => expect(document.activeElement).toBe(previous));
+    });
+
+    it('goes to the following sidebar section once the only folder is deleted', async () => {
+      render(<Library folders={[folder]} confirmed before after />);
+      deleteFrom('run-1');
+      await waitFor(() => expect(screen.queryByTestId('artifact-run-folders')).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'after' })));
+    });
+
+    it('goes to the sidebar section before it when none follows', async () => {
+      render(<Library folders={[folder]} confirmed before />);
+      deleteFrom('run-1');
+      await waitFor(() => expect(screen.queryByTestId('artifact-run-folders')).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'before' })));
+    });
+
+    it('goes to the library search field when no sidebar section is left', async () => {
+      render(<Library folders={[folder]} confirmed search />);
+      deleteFrom('run-1');
+      await waitFor(() => expect(screen.queryByTestId('artifact-run-folders')).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('search')));
+    });
   });
 
   it('closes its menu on Escape', () => {

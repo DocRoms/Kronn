@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { Check, StickyNote } from 'lucide-react';
 import type { DiscussionMessage } from '../types/generated';
 import { MarkdownContent } from './MessageBubble';
+import { Message } from './Message';
 
 interface DiscussionNoteProps {
   message: DiscussionMessage;
@@ -42,7 +43,7 @@ export const DiscussionNote = memo(function DiscussionNote({
   };
 
   return (
-    <div className="disc-note-row" data-message-id={message.id} data-role="note">
+    <Message variant="note" rowProps={{ 'data-message-id': message.id }}>
       <details className="disc-note">
         <summary>
           <span className="disc-note-heading">
@@ -72,6 +73,6 @@ export const DiscussionNote = memo(function DiscussionNote({
         {copied ? <Check size={8} /> : null}
         {shortMessageId(message.id)}
       </button>
-    </div>
+    </Message>
   );
 });

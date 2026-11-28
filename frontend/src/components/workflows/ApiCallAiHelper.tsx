@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, X, Send, Sparkles, Loader2, Minus, Maximize2, ChevronDown, ClipboardPaste, Link2, MessageSquareText } from 'lucide-react';
+import { Bot, X, Send, Sparkles, Loader2, Minus, Maximize2, ClipboardPaste, Link2, MessageSquareText } from 'lucide-react';
 import '../aiHelper.css';
 import { assistantConversations, discussions as discussionsApi } from '../../lib/api';
-import { AGENT_LABELS, agentColor } from '../../lib/constants';
 import { isLocaleLoaded, loadLocale, t as translate, type UILocale } from '../../lib/i18n';
 import type { AgentType, AssistantConversation, McpServer, WorkflowStep } from '../../types/generated';
 import { sanitizeForAssistant, scrubSecrets } from '../../lib/assistantSecrets';
 import { AssistantConversationList } from '../AssistantConversationList';
+import { AssistantAgentPicker } from '../AssistantAgentPicker';
+import {
+  assistantChoiceFromDiscussion, assistantDiscussionTarget, sameAssistantChoice, type AssistantAgentChoice,
+} from '../../lib/assistantAgentChoice';
 import {
   notifyAssistantConversationsChanged,
   pendingFor,
@@ -162,8 +165,7 @@ export function ApiCallAiHelper({
   // Active agent for the current chat. Defaults to the first installed
   // agent and is mutable mid-conversation via the header dropdown (when
   // the user switches, the discussion resets — see `switchAgent` below).
-  const [activeAgent, setActiveAgent] = useState<AgentType | null>(null);
-  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [activeAgent, setActiveAgent] = useState<AssistantAgentChoice | null>(null);
   const [discussionId, setDiscussionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -204,22 +206,6 @@ export function ApiCallAiHelper({
     }
   }, [phase, minimized, streaming]);
 
-  // Close the agent menu when clicking outside. The menu is a small
-  // floating list under the chevron; without this it stays open after
-  // selecting and the next click anywhere just dismisses it instead of
-  // performing the user's actual intent.
-  useEffect(() => {
-    if (!agentMenuOpen) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('.wf-apicall-ai-agent-selector')) {
-        setAgentMenuOpen(false);
-      }
-    };
-    window.addEventListener('mousedown', handler);
-    return () => window.removeEventListener('mousedown', handler);
-  }, [agentMenuOpen]);
-
   // Auto-scroll to the bottom on new content. Use `behavior: 'auto'` (jump,
   // not smooth) so streaming feels instantaneous and doesn't fight against
   // chunks landing back-to-back.
@@ -249,7 +235,6 @@ export function ApiCallAiHelper({
     setAppliedSignatures(new Set());
     setStreaming(false);
     setMinimized(false);
-    setAgentMenuOpen(false);
     setActiveAgent(null);
     setPhase('closed');
   }, [discussionId, beginSession]);
@@ -262,7 +247,7 @@ export function ApiCallAiHelper({
     setStreaming(false);
     setPhase('chatting');
     setMinimized(false);
-    setActiveAgent(conversation.agent);
+    setActiveAgent({ agent: conversation.agent, tier: null });
     setDiscussionId(conversation.discussion_id);
     setMessages([]);
     setInput('');
@@ -272,6 +257,8 @@ export function ApiCallAiHelper({
       if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
       const disc = await discussionsApi.get(conversation.discussion_id);
       if (session !== sessionRef.current) return;
+      // KT-1885 — the picker shows what the conversation runs on: its connection and its tier.
+      setActiveAgent(assistantChoiceFromDiscussion(conversation.agent, disc));
       setMessages(transcriptToChat(disc.messages, [
         agentT('wf.apicall.helper.sys.userQuestion'),
         t('wf.apicall.helper.sys.userQuestion'),
@@ -305,7 +292,7 @@ export function ApiCallAiHelper({
   // We forward-declare the switchAgent ref because startWithAgent is
   // defined just below and we need to call it from switchAgent without a
   // circular dep in useCallback. Set after startWithAgent is defined.
-  const startWithAgentRef = useRef<((agent: AgentType) => Promise<void>) | null>(null);
+  const startWithAgentRef = useRef<((agent: AssistantAgentChoice) => Promise<void>) | null>(null);
 
   // Triggered by the agent dropdown in the bubble header. Replaces the
   // standalone 'picking-agent' phase from 0.8.0: the user always sees the
@@ -315,9 +302,8 @@ export function ApiCallAiHelper({
   // in-flight conversation across agents is messy and not what users want
   // when they switch — they're saying "this agent isn't getting it, let
   // me try another from scratch".
-  const switchAgent = useCallback((agent: AgentType) => {
-    setAgentMenuOpen(false);
-    if (agent === activeAgent || streaming) return;
+  const switchAgent = useCallback((agent: AssistantAgentChoice) => {
+    if (sameAssistantChoice(activeAgent, agent) || streaming) return;
     setDiscussionId(null);
     setMessages([]);
     setInput('');
@@ -328,7 +314,7 @@ export function ApiCallAiHelper({
     void startWithAgentRef.current?.(agent);
   }, [activeAgent, streaming]);
 
-  const startWithAgent = useCallback(async (agent: AgentType) => {
+  const startWithAgent = useCallback(async (agent: AssistantAgentChoice) => {
     const session = beginSession();
     // 0.8.1 UX: open the bubble and prime a discussion with
     // the system prompt baked in, but DON'T fire the agent right away.
@@ -348,7 +334,8 @@ export function ApiCallAiHelper({
       const disc = await discussionsApi.create({
         project_id: projectId,
         title: `🤖 ${t('wf.apicall.helper.discTitle')}${label ? ` · ${label}` : ''}`,
-        agent,
+        // KT-1885 — the agent or connection chosen in the shared picker, at its tier.
+        ...assistantDiscussionTarget(agent),
         // Backend reads `language` to inject "Respond in {lang}" into the
         // agent's prompt. Without this the agent defaulted to French
         // regardless of the user's Output Language config.
@@ -513,7 +500,7 @@ export function ApiCallAiHelper({
             // 0.8.1 UX: skip the standalone picker. Open the chat
             // directly with the first installed agent. The user can
             // switch via the header dropdown once the bubble is open.
-            void startWithAgent(installedAgents[0]);
+            void startWithAgent({ agent: installedAgents[0], tier: null });
           }}
           title={triggerHint}
         >
@@ -544,44 +531,20 @@ export function ApiCallAiHelper({
         <div className="wf-apicall-ai-bubble" role="dialog" aria-label={t('wf.apicall.helper.bubbleTitle')}>
           <div className="wf-apicall-ai-bubble-header">
             <Bot size={13} />
-            {/* 0.8.1 UX: agent selector lives directly in the header, replacing
-                the standalone picking-agent phase. The chevron toggles a small
-                dropdown with all installed agents; click switches and resets
-                the conversation. */}
+            {/* KT-1885 — the shared agent picker: installed agents, external
+                connections and tiers; a switch keeps the conversation and starts
+                a new one. */}
             <div className="wf-apicall-ai-agent-selector">
-              <button
-                type="button"
-                className="wf-apicall-ai-agent-trigger"
-                onClick={() => setAgentMenuOpen(o => !o)}
-                disabled={streaming}
-                aria-haspopup="listbox"
-                aria-expanded={agentMenuOpen}
-                title={t('wf.apicall.helper.switchAgent')}
-              >
-                <span
-                  className="wf-apicall-ai-agent-dot"
-                  style={{ background: activeAgent ? agentColor(activeAgent) : 'var(--kr-text-ghost)' }}
+              {activeAgent ? (
+                <AssistantAgentPicker
+                  installedAgents={installedAgents}
+                  current={activeAgent}
+                  onSelect={switchAgent}
+                  disabled={streaming || loading}
+                  title={t('wf.apicall.helper.switchAgent')}
+                  t={t}
                 />
-                <span>{activeAgent ? (AGENT_LABELS[activeAgent] ?? activeAgent) : t('wf.apicall.helper.bubbleTitle')}</span>
-                <ChevronDown size={11} />
-              </button>
-              {agentMenuOpen && (
-                <div className="wf-apicall-ai-agent-menu" role="listbox">
-                  {installedAgents.map(agent => (
-                    <button
-                      key={agent}
-                      type="button"
-                      role="option"
-                      aria-selected={agent === activeAgent}
-                      className={`wf-apicall-ai-agent-option${agent === activeAgent ? ' wf-apicall-ai-agent-option-active' : ''}`}
-                      onClick={() => switchAgent(agent)}
-                    >
-                      <span className="wf-apicall-ai-agent-dot" style={{ background: agentColor(agent) }} />
-                      {AGENT_LABELS[agent] ?? agent}
-                    </button>
-                  ))}
-                </div>
-              )}
+              ) : <span>{t('wf.apicall.helper.bubbleTitle')}</span>}
             </div>
             <span className="wf-apicall-ai-bubble-eph" title={t('aiHelper.keptHint')}>{t('aiHelper.kept')}</span>
             <button

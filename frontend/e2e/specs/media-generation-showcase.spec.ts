@@ -118,7 +118,7 @@ test('captures the media slots on the connection card', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
-  await dashboard.clickSettings();
+  await dashboard.openSettings('agents');
 
   // Open the OpenRouter connection's editor, then frame the media block
   // itself: a full-page capture of Settings is unreadable.

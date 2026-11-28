@@ -348,7 +348,7 @@ pub enum ChainError {
         from: AgentType,
         to: AgentType,
     },
-    BadModel(&'static str),
+    BadModel(String),
     /// The fallback's mode is not of the kind of the mode it replaces: text goes
     /// to text, decision to decision, image to image, video to video.
     WrongKind {
@@ -395,7 +395,7 @@ impl std::fmt::Display for ChainError {
                 display_name(from),
                 display_name(from),
             ),
-            ChainError::BadModel(why) => write!(f, "The fallback model {why}."),
+            ChainError::BadModel(why) => write!(f, "Fallback refused: {why}."),
             ChainError::WrongKind { mode, target } => write!(
                 f,
                 "A {} fallback must be a {} model; {} is not one.",
@@ -559,14 +559,7 @@ pub fn check_shape(
             }
         }
         if let Some(model) = &link.model {
-            if model.trim().is_empty() {
-                return Err(ChainError::BadModel("is empty"));
-            }
-            if model.chars().count() > 200 || model.chars().any(char::is_control) {
-                return Err(ChainError::BadModel(
-                    "must be one line of at most 200 characters",
-                ));
-            }
+            crate::models::setup::check_model_id(model).map_err(ChainError::BadModel)?;
         }
     }
     Ok(())
@@ -1503,3 +1496,40 @@ inventory::submit! { crate::core::uplink::ConfigMigration(migrate_config) }
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_fallback_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod model_id_guard_tests {
+    use super::*;
+
+    /// KT-1998 — every link of a chain (the agent fallback rows, a
+    /// discussion's override chain, a step's own chain) goes through the
+    /// shared rule, judged on the text as given; the error reads once.
+    #[test]
+    fn model_id_guard_fallback_chain_link_refuses_a_bad_model() {
+        let config = crate::core::config::default_config().agents;
+        let padded = format!("{}gpt-5", " ".repeat(100_000));
+        for bad in [
+            "--dangerously-skip-permissions",
+            " -c",
+            "\ngpt-5\n",
+            "\tgpt-5",
+            padded.as_str(),
+        ] {
+            let link = AgentFallback {
+                agent: AgentType::Codex,
+                model: Some(bad.into()),
+                mode: None,
+            };
+            let error = validate_chain(&config, None, None, &[link]).expect_err("refused");
+            assert!(matches!(error, ChainError::BadModel(_)), "{error}");
+            let text = error.to_string();
+            assert!(text.starts_with("Fallback refused: model "), "{text}");
+        }
+        let named = AgentFallback {
+            agent: AgentType::Codex,
+            model: Some("vendor/model:tag@v1".into()),
+            mode: None,
+        };
+        validate_chain(&config, None, None, &[named]).expect("a plain id passes");
+    }
+}

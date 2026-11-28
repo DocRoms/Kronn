@@ -120,7 +120,7 @@ test.describe.serial('publication authority, end to end', () => {
   }) => {
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('security');
 
     const section = page.getByRole('region', { name: 'Identifiants de publication' });
     await expect(section).toBeVisible();
@@ -153,7 +153,7 @@ test.describe.serial('publication authority, end to end', () => {
   }) => {
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('security');
 
     const section = page.getByRole('region', { name: 'Identifiants de publication' });
     await section.getByLabel('Secret admin ou identifiant humain').fill(adminSecret());
@@ -370,7 +370,7 @@ test.describe.serial('publication authority, end to end', () => {
     const before = adminSecret();
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('security');
 
     const section = page.getByRole('region', { name: 'Identifiants de publication' });
     await section.getByLabel('Secret admin ou identifiant humain').fill(before);

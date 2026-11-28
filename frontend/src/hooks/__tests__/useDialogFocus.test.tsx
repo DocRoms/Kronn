@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { useRef, useState } from 'react';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { act, render, screen, cleanup, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useDialogFocus, type DialogFocusOptions } from '../useDialogFocus';
+import { insideLayerAbove, registerLayer, useDialogFocus, type DialogFocusOptions } from '../useDialogFocus';
 
 function Dialog({ onClose, options }: { onClose: () => void; options?: DialogFocusOptions }) {
   const ref = useDialogFocus<HTMLDivElement>({ onEscape: onClose, ...options });
@@ -147,14 +147,41 @@ describe('useDialogFocus (KT-1072)', () => {
       expect(onEscape).toHaveBeenCalledTimes(1);
     });
 
-    it('a non-modal dialog ignores Escape pressed outside it', () => {
+    it('a non-modal dialog ignores Escape pressed in another control outside it', () => {
       const onEscape = vi.fn();
       render(<Single onEscape={onEscape} modal={false} />);
       fireEvent.keyDown(screen.getByLabelText('page composer'), { key: 'Escape' });
-      fireEvent.keyDown(document.body, { key: 'Escape' });
       expect(onEscape).not.toHaveBeenCalled();
       fireEvent.keyDown(screen.getByLabelText('inside'), { key: 'Escape' });
       expect(onEscape).toHaveBeenCalledTimes(1);
+    });
+
+    it('a non-modal top layer answers Escape when its focused control was removed (KT-2014)', () => {
+      function Refreshing({ onEscape, withControl }: { onEscape: () => void; withControl: boolean }) {
+        const ref = useDialogFocus<HTMLDivElement>({ onEscape, trap: false });
+        return <div ref={ref} role="dialog" aria-label="panel">{withControl && <button type="button">refresh</button>}<span>text</span></div>;
+      }
+      const onEscape = vi.fn();
+      const { rerender } = render(<Refreshing onEscape={onEscape} withControl />);
+      expect(screen.getByText('refresh')).toHaveFocus();
+      rerender(<Refreshing onEscape={onEscape} withControl={false} />);
+      expect(document.activeElement).toBe(document.body);
+      fireEvent.keyDown(document.body, { key: 'Escape' });
+      expect(onEscape).toHaveBeenCalledTimes(1);
+    });
+
+    it('a lost focus belongs to the top layer only, modal or not (KT-2014)', () => {
+      const below = vi.fn();
+      const top = vi.fn();
+      function Panel({ name, onEscape }: { name: string; onEscape: () => void }) {
+        const ref = useDialogFocus<HTMLDivElement>({ onEscape, trap: false });
+        return <div ref={ref} role="dialog" aria-label={name}><button type="button">{`in ${name}`}</button></div>;
+      }
+      render(<><Panel name="A" onEscape={below} /><Panel name="B" onEscape={top} /></>);
+      act(() => (document.activeElement as HTMLElement).blur());
+      fireEvent.keyDown(document.body, { key: 'Escape' });
+      expect(top).toHaveBeenCalledTimes(1);
+      expect(below).not.toHaveBeenCalled();
     });
 
     it('a modal dialog takes Escape from body but not from another focused element', () => {
@@ -253,5 +280,43 @@ describe('useDialogFocus (KT-1072)', () => {
     await userEvent.tab();
     await userEvent.tab();
     expect(screen.getByText('in B')).toHaveFocus();
+  });
+
+  describe('stack of open layers (KT-2014)', () => {
+    it('knows a layer opened later, even a portal outside the first one', () => {
+      const parent = document.createElement('div');
+      const child = document.createElement('div');
+      const inChild = document.createElement('button');
+      child.append(inChild);
+      document.body.append(parent, child);
+      const offParent = registerLayer(parent);
+      expect(insideLayerAbove(parent, inChild)).toBe(false);
+      const offChild = registerLayer(child);
+      expect(insideLayerAbove(parent, inChild)).toBe(true);
+      // Not the other way round: the parent was opened before the child.
+      expect(insideLayerAbove(child, parent)).toBe(false);
+      offChild();
+      expect(insideLayerAbove(parent, inChild)).toBe(false);
+      offParent();
+      parent.remove();
+      child.remove();
+    });
+
+    it('puts every dialog on it while open', () => {
+      const probe = document.createElement('button');
+      function Two() {
+        const outer = useDialogFocus<HTMLDivElement>();
+        const inner = useDialogFocus<HTMLDivElement>();
+        return <><div ref={outer} role="dialog" aria-label="outer"><button type="button">o</button></div><div ref={inner} role="dialog" aria-label="inner" /></>;
+      }
+      const { unmount } = render(<Two />);
+      const outer = screen.getByRole('dialog', { name: 'outer' });
+      const inner = screen.getByRole('dialog', { name: 'inner' });
+      inner.append(probe);
+      expect(insideLayerAbove(outer, probe)).toBe(true);
+      probe.remove();
+      unmount();
+      expect(insideLayerAbove(outer, inner)).toBe(false);
+    });
   });
 });

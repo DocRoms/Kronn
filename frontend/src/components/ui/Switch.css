@@ -1,0 +1,112 @@
+/* KT-1882 — Switch. Design tokens only; no theme is named. The state is drawn
+   at 3:1 on every surface: the off thumb and border in --kr-text-muted, the
+   on track in --kr-accent with a --kr-text-on-accent thumb. */
+
+.ui-switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  min-width: 0;
+}
+
+.ui-switch-row {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--kr-space-2);
+  min-height: var(--kr-control-h-sm);
+  font-size: var(--kr-type-md);
+  color: var(--kr-text-primary);
+  cursor: pointer;
+}
+
+/* The native checkbox stays in the page for the keyboard and assistive
+   technology, laid over the track so a tap on the track hits it. */
+.ui-switch-input {
+  position: absolute;
+  left: 0;
+  width: var(--kr-space-7);
+  height: var(--kr-space-5);
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.ui-switch-track {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  box-sizing: border-box;
+  width: var(--kr-space-7);
+  height: var(--kr-space-5);
+  padding: 1px;
+  background-color: transparent;
+  border: 1px solid;
+  border-color: var(--kr-text-muted);
+  border-radius: var(--kr-radius-pill);
+  transition:
+    background-color var(--kr-duration-fast) ease-out,
+    border-color var(--kr-duration-fast) ease-out;
+}
+
+.ui-switch-thumb {
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
+  background-color: var(--kr-text-muted);
+  border-radius: var(--kr-radius-pill);
+  transition: transform var(--kr-duration-fast) ease-out;
+}
+
+.ui-switch-input:checked + .ui-switch-track {
+  background-color: var(--kr-accent);
+  border-color: var(--kr-accent);
+}
+
+.ui-switch-input:checked + .ui-switch-track .ui-switch-thumb {
+  background-color: var(--kr-text-on-accent);
+  transform: translateX(var(--kr-space-3));
+}
+
+/* The input is transparent: its focus ring is drawn on the track. */
+.ui-switch-input:focus-visible + .ui-switch-track {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: 2px;
+}
+
+.ui-switch-row:hover .ui-switch-input:not(:disabled) + .ui-switch-track {
+  box-shadow: 0 0 0 var(--kr-space-1) var(--kr-bg-hover);
+}
+
+.ui-switch-label {
+  line-height: 1.4;
+}
+
+.ui-switch-description {
+  margin: 0;
+  padding-left: calc(var(--kr-space-7) + var(--kr-space-2));
+  font-size: var(--kr-type-sm);
+  line-height: 1.4;
+  color: var(--kr-text-secondary);
+}
+
+.ui-switch[data-disabled="true"] .ui-switch-row {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-switch-track,
+  .ui-switch-thumb {
+    transition: none;
+  }
+}
+
+/* A finger needs a larger target: the whole row, label included, is the
+   touch height. */
+@media (pointer: coarse) {
+  .ui-switch-row {
+    min-height: var(--kr-control-h-touch);
+  }
+}

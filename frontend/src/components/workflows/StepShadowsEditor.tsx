@@ -9,14 +9,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronRight, FlaskConical, Info, Plus, Trash2 } from 'lucide-react';
 import { skills as skillsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import { skillBaseId, skillPinnedVersion } from '../../lib/automationSkills';
-import { AGENT_LABELS, ALL_AGENT_TYPES } from '../../lib/constants';
+import { AgentSwitchPicker, type AgentSwitchTarget, type MainAgent } from '../AgentSwitchPicker';
 import { freshShadowId, shadowTally } from '../../lib/shadowMerge';
 import { isIdenticalShadow, pruneMerge, shadowTestedCount } from '../../lib/shadowRuns';
 import { StepMergeEditor } from './StepShadowMergeEditor';
 import { MAX_SHADOWS, stepCanCarryShadows, useVersions, type Versions } from './shadowEditorModel';
-import { shadowSkillIds } from './shadowRowModel';
+import { shadowSkillIds, stepMainAgent } from './shadowRowModel';
 import type {
-  AgentType, Project, QuickPrompt, ShadowAgent, ShadowBudget, ShadowMerge, ShadowPrompt, Skill, StepShadow, WorkflowStep,
+  ModelTiersConfig, Project, QuickPrompt, ShadowAgent, ShadowBudget, ShadowMerge, ShadowPrompt, Skill, StepShadow, WorkflowStep,
 } from '../../types/generated';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
@@ -32,6 +32,10 @@ interface Props {
   projects: readonly Project[];
   skills: readonly Skill[];
   quickPrompts: readonly QuickPrompt[];
+  /** The agents and connections a shadow may run on (KT-1885); every agent Kronn knows when absent. */
+  agentChoices?: readonly AgentSwitchTarget[];
+  /** The agent families' configured models, to name a default model. */
+  modelTiers?: ModelTiersConfig | null;
   t: Translate;
   /** Opened from a link to the shadow settings: start expanded, scrolled into view. */
   focusOnOpen?: boolean;
@@ -43,8 +47,6 @@ interface Props {
 
 const SHADOW_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 
-/** The empty text of an input is no value. */
-const orUndefined = (text: string): string | undefined => (text.trim() ? text : undefined);
 const positive = (text: string): number | undefined => {
   const n = Number(text);
   return Number.isFinite(n) && n > 0 ? n : undefined;
@@ -155,53 +157,42 @@ function QuickPromptRow({ id, name, normalRef, shadow, update, t }: { id: string
   );
 }
 
-/** The agent a shadow runs its step on. */
-function AgentFields({ value, onChange, testId, t }: {
+/** What the agent picker of a shadow needs from the page. */
+interface AgentContext {
+  main: MainAgent;
+  choices?: readonly AgentSwitchTarget[];
+  modelTiers?: ModelTiersConfig | null;
+}
+
+/**
+ * The agent a shadow runs its step on (KT-1885): the shared agent picker in its
+ * « exact model » mode — an agent and a model id (the catalogue's, or one typed
+ * in its search), or « = principal »; the step's own model is greyed out.
+ */
+function AgentFields({ value, onChange, testId, context, t }: {
   value: ShadowAgent | undefined;
   onChange: (next: ShadowAgent | undefined) => void;
   testId: string;
+  context: AgentContext;
   t: Translate;
 }) {
   return (
     <span className="wf-shadow-agent-fields">
-      <select
-        className="wf-shadow-select"
-        data-testid={`${testId}-agent`}
-        aria-label={t('wf.shadow.agentTitle')}
-        value={value?.agent ?? ''}
-        onChange={e => onChange(e.target.value ? { ...(value ?? {}), agent: e.target.value as AgentType } : undefined)}
-      >
-        <option value="">{t('wf.shadow.ownAgent')}</option>
-        {ALL_AGENT_TYPES.map(agent => <option key={agent} value={agent}>{AGENT_LABELS[agent] ?? agent}</option>)}
-        <option value="Custom">{AGENT_LABELS.Custom ?? 'Custom'}</option>
-      </select>
-      {value && (
-        <>
-          <input
-            className="wf-shadow-input"
-            data-testid={`${testId}-model`}
-            aria-label={t('wf.shadow.model')}
-            placeholder={t('wf.shadow.model')}
-            value={value.model ?? ''}
-            onChange={e => onChange({ ...value, model: orUndefined(e.target.value) })}
-          />
-          {(value.agent === 'Custom' || value.connection_id) && (
-            <input
-              className="wf-shadow-input"
-              data-testid={`${testId}-connection`}
-              aria-label={t('wf.shadow.connection')}
-              placeholder={t('wf.shadow.connection')}
-              value={value.connection_id ?? ''}
-              onChange={e => onChange({ ...value, connection_id: orUndefined(e.target.value) })}
-            />
-          )}
-        </>
-      )}
+      <AgentSwitchPicker
+        currentAgent={context.main.agent}
+        availableAgents={[]}
+        availableTargets={context.choices?.length ? [...context.choices] : undefined}
+        modelTiers={context.modelTiers}
+        variant="field"
+        title={t('wf.shadow.agentTitle')}
+        ariaLabel={t('wf.shadow.agentTitle')}
+        exactModel={{ value, onChange, main: context.main, testId: `${testId}-agent` }}
+      />
     </span>
   );
 }
 
-function ShadowEditor({ shadow, shadows, onChange, onRemove, step, projects, skills, quickPrompts, t }: {
+function ShadowEditor({ shadow, shadows, onChange, onRemove, step, projects, skills, quickPrompts, agentContext, t }: {
   shadow: StepShadow;
   shadows: readonly StepShadow[];
   onChange: (next: StepShadow) => void;
@@ -210,6 +201,7 @@ function ShadowEditor({ shadow, shadows, onChange, onRemove, step, projects, ski
   projects: readonly Project[];
   skills: readonly Skill[];
   quickPrompts: readonly QuickPrompt[];
+  agentContext: AgentContext;
   t: Translate;
 }) {
   const projectIds = shadow.project_ids ?? [];
@@ -271,7 +263,7 @@ function ShadowEditor({ shadow, shadows, onChange, onRemove, step, projects, ski
 
       <p className="wf-shadow-subtitle">{t('wf.shadow.agentTitle')}</p>
       <div className="wf-shadow-item-row">
-        <AgentFields value={shadow.agent} onChange={agent => onChange({ ...shadow, agent })} testId={testId} t={t} />
+        <AgentFields value={shadow.agent} onChange={agent => onChange({ ...shadow, agent })} testId={testId} context={agentContext} t={t} />
       </div>
 
       <p className="wf-shadow-subtitle">{t('wf.shadow.promptTitle')}</p>
@@ -423,7 +415,8 @@ function ShadowEditor({ shadow, shadows, onChange, onRemove, step, projects, ski
   );
 }
 
-export function StepShadowsEditor({ step, onChange, projects, skills, quickPrompts, t, focusOnOpen = false, onFocused, testId = 'wf-step-shadows' }: Props) {
+export function StepShadowsEditor({ step, onChange, projects, skills, quickPrompts, agentChoices, modelTiers, t, focusOnOpen = false, onFocused, testId = 'wf-step-shadows' }: Props) {
+  const agentContext: AgentContext = { main: stepMainAgent(step), choices: agentChoices, modelTiers };
   const shadows = step.shadows ?? [];
   const [expanded, setExpanded] = useState(shadows.length > 0 || focusOnOpen);
   const toggleRef = useRef<HTMLButtonElement>(null);
@@ -474,6 +467,7 @@ export function StepShadowsEditor({ step, onChange, projects, skills, quickPromp
               projects={projects}
               skills={skills}
               quickPrompts={quickPrompts}
+              agentContext={agentContext}
               t={t}
             />
           ))}
@@ -492,7 +486,7 @@ export function StepShadowsEditor({ step, onChange, projects, skills, quickPromp
               shadows={shadows}
               merge={step.shadow_merge}
               onChange={merge => onChange(shadows, merge)}
-              agentFields={(value, onValue, id) => <AgentFields value={value} onChange={onValue} testId={id} t={t} />}
+              agentFields={(value, onValue, id) => <AgentFields value={value} onChange={onValue} testId={id} context={agentContext} t={t} />}
               testId={testId}
               t={t}
             />

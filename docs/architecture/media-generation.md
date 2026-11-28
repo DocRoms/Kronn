@@ -213,9 +213,9 @@ a normal `no_agent` discussion at an explicit Generate click, then passes that
 room to the existing generation endpoint. A successfully created room is kept
 across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
-billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:400-419#createMediaDiscussion]`
+billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:413-432#createMediaDiscussion]`
 `[src: file: frontend/src/components/MediaGenerateForm.tsx:479-536#submit]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2554-2573#handleCreateMediaDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2397-2416#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 

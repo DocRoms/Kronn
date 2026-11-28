@@ -52,65 +52,6 @@
   font-size: var(--kr-fs-2xs);
 }
 
-.wf-apicall-ai-agent-popover {
-  position: absolute;
-  z-index: calc(var(--kr-z-sticky) + 10);
-  margin-top: var(--kr-sp-2);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: var(--kr-sp-3);
-  border-radius: var(--kr-r-md);
-  border: 1px solid var(--kr-border-strong);
-  background: var(--kr-bg-elevated);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
-  min-width: 220px;
-}
-
-.wf-apicall-ai-popover-header {
-  font-size: var(--kr-fs-2xs);
-  color: var(--kr-text-ghost);
-  margin-bottom: 4px;
-  padding: 0 4px;
-}
-
-.wf-apicall-ai-agent-option {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-3);
-  padding: 6px 10px;
-  border-radius: var(--kr-r-sm);
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--kr-text-primary);
-  cursor: pointer;
-  font-size: var(--kr-fs-sm);
-  text-align: left;
-}
-
-.wf-apicall-ai-agent-option:hover {
-  background: var(--kr-bg-hover);
-  border-color: var(--kr-border-soft);
-}
-
-.wf-apicall-ai-agent-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.wf-apicall-ai-agent-cancel {
-  margin-top: 4px;
-  padding: 4px 10px;
-  border-radius: var(--kr-r-sm);
-  border: 1px solid var(--kr-border-soft);
-  background: transparent;
-  color: var(--kr-text-ghost);
-  font-size: var(--kr-fs-2xs);
-  cursor: pointer;
-}
-
 .wf-apicall-ai-bubble {
   position: fixed;
   bottom: 24px;
@@ -382,83 +323,18 @@
   white-space: nowrap;
 }
 
-/* ── Agent selector dropdown in bubble header (0.8.1 UX) ─────────────── */
+/* ── Agent picker in the bubble header (the shared AgentSwitchPicker, KT-1885) ── */
 
 .wf-apicall-ai-agent-selector {
   position: relative;
   flex: 1;
 }
 
-.wf-apicall-ai-agent-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  border: 1px solid transparent;
-  border-radius: var(--kr-r-sm);
-  background: transparent;
-  color: var(--kr-text-primary);
-  font-size: var(--kr-fs-sm);
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.1s, border-color 0.1s;
-}
-
-.wf-apicall-ai-agent-trigger:hover:not(:disabled) {
-  background: var(--kr-bg-hover);
-  border-color: var(--kr-border-soft);
-}
-
-.wf-apicall-ai-agent-trigger:disabled {
-  cursor: default;
-  opacity: 0.7;
-}
-
-.wf-apicall-ai-agent-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 10;
-  min-width: 180px;
-  padding: 4px;
-  border-radius: var(--kr-r-md);
-  background: var(--kr-bg-base);
-  border: 1px solid var(--kr-border-light);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.wf-apicall-ai-agent-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border: none;
-  background: transparent;
-  color: var(--kr-text-primary);
-  font-size: var(--kr-fs-sm);
-  text-align: left;
-  cursor: pointer;
-  border-radius: var(--kr-r-sm);
-  transition: background 0.1s;
-}
-
-.wf-apicall-ai-agent-option:hover {
-  background: var(--kr-bg-hover);
-}
-
-.wf-apicall-ai-agent-option-active {
-  background: rgba(var(--kr-accent-rgb), 0.12);
-  color: var(--kr-accent-ink);
-}
-
-.wf-apicall-ai-agent-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
+/* The bubble's title line: its agent reads at the text floor, not smaller. */
+.wf-apicall-ai-agent-selector .kr-agent-switch-btn {
+  min-height: var(--kr-space-6);
+  padding: var(--kr-space-1) var(--kr-space-2);
+  font-size: var(--kr-type-sm);
 }
 
 /* ── Welcome state with starter chips (0.8.1 UX) ─────────────────────── */

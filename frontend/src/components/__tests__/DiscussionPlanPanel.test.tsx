@@ -1214,6 +1214,38 @@ describe('DiscussionPlanPanel', () => {
     ));
   });
 
+  it('names every button of the view, the list and the open task detail (KT-1884)', async () => {
+    const { container } = render(
+      <DiscussionPlanPanel
+        discussionId="disc-1"
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+    const unnamed = () => [...container.querySelectorAll<HTMLElement>('button')]
+      .filter(button => !(button.getAttribute('aria-label') ?? '').trim()
+        && !(button.getAttribute('aria-labelledby') ?? '').trim()
+        && !(button.textContent ?? '').trim()
+        && !(button.getAttribute('title') ?? '').trim())
+      .map(button => button.outerHTML.slice(0, 120));
+
+    await screen.findByText('planning.progress:0/1');
+    // The quick-create submit, icon only.
+    expect(screen.getByRole('button', { name: 'planning.createAction' })).toBeInTheDocument();
+    for (const button of container.querySelectorAll('button')) expect(button).toHaveAccessibleName();
+    expect(unnamed()).toEqual([]);
+
+    fireEvent.click(container.querySelector('.plan-task-open') as HTMLElement);
+    await screen.findByLabelText('planning.taskActions');
+    const detailClose = screen.getByRole('button', { name: 'planning.closeTaskDetail' });
+    expect(detailClose.closest('.plan-detail-head')).not.toBeNull();
+    for (const button of container.querySelectorAll('button')) expect(button).toHaveAccessibleName();
+    expect(unnamed()).toEqual([]);
+
+    fireEvent.click(detailClose);
+    await waitFor(() => expect(container.querySelector('.plan-detail')).toBeNull());
+  });
+
   it('keeps the selected task detail outside the independently scrollable plan list', async () => {
     const { container } = render(
       <DiscussionPlanPanel

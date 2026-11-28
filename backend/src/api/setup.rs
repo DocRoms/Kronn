@@ -989,6 +989,9 @@ pub async fn set_model_tiers(
     State(state): State<AppState>,
     Json(req): Json<ModelTiersConfig>,
 ) -> Json<ApiResponse<()>> {
+    if let Err(error) = crate::models::setup::check_model_tiers(&req) {
+        return Json(ApiResponse::err(format!("Model tiers: {error}")));
+    }
     let mut config = state.config.write().await;
     config.agents.model_tiers = req;
     match config::save(&config).await {
@@ -6727,6 +6730,10 @@ debug_mode = false
     }
 }
 
+#[cfg(test)]
+#[path = "setup_model_id_guard_tests.rs"]
+mod model_id_guard_tests;
+
 #[cfg(all(test, feature = "full-tests"))]
 mod frontend_origin_tests {
     use super::normalize_origin_list;
@@ -6874,13 +6881,22 @@ pub async fn set_connection_fallback(
     Json(req): Json<SetConnectionFallbackRequest>,
 ) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
     use crate::core::connection_fallback as media;
-    let fallback = req.fallback.map(|mut target| {
-        target.model = target
-            .model
-            .map(|model| model.trim().to_string())
-            .filter(|model| !model.is_empty());
-        target
-    });
+    // KT-1998 — the model is judged as sent, then stored trimmed.
+    let fallback = match req
+        .fallback
+        .map(|mut target| {
+            target.model = crate::models::setup::clean_optional_model(target.model)?;
+            Ok::<_, String>(target)
+        })
+        .transpose()
+    {
+        Ok(fallback) => fallback,
+        Err(why) => {
+            return Json(ApiResponse::err(
+                media::ConnectionChainError::BadModel(why).to_string(),
+            ))
+        }
+    };
     // Both ends must be something that exists: ComfyUI, or a stored connection.
     let mut named = vec![req.owner.clone()];
     if let Some(target) = &fallback {
@@ -6966,14 +6982,23 @@ pub async fn set_agent_fallback(
     State(state): State<AppState>,
     Json(req): Json<SetAgentFallbackRequest>,
 ) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
+    // KT-1998 — the model is judged as sent, then stored trimmed.
+    let fallback = match req
+        .fallback
+        .map(|mut link| {
+            link.model = crate::models::setup::clean_optional_model(link.model)?;
+            Ok::<_, String>(link)
+        })
+        .transpose()
+    {
+        Ok(fallback) => fallback,
+        Err(why) => {
+            return Json(ApiResponse::err(
+                crate::core::agent_fallback::ChainError::BadModel(why).to_string(),
+            ))
+        }
+    };
     let mut config = state.config.write().await;
-    let fallback = req.fallback.map(|mut link| {
-        link.model = link
-            .model
-            .map(|model| model.trim().to_string())
-            .filter(|model| !model.is_empty());
-        link
-    });
     if let Some(link) = &fallback {
         if let Err(error) =
             crate::core::agent_fallback::validate_row(&config.agents, &req.agent, req.mode, link)

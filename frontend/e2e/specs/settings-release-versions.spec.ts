@@ -25,7 +25,7 @@ for (const width of [1440, 390]) {
     await page.route('**/api/model-catalogs', route => route.fulfill({ json: { success: true, data: { targets: [] }, error: null } }));
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickSettings();
+    await dashboard.openSettings('agents');
     const heading = page.locator('.set-agent-row[data-agent-type="ClaudeCode"] .set-agent-title-row');
     await expect(heading).toContainText(error);
     const compression = page.locator('.set-compression').filter({ hasText: /ccusage.*20\.1\.0/i });

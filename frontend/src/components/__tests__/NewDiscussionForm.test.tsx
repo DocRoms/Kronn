@@ -418,7 +418,7 @@ describe('NewDiscussionForm — creation flow layout', () => {
     );
 
     const picker = await screen.findByTestId('new-disc-agent-picker');
-    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', {
       name: 'Codex · disc.tier.reasoning',
     }));
@@ -433,6 +433,53 @@ describe('NewDiscussionForm — creation flow layout', () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({ agent: 'Codex', tier: 'reasoning' }),
     ));
+  });
+
+  // KT-1994 — a model outside the modes is sent as the discussion's exact model; a mode clears it.
+  it('starts on a custom model typed in the picker, labelled « Personnalisé », and a mode clears it', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    const picker = await screen.findByTestId('new-disc-agent-picker');
+    // The typed id is offered for the current agent: Codex first.
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.economy' }));
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
+    fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'gpt-5.5-codex-max' } });
+    const free = document.querySelectorAll<HTMLElement>('[data-kind="free"]');
+    expect(free).toHaveLength(1);
+    await act(async () => { fireEvent.click(free[0]); });
+    expect(picker.querySelector('.kr-agent-switch-custom')).toHaveTextContent('agentPicker.custom');
+    expect(picker).toHaveTextContent('gpt-5.5-codex-max');
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), { target: { value: 'Analyse ce changement.' } });
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ agent: 'Codex', model: 'gpt-5.5-codex-max' }),
+    ));
+
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.economy' }));
+    });
+    expect(picker.querySelector('.kr-agent-switch-custom')).toBeNull();
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1][0]).toEqual(expect.objectContaining({ agent: 'Codex', tier: 'economy' }));
+    expect(onSubmit.mock.calls[1][0]).not.toHaveProperty('model');
   });
 
   it('selects usable OpenCode and preserves its native identity in the discussion payload', async () => {
@@ -450,7 +497,7 @@ describe('NewDiscussionForm — creation flow layout', () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^disc\.agentAndMode( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', {
       name: 'OpenCode · disc.tier.reasoning',
     }));
@@ -1318,7 +1365,7 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
     await act(async () => { fireEvent.click(advancedToggle); });
 
     await waitFor(() => {
-      const currentTier = document.querySelector('.kr-agent-switch-current-tier') as HTMLElement;
+      const currentTier = document.querySelector('.ui-agent-identity-tier') as HTMLElement;
       expect(currentTier).toBeTruthy();
       expect(currentTier.getAttribute('data-tier')).toBe('reasoning');
     });
@@ -1359,7 +1406,7 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
     await act(async () => { fireEvent.click(advancedToggle); });
 
     await waitFor(() => {
-      const currentTier = document.querySelector('.kr-agent-switch-current-tier') as HTMLElement;
+      const currentTier = document.querySelector('.ui-agent-identity-tier') as HTMLElement;
       expect(currentTier.getAttribute('data-tier')).toBe('default');
     });
   });
@@ -1490,7 +1537,7 @@ describe('NewDiscussionForm — native agents need full access', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
       target: { value: 'Lance OpenCode.' },
     });
-    expect(screen.getByTestId('full-access-required')).toHaveTextContent('config.fullAccessRequired');
+    expect(screen.getByTestId('full-access-required')).toHaveTextContent('serverReason.fullAccessRequired');
     expect(document.querySelector('.disc-create-btn')).toBeDisabled();
     fireEvent.click(screen.getByText('config.fullAccessRequiredLink'));
     expect(onNavigate).toHaveBeenCalledWith('settings');
@@ -1912,7 +1959,7 @@ describe('NewDiscussionForm — Configuration links open in a new tab', () => {
     expectConfigLink('config.restrictedAgentLink', onClose, onNavigate);
   });
 
-  it('a Ctrl-click on the collaboration settings button opens /config#settings-agent-handoffs in a new tab', async () => {
+  it('a Ctrl-click on the collaboration settings button opens /config/agents#settings-agent-handoffs in a new tab', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     const { onClose, onNavigate } = renderWith([AGENT, CODEX_AGENT], null);
     fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
@@ -1922,7 +1969,7 @@ describe('NewDiscussionForm — Configuration links open in a new tab', () => {
     fireEvent.click(await screen.findByText('disc.multiAgentCollaborationSettings'), { ctrlKey: true });
 
     expect(open).toHaveBeenCalledWith(
-      `${window.location.origin}/config#settings-agent-handoffs`, '_blank', 'noopener,noreferrer',
+      `${window.location.origin}/config/agents#settings-agent-handoffs`, '_blank', 'noopener,noreferrer',
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(onNavigate).not.toHaveBeenCalled();

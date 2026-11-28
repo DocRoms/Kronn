@@ -27,6 +27,7 @@ import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/work
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
 import { requiresFullAccessToRun } from '../../lib/agentFullAccess';
 import { AGENT_LABELS, ALL_AGENT_TYPES, agentTextColor, isAgentRestricted } from '../../lib/constants';
+import { fullAccessRequiredText } from '../../lib/serverReason';
 import type {
   Project, Workflow, WorkflowTrigger,
   WorkflowStep, AgentType, WorkflowSafety,
@@ -1879,6 +1880,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               projects={projects}
               skills={availableSkills}
               quickPrompts={availableQuickPrompts}
+              agentChoices={agentChoices}
+              modelTiers={agentAccess?.model_tiers}
               t={t}
               focusOnOpen={shadowFocus}
               onFocused={() => setShadowFocus(false)}
@@ -2430,7 +2433,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   <div className="wf-restricted-warning">
                     <AlertTriangle size={12} />
                     <span>{requiresFullAccessToRun(agentAccess, step.agent)
-                      ? t('config.fullAccessRequired', AGENT_LABELS[step.agent] ?? step.agent)
+                      ? fullAccessRequiredText(t, AGENT_LABELS[step.agent] ?? step.agent)
                       : t('config.restrictedStep')}</span>
                     <AppLink className="kr-inline-link" style={{ marginLeft: 4 }} to={PAGE_PATHS.settings}
                       onNavigate={onNavigateSettings ? () => onNavigateSettings() : undefined}
@@ -4831,6 +4834,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           projects={projects}
                           skills={availableSkills}
                           quickPrompts={availableQuickPrompts}
+                          agentChoices={agentChoices}
+                          modelTiers={agentAccess?.model_tiers}
                           t={t}
                           focusOnOpen={shadowFocus && i === shadowTarget}
                           onFocused={() => setShadowFocus(false)}

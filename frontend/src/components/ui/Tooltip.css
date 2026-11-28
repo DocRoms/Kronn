@@ -1,0 +1,32 @@
+/* KT-1880 — Tooltip. Rendered in <body> at a fixed position (anchor.ts). */
+
+.ui-tooltip-anchor {
+  display: inline-flex;
+}
+
+.ui-tooltip {
+  z-index: var(--kr-z-popover);
+  max-width: calc(var(--kr-space-8) * 6);
+  padding: var(--kr-space-1) var(--kr-space-2);
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  line-height: 1.4;
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-radius-control);
+  box-shadow: var(--kr-shadow-popover);
+  pointer-events: auto;
+  animation: ui-tooltip-in var(--kr-duration-fast) ease-out;
+}
+
+@keyframes ui-tooltip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-tooltip {
+    animation: none;
+  }
+}

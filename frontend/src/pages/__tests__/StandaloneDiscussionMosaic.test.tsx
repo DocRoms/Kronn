@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { StandaloneDiscussionMosaic } from '../StandaloneDiscussionMosaic';
 import { useDiscussionMonitor } from '../../hooks/useDiscussionMonitor';
+import { APP_BAR_HEIGHT_VAR } from '../../hooks/useAppBarHeight';
 import type { DiscussionMonitorItem, DiscussionMonitorPreview } from '../../types/generated';
 vi.mock('../../hooks/useDiscussionMonitor', () => ({ useDiscussionMonitor: vi.fn() }));
 vi.mock('../../components/DiscussionMosaicComposer', () => ({
@@ -95,5 +96,19 @@ describe('discussion mosaic', () => {
     expect(screen.getByText('disc.mosaic.refreshError')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.refresh' }));
     expect(vi.mocked(useDiscussionMonitor).mock.results[0].value.refresh).toHaveBeenCalledOnce();
+  });
+  it('publishes its toolbar height, so its narrow-window toasts sit under the toolbar (KT-1883)', () => {
+    monitor([{ id: 'a', preview: preview('Alpha'), error: null }]);
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return { height: this.classList.contains('discussion-mosaic-toolbar') ? 64 : 0 } as DOMRect;
+    });
+    try {
+      const view = render(<StandaloneDiscussionMosaic discussionIds={['a']} layout="two-columns" onLayoutChange={vi.fn()} />);
+      expect(document.documentElement.style.getPropertyValue(APP_BAR_HEIGHT_VAR)).toBe('64px');
+      view.unmount();
+      expect(document.documentElement.style.getPropertyValue(APP_BAR_HEIGHT_VAR)).toBe('');
+    } finally {
+      rect.mockRestore();
+    }
   });
 });

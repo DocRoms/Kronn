@@ -94,6 +94,9 @@ describe('CSS design tokens', () => {
   });
 
   it.each([
+    // KT-1880: the shared primary button took --kr-bg-base before.
+    ['styles/components.css', '.btn-primary'],
+    ['components/ui/Button.css', '.ui-button[data-variant="primary"], .ui-icon-button[data-variant="primary"]'],
     ['components/DiscussionActionCard.css', '.discussion-action-card__launch, .discussion-action-card__open'],
     ['pages/Dashboard.css', '.project-git-switcher > button'],
     ['pages/Dashboard.css', ".project-git-branch-list article[data-current='true'] .project-git-branch-node"],

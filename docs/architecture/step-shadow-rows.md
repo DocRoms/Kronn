@@ -37,7 +37,7 @@ reason (`wf.shadow.rows.saveFailed`), like the main agent picker. Without
 | Piece | File |
 |---|---|
 | Sub-rows, toggles, summary line, `?` popover | `frontend/src/components/workflows/StepShadowRows.tsx` |
-| Agent/model menu, transport badge | `frontend/src/components/workflows/ShadowAgentPicker.tsx` |
+| Agent/model menu (the shared picker's « exact model » mode, KT-1885), transport badge | `exactModel` and `TransportBadge` in `frontend/src/components/AgentSwitchPicker.tsx` |
 | Branch map lines (`⑂`, `⊕`, footer) | `frontend/src/components/workflows/StepBranchMap.tsx` |
 | Header button label | `ShadowStatusButton` in `frontend/src/components/workflows/StepShadowsEditor.tsx` |
 | Runs list tag (`⑂ N · ⊕ ok / partielle`) | `RunShadowTag` in `frontend/src/components/workflows/WorkflowDetail.tsx` |

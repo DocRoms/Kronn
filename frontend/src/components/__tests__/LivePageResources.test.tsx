@@ -48,36 +48,43 @@ describe('LivePageResources (KT-1450)', () => {
   });
 
   it('promotes once, after a confirmation naming the step, then says what changed', async () => {
-    const confirm = vi.fn();
-    vi.stubGlobal('confirm', confirm);
+    // KT-1881 (KT-1456) — a ConfirmDialog, not window.confirm.
+    const nativeConfirm = vi.fn();
+    vi.stubGlobal('confirm', nativeConfirm);
     let release: () => void = () => {};
     vi.mocked(workflowsApi.promoteShadow).mockImplementation(() => new Promise(resolve => { release = () => resolve(null as never); }));
     renderPanel();
     const promote = await screen.findByTestId('live-page-resource-promote-custom-review-candidate');
 
-    confirm.mockReturnValueOnce(false);
     fireEvent.click(promote);
-    expect(workflowsApi.promoteShadow).not.toHaveBeenCalled();
+    let dialog = await screen.findByRole('alertdialog', { name: 'Promouvoir « Review » v5 ?' });
+    expect(dialog).toHaveAccessibleDescription(/L’étape « reason » de « PR review » chargera v5/);
+    expect(within(dialog).getByRole('button', { name: 'Annuler' })).toHaveFocus();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Annuler' }));
     await act(async () => {});
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(workflowsApi.promoteShadow).not.toHaveBeenCalled();
 
-    confirm.mockReturnValue(true);
     fireEvent.click(promote);
+    // A second click while it asks opens nothing more and promotes nothing.
     fireEvent.click(promote);
-    expect(confirm.mock.calls[1][0]).toContain('L’étape « reason » de « PR review »');
+    dialog = await screen.findByRole('alertdialog');
+    expect(screen.getAllByRole('alertdialog')).toHaveLength(1);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Promouvoir v5' }));
     await waitFor(() => expect(workflowsApi.promoteShadow).toHaveBeenCalledTimes(1));
     expect(workflowsApi.promoteShadow).toHaveBeenCalledWith('wf-1', { kind: 'skill', id: 'custom-review', step: 'reason', shadow: 'candidate' });
     await act(async () => { release(); });
     expect(await screen.findByTestId('live-page-resources-done')).toHaveTextContent('l’étape de « PR review » charge désormais v5');
     await waitFor(() => expect(pagesApi.resources).toHaveBeenCalledTimes(2));
+    expect(nativeConfirm).not.toHaveBeenCalled();
   });
 
   it('says a Quick Prompt promotion pins this step and leaves the Quick Prompt as it is', async () => {
-    const confirm = vi.fn().mockReturnValue(false);
-    vi.stubGlobal('confirm', confirm);
     renderPanel();
     fireEvent.click(await screen.findByTestId('live-page-resource-promote-qp-1-candidate'));
-    expect(confirm.mock.calls[0][0]).toContain('L’étape « sum » de « PR review » épinglera');
-    expect(confirm.mock.calls[0][0]).toContain('Le Quick Prompt lui-même ne change pas');
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveAccessibleDescription(/L’étape « sum » de « PR review » épinglera/);
+    expect(dialog).toHaveAccessibleDescription(/Le Quick Prompt lui-même ne change pas/);
   });
 
   it('offers no promotion when the shadow tests the version the step already loads', async () => {
@@ -98,7 +105,6 @@ describe('LivePageResources (KT-1450)', () => {
   });
 
   it('promotes the version of the shadow it names when several shadows test one skill', async () => {
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
     vi.mocked(workflowsApi.promoteShadow).mockResolvedValue(null as never);
     vi.mocked(pagesApi.resources).mockResolvedValue([
       { kind: 'skill', id: 'custom-review', name: 'Review', latest_version: 13, uses: [
@@ -113,6 +119,7 @@ describe('LivePageResources (KT-1450)', () => {
     expect(row.textContent).toContain('pr-review@13');
     expect(row.textContent).toContain('No skill');
     fireEvent.click(screen.getByTestId('live-page-resource-promote-custom-review-pr-review-13'));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Promouvoir v13' }));
     await waitFor(() => expect(workflowsApi.promoteShadow).toHaveBeenCalledWith('wf-1', { kind: 'skill', id: 'custom-review', step: 'reason', shadow: 'pr-review-13' }));
     // A shadow that drops the skill offers its promotion too.
     expect(screen.getByTestId('live-page-resource-promote-custom-review-no-skill')).toBeInTheDocument();

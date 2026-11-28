@@ -65,6 +65,15 @@ async fn create_bundle_as(
     let mut id_map: HashMap<String, String> = HashMap::new(); // bundle_id → real_id
 
     for qp in &req.quick_prompts {
+        // KT-1998 — a bundled Quick Prompt's model, like a saved one's.
+        if let Err(error) =
+            crate::models::check_agent_settings_model(qp.request.agent_settings.as_ref())
+        {
+            return Json(ApiResponse::err(format!(
+                "Quick Prompt `{}`: {error}",
+                qp.bundle_id
+            )));
+        }
         if !validate_bundle_id(&qp.bundle_id) {
             return Json(ApiResponse::err(format!(
                 "Invalid bundle_id `{}` on quick_prompts entry — must be kebab-case ([A-Za-z0-9_-]+) and non-empty",
@@ -377,6 +386,7 @@ async fn create_bundle_as(
     // inline-code interpolation), for the parent and every child.
     for workflow in std::iter::once(&wf_to_insert).chain(prepared_children.iter()) {
         if let Err(error) = crate::api::workflows::validate_exec_definition(workflow)
+            .and_then(|()| crate::api::workflows::validate_workflow_models(workflow))
             .and_then(|()| crate::api::workflows::validate_foreach_files(workflow))
             .and_then(|()| crate::workflows::refs::validate_syntax(&workflow.refs))
             .and_then(|()| {
@@ -680,6 +690,83 @@ fn mark_bundle_lines(
     }
     crate::api::workflows::mark_line_writers(steps, &[], writer);
     crate::api::workflows::clear_stale_approvals(steps);
+}
+
+#[cfg(test)]
+mod model_id_guard_tests {
+    use super::*;
+
+    fn bundle(prompt_model: &str, step_model: &str) -> BundleRequest {
+        serde_json::from_value(serde_json::json!({
+            "quick_prompts": [{
+                "bundle_id": "ask", "name": "Ask", "icon": null,
+                "prompt_template": "Say hello", "agent": "OpenCode", "project_id": null,
+                "agent_settings": { "model": prompt_model },
+            }],
+            "workflow": {
+                "name": "bundled", "project_id": null, "trigger": {"type": "Manual"},
+                "steps": [{
+                    "name": "ask", "step_type": {"type": "Agent"}, "agent": "OpenCode",
+                    "prompt_template": "Say hello",
+                    "agent_settings": { "model": step_model },
+                }],
+            },
+        }))
+        .unwrap()
+    }
+
+    /// KT-1998 — a bundle (an agent's proposal or the wizard's) refuses a bad
+    /// model on a bundled Quick Prompt and on a workflow step; nothing is
+    /// written.
+    #[tokio::test]
+    async fn model_id_guard_bundle_refuses_prompt_and_step_models() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let padded = format!("{}gpt-5", " ".repeat(100_000));
+        for bad in ["--help", " -c", "\ngpt-5\n", "\tgpt-5", padded.as_str()] {
+            for (request, writer) in [
+                (
+                    bundle(bad, "gpt-5"),
+                    crate::api::workflows::WorkflowWriter::Agent,
+                ),
+                (
+                    bundle("gpt-5", bad),
+                    crate::api::workflows::WorkflowWriter::Agent,
+                ),
+                (
+                    bundle("gpt-5", bad),
+                    crate::api::workflows::WorkflowWriter::Human,
+                ),
+            ] {
+                let Json(refused) = create_bundle_as(state.clone(), request, writer).await;
+                let error = refused.error.expect("refused");
+                assert!(
+                    error.contains("must not start with '-'") || error.contains("one line"),
+                    "{bad:?}: {error}"
+                );
+            }
+        }
+        let workflows = state
+            .db
+            .with_conn(crate::db::workflows::list_workflows)
+            .await
+            .unwrap();
+        let prompts = state
+            .db
+            .with_conn(crate::db::quick_prompts::list_quick_prompts)
+            .await
+            .unwrap();
+        assert!(
+            workflows.is_empty() && prompts.is_empty(),
+            "nothing is written"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "full-tests"))]

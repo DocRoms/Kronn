@@ -279,6 +279,7 @@ mod tests {
             availability: ModelAvailability::Available,
             unavailable_reason: None,
             unavailable_detail: None,
+            unavailable_code: None,
             capabilities: capabilities.into_iter().map(String::from).collect(),
             reasoning_modes: vec![],
             default_reasoning_mode: None,

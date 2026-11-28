@@ -1,0 +1,145 @@
+/* KT-1886 — ProgressBar. Tokens only, no theme named. The fill takes the
+   accent or a --kr-status-* colour; the label and the reading stay in the
+   text roles. No chart library: a track and its fills. */
+
+.ui-progress {
+  --ui-progress-colour: var(--kr-accent);
+  --ui-progress-h: var(--kr-space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  min-width: 0;
+}
+
+.ui-progress[data-size="sm"] .ui-progress-track {
+  height: var(--kr-space-1);
+}
+
+.ui-progress[data-tone="success"],
+.ui-progress-segment[data-tone="success"],
+.ui-progress-swatch[data-tone="success"] { --ui-progress-colour: var(--kr-status-success); }
+
+.ui-progress[data-tone="warning"],
+.ui-progress-segment[data-tone="warning"],
+.ui-progress-swatch[data-tone="warning"] { --ui-progress-colour: var(--kr-status-warning); }
+
+.ui-progress[data-tone="danger"],
+.ui-progress-segment[data-tone="danger"],
+.ui-progress-swatch[data-tone="danger"] { --ui-progress-colour: var(--kr-status-danger); }
+
+.ui-progress[data-tone="info"],
+.ui-progress-segment[data-tone="info"],
+.ui-progress-swatch[data-tone="info"] { --ui-progress-colour: var(--kr-status-info); }
+
+.ui-progress-segment[data-tone="accent"],
+.ui-progress-swatch[data-tone="accent"] { --ui-progress-colour: var(--kr-accent); }
+
+.ui-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--kr-space-2);
+  min-width: 0;
+  font-size: var(--kr-type-sm);
+}
+
+.ui-progress-label {
+  color: var(--kr-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.ui-progress-reading {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--kr-text-primary);
+}
+
+.ui-progress-track {
+  position: relative;
+  display: flex;
+  height: var(--ui-progress-h);
+  overflow: hidden;
+  border-radius: var(--kr-radius-pill);
+  background-color: var(--kr-bg-hover-strong);
+}
+
+.ui-progress-fill {
+  display: block;
+  width: var(--ui-progress-value, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background-color: var(--ui-progress-colour);
+  transition: width var(--kr-duration-base) ease-out;
+}
+
+/* Indeterminate: a part of the track slides across it. */
+.ui-progress[data-indeterminate="true"] .ui-progress-fill {
+  width: 40%;
+  animation: ui-progress-slide calc(var(--kr-duration-slow) * 5) ease-in-out infinite;
+}
+
+@keyframes ui-progress-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+
+/* Stacked: each part its share, a small one kept visible. */
+.ui-progress-segment {
+  display: block;
+  flex: 0 1 var(--ui-progress-value);
+  min-width: var(--kr-space-1);
+  height: 100%;
+  background-color: var(--ui-progress-colour);
+}
+
+.ui-progress-segment + .ui-progress-segment {
+  border-inline-start: 1px solid var(--kr-bg-surface);
+}
+
+.ui-progress-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-space-1) var(--kr-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-secondary);
+}
+
+.ui-progress-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+}
+
+.ui-progress-swatch {
+  width: var(--kr-space-2);
+  height: var(--kr-space-2);
+  border-radius: var(--kr-radius-pill);
+  background-color: var(--ui-progress-colour);
+}
+
+.ui-progress-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+/* Still under reduced motion: the whole track striped, nothing moves. */
+@media (prefers-reduced-motion: reduce) {
+  .ui-progress-fill {
+    transition: none;
+  }
+
+  .ui-progress[data-indeterminate="true"] .ui-progress-fill {
+    width: 100%;
+    animation: none;
+    background-color: transparent;
+    background-image: repeating-linear-gradient(
+      -45deg,
+      var(--ui-progress-colour) 0 var(--kr-space-1),
+      transparent var(--kr-space-1) var(--kr-space-2)
+    );
+  }
+}

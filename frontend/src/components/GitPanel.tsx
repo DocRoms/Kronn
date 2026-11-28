@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type Ref } from 'react';
 import { projects as projectsApi, discussions as discussionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import ReactMarkdown from 'react-markdown';
@@ -10,6 +10,7 @@ import {
   Loader2, Check, X, Maximize2, Minimize2,
 } from 'lucide-react';
 import { GitDiffViewer } from './GitDiffViewer';
+import { SidePanelHeaderSlot } from './SidePanelHeaderSlot';
 import type { DiffLine } from '../lib/diff-syntax';
 import type { DiscussionWorkspace } from '../types/generated';
 
@@ -58,6 +59,25 @@ interface GitStatus {
 }
 
 const COMMIT_PAGE_SIZE = 40;
+
+/** Where the focus goes once the panel has switched between list and diff. */
+type PendingFocus =
+  | { kind: 'back' }
+  | { kind: 'row'; path: string; committed: boolean };
+
+const fileRowKey = (path: string, committed: boolean) =>
+  `${committed ? 'committed' : 'worktree'}:${path}`;
+
+/** The row and its focus ring (its scroll margin) lie inside the visible part
+ *  of the list's scroll box, itself clipped to the window. */
+const rowInView = (row: HTMLElement, box: HTMLElement | null) => {
+  const margin = parseFloat(getComputedStyle(row).scrollMarginTop) || 0;
+  const rowRect = row.getBoundingClientRect();
+  const boxRect = box?.getBoundingClientRect();
+  const top = Math.max(boxRect?.top ?? 0, 0);
+  const bottom = Math.min(boxRect?.bottom ?? window.innerHeight, window.innerHeight);
+  return rowRect.top - margin >= top && rowRect.bottom + margin <= bottom;
+};
 
 interface Props {
   projectId?: string;
@@ -144,6 +164,26 @@ export function GitPanel({
   const [diffContent, setDiffContent] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
+
+  // KT-1989 — the list and the diff are two separate trees: the control a
+  // keyboard user pressed unmounts with its view, and the focus would fall on
+  // the page. Opening a diff from the list puts it on the way back; going back
+  // puts it on the row of the file whose diff was open (the first row when that
+  // file is gone, the expand toggle when the list is empty).
+  const pendingFocusRef = useRef<PendingFocus | null>(null);
+  const backButtonRef = useRef<HTMLButtonElement | null>(null);
+  const listExpandToggleRef = useRef<HTMLButtonElement | null>(null);
+  // The list's scroll box is rebuilt on the way back: its offset is kept when
+  // a diff opens and put back before the focus, so the list is where the user
+  // left it (keyboard and mouse alike).
+  const listBodyRef = useRef<HTMLDivElement | null>(null);
+  const listScrollTopRef = useRef(0);
+  const fileRowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const fileRowRef = (path: string, committed: boolean) => (el: HTMLButtonElement | null) => {
+    const key = fileRowKey(path, committed);
+    if (el) fileRowRefs.current.set(key, el);
+    else fileRowRefs.current.delete(key);
+  };
 
   // Branch creation
   const [showBranch, setShowBranch] = useState(false);
@@ -307,6 +347,53 @@ export function GitPanel({
       setDiffLoading(false);
     }
   }, [discussionId, projectId, selectedWorkspaceId]);
+
+  // KT-1989 — only the list's rows and the back button ask for a focus move:
+  // the expanded view's file buttons stay mounted while switching diffs, and
+  // the focus stays on them.
+  const openDiffFromList = (path: string, committed = false) => {
+    pendingFocusRef.current = { kind: 'back' };
+    listScrollTopRef.current = listBodyRef.current?.scrollTop ?? 0;
+    void openDiff(path, committed);
+  };
+
+  const backToList = () => {
+    if (diffPath) pendingFocusRef.current = { kind: 'row', path: diffPath, committed: diffCommitted };
+    setDiffPath(null);
+  };
+
+  useEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (!pending) return;
+    if (pending.kind === 'back') {
+      if (!diffPath) return;
+      pendingFocusRef.current = null;
+      backButtonRef.current?.focus();
+      return;
+    }
+    if (diffPath) return;
+    pendingFocusRef.current = null;
+    const rows = fileRowRefs.current;
+    const firstFile = status?.files[0];
+    const firstCommitted = status?.committed_files?.[0];
+    const target = rows.get(fileRowKey(pending.path, pending.committed))
+      ?? (firstFile && rows.get(fileRowKey(firstFile.path, false)))
+      ?? (firstCommitted && rows.get(fileRowKey(firstCommitted.path, true)))
+      ?? null;
+    const body = listBodyRef.current;
+    if (body) body.scrollTop = listScrollTopRef.current;
+    if (!target) {
+      listExpandToggleRef.current?.focus();
+      return;
+    }
+    target.focus({ preventScroll: true });
+    // Fallback only (file gone, list changed): scroll as far as needed to show
+    // the row with its whole focus ring (the row's scroll margin), never to
+    // centre it.
+    if (!rowInView(target, body)) {
+      target.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    }
+  }, [diffPath, status]);
 
   // KT-453/461 — "Talk about it in the discussion", fired from
   // GitDiffViewer's contiguous line-range selection. Prefills the composer
@@ -507,45 +594,66 @@ export function GitPanel({
     && workspace.disc_id === discussionId
     && workspace.state === 'attached';
 
+  // The expand toggle is in the header of both views; inside the side panel
+  // it and the refresh go to the actions of the shell's one header, the way
+  // back to its leading zone, on the left of the title (KT-1884).
+  const expandToggle = (testId?: string, ref?: Ref<HTMLButtonElement>) => (
+    <button
+      ref={ref}
+      type="button"
+      className="disc-tool-panel-icon"
+      data-testid={testId}
+      onClick={toggleExpanded}
+      title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
+      aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
+      aria-pressed={expanded}
+    >
+      {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+    </button>
+  );
+
   // ─── Diff view ──────────────────────────────────────────────────────────────
   if (diffPath) {
+    const backButton = (
+      <button
+        type="button"
+        ref={backButtonRef}
+        className="disc-tool-panel-icon git-back-btn"
+        onClick={backToList}
+        aria-label={t('git.back')}
+      >
+        <ChevronLeft size={14} />
+      </button>
+    );
     return (
       <aside
         className="disc-tool-panel git-panel"
         data-expanded={expanded}
         aria-label={t('git.title')}
       >
-        <header className="disc-tool-panel-header git-header">
-          <button
-            className="disc-tool-panel-icon git-back-btn"
-            onClick={() => setDiffPath(null)}
-            aria-label={t('git.back')}
-          >
-            <ChevronLeft size={14} />
-          </button>
-          <span className="disc-tool-panel-title git-header-title">{diffPath}</span>
-          <div className="disc-tool-panel-actions">
-            <button
-              type="button"
-              className="disc-tool-panel-icon"
-              onClick={toggleExpanded}
-              title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
-              aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
-              aria-pressed={expanded}
-            >
-              {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-            </button>
-            {onClose && (
-              <button
-                className="disc-tool-panel-icon git-close-btn"
-                onClick={onClose}
-                aria-label={t('common.close')}
-              >
-                <X size={14} />
-              </button>
-            )}
-          </div>
-        </header>
+        <SidePanelHeaderSlot
+          meta={<span className="git-header-path" title={diffPath}>{diffPath}</span>}
+          leading={backButton}
+          actions={expandToggle()}
+          standalone={(
+            <header className="disc-tool-panel-header git-header">
+              {backButton}
+              <span className="disc-tool-panel-title git-header-title">{diffPath}</span>
+              <div className="disc-tool-panel-actions">
+                {expandToggle()}
+                {onClose && (
+                  <button
+                    className="disc-tool-panel-icon git-close-btn"
+                    onClick={onClose}
+                    aria-label={t('common.close')}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+            </header>
+          )}
+        />
         {expanded && status ? (
           <div className="git-expanded-layout">
             <GitDiffViewer
@@ -599,6 +707,11 @@ export function GitPanel({
   }
 
   // ─── Main view ──────────────────────────────────────────────────────────────
+  const refreshButton = (
+    <button type="button" className="disc-tool-panel-icon git-icon-btn" onClick={fetchStatus} title={t('git.refresh')} aria-label={t('git.refresh')}>
+      <RefreshCw size={12} />
+    </button>
+  );
   return (
     <aside
       className="disc-tool-panel git-panel"
@@ -606,31 +719,24 @@ export function GitPanel({
       aria-label={t('git.title')}
     >
       {/* Header */}
-      <header className="disc-tool-panel-header git-header">
-        <span className="disc-tool-panel-title git-header-title">
-          <GitBranch size={13} style={{ marginRight: 6 }} />
-          {t('git.title')}
-        </span>
-        <div className="disc-tool-panel-actions git-header-actions">
-          <button
-            type="button"
-            className="disc-tool-panel-icon"
-            data-testid="git-expand-toggle"
-            onClick={toggleExpanded}
-            title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
-            aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
-            aria-pressed={expanded}
-          >
-            {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-          </button>
-          <button className="disc-tool-panel-icon git-icon-btn" onClick={fetchStatus} title={t('git.refresh')} aria-label={t('git.refresh')}>
-            <RefreshCw size={12} />
-          </button>
-          {onClose && (
-            <button className="disc-tool-panel-icon git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
-          )}
-        </div>
-      </header>
+      <SidePanelHeaderSlot
+        actions={<>{expandToggle('git-expand-toggle', listExpandToggleRef)}{refreshButton}</>}
+        standalone={(
+          <header className="disc-tool-panel-header git-header">
+            <span className="disc-tool-panel-title git-header-title">
+              <GitBranch size={13} style={{ marginRight: 6 }} />
+              {t('git.title')}
+            </span>
+            <div className="disc-tool-panel-actions git-header-actions">
+              {expandToggle('git-expand-toggle', listExpandToggleRef)}
+              {refreshButton}
+              {onClose && (
+                <button className="disc-tool-panel-icon git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
+              )}
+            </div>
+          </header>
+        )}
+      />
 
       {discussionId && workspaces.length > 0 && (
         <label className="git-workspace-picker">
@@ -677,7 +783,7 @@ export function GitPanel({
       )}
 
       {status && !loading && (
-        <div className="git-body">
+        <div className="git-body" ref={listBodyRef}>
           {/* Branch info */}
           <div className="git-branch-bar">
             <GitBranch size={12} />
@@ -730,7 +836,7 @@ export function GitPanel({
                 onKeyDown={e => e.key === 'Enter' && handleCreateBranch()}
                 autoFocus
               />
-              <button className="git-action-btn" onClick={handleCreateBranch} disabled={branchLoading}>
+              <button className="git-action-btn" onClick={handleCreateBranch} disabled={branchLoading} aria-label={t('git.createBranch')}>
                 {branchLoading ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Check size={12} />}
               </button>
               <button className="git-icon-btn" onClick={() => setShowBranch(false)} aria-label="Cancel branch creation"><X size={12} /></button>
@@ -942,8 +1048,9 @@ export function GitPanel({
                       )}
                       <Icon size={12} style={{ color }} className="flex-shrink-0" />
                       <button
+                        ref={fileRowRef(file.path, false)}
                         className="git-file-btn"
-                        onClick={() => openDiff(file.path)}
+                        onClick={() => openDiffFromList(file.path)}
                         title={file.path}
                       >
                         {file.path}
@@ -976,10 +1083,11 @@ export function GitPanel({
                     <div key={`committed-${file.path}`} className="git-file-row git-file-row-committed">
                       <Icon size={12} style={{ color }} className="flex-shrink-0" />
                       <button
+                        ref={fileRowRef(file.path, true)}
                         type="button"
                         className="git-file-btn"
                         title={t('git.viewCommittedDiff', file.path)}
-                        onClick={() => openDiff(file.path, true)}
+                        onClick={() => openDiffFromList(file.path, true)}
                       >
                         {file.path}
                       </button>

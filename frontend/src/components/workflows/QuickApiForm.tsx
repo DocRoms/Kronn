@@ -268,7 +268,7 @@ export function QuickApiForm({
     <div className="qp-form">
       <div className="flex-between mb-4">
         <h3 className="font-semibold">{editApi ? name || t('qa.name') : t('qa.new')}</h3>
-        <button className="wf-icon-btn" onClick={onCancel}><X size={14} /></button>
+        <button type="button" className="wf-icon-btn" onClick={onCancel} aria-label={t('common.close')}><X size={14} /></button>
       </div>
 
       <div className="flex-row gap-4 mb-4">

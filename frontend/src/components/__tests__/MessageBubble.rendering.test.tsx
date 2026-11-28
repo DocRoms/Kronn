@@ -295,7 +295,7 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
     expect(chip).not.toBeNull();
     expect(chip?.dataset.agent).toBe('Codex');
     expect(chip?.textContent).toBe('@codex · agent ponctuel');
-    expect(chip?.style.color).toBe('#10a37f');
+    expect(chip?.style.color).toBe('var(--kr-agent-codex-text)');
     expect(screen.getByText('vérifie ce patch')).toBeInTheDocument();
   });
 
@@ -591,7 +591,10 @@ describe('MessageBubble — @user carries the real human identity', () => {
       return element;
     });
     expect(chip).not.toBeNull();
-    expect(rendered.container.querySelector<HTMLElement>('.disc-msg-agent-label')?.style.color)
+    // KT-1936 — the colour sits on the identity's line, and on the name itself.
+    expect(rendered.container.querySelector<HTMLElement>('.disc-msg-agent-label > .flex-row')?.style.color)
+      .toBe('#123abc');
+    expect(rendered.container.querySelector<HTMLElement>('.disc-msg-agent-label .ui-agent-identity-name')?.style.color)
       .toBe('#123abc');
   });
 });
@@ -603,7 +606,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
       { defaultAgent: 'Custom', defaultAgentAlias: '@openrouter' },
     );
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      '@openrouter · disc.targetDiscussionAgent',
+      '@openrouter · modèle non enregistré · agent principal',
     );
     expect(container.querySelector('.disc-msg-agent-label')).not.toHaveTextContent('Custom');
   });
@@ -611,7 +614,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
   it('renders a non-default native responder as a punctual agent', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent', agent_type: 'Codex' }));
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      '@codex · disc.targetPunctualAgent',
+      '@codex · modèle non enregistré · agent ponctuel',
     );
     expect(container.querySelector<HTMLElement>('.disc-msg-bubble')?.style.borderLeftColor)
       .toBeTruthy();
@@ -623,7 +626,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
       { defaultAgent: 'Vibe' },
     );
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      '@vibe · disc.targetDiscussionAgent',
+      '@vibe · modèle non enregistré · agent principal',
     );
   });
 
@@ -632,11 +635,35 @@ describe('MessageBubble — agent label + copy buttons', () => {
       makeMessage({ role: 'Agent', agent_type: 'Codex', source_msg_id: 'live-cli-1' }),
     );
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      '@codex · disc.targetCli',
+      '@codex · modèle non enregistré · session CLI',
     );
   });
 
-  it('renders a workflow-step response as a discussion agent and never as a CLI ordinal', () => {
+  // KT-1936 — the message header renders AgentIdentity: the concrete model
+  // per message, else « model not recorded », never the tier name.
+  it('writes the concrete model of the message next to the agent, then the role chip', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', agent_type: 'ClaudeCode', model: 'claude-opus-4-5', model_tier: 'reasoning' }),
+    );
+    const label = container.querySelector('.disc-msg-agent-label')!;
+    expect(label.querySelector('.ui-agent-identity')).not.toBeNull();
+    expect(label.querySelector('[data-testid="agent-identity-model"]')).toHaveTextContent(/^claude-opus-4-5$/);
+    expect(label.querySelector('[data-testid="agent-identity-model"]')).toHaveAttribute('data-state', 'id');
+    expect(label.querySelector('.ui-agent-identity-tier')).toHaveAttribute('data-tier', 'reasoning');
+    expect(label.querySelector('.ui-agent-identity-role')).toHaveTextContent('agent principal');
+  });
+
+  it('says « model not recorded » on a legacy message instead of the tier name', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', agent_type: 'ClaudeCode', model: null, model_tier: 'economy' }),
+    );
+    const model = container.querySelector('.disc-msg-agent-label [data-testid="agent-identity-model"]');
+    expect(model).toHaveAttribute('data-state', 'notRecorded');
+    expect(model).toHaveTextContent('modèle non enregistré');
+    expect(model).not.toHaveTextContent('economy');
+  });
+
+  it('renders a workflow-step response with the workflow step role and never as a CLI ordinal', () => {
     const { container } = renderBubble(
       makeMessage({
         role: 'Agent',
@@ -655,9 +682,51 @@ describe('MessageBubble — agent label + copy buttons', () => {
       },
     );
     const label = container.querySelector('.disc-msg-agent-label');
-    expect(label).toHaveTextContent('@codex · disc.targetDiscussionAgent');
+    expect(label).toHaveTextContent('@codex · modèle non enregistré · étape de workflow');
     expect(label).toHaveTextContent('Implementation › Orchestrate');
     expect(label).not.toHaveTextContent('CLI 3');
+  });
+
+  // KT-2009 — a step message writes the model its attempt ran, read from the run.
+  describe('the model of a workflow-step message', () => {
+    const step = {
+      run_id: 'run-1',
+      workflow_id: 'workflow-1',
+      workflow_name: 'Implementation',
+      step_key: 'orchestrate',
+      step_name: 'Orchestrate',
+    };
+    const modelOf = (container: HTMLElement) =>
+      container.querySelector('.disc-msg-agent-label [data-testid="agent-identity-model"]');
+
+    it('writes the model the run recorded for the attempt, keeping the workflow › step label', () => {
+      const { container } = renderBubble(
+        makeMessage({ role: 'Agent', agent_type: 'Codex', model: null }),
+        { workflowStep: { ...step, model: 'gpt-5-codex' } },
+      );
+      expect(modelOf(container)).toHaveAttribute('data-state', 'id');
+      expect(modelOf(container)).toHaveTextContent(/^gpt-5-codex$/);
+      const label = container.querySelector('.disc-msg-agent-label');
+      expect(label).toHaveTextContent('@codex · gpt-5-codex · étape de workflow');
+      expect(label).toHaveTextContent('Implementation › Orchestrate');
+    });
+
+    it('prefers the model the message itself recorded over the run’s', () => {
+      const { container } = renderBubble(
+        makeMessage({ role: 'Agent', agent_type: 'ClaudeCode', model: 'claude-opus-4-7' }),
+        { workflowStep: { ...step, model: 'claude-sonnet-4-6' } },
+      );
+      expect(modelOf(container)).toHaveTextContent(/^claude-opus-4-7$/);
+    });
+
+    it('keeps « model not recorded » when neither the message nor the run names one', () => {
+      const { container } = renderBubble(
+        makeMessage({ role: 'Agent', agent_type: 'ClaudeCode', model: '  ' }),
+        { workflowStep: step },
+      );
+      expect(modelOf(container)).toHaveAttribute('data-state', 'notRecorded');
+      expect(modelOf(container)).toHaveTextContent('modèle non enregistré');
+    });
   });
 
   it('labels the agentless guided-tour document as preloaded Kronn content', () => {
@@ -669,7 +738,7 @@ describe('MessageBubble — agent label + copy buttons', () => {
       }),
     );
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
-      'disc.tourDemoAuthor · disc.tourDemoKind',
+      'disc.tourDemoAuthor · modèle non enregistré · disc.tourDemoKind',
     );
     expect(container.querySelector('.disc-msg-agent-label')).not.toHaveTextContent('@claude');
   });
@@ -680,10 +749,10 @@ describe('MessageBubble — agent label + copy buttons', () => {
       makeMessage({ role: 'Agent', content: 'copy me' }),
       { onCopy },
     );
-    // Two copy buttons exist for an Agent msg (label + footer); clicking
-    // either must forward the same (id, content) pair.
+    // KT-1902 — one Copy per message, in the footer actions (the header
+    // duplicate is gone).
     const btns = container.querySelectorAll('button.disc-copy-btn');
-    expect(btns.length).toBe(2);
+    expect(btns.length).toBe(1);
     fireEvent.click(btns[0]);
     expect(onCopy).toHaveBeenCalledWith('msg-test', 'copy me');
   });
@@ -691,8 +760,9 @@ describe('MessageBubble — agent label + copy buttons', () => {
   it('reflects the copied state on the copy button', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent' }), { isCopied: true });
     const btn = container.querySelector('button.disc-copy-btn');
-    expect(btn?.getAttribute('data-copied')).toBe('true');
-    expect(btn?.textContent).toContain('disc.copied');
+    expect(btn?.getAttribute('data-state')).toBe('copied');
+    // The name stays: a copy that worked does not rename the button.
+    expect(btn).toHaveAccessibleName('disc.copyMessage');
   });
 });
 
@@ -700,7 +770,7 @@ describe('MessageBubble — TTS button states (Agent only)', () => {
   it('shows the default TTS label when not active', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent' }));
     const tts = container.querySelector('button.disc-tts-btn');
-    expect(tts?.textContent).toContain('TTS');
+    expect(tts).toHaveAccessibleName('disc.tts.read');
   });
 
   it('shows the loading state', () => {
@@ -709,7 +779,7 @@ describe('MessageBubble — TTS button states (Agent only)', () => {
       { isTtsActive: true, ttsState: 'loading' },
     );
     const tts = container.querySelector('button.disc-tts-btn');
-    expect(tts?.textContent).toContain('TTS');
+    expect(tts).toHaveAccessibleName('disc.tts.loading');
     expect(tts?.querySelector('svg')).not.toBeNull();
   });
 
@@ -718,7 +788,7 @@ describe('MessageBubble — TTS button states (Agent only)', () => {
       makeMessage({ role: 'Agent' }),
       { isTtsActive: true, ttsState: 'playing' },
     );
-    expect(container.querySelector('button.disc-tts-btn')?.textContent).toContain('Pause');
+    expect(container.querySelector('button.disc-tts-btn')).toHaveAccessibleName('disc.tts.pause');
   });
 
   it('shows Reprendre while paused', () => {
@@ -726,7 +796,7 @@ describe('MessageBubble — TTS button states (Agent only)', () => {
       makeMessage({ role: 'Agent' }),
       { isTtsActive: true, ttsState: 'paused' },
     );
-    expect(container.querySelector('button.disc-tts-btn')?.textContent).toContain('Reprendre');
+    expect(container.querySelector('button.disc-tts-btn')).toHaveAccessibleName('disc.tts.resume');
   });
 
   it('invokes onTts(msgId, content, language) on click', () => {
@@ -1139,26 +1209,20 @@ describe('MarkdownContent — CopyableBlock copy paths', () => {
     });
   });
 
-  it('copies a fenced code block via the overlay button', () => {
-    const { container } = render(
-      <MarkdownContent content={'```\nconst x = 1;\n```'} />,
-    );
-    const btn = container.querySelector('button.disc-copyable-block-btn') as HTMLButtonElement;
-    expect(btn).not.toBeNull();
-    fireEvent.click(btn);
-    expect(navigator.clipboard.writeText).toHaveBeenCalled();
-    const arg = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(arg).toContain('const x = 1;');
+  // KT-1902 — the code block's Copy is a named button (CodeBlock), no longer
+  // an unnamed glyph over the corner.
+  it('copies a fenced code block via its named Copy button', async () => {
+    render(<MarkdownContent content={'```\nconst x = 1;\n```'} />);
+    fireEvent.click(screen.getByRole('button', { name: 'disc.code.copy' }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledWith('const x = 1;'));
   });
 
-  it('copies a markdown table as tab/newline-joined text (extractText TABLE path)', () => {
+  it('copies a markdown table as tab/newline-joined text (extractText TABLE path)', async () => {
     const md = '| A | B |\n| --- | --- |\n| 1 | 2 |';
     const { container } = render(<MarkdownContent content={md} />);
-    // The table is wrapped in its own CopyableBlock; grab the button
-    // inside the element that contains a <table>.
     const tableWrapper = container.querySelector('table')!.closest('.relative') as HTMLElement;
-    const btn = within(tableWrapper).getByRole('button');
-    fireEvent.click(btn);
+    fireEvent.click(within(tableWrapper).getByRole('button', { name: 'disc.table.copy' }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalled());
     const arg = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
     // Header + cells flattened with tab separators and newline between rows.
     expect(arg).toContain('A\tB');
@@ -1167,10 +1231,11 @@ describe('MarkdownContent — CopyableBlock copy paths', () => {
 });
 
 describe('MarkdownContent — fence branches (discussionId-gated)', () => {
-  it('renders a normal code block through CopyableBlock when no discussionId', () => {
+  it('renders a normal code block through CodeBlock when no discussionId', () => {
     const { container } = render(<MarkdownContent content={'```js\nfoo()\n```'} />);
     expect(container.querySelector('pre')).not.toBeNull();
-    expect(container.querySelector('button.disc-copyable-block-btn')).not.toBeNull();
+    expect(container.querySelector('.kr-code-block-language')).toHaveTextContent('JavaScript');
+    expect(screen.getByRole('button', { name: 'disc.code.copyLanguage' })).toBeInTheDocument();
   });
 
   it('falls through to a code block for a malformed kronn-doc-data fence', () => {
@@ -1218,16 +1283,16 @@ describe('MessageBubble — inline CTAs open their Configuration address in a ne
     expectNewTab('disc.overrideKey', onNavigate, '/config');
   });
 
-  it('the edit-timeout CTA opens /config#settings-server', () => {
+  it('the edit-timeout CTA opens /config/security#settings-server', () => {
     const onNavigate = vi.fn();
     renderBubble(
       makeMessage({ role: 'Agent', content: "Réponse partielle — l'agent a été interrompu." }),
       { onNavigate },
     );
-    expectNewTab('disc.editTimeout', onNavigate, '/config#settings-server');
+    expectNewTab('disc.editTimeout', onNavigate, '/config/security#settings-server');
   });
 
-  it('the model-error tier shortcut opens /config#settings-agent-config', () => {
+  it('the model-error tier shortcut opens /config/agents#settings-agent-config', () => {
     const onNavigate = vi.fn();
     const content = '[kronn:model-error]\n' + JSON.stringify({
       kind: 'model_error',
@@ -1243,6 +1308,6 @@ describe('MessageBubble — inline CTAs open their Configuration address in a ne
       model: 'model-a',
       model_tier: 'default',
     }), { onNavigate });
-    expectNewTab('disc.changeTierModel', onNavigate, '/config#settings-agent-config');
+    expectNewTab('disc.changeTierModel', onNavigate, '/config/agents#settings-agent-config');
   });
 });

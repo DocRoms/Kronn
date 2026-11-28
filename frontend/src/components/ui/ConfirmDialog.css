@@ -1,0 +1,33 @@
+/* KT-1881 — ConfirmDialog: a Dialog (Dialog.css) whose question is short and
+   whose message is the whole content, so the body under it stays empty. A
+   long message scrolls in place of the body. */
+
+.ui-confirm-dialog > .ui-overlay-description {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: var(--kr-space-4);
+  color: var(--kr-text-primary);
+}
+
+.ui-confirm-dialog > .ui-overlay-footer {
+  border-top: 0;
+}
+
+/* Under the first breakpoint it does not fill the screen as a Dialog does:
+   it stays a card centred in the window, a --kr-space-4 margin all round,
+   as tall as its content, the scrim visible around it. Its two buttons stack
+   full width when they do not fit on one line (Cancel first, as in the DOM). */
+@media (max-width: 639px) {
+  .ui-dialog.ui-confirm-dialog,
+  .ui-dialog.ui-confirm-dialog[data-size] {
+    width: calc(100% - 2 * var(--kr-space-4));
+    max-height: calc(100dvh - 2 * var(--kr-space-4));
+    margin: var(--kr-space-4);
+  }
+
+  .ui-confirm-dialog > .ui-overlay-footer > * {
+    flex: 1 1 auto;
+  }
+}

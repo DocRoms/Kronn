@@ -247,6 +247,25 @@ fn clean(value: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// KT-1998 — every model slot of a connection (the three tiers, decision,
+/// image, video) through the shared rule `models::setup::check_optional_model`;
+/// a blank slot is still "no model".
+fn check_connection_models(req: &UpsertConnectionRequest) -> Result<(), String> {
+    for (slot, model) in [
+        ("economy_model", &req.economy_model),
+        ("default_model", &req.default_model),
+        ("reasoning_model", &req.reasoning_model),
+        ("decision_model", &req.decision_model),
+        ("image_model", &req.image_model),
+        ("video_model", &req.video_model),
+    ] {
+        let model = model.as_deref();
+        crate::models::setup::check_optional_model(model)
+            .map_err(|error| format!("{slot}: {error}"))?;
+    }
+    Ok(())
+}
+
 fn validate_credential_format(
     preset: ExternalApiConnectionPreset,
     api_key: Option<&str>,
@@ -1886,6 +1905,9 @@ pub async fn create(
             return Json(ApiResponse::err(locked));
         }
     }
+    if let Err(message) = check_connection_models(&req) {
+        return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
+    }
     let display_name = req.display_name.trim().to_string();
     if display_name.is_empty() {
         return Json(ApiResponse::err_coded(
@@ -2020,6 +2042,9 @@ async fn update_inner(
         if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
             return Json(ApiResponse::err(locked));
         }
+    }
+    if let Err(message) = check_connection_models(&req) {
+        return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
     }
     let display_name = req.display_name.trim().to_string();
     if display_name.is_empty() {
@@ -2216,6 +2241,119 @@ pub async fn delete(
     }
     *live = cfg;
     Json(ApiResponse::ok(()))
+}
+
+#[cfg(test)]
+mod model_id_guard_tests {
+    use super::*;
+
+    /// A dash-led id, line breaks or a tab around an id, and a long run of
+    /// spaces before one.
+    fn bad_models() -> Vec<String> {
+        vec![
+            "--help".into(),
+            " -c".into(),
+            "\ngpt-5\n".into(),
+            "\tgpt-5".into(),
+            format!("{}gpt-5", " ".repeat(100_000)),
+        ]
+    }
+
+    const SLOTS: [&str; 6] = [
+        "economy_model",
+        "default_model",
+        "reasoning_model",
+        "decision_model",
+        "image_model",
+        "video_model",
+    ];
+
+    fn request(slot: &str, model: &str) -> UpsertConnectionRequest {
+        let mut body = serde_json::json!({
+            "display_name": "Proxy", "mention_alias": "proxy",
+            "endpoint": "https://proxy.example/v1", "origin_preset": "other",
+            "economy_model": null, "default_model": null, "reasoning_model": null,
+        });
+        body[slot] = serde_json::Value::String(model.into());
+        serde_json::from_value(body).unwrap()
+    }
+
+    fn assert_refusal(error: &str, slot: &str, bad: &str) {
+        assert!(error.contains(slot), "{slot} {bad:?}: {error}");
+        assert!(
+            error.contains("must not start with '-'") || error.contains("one line"),
+            "{slot} {bad:?}: {error}"
+        );
+    }
+
+    /// KT-1998 — create and update refuse a bad model in any of the six model
+    /// slots of a connection (tiers, decision, image, video), before anything
+    /// is written.
+    #[tokio::test]
+    async fn model_id_guard_connection_models_refuse_a_bad_model() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config())),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        for bad in bad_models() {
+            for slot in SLOTS {
+                let Json(refused) = create(State(state.clone()), Json(request(slot, &bad))).await;
+                assert_refusal(&refused.error.expect("create refuses"), slot, &bad);
+            }
+        }
+        let rows = state.db.with_conn(store::list).await.unwrap();
+        assert!(rows.is_empty(), "create wrote nothing");
+
+        let existing = ExternalApiConnection {
+            id: "conn-1".into(),
+            display_name: "Proxy".into(),
+            mention_alias: "proxy".into(),
+            endpoint: Some("https://proxy.example/v1".into()),
+            credential_slug: "conn-proxy-1".into(),
+            origin_preset: ExternalApiConnectionPreset::Other,
+            economy_model: None,
+            default_model: Some("gpt-5".into()),
+            reasoning_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            image_model: Some("flux-dev".into()),
+            video_model: None,
+            decision_model: None,
+            tools_enabled: None,
+            media_endpoint: None,
+        };
+        let row = existing.clone();
+        state
+            .db
+            .with_conn(move |conn| store::insert(conn, &row))
+            .await
+            .unwrap();
+        for bad in bad_models() {
+            for slot in SLOTS {
+                let Json(refused) =
+                    update_inner(state.clone(), "conn-1".into(), request(slot, &bad)).await;
+                assert_refusal(&refused.error.expect("update refuses"), slot, &bad);
+            }
+        }
+        let kept = state
+            .db
+            .with_conn(|conn| store::get(conn, "conn-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            kept.default_model.as_deref(),
+            Some("gpt-5"),
+            "update wrote nothing"
+        );
+        assert_eq!(
+            kept.image_model.as_deref(),
+            Some("flux-dev"),
+            "update wrote nothing"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "full-tests"))]

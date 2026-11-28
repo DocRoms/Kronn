@@ -378,6 +378,25 @@ class DiscussionQuestionReadTests(unittest.TestCase):
         self.assertIn("workflow Agent step", self.mod.TOOL_MANUALS["disc_question_list"])
         self.assertIn('resume `{"workflow_id"', self.mod.TOOL_MANUALS["disc_question_list"])
 
+    def test_question_cancel_reads_back_cancelled_with_no_answer_and_no_cancel_tool(self):
+        """KT-1955 — a key read relays a card refused without a message as the
+        API returns it (cancelled, no answer), and no agent tool can close one."""
+        cancelled = {"key": "settled", "state": "cancelled", "answer": None,
+                     "cancellation": {"author_pseudo": "Romu", "cancelled_at": "2026-11-23T10:00:00Z"}}
+        with mock.patch.object(self.mod, "_disc_id", return_value="room"), mock.patch.object(
+            self.mod, "_http", return_value={"success": True, "data": {"questions": [cancelled], "pending_count": 0}}
+        ):
+            self.assertEqual(self.mod.call_disc_question_list({})["questions"], [])
+            read = self.mod.call_disc_question_list({"key": "settled"})
+        self.assertEqual(read["questions"], [cancelled])
+        self.assertIsNone(read["questions"][0]["answer"])
+        self.assertEqual(read["pending_count"], 0)
+        manual = self.mod.TOOL_MANUALS["disc_question_list"]
+        self.assertIn("state=cancelled means the human refused without a message", manual)
+        self.assertIn("ask again only if the decision is still needed", manual)
+        self.assertFalse(any("cancel" in tool["name"] and "question" in tool["name"]
+                             for tool in self.mod.TOOLS))
+
 
 class CurrentDiscMetaCacheTests(unittest.TestCase):
     """Behaviour of `_current_disc_meta()` and its cache."""

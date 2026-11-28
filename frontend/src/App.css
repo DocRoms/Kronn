@@ -1,66 +1,10 @@
 /* App — root-level screens (loading, slow start) */
 
-.app-fullscreen {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100vh;
-  flex-direction: column;
-  gap: 16px;
-}
-
-/* ── Retry under a slow start ───────────────────────── */
-.app-retry-btn {
-  margin-top: 8px;
-  padding: 8px 20px;
-  border-radius: var(--kr-r-md);
-  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
-  background: rgba(var(--kr-accent-rgb), 0.08);
-  color: var(--kr-accent);
-  cursor: pointer;
-  font-size: var(--kr-fs-md);
-  font-family: var(--kr-font-mono);
-  font-weight: 500;
-}
-
-/* ── Loading screen ──────────────────────────────────── */
-.app-loading-mark {
-  flex-shrink: 0;
-  transform-origin: center;
-  animation: kronn-startup-rotate 6s linear infinite;
-}
-
-@keyframes kronn-startup-rotate {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .app-loading-mark {
-    animation: none;
-  }
-}
-
-.app-loading-text {
-  color: var(--kr-text-muted);
-  font-size: var(--kr-fs-md);
-  font-family: var(--kr-font-mono);
-}
+/* KT-1883 — the loading screen moved to components/ui/LoadingState.css. */
 
 .app-loading-note {
   max-width: 360px;
   color: var(--kr-text-muted);
   font-size: var(--kr-fs-base);
-  text-align: center;
-}
-
-/* LoadingState inside the page area, after start-up. */
-.kronn-loading-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  min-height: 40vh;
-  padding: var(--kr-sp-6);
   text-align: center;
 }

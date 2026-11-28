@@ -60,7 +60,7 @@ beforeEach(() => resetLiveRuns());
 afterEach(() => cleanup());
 
 describe('WorkflowStepActivityBubble', () => {
-  it('shows the provider as a discussion agent with workflow, step, and run provenance', () => {
+  it('shows the provider with its model state and the workflow step role, with workflow, step, and run provenance', () => {
     render(<WorkflowStepActivityBubble step={step()} />);
 
     expect(screen.getByTestId('workflow-step-identity')).toHaveTextContent(
@@ -68,7 +68,11 @@ describe('WorkflowStepActivityBubble', () => {
     );
     expect(screen.getByText('disc.workflowStepRunning')).toBeInTheDocument();
     const bubble = screen.getByTestId('workflow-step-running-run-123456789-orchestrate');
-    expect(bubble).toHaveTextContent('@claude · disc.targetDiscussionAgent');
+    // KT-1936 — AgentIdentity: name, the explicit model state, the role chip.
+    const identity = screen.getByTestId('workflow-step-agent-identity');
+    expect(identity.querySelector('.ui-agent-identity')).not.toBeNull();
+    expect(identity).toHaveTextContent('@claude · ui.agentIdentity.model.providerDefault · ui.agentIdentity.role.workflowStep');
+    expect(identity.querySelector('[data-testid="agent-identity-model"]')).toHaveAttribute('data-state', 'providerDefault');
     expect(bubble).not.toHaveTextContent('CLI');
   });
 

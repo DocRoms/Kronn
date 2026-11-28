@@ -44,6 +44,9 @@ vi.mock('../../lib/api', () => ({
     list: listMock,
     update: updateMock,
   },
+  // KT-1885 — the shared agent picker lists the external connections and the model catalogue.
+  externalApi: { list: vi.fn().mockResolvedValue([]) },
+  modelCatalogApi: { list: vi.fn().mockResolvedValue({ targets: [] }), refresh: vi.fn().mockResolvedValue(null) },
 }));
 
 import { CustomApiAiHelper } from '../CustomApiAiHelper';
@@ -353,13 +356,12 @@ describe('CustomApiAiHelper — minimize / restore / close', () => {
 describe('CustomApiAiHelper — agent switch', () => {
   it('switching agents keeps the old disc + creates a new one with the new agent', async () => {
     await openChat({ installedAgents: ['ClaudeCode', 'Codex', 'GeminiCli'] });
-    const headerTrigger = screen.getAllByRole('button').find(
-      btn => btn.getAttribute('aria-haspopup') === 'listbox',
-    )!;
-    fireEvent.click(headerTrigger);
-    expect(screen.getByRole('listbox')).toBeTruthy();
+    // KT-1885 — the shared agent picker; the « agent default » entry keeps the agent's own tier.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^mcp\.custom\.helper\.switchAgent( — |$)/ }));
+    });
     createMock.mockClear();
-    fireEvent.click(screen.getByRole('option', { name: /Gemini CLI/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Gemini CLI · disc.defaultAgentModel' }));
     await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
     expect(createMock.mock.calls[0][0].agent).toBe('GeminiCli');
     expect(deleteMock).not.toHaveBeenCalled();
@@ -470,6 +472,35 @@ describe('CustomApiAiHelper — kept conversation (KT-1111)', () => {
     expect(dialog).not.toContain('ctx block');
     expect(getMock).toHaveBeenCalledWith('disc-old');
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  // KT-1885 review — the picker shows what a reopened conversation runs on.
+  it('"Resume" reopens on the connection and the tier the conversation was created with', async () => {
+    const api = await import('../../lib/api');
+    vi.mocked(api.externalApi.list).mockResolvedValue([{
+      id: 'conn-team', display_name: 'Team proxy', mention_alias: 'team', endpoint: 'https://llm.example/v1',
+      credential_slug: 'team', origin_preset: 'other', economy_model: 'gpt-team-mini', default_model: 'gpt-team',
+      reasoning_model: null, created_at: '', updated_at: '', has_credential: true,
+    }] as never);
+    listMock.mockResolvedValue([{
+      discussion_id: 'disc-old', kind: 'custom_api', target_id: null, target_step: null, plugin_id: null,
+      target_label: 'MyAPI', last_proposal_signature: null, last_applied_signature: null, last_applied_at: null,
+      created_at: '2026-10-08T10:00:00Z', title: 'helper', agent: 'Custom', archived: false, message_count: 1,
+      updated_at: '2026-10-08T10:05:00Z',
+    }]);
+    getMock.mockResolvedValue({ id: 'disc-old', agent: 'Custom', connection_id: 'conn-team', tier: 'economy', messages: [] });
+    renderHelper();
+    fireEvent.click(await screen.findByRole('button', { name: /aiHelper.conversations.title/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
+    });
+    const trigger = screen.getByRole('button', { name: /^mcp\.custom\.helper\.switchAgent( — |$)/ });
+    await waitFor(() => expect(trigger).toHaveTextContent('Team proxy'));
+    expect(trigger.querySelector('.ui-agent-identity-tier')).toHaveAttribute('data-tier', 'economy');
+    await act(async () => { fireEvent.click(trigger); });
+    expect(await screen.findByRole('menuitem', { name: 'Team proxy · disc.tier.economy' })).toBeDisabled();
+    expect(createMock).not.toHaveBeenCalled();
+    vi.mocked(api.externalApi.list).mockResolvedValue([]);
   });
 
   it('deletion is an explicit, confirmed action', async () => {

@@ -3,11 +3,14 @@ import { newTabClickProps } from '../lib/newTabNavigation';
 import { discussionPath } from '../lib/routes';
 import { useMemo, useState } from 'react';
 import { MarkdownContent } from './MessageBubble';
-import { AGENT_LABELS, MODEL_TIER_ICONS, agentTextColor } from '../lib/constants';
+import { AGENT_LABELS, agentTextColor } from '../lib/constants';
 import type { AgentType, Discussion, ModelTiersConfig } from '../types/generated';
 import { BatchCompareDetailsPanel } from './BatchCompareDetailsPanel';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
+import { useT } from '../lib/I18nContext';
+import { AgentIdentity } from './ui/AgentIdentity';
+import { agentIdentityText, type AgentIdentityModel } from './ui/agentIdentityKinds';
 import './BatchComparePanel.css';
 
 interface BatchComparePanelProps {
@@ -112,6 +115,8 @@ export function BatchComparePanel({
   onClose,
   t,
 }: BatchComparePanelProps) {
+  // AgentIdentity's own words (the unknown model state) come from the locale.
+  const { t: tUi } = useT();
   const [columnOrder, setColumnOrder] = useState<string[]>([]);
   const [showDetails, setShowDetails] = useState(false);
 
@@ -196,7 +201,9 @@ export function BatchComparePanel({
             // the model that produced a past answer.
             const attestedModel = normalizeModelId(answer?.model);
             const recordedModel = attestedModel ?? lastRecordedModel(discussion, answer);
-            const model = recordedModel ?? t('disc.defaultAgentModel');
+            // KT-1936 — no recorded model: the « default model » state of
+            // AgentIdentity, with the « unknown » provenance note below it.
+            const model: AgentIdentityModel = recordedModel ? { kind: 'id', id: recordedModel } : { kind: 'providerDefault' };
             const agentLabel = compareAgentLabel(discussion, externalConnections);
             const duration = formatDuration(answer?.duration_ms);
             const tokens = answer?.tokens_used != null && answer.tokens_used > 0
@@ -205,10 +212,16 @@ export function BatchComparePanel({
             return (
               <article key={discussion.id} className="disc-compare-column" data-running={running}>
                 <header className="disc-compare-column-head">
-                  <div className="disc-compare-target-name" style={{ color: agentTextColor(discussion.agent) }}>
+                  {/* KT-1936 — the agent, its model and its mode, one component. */}
+                  <div className="disc-compare-target-name" title={agentIdentityText({ name: agentLabel, model }, tUi)}>
                     <span className="disc-compare-index">{index + 1}</span>
-                    <strong>{agentLabel}</strong>
-                    <span className="disc-compare-tier" title={tier}>{MODEL_TIER_ICONS[tier]}</span>
+                    <AgentIdentity
+                      name={agentLabel}
+                      color={agentTextColor(discussion.agent)}
+                      model={model}
+                      tier={tier}
+                      tierLabel={t(`disc.tier.${tier}`)}
+                    />
                   </div>
                   <div className="disc-compare-reorder">
                     <button
@@ -232,11 +245,12 @@ export function BatchComparePanel({
                       <ArrowRight size={13} />
                     </button>
                   </div>
-                  <span className="disc-compare-card-model">
-                    <span className="disc-compare-model" title={model}>{model}</span>
-                    {attestedModel == null && recordedModel != null && <small>{t('disc.compare.modelRecorded')}</small>}
-                    {recordedModel == null && <small>{t('disc.compare.modelUnknown')}</small>}
-                  </span>
+                  {(attestedModel == null) && (
+                    <span className="disc-compare-card-model">
+                      {recordedModel != null && <small>{t('disc.compare.modelRecorded')}</small>}
+                      {recordedModel == null && <small>{t('disc.compare.modelUnknown')}</small>}
+                    </span>
+                  )}
                   <div className="disc-compare-metrics">
                     <span title={duration == null ? t('disc.compare.metricUnavailable') : undefined}>
                       <Clock3 size={12} />

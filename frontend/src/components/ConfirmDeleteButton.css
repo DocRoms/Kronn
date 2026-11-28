@@ -1,13 +1,31 @@
+/* KT-1996 — a line of its own when the row is too narrow: the impact sentence
+   wraps under the button instead of pushing the card or being cut. */
 .kr-confirm-delete {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--kr-sp-2);
+  gap: var(--kr-space-1);
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Armed reads as armed: the next click destroys something. */
 .kr-confirm-delete [data-armed='true'] {
   color: var(--kr-error);
   border-color: var(--kr-error);
+}
+
+/* KT-1996 — armed, the control is as wide as its word in every locale. The
+   callers size it as a square for the icon (`.wf-card-delete-btn` 26 px,
+   `.qp-card-tool-btn` 28 px): this selector outranks them, so the word grows
+   the button and moves its neighbour instead of running over it. */
+.kr-confirm-delete > button[data-armed='true'] {
+  flex-shrink: 0;
+  width: auto;
+  min-width: max-content;
+  min-height: var(--kr-space-6);
+  padding-right: var(--kr-space-2);
+  padding-left: var(--kr-space-2);
 }
 
 .kr-confirm-delete-word {
@@ -20,9 +38,12 @@
   font-size: var(--kr-fs-xs);
 }
 
-/* What the deletion takes with it, read while armed — information, not alarm. */
+/* What the deletion takes with it, read while armed — information, not alarm.
+   It wraps (KT-1996): a sentence is not a label. */
 .kr-confirm-delete-impact {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--kr-text-muted);
   font-size: var(--kr-fs-xs);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }

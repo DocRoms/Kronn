@@ -208,7 +208,9 @@ describe('StepShadowsEditor (KT-1459)', () => {
     const set = (testId: string, value: string) => fireEvent.change(screen.getByTestId(testId), { target: { value } });
     set('wf-shadow-qwen-local-label', 'Qwen (Ollama)');
     expect(onChange).toHaveBeenLastCalledWith([shadow('qwen-local', { label: 'Qwen (Ollama)' })]);
-    set('wf-shadow-qwen-local-agent', 'Ollama');
+    fireEvent.click(screen.getByTestId('wf-shadow-qwen-local-agent'));
+    fireEvent.click(within(within(screen.getByTestId('wf-shadow-qwen-local-agent-menu')).getByRole('group', { name: 'Ollama' }))
+      .getAllByRole('menuitem')[0]);
     expect(onChange).toHaveBeenLastCalledWith([shadow('qwen-local', { agent: { agent: 'Ollama' } })]);
     set('wf-shadow-qwen-local-prompt-kind', 'inline');
     expect(onChange).toHaveBeenLastCalledWith([shadow('qwen-local', { prompt: { type: 'inline', template: '' } })]);
@@ -224,12 +226,62 @@ describe('StepShadowsEditor (KT-1459)', () => {
     expect(onChange).toHaveBeenLastCalledWith([shadow('qwen-local', { enabled: false })]);
   });
 
-  it('keeps the model of the agent and names a connection for a custom one', () => {
-    const onChange = renderEditor(step({ shadows: [shadow('alt', { agent: { agent: 'Custom' } })] }));
-    fireEvent.change(screen.getByTestId('wf-shadow-alt-model'), { target: { value: 'gpt-x' } });
-    expect(onChange).toHaveBeenLastCalledWith([shadow('alt', { agent: { agent: 'Custom', model: 'gpt-x' } })]);
-    fireEvent.change(screen.getByTestId('wf-shadow-alt-connection'), { target: { value: 'litellm' } });
-    expect(onChange).toHaveBeenLastCalledWith([shadow('alt', { agent: { agent: 'Custom', connection_id: 'litellm' } })]);
+  // KT-1885 — the shadow's agent is the shared agent picker in its « exact model »
+  // mode. What the native select and free inputs did must stay possible.
+  describe('the agent of a shadow, in the shared picker (KT-1885)', () => {
+    const choices = [
+      { agent: 'ClaudeCode' as const },
+      { agent: 'Custom' as const, connectionId: 'litellm', label: 'LiteLLM proxy' },
+    ];
+    const open = async (id: string) => {
+      await act(async () => { fireEvent.click(screen.getByTestId(`${id}-agent`)); });
+      return screen.getByTestId(`${id}-agent-menu`);
+    };
+
+    it('opens on its search field, with « = principal » chosen for a shadow without an agent', async () => {
+      renderEditor(step({ agent: 'ClaudeCode', shadows: [shadow('alt')] }), vi.fn(), { agentChoices: choices });
+      const menu = await open('wf-shadow-alt');
+      expect(screen.getByRole('searchbox')).toHaveFocus();
+      expect(within(menu).getByTestId('wf-shadow-alt-agent-same')).toHaveAttribute('data-current', 'true');
+      // The popover sits in <body>, the layer above every dialog.
+      expect(menu.closest('.kr-agent-switch-popover')?.parentElement).toBe(document.body);
+    });
+
+    it('greys the main model: « = principal » already says it', async () => {
+      renderEditor(step({ agent: 'ClaudeCode', shadows: [shadow('alt', { agent: { agent: 'Custom', connection_id: 'litellm' } })] }),
+        vi.fn(), { agentChoices: choices });
+      const menu = await open('wf-shadow-alt');
+      // KT-2013 — the step runs its own mode (`default`, no model named): that
+      // mode's row is the principal's, not the agent's default row.
+      const claude = within(within(menu).getByRole('group', { name: 'Claude Code' }));
+      const main = claude.getByRole('menuitem', { name: 'Claude Code · Standard' });
+      expect(main).toBeDisabled();
+      expect(main).toHaveAttribute('data-main', 'true');
+      expect(claude.getByRole('menuitem', { name: "Claude Code · modèle par défaut de l'agent" })).toBeEnabled();
+      expect(within(within(menu).getByRole('group', { name: 'LiteLLM proxy' })).getAllByRole('menuitem')[0]).toBeEnabled();
+    });
+
+    // KT-1994 review — the typed id is offered once, for the agent and connection chosen.
+    it('keeps a free model id, typed in the search, on the agent and connection chosen', async () => {
+      const onChange = renderEditor(step({ agent: 'ClaudeCode', shadows: [shadow('alt', { agent: { agent: 'Custom', connection_id: 'litellm' } })] }),
+        vi.fn(), { agentChoices: choices });
+      await open('wf-shadow-alt');
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'gpt-x' } });
+      const free = document.querySelectorAll<HTMLElement>('[data-kind="free"]');
+      expect(free).toHaveLength(1);
+      fireEvent.click(free[0]);
+      expect(onChange).toHaveBeenLastCalledWith([shadow('alt', { agent: { agent: 'Custom', model: 'gpt-x', connection_id: 'litellm' } })]);
+    });
+
+    it('keeps a saved connection the page no longer lists, and « = principal » clears the agent', async () => {
+      const onChange = renderEditor(step({ agent: 'ClaudeCode', shadows: [shadow('alt', { agent: { agent: 'Custom', connection_id: 'gone', model: 'm-1' } })] }),
+        vi.fn(), { agentChoices: choices });
+      expect(screen.getByTestId('wf-shadow-alt-agent')).toHaveTextContent('gone · m-1');
+      const menu = await open('wf-shadow-alt');
+      expect(within(menu).getByRole('group', { name: 'gone' })).toBeInTheDocument();
+      fireEvent.click(within(menu).getByTestId('wf-shadow-alt-agent-same'));
+      expect(onChange).toHaveBeenLastCalledWith([shadow('alt', { agent: undefined })]);
+    });
   });
 
   it('removes a shadow and flags a duplicate or an invalid id', () => {

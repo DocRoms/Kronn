@@ -60,6 +60,7 @@ import type {
 } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
 import { DodEvidencePrompt } from './DodEvidencePrompt';
+import { SidePanelHeaderSlot } from './SidePanelHeaderSlot';
 import './DiscussionToolPanel.css';
 import './DiscussionPlanPanel.css';
 import { awaitingMergeTitle, shortBranch } from '../lib/awaitingMerge';
@@ -772,24 +773,28 @@ export function DiscussionPlanPanel({
     );
   };
 
+  const planProgress = plan
+    ? `${t('planning.progress', plan.completed_active, plan.total_active)}${plan.later.length > 0 ? ` · +${plan.later.length}` : ''}`
+    : null;
+
   return (
     <aside className="disc-tool-panel plan-panel" aria-label={t('planning.discussionPlan')}>
-      <header className="disc-tool-panel-header plan-panel-header">
-        <div>
-          <div className="disc-tool-panel-title plan-panel-title"><Target size={15} /> <span>{t('planning.discussionPlan')}</span></div>
-          {plan && (
-            <div className="plan-panel-progress">
-              {t('planning.progress', plan.completed_active, plan.total_active)}
-              {plan.later.length > 0 ? ` · +${plan.later.length}` : ''}
+      <SidePanelHeaderSlot
+        meta={plan ? <span className="plan-panel-meta">{planProgress}</span> : undefined}
+        standalone={(
+          <header className="disc-tool-panel-header plan-panel-header">
+            <div>
+              <div className="disc-tool-panel-title plan-panel-title"><Target size={15} /> <span>{t('planning.discussionPlan')}</span></div>
+              {plan && <div className="plan-panel-progress">{planProgress}</div>}
             </div>
-          )}
-        </div>
-        {onClose && (
-          <button type="button" className="disc-tool-panel-icon plan-panel-close" onClick={onClose} aria-label={t('common.close')}>
-            <X size={16} />
-          </button>
+            {onClose && (
+              <button type="button" className="disc-tool-panel-icon plan-panel-close" onClick={onClose} aria-label={t('common.close')}>
+                <X size={16} />
+              </button>
+            )}
+          </header>
         )}
-      </header>
+      />
 
       <div className="plan-quick-create">
         <Plus size={14} />
@@ -806,8 +811,10 @@ export function DiscussionPlanPanel({
           type="button"
           onClick={() => void createQuickTask()}
           disabled={!quickTitle.trim() || creating}
+          aria-label={t('planning.createAction')}
+          title={t('planning.createAction')}
         >
-          {creating ? <Loader2 size={13} className="spin" /> : <Check size={13} />}
+          {creating ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <Check size={13} aria-hidden="true" />}
         </button>
       </div>
 
@@ -1035,7 +1042,14 @@ export function DiscussionPlanPanel({
                 label={selectedTask.reference}
                 title={t('planning.copyTaskId', selectedTask.reference)}
               />
-              <button type="button" onClick={closeDetail}><X size={13} /></button>
+              <button
+                type="button"
+                onClick={closeDetail}
+                aria-label={t('planning.closeTaskDetail')}
+                title={t('planning.closeTaskDetail')}
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
             </div>
             <h3>{selectedTask.title}</h3>
             {selectedTask.description && <TaskDescription value={selectedTask.description} />}

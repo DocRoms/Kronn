@@ -38,15 +38,15 @@ describe('readinessFixPath', () => {
   it('sends a session that would not start to the plugins, anything else to the agent settings', () => {
     expect(readinessFixPath(result({ reason: 'session_timeout' }))).toBe('/plugins');
     expect(readinessFixPath(result({ reason: 'session_failed' }))).toBe('/plugins');
-    expect(readinessFixPath(result({ reason: 'not_logged_in' }))).toBe('/config#settings-agent-config');
-    expect(readinessFixPath(result({ reason: 'not_installed' }))).toBe('/config#settings-agent-config');
+    expect(readinessFixPath(result({ reason: 'not_logged_in' }))).toBe('/config/agents#settings-agent-config');
+    expect(readinessFixPath(result({ reason: 'not_installed' }))).toBe('/config/agents#settings-agent-config');
   });
 });
 
 describe('AgentReadinessPanel — fix in a new tab', () => {
   it.each([
     ['a session that would not start', { reason: 'session_timeout' as const }, '/plugins'],
-    ['an agent that is not logged in', { reason: 'not_logged_in' as const, message_key: 'readiness.reason.not_logged_in' }, '/config#settings-agent-config'],
+    ['an agent that is not logged in', { reason: 'not_logged_in' as const, message_key: 'readiness.reason.not_logged_in' }, '/config/agents#settings-agent-config'],
   ])('opens where %s is fixed in a new tab on a Ctrl-click, without fixing here', (_name, overrides, path) => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     const onFix = vi.fn();

@@ -2199,7 +2199,7 @@ export const discussions = {
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   /** Where the server kept the worktree it could not remove, if it did (KT-2084). */
   delete: (id: string) => api<string | null>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; connection_id?: string | null; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; attach_agents?: AgentType[]; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; connection_id?: string | null; model?: string | null; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; attach_agents?: AgentType[]; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
   nativeAgentMode: (id: string) =>
     api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),
   agentHandoffMode: (id: string) =>
@@ -2602,7 +2602,9 @@ export const discussions = {
 
   /** Refuse an arbitration instead of answering it. Same idempotency contract:
    *  a refusal posts a durable message and dispatches to the asker, so a
-   *  repeated click must not record it twice. */
+   *  repeated click must not record it twice. Without a `reason` (absent,
+   *  empty or blank) the server only closes the card as `cancelled`: nobody
+   *  is told and nothing resumes (KT-1955). */
   declineQuestion: (
     id: string,
     questionId: string,

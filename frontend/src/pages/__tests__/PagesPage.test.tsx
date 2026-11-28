@@ -2530,9 +2530,10 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
       expect(within(screen.getByTestId('artifact-run-folder-run-7')).getByText('wf.shadow.compare.main · opus')).toBeInTheDocument();
     });
 
+    // KT-1881 — the question is a ConfirmDialog, never window.confirm.
     it('« Delete the folder » asks first, deletes the run\'s Artifacts and keeps the rest', async () => {
-      const confirm = vi.fn(() => true);
-      vi.stubGlobal('confirm', confirm);
+      const nativeConfirm = vi.fn(() => true);
+      vi.stubGlobal('confirm', nativeConfirm);
       vi.mocked(pagesApi.deleteRunFolder).mockResolvedValue({ count: 2 });
       render(<PagesPage />);
       await screen.findByTestId('artifact-run-folder-run-7');
@@ -2540,10 +2541,47 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
       vi.mocked(pagesApi.runFolders).mockResolvedValue([]);
       fireEvent.click(screen.getByTestId('artifact-run-folder-menu-run-7'));
       fireEvent.click(screen.getByTestId('artifact-run-folder-delete-run-7'));
-      expect(confirm).toHaveBeenCalledWith('pages.runFolders.deleteConfirm:2,pages.runFolders.folder:Jeux,4');
+      const dialog = await screen.findByRole('alertdialog', {
+        name: 'pages.runFolders.deleteConfirmTitle:pages.runFolders.folder:Jeux,4',
+      });
+      expect(within(dialog).getByText('pages.runFolders.deleteConfirm:2')).toBeInTheDocument();
+      expect(pagesApi.deleteRunFolder).not.toHaveBeenCalled();
+      fireEvent.click(within(dialog).getByRole('button', { name: 'pages.runFolders.deleteFolder' }));
+      expect(nativeConfirm).not.toHaveBeenCalled();
       await waitFor(() => expect(pagesApi.deleteRunFolder).toHaveBeenCalledWith('run-7'));
+      expect(screen.queryByRole('alertdialog')).toBeNull();
       await waitFor(() => expect(screen.queryByTestId('artifact-run-folder-run-7')).toBeNull());
       expect(getCanonicalPageRow('Adobe Signals')).toBeInTheDocument();
+    });
+
+    // KT-2033 — the last folder gone, its section goes with it: the focus moves
+    // to the sidebar section that followed it, never to the page body.
+    it('deleting the only run folder hands the focus to the Projects section toggle', async () => {
+      vi.mocked(pagesApi.deleteRunFolder).mockResolvedValue({ count: 2 });
+      render(<PagesPage />);
+      await screen.findByTestId('artifact-run-folder-run-7');
+      vi.mocked(pagesApi.list).mockResolvedValue([page]);
+      vi.mocked(pagesApi.runFolders).mockResolvedValue([]);
+      fireEvent.click(screen.getByTestId('artifact-run-folder-menu-run-7'));
+      fireEvent.click(screen.getByTestId('artifact-run-folder-delete-run-7'));
+      const dialog = await screen.findByRole('alertdialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'pages.runFolders.deleteFolder' }));
+      await waitFor(() => expect(screen.queryByTestId('artifact-run-folders')).toBeNull());
+      const projects = document.querySelector('.disc-sidebar-projects > .disc-group-btn');
+      expect(projects).not.toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(projects));
+    });
+
+    it('« Delete the folder » cancelled in its dialog deletes nothing and keeps the folder', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('artifact-run-folder-run-7');
+      fireEvent.click(screen.getByTestId('artifact-run-folder-menu-run-7'));
+      fireEvent.click(screen.getByTestId('artifact-run-folder-delete-run-7'));
+      const dialog = await screen.findByRole('alertdialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'ui.confirm.cancel' }));
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+      expect(pagesApi.deleteRunFolder).not.toHaveBeenCalled();
+      expect(screen.getByTestId('artifact-run-folder-run-7')).toBeInTheDocument();
     });
 
     // KT-1999 — a search opens the run folders, as it opens the project groups:
@@ -2560,13 +2598,14 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
 
     // KT-1999 — the library read that follows the delete reports its own failure.
     it('shows a failed read of the library after « Delete the folder »', async () => {
-      vi.stubGlobal('confirm', vi.fn(() => true));
       vi.mocked(pagesApi.deleteRunFolder).mockResolvedValue({ count: 2 });
       render(<PagesPage />);
       await screen.findByTestId('artifact-run-folder-run-7');
       vi.mocked(pagesApi.list).mockRejectedValue(new Error('The library is unreachable'));
       fireEvent.click(screen.getByTestId('artifact-run-folder-menu-run-7'));
       fireEvent.click(screen.getByTestId('artifact-run-folder-delete-run-7'));
+      const dialog = await screen.findByRole('alertdialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'pages.runFolders.deleteFolder' }));
       await waitFor(() => expect(pagesApi.deleteRunFolder).toHaveBeenCalledWith('run-7'));
       expect(await screen.findByText('The library is unreachable')).toBeInTheDocument();
     });

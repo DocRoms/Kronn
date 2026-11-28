@@ -22,6 +22,12 @@ pub struct WorkflowStepIdentity {
     pub workflow_name: String,
     pub step_key: String,
     pub step_name: String,
+    /// KT-2009 — the model the step's attempt that posted a message ran, read
+    /// from the run's recorded attempts. Only on a message's identity; absent
+    /// when the run recorded none, so the header keeps its unknown state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -643,6 +649,12 @@ pub struct CreateDiscussionRequest {
     /// Model capability tier (economy / default / reasoning).
     #[serde(default)]
     pub tier: ModelTier,
+    /// KT-1993 — an exact model id pinned at creation (the picker's "Custom"
+    /// choice). Wins over the tier, and over a model inherited from the Quick
+    /// Prompt that launched this discussion. Absent = resolve from the tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
     /// 0.8.5 — when this discussion is being spawned by a Quick Prompt
     /// launch (single, batch, or compare-agents path that bypasses
     /// `create_batch_run`), the originating QP id. The backend
@@ -666,7 +678,7 @@ pub struct CreateDiscussionRequest {
     pub assistant: Option<crate::db::assistant_conversations::AssistantContext>,
 }
 
-crate::debug_without_secrets!(CreateDiscussionRequest { project_id, title, agent, connection_id, language, initial_prompt, initial_targets, skill_ids, profile_ids, directive_ids, workspace_mode, base_branch, review_head, review_base, tier, originating_qp_id, no_agent, assistant; masked: launch_variables });
+crate::debug_without_secrets!(CreateDiscussionRequest { project_id, title, agent, connection_id, language, initial_prompt, initial_targets, skill_ids, profile_ids, directive_ids, workspace_mode, base_branch, review_head, review_base, tier, model, originating_qp_id, no_agent, assistant; masked: launch_variables });
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
@@ -686,6 +698,17 @@ pub struct UpdateDiscussionRequest {
     /// Switch the primary agent for this discussion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentType>,
+    /// KT-1993 — the exact model. `Some(Some(id))` = set (validated by
+    /// `normalize_exact_model`: trimmed, one line, at most 256 characters, no
+    /// leading `-`), `Some(None)` = clear (the tier applies again),
+    /// absent = no change. Changing `agent` or `connection_id`, or sending a
+    /// `tier`, without a model clears the stored model.
+    #[serde(
+        default,
+        deserialize_with = "super::deserialize_optional_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model: Option<Option<String>>,
     /// Change the sticky named connection (KT-545). `Some(Some("id"))` = set,
     /// `Some(None)` = clear, absent = no change — same convention as
     /// `project_id`. Validated against `agent` (post-update if both are

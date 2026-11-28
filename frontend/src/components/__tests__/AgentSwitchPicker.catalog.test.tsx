@@ -5,8 +5,7 @@ import type { CatalogModelEntry, ModelTiersConfig } from '../../types/generated'
 
 const { list } = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock('../../lib/api', () => buildApiMock({ modelCatalogApi: { list: list as never } }));
-import { AgentSwitchPicker } from '../AgentSwitchPicker';
-import { MentionTierChoices } from '../MentionTierChoices';
+import { AgentPickerTierChoices, AgentSwitchPicker } from '../AgentSwitchPicker';
 
 function model(id: string, tier: CatalogModelEntry['tier_assignment'] = null): CatalogModelEntry {
   return { id, runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode',
@@ -26,7 +25,7 @@ function config(reasoning: string | null): ModelTiersConfig {
 async function show(configured: string | null = null) {
   render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode']} currentTier="default"
     modelTiers={config(configured)} onSelectionChange={vi.fn()} title="Choose" ariaLabel="Choose" />);
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
 }
 
 beforeEach(() => {
@@ -42,7 +41,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     const select = vi.fn();
     render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode']}
       currentTier={null} onSelectionChange={select} title="Choose" ariaLabel="Choose" />);
-    fireEvent.click(screen.getByRole('button', { name: 'Choose' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: /Claude Code.*reasoning/ }));
     expect(select).toHaveBeenCalledWith('ClaudeCode', 'reasoning');
   });
@@ -50,15 +49,16 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
   it('uses the explicit tier override before a different catalogue assignment', async () => {
     await show('operator-choice');
     await screen.findByText('modelCatalog.provenance.live');
-    expect(screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ }))
-      .toHaveAttribute('title', 'reasoning · operator-choice');
+    // KT-1885 — the tooltip names the model, then the tier's catalogue state.
+    expect(screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ }).getAttribute('title'))
+      .toMatch(/^reasoning · operator-choice(?: — |$)/);
   });
 
   it('never silently substitutes the catalogue assignment for an unknown configured model', async () => {
     await show('operator-model-not-in-catalog');
     await waitFor(() => expect(list).toHaveBeenCalled());
     expect(screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ }))
-      .toHaveAttribute('title', 'reasoning · operator-model-not-in-catalog');
+      .toHaveAttribute('title', 'reasoning · operator-model-not-in-catalog — modelCatalog.notInCatalog');
   });
 
   it('labels a stale live entry as cached instead of presenting a fresh discovery', async () => {
@@ -88,7 +88,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     render(<AgentSwitchPicker currentAgent="LiteLlm" availableAgents={['LiteLlm']} currentTier="default"
       currentConnectionId="team-a" availableTargets={[{ agent: 'LiteLlm', connectionId: 'team-a', label: 'Team A' }]}
       modelTiers={tiers} onTargetSelectionChange={vi.fn()} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     await waitFor(() => expect(list).toHaveBeenCalled());
     expect(screen.getByRole('menuitem', { name: /Team A.*reasoning/ }))
       .toHaveAttribute('title', 'reasoning · Default agent model');
@@ -111,7 +111,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     await screen.findByText('modelCatalog.provenance.live');
     fireEvent.keyDown(document, { key: 'Escape' });
     list.mockRejectedValue(new Error('offline'));
-    fireEvent.click(screen.getByRole('button', { name: 'Choose' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ }));
     expect(await screen.findByText('modelCatalog.loadError')).toBeInTheDocument();
     expect(screen.getByText('modelCatalog.provenance.cached')).toBeInTheDocument();
     expect(screen.queryByText('modelCatalog.provenance.live')).not.toBeInTheDocument();
@@ -121,13 +121,13 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode']} currentTier="default"
       currentModel="saved-explicit-model" modelTiers={config('operator-choice')}
       onSelectionChange={vi.fn()} title="Choose" ariaLabel="Choose" />);
-    const trigger = screen.getByRole('button', { name: 'Choose' });
+    const trigger = screen.getByRole('button', { name: /^Choose( — |$)/ });
     expect(trigger).toHaveAttribute('title', 'Choose · default · saved-explicit-model');
     await act(async () => { fireEvent.click(trigger); });
-    expect(screen.getByRole('menuitem', { name: /Claude Code.*default/ }))
-      .toHaveAttribute('title', 'default · saved-explicit-model');
-    expect(screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ }))
-      .toHaveAttribute('title', 'reasoning · operator-choice');
+    expect(screen.getByRole('menuitem', { name: /Claude Code.*default/ }).getAttribute('title'))
+      .toMatch(/^default · saved-explicit-model(?: — |$)/);
+    expect(screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ }).getAttribute('title'))
+      .toMatch(/^reasoning · operator-choice(?: — |$)/);
   });
 
   it('searches labels, exact connection identities and model IDs without refetching or selecting', async () => {
@@ -141,7 +141,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
       availableTargets={[{ agent: 'Codex' }, { agent: 'Custom', connectionId: 'team-a', label: 'Équipe A' },
         { agent: 'Custom', connectionId: 'team-b', label: 'Équipe B' }]}
       onTargetSelectionChange={select} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     const search = screen.getByRole('searchbox', { name: 'agentPicker.search' });
     expect(search).toHaveFocus();
     for (const query of ['CAFE', 'vendor/model-rare', 'team-a', 'equipe a']) {
@@ -161,8 +161,8 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     await show('operator-未知-model');
     fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }),
       { target: { value: '未知' } });
-    expect(screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ }))
-      .toHaveAttribute('title', 'reasoning · operator-未知-model');
+    expect(screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ }).getAttribute('title'))
+      .toMatch(/^reasoning · operator-未知-model(?: — |$)/);
   });
 
   it('reports no matches and resets the query when reopened', async () => {
@@ -172,7 +172,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     expect(screen.queryAllByRole('menuitem')).toHaveLength(0);
     expect(screen.getByRole('status')).toHaveTextContent('agentPicker.noMatch');
     fireEvent.keyDown(document, { key: 'Escape' });
-    const trigger = screen.getByRole('button', { name: 'Choose' });
+    const trigger = screen.getByRole('button', { name: /^Choose( — |$)/ });
     expect(trigger).toHaveFocus();
     await act(async () => { fireEvent.click(trigger); });
     expect(screen.getByRole('searchbox', { name: 'agentPicker.search' })).toHaveValue('');
@@ -187,7 +187,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     }] });
     render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode', 'Codex']}
       currentTier="default" onSelectionChange={select} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     const search = screen.getByRole('searchbox', { name: 'agentPicker.search' });
     fireEvent.keyDown(search, { key: 'ArrowDown' });
     const first = screen.getByRole('menuitem', { name: /Claude Code.*reasoning/ });
@@ -200,7 +200,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     fireEvent.keyDown(first, { key: 'ArrowUp' });
     expect(search).toHaveFocus();
     fireEvent.keyDown(search, { key: 'Escape' });
-    expect(screen.getByRole('button', { name: 'Choose' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Choose( — |$)/ })).toHaveFocus();
     expect(select).not.toHaveBeenCalled();
   });
 
@@ -220,7 +220,7 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
   it('provides search in the simple agent-only picker too', async () => {
     render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode', 'Codex']}
       onChange={vi.fn()} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'codex' } });
     expect(screen.getAllByRole('menuitem')).toHaveLength(1);
     expect(screen.getByRole('menuitem', { name: 'Codex' })).toBeInTheDocument();
@@ -232,10 +232,10 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
       <AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode', 'Codex']}
         onChange={vi.fn()} title="Choose" ariaLabel="Choose" />
     </div>);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     fireEvent.keyDown(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'Choose' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Choose' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Choose( — |$)/ })).toHaveFocus();
     expect(parentKey).not.toHaveBeenCalled();
   });
 
@@ -245,14 +245,14 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
       availableTargets={[{ agent: 'Codex' }, { agent: 'Custom', connectionId: 'team-a', label: 'Équipe A' },
         { agent: 'Custom', connectionId: 'team-b', label: 'Équipe B' }]}
       onTargetSelectionChange={select} title="Choose" ariaLabel="Choose" />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Choose' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Choose( — |$)/ })); });
     fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'team-b' } });
     const option = screen.getByRole('menuitem', { name: /Équipe B.*reasoning/ });
     await act(async () => { fireEvent.click(option); fireEvent.click(option); });
     expect(select).toHaveBeenCalledTimes(1);
     expect(select).toHaveBeenCalledWith({ agent: 'Custom', connectionId: 'team-b', label: 'Équipe B' }, 'reasoning');
     expect(screen.queryByRole('dialog', { name: 'Choose' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Choose' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Choose( — |$)/ })).toHaveFocus();
   });
 });
 
@@ -275,11 +275,16 @@ it('presents the launchable catalogue warning visually before choosing the agent
 it('presents the launchable catalogue warning visually before choosing the mention tier', () => {
   const notice = 'model operator-choice is absent from the complete CLI listing; this launch can still try it';
   const onSelect = vi.fn();
-  render(<MentionTierChoices trigger="@claude" resolve={tier => ({
-    configured: 'operator-choice', entry: model('operator-choice', tier), view: undefined,
-    model: 'operator-choice', unavailable: false, replacement: null, refusal: null,
-    notice: tier === 'reasoning' ? notice : null, provenance: 'live' as const,
-  })} onSelect={onSelect} t={(key, ...args) => [key, ...args].join(' ')} />);
+  // KT-1885 — the mention menu renders the picker's own tier choices, keeping the text field's focus.
+  render(<AgentPickerTierChoices targetLabel="@claude" tiers={['economy', 'default', 'reasoning']} keepFocus
+    resolve={tier => ({
+      configured: 'operator-choice', entry: model('operator-choice', tier), view: undefined,
+      model: 'operator-choice', unavailable: false, replacement: null, refusal: null,
+      notice: tier === 'reasoning' ? notice : null, provenance: 'live' as const,
+      refusalSource: null, noticeSource: tier === 'reasoning' ? { detail: notice } : null,
+    })}
+    tierLabel={tier => tier} modelLabel={() => 'operator-choice'} defaultLabel="default"
+    onSelect={onSelect} t={(key, ...args) => [key, ...args].join(' ')} />);
   const button = screen.getAllByRole('button').find(candidate => candidate.getAttribute('data-tier') === 'reasoning')!;
   expect(button.getAttribute('title')).toContain(notice);
   expect(within(button).getByText(/modelCatalog\.notListedBadge/)).toBeVisible();

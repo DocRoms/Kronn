@@ -49,6 +49,7 @@ import { DiscussionSkillPicker } from './DiscussionSkillPicker';
 import { DiscussionScopeSection } from './DiscussionScope';
 import { TrustLevelControl } from './TrustLevel';
 import { DiscussionDetailsSection } from './DiscussionDetailsSection';
+import { SidePanelHeaderSlot } from './SidePanelHeaderSlot';
 import './DiscussionToolPanel.css';
 import './DiscussionSettingsPanel.css';
 
@@ -258,22 +259,24 @@ export function DiscussionSettingsPanel({
       id="disc-settings-panel"
       aria-label={t('disc.settingsPanel')}
     >
-      <header className="disc-tool-panel-header">
-        <div className="disc-tool-panel-title">
-          <Settings size={15} />
-          <span>{t('disc.settingsPanel')}</span>
-        </div>
-        {onClose && (
-          <button
-            type="button"
-            className="disc-tool-panel-icon"
-            onClick={onClose}
-            aria-label={t('common.close')}
-          >
-            <X size={16} />
-          </button>
-        )}
-      </header>
+      <SidePanelHeaderSlot standalone={(
+        <header className="disc-tool-panel-header">
+          <div className="disc-tool-panel-title">
+            <Settings size={15} />
+            <span>{t('disc.settingsPanel')}</span>
+          </div>
+          {onClose && (
+            <button
+              type="button"
+              className="disc-tool-panel-icon"
+              onClick={onClose}
+              aria-label={t('common.close')}
+            >
+              <X size={16} />
+            </button>
+          )}
+        </header>
+      )} />
 
       <div className="disc-tool-panel-body disc-settings-body">
         <section className="disc-settings-overview" aria-label={t('disc.settingsOverview')}>

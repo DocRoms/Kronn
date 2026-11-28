@@ -1,0 +1,72 @@
+/* KT-1883 — Notice. As in StatusBadge, the tone is the --kr-status-* colour
+   on the icon and the inline-start border, and the same colour at low
+   opacity (from its rgb triple) on the border and the fill. The text stays in
+   --kr-text-primary / --kr-text-secondary, so it reads at 4.5:1 in every
+   theme. */
+
+.ui-notice {
+  --ui-notice-rgb: var(--kr-info-rgb);
+  --ui-notice-colour: var(--kr-status-info);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-space-3);
+  padding: var(--kr-space-3) var(--kr-space-4);
+  font-size: var(--kr-type-md);
+  line-height: 1.45;
+  color: var(--kr-text-primary);
+  background-color: rgba(var(--ui-notice-rgb), 0.08);
+  border: 1px solid rgba(var(--ui-notice-rgb), 0.32);
+  border-inline-start: var(--kr-space-1) solid var(--ui-notice-colour);
+  border-radius: var(--kr-radius-surface);
+}
+
+.ui-notice[data-tone="warning"] { --ui-notice-rgb: var(--kr-warning-rgb); --ui-notice-colour: var(--kr-status-warning); }
+.ui-notice[data-tone="danger"] { --ui-notice-rgb: var(--kr-danger-rgb); --ui-notice-colour: var(--kr-status-danger); }
+.ui-notice[data-tone="success"] { --ui-notice-rgb: var(--kr-success-rgb); --ui-notice-colour: var(--kr-status-success); }
+
+.ui-notice-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding-top: 1px;
+  color: var(--ui-notice-colour);
+}
+
+.ui-notice-icon svg {
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
+}
+
+.ui-notice-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  overflow-wrap: break-word;
+}
+
+.ui-notice-title {
+  margin: 0;
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+.ui-notice-message {
+  color: var(--kr-text-primary);
+}
+
+.ui-notice-message > p {
+  margin: 0;
+}
+
+.ui-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-space-2);
+  margin-top: var(--kr-space-1);
+}
+
+.ui-notice-dismiss {
+  flex-shrink: 0;
+  margin: calc(-1 * var(--kr-space-1)) calc(-1 * var(--kr-space-2)) 0 0;
+}

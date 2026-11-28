@@ -872,6 +872,41 @@ describe('DiscussionsPage', () => {
     expect(screen.queryByRole('complementary', { name: 'Terminal' })).not.toBeInTheDocument();
   });
 
+  // KT-2015 — the composer's @ menu consumed nothing on Escape, and the page's
+  // window listener closed every side panel: one key closed both.
+  it('Escape in the @ or emoji menu closes the menu only; the next Escape closes the side panel', async () => {
+    const discussion = makeListDiscussion('d-escape-menu', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    await wrap(
+      <DiscussionsPage
+        projects={[]} agents={[]} allDiscussions={[discussion]} configLanguage="fr"
+        agentAccess={null} refetchDiscussions={noop} refetchProjects={noop}
+        onNavigate={noop} toast={toastFn} initialActiveDiscussionId="d-escape-menu"
+        {...liftedProps()}
+      />,
+    );
+    await openPanel(/^Git$/);
+    expect(await screen.findByTestId('git-panel')).toBeInTheDocument();
+    const textarea = document.querySelector('.disc-composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.change(textarea, { target: { value: '@' } });
+    await waitFor(() => expect(document.querySelector('.kr-agent-switch-palette-row')).not.toBeNull());
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    expect(document.querySelector('.kr-agent-switch-palette-row')).toBeNull();
+    expect(screen.getByTestId('git-panel')).toBeInTheDocument();
+
+    // The emoji menu keeps its behaviour: it closes, the panel stays.
+    fireEvent.change(textarea, { target: { value: ':smi' } });
+    await waitFor(() => expect(document.querySelector('.disc-emoji-popover')).not.toBeNull());
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    expect(document.querySelector('.disc-emoji-popover')).toBeNull();
+    expect(screen.getByTestId('git-panel')).toBeInTheDocument();
+
+    // No menu open: the next Escape closes the panel.
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('git-panel')).toBeNull());
+  });
+
   it('shows a single close button on every panel: the shell\'s own', async () => {
     const discussion = makeListDiscussion('d-one-close', 0);
     vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
@@ -902,6 +937,50 @@ describe('DiscussionsPage', () => {
       const closes = within(shell).getAllByRole('button', { name: /ferm/i });
       expect(closes.map(button => button.getAttribute('aria-label')), `panel « ${tab.textContent} »`)
         .toEqual(['Fermer les panneaux']);
+    }
+  });
+
+  it('shows one header above the tabs on every panel, the panel drawing none of its own (KT-1884)', async () => {
+    const discussion = makeListDiscussion('d-one-header', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={{
+          claude_code: { full_access: true },
+        } as unknown as AgentsConfig}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-one-header"
+        {...liftedProps()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
+    const shell = await screen.findByTestId('panel-switcher');
+    const rail = () => shell.querySelector('.side-panel-shell-rail') as HTMLElement;
+    const tabs = within(rail()).getAllByRole('tab');
+    expect(tabs.length).toBeGreaterThanOrEqual(5);
+    for (const tab of tabs) {
+      fireEvent.click(tab);
+      const label = `panel « ${tab.textContent} »`;
+      expect(shell.querySelectorAll('.ui-header'), label).toHaveLength(1);
+      expect(
+        shell.querySelectorAll('.disc-tool-panel-header, .disc-assets-panel-header, .disc-notes-panel-head'),
+        label,
+      ).toHaveLength(0);
+      const header = shell.querySelector('.ui-header') as HTMLElement;
+      expect(within(header).getByRole('heading', { level: 2 }), label).toHaveTextContent(discussion.title);
+      // Above the rail and the panel, and the rail keeps every tab.
+      expect(header.nextElementSibling, label).toHaveClass('side-panel-shell-main');
+      expect(within(rail()).getAllByRole('tab'), label).toHaveLength(tabs.length);
+      expect(within(header).getByTestId('side-panel-menu-btn'), label).toBeInTheDocument();
     }
   });
 
@@ -3003,8 +3082,9 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    // Per-message TTS play button should be present on agent messages
-    const ttsPlayBtn = document.querySelector('button[title="Lire à voix haute"]');
+    // Per-message TTS play button should be present on agent messages (KT-1902:
+    // a named footer action, its name in aria-label rather than a title).
+    const ttsPlayBtn = document.querySelector('button[aria-label="Lire à voix haute"]');
     expect(ttsPlayBtn).toBeTruthy();
   });
 
@@ -3037,7 +3117,7 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    const ttsPlayBtn = document.querySelector('button[title="Lire à voix haute"]') as HTMLButtonElement;
+    const ttsPlayBtn = document.querySelector('button[aria-label="Lire à voix haute"]') as HTMLButtonElement;
     await act(async () => { fireEvent.click(ttsPlayBtn); });
 
     // speechSynthesis.cancel should be called first (to stop any ongoing speech)
@@ -3615,7 +3695,8 @@ describe('DiscussionsPage', () => {
       }
       fireEvent.click(await screen.findByTestId('side-panel-menu-btn'));
       await act(async () => {
-        fireEvent.click(document.querySelector('[role="menuitem"][data-action="delete"]') as HTMLElement);
+        // The panel menu's one destructive item is the delete.
+        fireEvent.click(document.querySelector('[role="menuitem"][data-destructive]') as HTMLElement);
       });
       await waitFor(() => expect(discussionsApi.delete).toHaveBeenCalledTimes(count));
     };
@@ -4578,8 +4659,8 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    // Should find copy buttons (title attribute)
-    const copyBtns = document.querySelectorAll('[title="Copier le message"]');
+    // Should find copy buttons (KT-1902: named by aria-label, a footer action)
+    const copyBtns = document.querySelectorAll('[aria-label="Copier le message"]');
     expect(copyBtns.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -4786,10 +4867,12 @@ describe('DiscussionsPage', () => {
     // The button carries the configured agent under its canonical mention plus its
     // role, so the same identity reads the same way here, in the composer and in
     // the participant list.
-    const switchBtn = screen.getByRole('button', { name: "Changer d'agent ou de mode IA" });
+    const switchBtn = screen.getByRole('button', { name: /^Changer d'agent ou de mode IA( — |$)/ });
     expect(switchBtn).toBeTruthy();
     expect(switchBtn?.textContent).toContain('@claude');
-    expect(switchBtn?.textContent).toContain('agent de discussion');
+    expect(switchBtn?.textContent).toContain('agent principal');
+    // KT-1936 — the accessible name says the action, then the identity.
+    expect(switchBtn.getAttribute('aria-label')).toMatch(/^Changer d'agent ou de mode IA — @claude · .+ · agent principal$/);
   });
 
   // ─── Global discussion search entry point ────────────────────────────
@@ -4868,7 +4951,7 @@ describe('DiscussionsPage', () => {
     );
 
     // Click the agent switch button
-    const switchBtn = screen.getByRole('button', { name: "Changer d'agent ou de mode IA" });
+    const switchBtn = screen.getByRole('button', { name: /^Changer d'agent ou de mode IA( — |$)/ });
     expect(switchBtn).toBeTruthy();
     await act(async () => { fireEvent.click(switchBtn); });
 

@@ -165,7 +165,7 @@ describe('BatchComparePanel', () => {
     );
 
     const agentOrder = () => Array.from(document.querySelectorAll('.disc-compare-column'))
-      .map(column => column.querySelector('.disc-compare-target-name strong')?.textContent);
+      .map(column => column.querySelector('.disc-compare-target-name .ui-agent-identity-name')?.textContent);
     expect(agentOrder()).toEqual(['Codex', 'Claude Code', 'Vibe']);
 
     fireEvent.click(screen.getByRole('button', { name: 'disc.compare.moveRight Codex' }));
@@ -445,9 +445,9 @@ describe('BatchComparePanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'disc.compare.details' }));
     await screen.findByText('disc.compare.aiJudge');
-    fireEvent.click(screen.getByRole('button', { name: 'disc.compare.chooseJudge' }));
+    fireEvent.click(screen.getByRole('button', { name: /^disc\.compare\.chooseJudge( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'OpenCode · default' }));
-    expect(screen.getByRole('button', { name: 'disc.compare.chooseJudge' })).toHaveTextContent('OpenCode');
+    expect(screen.getByRole('button', { name: /^disc\.compare\.chooseJudge( — |$)/ })).toHaveTextContent('OpenCode');
     fireEvent.click(screen.getByRole('button', { name: 'disc.compare.launchJudge' }));
 
     await waitFor(() => expect(compareApi.startJudge).toHaveBeenCalledWith('run-opencode-judge', {
@@ -528,7 +528,8 @@ describe('BatchComparePanel', () => {
     // The run never recorded what actually answered; today's config must not
     // stand in for that missing history.
     expect(screen.queryByText('codex-reasoning-v9-today')).not.toBeInTheDocument();
-    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    // KT-1936 — AgentIdentity's « default model » state, next to the agent.
+    expect(screen.getByTestId('agent-identity-model')).toHaveAttribute('data-state', 'providerDefault');
   });
 
   it('keeps each homonymous connection its own recorded model instead of blending them', () => {
@@ -568,7 +569,8 @@ describe('BatchComparePanel', () => {
     );
 
     expect(screen.getAllByText('Gateway')).toHaveLength(2);
-    const models = Array.from(document.querySelectorAll('.disc-compare-model')).map(node => node.textContent);
+    const models = Array.from(document.querySelectorAll('.disc-compare-target-name [data-testid="agent-identity-model"]'))
+      .map(node => node.textContent);
     expect(models).toEqual(['model-from-a', 'model-from-b']);
   });
 
@@ -668,7 +670,8 @@ describe('BatchComparePanel', () => {
     );
 
     expect(screen.queryByText('attempted-after-model')).not.toBeInTheDocument();
-    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    // KT-1936 — AgentIdentity's « default model » state, next to the agent.
+    expect(screen.getByTestId('agent-identity-model')).toHaveAttribute('data-state', 'providerDefault');
     expect(screen.getByText('disc.compare.modelUnknown')).toBeInTheDocument();
   });
 
@@ -721,7 +724,8 @@ describe('BatchComparePanel', () => {
     );
 
     expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
-    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    // KT-1936 — AgentIdentity's « default model » state, next to the agent.
+    expect(screen.getByTestId('agent-identity-model')).toHaveAttribute('data-state', 'providerDefault');
     expect(screen.getByText('disc.compare.modelUnknown')).toBeInTheDocument();
   });
 });

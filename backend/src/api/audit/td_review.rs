@@ -528,6 +528,7 @@ pub fn talk_discussion_request(
         review_head: None,
         review_base: None,
         tier: lead.tier.unwrap_or_default(),
+        model: None,
         originating_qp_id: None,
         launch_variables: HashMap::new(),
         no_agent: false,

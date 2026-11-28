@@ -157,6 +157,18 @@ pub struct ParticipantView {
     /// inferred). `None` = not declared; the UI shows it as declared-at-join,
     /// never as a live/guessed value.
     pub model: Option<String>,
+    /// KT-2026 — this native row runs the discussion's OWN agent on its own
+    /// connection. The header shows that run once, as the main agent's state,
+    /// instead of a second chip. `false` for a joined session and for a one-off
+    /// native agent (a mention, another connection). Never inferred from
+    /// `agent_type` alone: two connections of one provider can differ.
+    pub is_main_agent: bool,
+    /// KT-2026 — the exact model this native run uses, when the server knows
+    /// it: a fallback pin's model, else the discussion's exact model on its own
+    /// turn (the runner's `turn_exact_model` rule). `None` = not known here:
+    /// the tier or the connection default decides, and the UI must not call it
+    /// « default model ».
+    pub run_model: Option<String>,
     /// Native CLI conversation id, when the joining bridge can prove one.
     /// `None` deliberately produces no resume affordance in the UI.
     pub conversation_id: Option<String>,
@@ -610,6 +622,72 @@ pub fn list_sessions(
 /// `presence_state` (never a bare "connected" badge from a lingering row) plus
 /// read/write liveness. `count_live_participants` (the sticky dispatch gate) is
 /// deliberately untouched — this is a display layer above it.
+/// KT-2026 — what a dispatch runs on, read from its durable row.
+struct DispatchTarget<'a> {
+    job_id: &'a str,
+    trigger_message_id: &'a str,
+    /// The agent the job names: its override, else the discussion's agent.
+    agent_type: &'a str,
+    /// The job names an agent (`agent_override_json`), not the discussion's.
+    overridden: bool,
+    connection_id: Option<&'a str>,
+}
+
+/// KT-2026 — the exact model a dispatch's run uses, when the server knows it.
+/// It is the runner's own rule (`api::discussions::streaming::turn_exact_model`,
+/// which this layer cannot call): a fallback pin's model first, then the
+/// discussion's exact model on its own turn only, dropped when a per-message
+/// tier targets that turn. Anything else is `None`: the tier or the connection
+/// decides, and this view does not project the tier. A read only, never a
+/// change to what is dispatched.
+fn dispatch_run_model(
+    conn: &Connection,
+    target: &DispatchTarget<'_>,
+    own_turn: bool,
+    discussion_model: Option<&str>,
+) -> Result<Option<String>> {
+    // A pin row is a fallback turn: its own model, even when that is none.
+    let pin: Option<Option<String>> = conn
+        .query_row(
+            "SELECT model FROM dispatch_fallback_pins WHERE dispatch_job_id = ?1",
+            [target.job_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    let tier: Option<String> = if target.overridden {
+        conn.query_row(
+            "SELECT model_tier FROM message_targets
+              WHERE message_id = ?1 AND target_kind = 'agent' AND agent_type = ?2
+                AND connection_id IS ?3 AND model_tier IS NOT NULL
+              ORDER BY position LIMIT 1",
+            params![
+                target.trigger_message_id,
+                target.agent_type,
+                target.connection_id
+            ],
+            |row| row.get(0),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT model_tier FROM message_targets
+              WHERE message_id = ?1 AND target_kind = 'discussion_agent'
+                AND connection_id IS ?2 AND model_tier IS NOT NULL
+              ORDER BY position LIMIT 1",
+            params![target.trigger_message_id, target.connection_id],
+            |row| row.get(0),
+        )
+        .optional()?
+    };
+    // The DB CHECK allows only economy / default / reasoning, so a stored tier
+    // is always a tier override.
+    Ok(match pin {
+        Some(pinned_model) => pinned_model,
+        None if tier.is_some() || !own_turn => None,
+        None => discussion_model.map(str::to_string),
+    })
+}
+
 pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<ParticipantView>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
@@ -646,6 +724,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                     workflow_name: r.get(19)?,
                     step_key: r.get(20)?,
                     step_name: r.get(21)?,
+                    model: None,
                 }),
                 None => None,
             };
@@ -706,6 +785,8 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                 resume_reason: None,
                 resume_since: None,
                 model: r.get(14)?,
+                is_main_agent: false,
+                run_model: None,
                 conversation_id: r.get(15)?,
                 cli_ordinal: workflow_step.is_none().then(|| r.get(16)).transpose()?,
                 workflow_step,
@@ -765,10 +846,24 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
     // backend-owned obligations from the durable job/dispatch sources instead
     // of inventing client presence. Only the newest row per provider decides:
     // a later successful dispatch must clear an older quota/stall badge.
-    let mut native_signals: std::collections::HashMap<
-        String,
-        (PresenceState, String, String, Option<String>),
-    > = std::collections::HashMap::new();
+    struct NativeSignal {
+        state: PresenceState,
+        reason: String,
+        since: String,
+        scheduled_at: Option<String>,
+        run_model: Option<String>,
+    }
+    // KT-2026 — keyed by (agent, is the discussion's own agent): the own
+    // agent's run is the principal badge's state; a one-off run of the same
+    // provider on another connection keeps its own row.
+    let mut native_signals: std::collections::HashMap<(String, bool), NativeSignal> =
+        std::collections::HashMap::new();
+    let (default_agent, disc_connection, disc_model): (String, Option<String>, Option<String>) =
+        conn.query_row(
+            "SELECT agent, connection_id, model FROM discussions WHERE id = ?1",
+            [disc_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
     let signal_priority = |state: PresenceState| match state {
         PresenceState::QuotaExhausted => 4,
         PresenceState::Stalled => 3,
@@ -776,16 +871,13 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
         PresenceState::ResumeExpected => 1,
         _ => 0,
     };
-    let mut insert_signal = |agent_type: String,
-                             state: PresenceState,
-                             reason: String,
-                             since: String,
-                             scheduled_at: Option<String>| {
+    let mut insert_signal = |agent_type: String, main: bool, signal: NativeSignal| {
+        let key = (agent_type, main);
         let replace = native_signals
-            .get(&agent_type)
-            .is_none_or(|current| signal_priority(state) > signal_priority(current.0));
+            .get(&key)
+            .is_none_or(|current| signal_priority(signal.state) > signal_priority(current.state));
         if replace {
-            native_signals.insert(agent_type, (state, reason, since, scheduled_at));
+            native_signals.insert(key, signal);
         }
     };
 
@@ -818,32 +910,52 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             "Escalated" => PresenceState::Stalled,
             _ => continue,
         };
-        insert_signal(agent_type, state, reason, updated_at, Some(scheduled_at));
+        let main = agent_type == default_agent;
+        insert_signal(
+            agent_type,
+            main,
+            NativeSignal {
+                state,
+                reason,
+                since: updated_at,
+                scheduled_at: Some(scheduled_at),
+                run_model: None,
+            },
+        );
     }
 
-    let default_agent: String = conn.query_row(
-        "SELECT agent FROM discussions WHERE id = ?1",
-        [disc_id],
-        |row| row.get(0),
-    )?;
     let mut seen_dispatch_agents = std::collections::HashSet::new();
     let mut dispatch_stmt = conn.prepare(
-        "SELECT agent_override_json, status, last_error, failure_kind,
-                COALESCE(agent_started_at, updated_at), updated_at
+        "SELECT id, trigger_message_id, agent_override_json, status, last_error, failure_kind,
+                COALESCE(agent_started_at, updated_at), updated_at, connection_id
            FROM agent_dispatch_jobs WHERE discussion_id = ?1
           ORDER BY updated_at DESC, id DESC LIMIT 100",
     )?;
     for row in dispatch_stmt.query_map(params![disc_id], |row| {
         Ok((
-            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })? {
-        let (agent_json, status, error, failure_kind, started_at, updated_at) = row?;
+        let (
+            job_id,
+            trigger_message_id,
+            agent_json,
+            status,
+            error,
+            failure_kind,
+            started_at,
+            updated_at,
+            connection_id,
+        ) = row?;
+        let overridden = agent_json.is_some();
         let agent_type = if let Some(agent_json) = agent_json {
             serde_json::from_str::<crate::models::AgentType>(&agent_json)
                 .map(|agent| format!("{agent:?}"))
@@ -851,7 +963,13 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
         } else {
             default_agent.clone()
         };
-        if !seen_dispatch_agents.insert(agent_type.clone()) {
+        // The discussion's own agent on its own connection: the same rule as
+        // `turn_runs_on_discussion_target`, on the names the rows carry.
+        let main = agent_type == default_agent
+            && connection_id
+                .as_deref()
+                .is_none_or(|connection| Some(connection) == disc_connection.as_deref());
+        if !seen_dispatch_agents.insert((agent_type.clone(), main)) {
             continue;
         }
         let state = match (status.as_str(), failure_kind.as_deref()) {
@@ -869,16 +987,39 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             status != "Running"
                 || crate::db::agent_dispatch::parse_runtime_unavailable(error).is_none()
         });
+        let run_model = dispatch_run_model(
+            conn,
+            &DispatchTarget {
+                job_id: &job_id,
+                trigger_message_id: &trigger_message_id,
+                agent_type: &agent_type,
+                overridden,
+                connection_id: connection_id.as_deref(),
+            },
+            main,
+            disc_model.as_deref(),
+        )?;
         insert_signal(
             agent_type,
-            state,
-            error.unwrap_or_else(|| "agent dispatch".into()),
-            started_at,
-            (status == "Pending").then_some(updated_at),
+            main,
+            NativeSignal {
+                state,
+                reason: error.unwrap_or_else(|| "agent dispatch".into()),
+                since: started_at,
+                scheduled_at: (status == "Pending").then_some(updated_at),
+                run_model,
+            },
         );
     }
     let mut synth_id = -1_i64;
-    for (agent_type, (presence_state, reason, since, scheduled_at)) in native_signals {
+    for ((agent_type, main), signal) in native_signals {
+        let NativeSignal {
+            state: presence_state,
+            reason,
+            since,
+            scheduled_at,
+            run_model,
+        } = signal;
         rows.retain(|participant| {
             participant.agent_type != agent_type
                 || participant.presence_state != PresenceState::Offline
@@ -903,6 +1044,8 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             resume_reason: Some(reason),
             resume_since: Some(since),
             model: None,
+            is_main_agent: main,
+            run_model,
             conversation_id: None,
             cli_ordinal: None,
             workflow_step: None,
@@ -918,24 +1061,61 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
     // target agent has no live session, synthesise a dormant, Kronn-wakeable
     // participant so the room shows the pending call rather than nothing.
     let mut obligation_stmt = conn.prepare(
-        "SELECT agent_override_json, available_at
+        "SELECT id, trigger_message_id, agent_override_json, available_at, connection_id
            FROM agent_dispatch_jobs
           WHERE discussion_id = ?1 AND status = 'Pending'
             AND agent_override_json IS NOT NULL
             AND last_error LIKE 'runtime_unavailable%'
           ORDER BY available_at ASC",
     )?;
-    let obligations: Vec<(String, Option<String>)> = obligation_stmt
+    /// KT-2026 — one deferred dispatch row, as the obligation loop reads it.
+    struct ObligationRow {
+        job_id: String,
+        trigger_message_id: String,
+        agent_json: String,
+        available_at: Option<String>,
+        connection_id: Option<String>,
+    }
+    let obligations: Vec<ObligationRow> = obligation_stmt
         .query_map(params![disc_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            Ok(ObligationRow {
+                job_id: r.get(0)?,
+                trigger_message_id: r.get(1)?,
+                agent_json: r.get(2)?,
+                available_at: r.get(3)?,
+                connection_id: r.get(4)?,
+            })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut seen_obligation: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (agent_json, available_at) in obligations {
+    for ObligationRow {
+        job_id,
+        trigger_message_id,
+        agent_json,
+        available_at,
+        connection_id,
+    } in obligations
+    {
         let Ok(agent) = serde_json::from_str::<crate::models::AgentType>(&agent_json) else {
             continue;
         };
         let agent_type = format!("{agent:?}");
+        let main = agent_type == default_agent
+            && connection_id
+                .as_deref()
+                .is_none_or(|connection| Some(connection) == disc_connection.as_deref());
+        let run_model = dispatch_run_model(
+            conn,
+            &DispatchTarget {
+                job_id: &job_id,
+                trigger_message_id: &trigger_message_id,
+                agent_type: &agent_type,
+                overridden: true,
+                connection_id: connection_id.as_deref(),
+            },
+            main,
+            disc_model.as_deref(),
+        )?;
         // Skip an agent that already has a genuinely live session (it is not
         // absent) or a second obligation for the same agent (one chip per
         // agent). A lingering Offline row is not proof of reachability: replace
@@ -970,6 +1150,8 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             resume_since: Some(now.to_rfc3339()),
             // A synthesised obligation is not a joined session — nothing declared.
             model: None,
+            is_main_agent: main,
+            run_model,
             conversation_id: None,
             // No real session row, so no stable ordinal / room alias.
             cli_ordinal: None,
@@ -2255,6 +2437,133 @@ mod tests {
             .unwrap()
             .iter()
             .all(|participant| participant.role != "native_resume"));
+    }
+
+    /// KT-2026 — a user message the running dispatch is triggered by.
+    fn seed_trigger_message(conn: &Connection) {
+        let msg = crate::models::DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
+            session_continuity: None,
+            kind: Default::default(),
+            model: None,
+            lint_report: None,
+            id: "u1".to_string(),
+            role: crate::models::MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
+            content: "go".to_string(),
+            agent_type: None,
+            timestamp: Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
+        };
+        crate::db::discussions::insert_message(conn, "d1", &msg).unwrap();
+    }
+
+    /// KT-2026 — the discussion's own agent and exact model, then one Running
+    /// dispatch (`agent_override` names another agent, or none = the own one).
+    fn seed_running_dispatch(
+        conn: &Connection,
+        discussion_model: Option<&str>,
+        agent_override: Option<&str>,
+    ) {
+        seed_trigger_message(conn);
+        conn.execute(
+            "UPDATE discussions SET agent = 'ClaudeCode', model = ?1 WHERE id = 'd1'",
+            [discussion_model],
+        )
+        .unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs
+                 (id, discussion_id, trigger_message_id, trigger_sort_order, dedupe_key,
+                  agent_override_json, status, available_at, created_at, updated_at)
+             VALUES ('j1', 'd1', 'u1', 0, 'mention:u1:run', ?1, 'Running', ?2, ?2, ?2)",
+            params![agent_override, now],
+        )
+        .unwrap();
+    }
+
+    fn native_rows(conn: &Connection) -> Vec<ParticipantView> {
+        list_participant_views(conn, "d1")
+            .unwrap()
+            .into_iter()
+            .filter(|participant| participant.role == "native_resume")
+            .collect()
+    }
+
+    #[test]
+    fn own_agent_running_turn_is_the_main_run_with_its_exact_model() {
+        let conn = setup_db();
+        seed_running_dispatch(&conn, Some("claude-exact-7"), None);
+        let rows = native_rows(&conn);
+        assert_eq!(rows.len(), 1, "the own agent's run is one row");
+        assert_eq!(rows[0].agent_type, "ClaudeCode");
+        assert_eq!(rows[0].presence_state, PresenceState::Running);
+        assert!(
+            rows[0].is_main_agent,
+            "the discussion's own agent is the main run"
+        );
+        assert_eq!(rows[0].run_model.as_deref(), Some("claude-exact-7"));
+    }
+
+    #[test]
+    fn own_agent_running_turn_without_exact_model_reports_none_not_a_guess() {
+        let conn = setup_db();
+        seed_running_dispatch(&conn, None, None);
+        let rows = native_rows(&conn);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_main_agent);
+        assert_eq!(
+            rows[0].run_model, None,
+            "no exact model: the tier decides, nothing is claimed"
+        );
+    }
+
+    #[test]
+    fn one_off_agent_running_turn_keeps_its_own_row_and_not_the_discussion_model() {
+        let conn = setup_db();
+        seed_running_dispatch(&conn, Some("claude-exact-7"), Some("\"Ollama\""));
+        let rows = native_rows(&conn);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agent_type, "Ollama");
+        assert!(
+            !rows[0].is_main_agent,
+            "a one-off agent is not the main run"
+        );
+        assert_eq!(
+            rows[0].run_model, None,
+            "the discussion's exact model belongs to its own agent only"
+        );
+    }
+
+    #[test]
+    fn own_agent_turn_with_a_per_message_tier_drops_the_exact_model() {
+        let conn = setup_db();
+        seed_running_dispatch(&conn, Some("claude-exact-7"), None);
+        conn.execute(
+            "INSERT INTO message_targets
+                 (message_id, target_kind, agent_type, connection_id, cli_session_id, position, model_tier)
+             VALUES ('u1', 'discussion_agent', 'ClaudeCode', NULL, NULL, 0, 'economy')",
+            [],
+        )
+        .unwrap();
+        let rows = native_rows(&conn);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_main_agent);
+        assert_eq!(
+            rows[0].run_model, None,
+            "a tier on this turn decides the model: the exact one does not run"
+        );
     }
 
     #[test]

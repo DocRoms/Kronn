@@ -145,7 +145,7 @@ describe('ChatInput draft persistence', () => {
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '@' } });
     const trigger = screen.getByText('@codex');
-    expect(trigger.style.color).toBe('#10a37f');
+    expect(trigger.style.color).toBe('var(--kr-agent-codex-text)');
     const nvidiaTrigger = screen.getByText('@nvidia');
     expect(nvidiaTrigger.style.color).toBe('var(--kr-agent-nvidia-text)');
   });

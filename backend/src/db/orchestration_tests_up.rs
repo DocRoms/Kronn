@@ -168,6 +168,46 @@ fn a_discussion_elevation_grants_only_that_discussion() {
     );
 }
 
+/// KT-1955 — « Refuser » without a message on Kronn's Docker elevation card
+/// closes it and grants nothing: no project or discussion access changes.
+#[test]
+fn question_cancel_a_blank_refusal_of_an_elevation_card_grants_nothing() {
+    let conn = setup();
+    let (_exec, card) = elevation_fixture(&conn);
+    let question_id: String = conn
+        .query_row(
+            "SELECT id FROM discussion_questions WHERE source_message_id = ?1",
+            [&card],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let q = crate::db::discussion_questions::decline(
+        &conn,
+        DISC,
+        &question_id,
+        &crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
+            idempotency_key: "blank".into(),
+            reason: None,
+        },
+        "Romu",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        q.state,
+        crate::db::discussion_questions::DiscussionQuestionState::Cancelled
+    );
+    assert_eq!(q.answer, None, "no scope was chosen");
+    assert_eq!(
+        crate::db::projects::validations_access(&conn, "p1").unwrap(),
+        crate::models::ValidationsAccess::Sandbox
+    );
+    assert!(
+        !crate::db::projects::discussion_capability_granted(&conn, DISC, "validations_docker")
+            .unwrap()
+    );
+}
+
 #[test]
 fn a_refusal_or_a_look_alike_card_grants_nothing() {
     let conn = setup();

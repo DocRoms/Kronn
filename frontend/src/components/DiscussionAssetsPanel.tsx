@@ -6,6 +6,7 @@ import type { ExternalApiConnectionView } from '../lib/api';
 import { MessageAttachments, type ImageGenerationRequest } from './MessageAttachments';
 import { MediaGenerateForm } from './MediaGenerateForm';
 import { VideoSequenceEditor } from './VideoSequenceEditor';
+import { SidePanelHeaderSlot } from './SidePanelHeaderSlot';
 import { mediaKind } from '../lib/mediaKind';
 
 type T = (key: string, ...args: (string | number)[]) => string;
@@ -172,23 +173,28 @@ export function DiscussionAssetsPanel({
 
   return (
     <aside className="disc-assets-panel" aria-label={t('disc.assets.title')}>
-      <header className="disc-assets-panel-header">
-        <div>
-          <h2>{t('disc.assets.title')}</h2>
-          <p>{t('disc.assets.subtitle', files.length)}</p>
-        </div>
-        {onClose && (
-          <button
-            type="button"
-            className="disc-icon-btn"
-            onClick={onClose}
-            aria-label={t('disc.assets.close')}
-            title={t('disc.assets.close')}
-          >
-            <X size={16} />
-          </button>
+      <SidePanelHeaderSlot
+        meta={<span>{t('disc.assets.subtitle', files.length)}</span>}
+        standalone={(
+          <header className="disc-assets-panel-header">
+            <div>
+              <h2>{t('disc.assets.title')}</h2>
+              <p>{t('disc.assets.subtitle', files.length)}</p>
+            </div>
+            {onClose && (
+              <button
+                type="button"
+                className="disc-icon-btn"
+                onClick={onClose}
+                aria-label={t('disc.assets.close')}
+                title={t('disc.assets.close')}
+              >
+                <X size={16} />
+              </button>
+            )}
+          </header>
         )}
-      </header>
+      />
 
       <div className="disc-assets-tabs" role="tablist" aria-label={t('disc.assets.tabs')}>
         {([

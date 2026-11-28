@@ -114,7 +114,9 @@ async function reachDashboard(page: Page, kronn: KronnInstance): Promise<void> {
 async function openEveryPage(page: Page): Promise<void> {
   await page.locator(NAV.settings).click();
   await expect(page).toHaveURL(/\/config/);
-  await expect(page.locator('.set-accordion-header').first()).toBeVisible();
+  // KT-1923 — Settings opens on its first sub-page, its sections drawn.
+  await expect(page.locator('#settings-subpage-you-title')).toBeVisible();
+  await expect(page.getByTestId('settings-subpage-content-you').locator('.set-section').first()).toBeVisible();
   await expectNoErrorScreen(page);
 
   await page.locator(NAV.projects).click();

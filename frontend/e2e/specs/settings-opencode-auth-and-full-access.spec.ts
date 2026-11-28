@@ -49,7 +49,7 @@ test('OpenCode with a confirmed auth failure shows its own setup action, never a
 
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
-  await dashboard.clickSettings();
+  await dashboard.openSettings('agents');
 
   const agents = page.locator('#settings-agent-config');
   const openCode = agents.locator('.set-agent-row[data-agent-type="OpenCode"]');
@@ -75,7 +75,7 @@ test('OpenCode with no confirmed auth signal still reads as ready, not auth-requ
 
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
-  await dashboard.clickSettings();
+  await dashboard.openSettings('agents');
 
   const agents = page.locator('#settings-agent-config');
   const openCode = agents.locator('.set-agent-row[data-agent-type="OpenCode"]');
@@ -99,7 +99,7 @@ test('OpenCode full-access panel describes ACP permission scope, not a fabricate
 
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
-  await dashboard.clickSettings();
+  await dashboard.openSettings('agents');
 
   const settings = new SettingsPage(page);
   const configuration = await settings.openAgentConfiguration('OpenCode');

@@ -10,6 +10,7 @@ fn failure(reason: ModelUnavailableReason, action: &str) -> CatalogPreflightFail
         model_id: Some("vertex_ai/claude-fable-5@default".into()),
         reason,
         detail: "Access denied (HTTP 401): the proxy lists this model but refuses it".into(),
+        detail_code: None,
         last_checked_at: "2026-10-06T08:15:00Z".parse().unwrap(),
         recommended_action: action.into(),
         replacement: None,

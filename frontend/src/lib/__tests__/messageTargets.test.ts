@@ -35,6 +35,8 @@ const cli = (id: number, agent_type: string, cli_ordinal: number | null = null):
   model: null,
   conversation_id: null,
   workflow_step: null,
+  is_main_agent: false,
+  run_model: null,
 });
 
 const labels = {

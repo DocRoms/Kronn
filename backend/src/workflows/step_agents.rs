@@ -88,7 +88,14 @@ pub fn validate(workflow: &Workflow, requested: &StepAgents) -> Result<ResolvedS
         let canonical = step_key(step);
         let normalized = StepAgentOverride {
             agent: choice.agent.clone(),
-            model: normalized_text("model", key, choice.model.as_deref())?,
+            // KT-1998 — the shared model rule; stored trimmed, blank is none.
+            model: choice
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+                .map(crate::models::setup::normalize_exact_model)
+                .transpose()
+                .map_err(|error| format!("`step_agents.{key}.model`: {error}"))?,
             reasoning_effort: normalized_text(
                 "reasoning_effort",
                 key,
@@ -437,7 +444,7 @@ mod tests {
     #[test]
     fn multi_line_or_oversized_text_is_refused() {
         let wf = workflow(vec![agent_step("a", AgentType::ClaudeCode)]);
-        let long = "m".repeat(MAX_TEXT_CHARS + 1);
+        let long = "m".repeat(crate::models::setup::MAX_MODEL_ID_CHARS + 1);
         for (model, effort) in [
             (Some("a\nb"), None),
             (Some(long.as_str()), None),

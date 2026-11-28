@@ -1,0 +1,492 @@
+/* KT-1878 — Settings > Design system. Written with the scales it shows.
+   KT-1987 — a sub-page of its own (/config/design-system); the link to it,
+   in the appearance settings, is styled by SettingsPage.css. */
+
+.ds-page {
+  min-width: 0;
+}
+
+/* The way back to Settings, in the header's leading slot. */
+.ds-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--kr-control-h-sm);
+  height: var(--kr-control-h-sm);
+  border-radius: var(--kr-radius-control);
+  color: var(--kr-text-secondary);
+  transition: background-color var(--kr-duration-fast) ease-out;
+}
+
+.ds-back:hover,
+.ds-back:focus-visible {
+  background-color: var(--kr-bg-hover-strong);
+  color: var(--kr-text-primary);
+}
+
+@media (pointer: coarse) {
+  .ds-back {
+    width: var(--kr-control-h-touch);
+    height: var(--kr-control-h-touch);
+  }
+}
+
+/* The two tabs, Tokens and Components, under the index. */
+.ds-tabs {
+  margin-top: var(--kr-space-5);
+}
+
+.ds-tabs .ds-part {
+  margin-top: 0;
+}
+
+.ds-tabs .ds-part > .ds-group:first-of-type {
+  margin-top: var(--kr-space-4);
+}
+
+.ds-group {
+  margin-top: var(--kr-space-6);
+}
+
+.ds-group-title {
+  margin: 0 0 var(--kr-space-2);
+  font-size: var(--kr-type-md);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+.ds-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-secondary);
+}
+
+.ds-table th,
+.ds-table td {
+  padding: var(--kr-space-2) var(--kr-space-3) var(--kr-space-2) 0;
+  border-bottom: 1px solid var(--kr-border-light);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.ds-table thead th {
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-text-muted);
+}
+
+.ds-table tbody th {
+  font-weight: var(--kr-weight-regular);
+  white-space: nowrap;
+}
+
+.ds-table code {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-primary);
+}
+
+.ds-value {
+  font-family: var(--kr-font-mono);
+  color: var(--kr-text-primary);
+  white-space: nowrap;
+}
+
+.ds-px,
+.ds-use {
+  color: var(--kr-text-muted);
+}
+
+.ds-px {
+  font-family: var(--kr-font-sans);
+}
+
+.ds-preview-cell {
+  width: 30%;
+}
+
+.ds-preview {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  color: var(--kr-text-primary);
+}
+
+.ds-preview[data-kind="space"],
+.ds-preview[data-kind="width"] {
+  height: var(--kr-space-2);
+  border-radius: var(--kr-radius-control);
+  background: var(--kr-accent);
+}
+
+.ds-preview[data-kind="radius"],
+.ds-preview[data-kind="colour"] {
+  width: var(--kr-space-7);
+  height: var(--kr-space-6);
+  border: 1px solid var(--kr-border-medium);
+}
+
+.ds-preview[data-kind="radius"] {
+  background: var(--kr-bg-elevated);
+}
+
+.ds-preview[data-kind="colour"] {
+  border-radius: var(--kr-radius-control);
+}
+
+.ds-preview[data-kind="height"] {
+  width: var(--kr-space-8);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+  background: var(--kr-bg-elevated);
+}
+
+.ds-preview[data-kind="duration"] {
+  width: var(--kr-space-3);
+  height: var(--kr-space-3);
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-accent);
+  transition-property: transform;
+  transition-timing-function: ease-out;
+}
+
+/* The dot slides at the token's duration when the row is pointed at; no
+   looping animation, which at 120ms would flash. */
+.ds-table tr:hover .ds-preview[data-kind="duration"] {
+  transform: translateX(var(--kr-space-8));
+}
+
+.ds-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ── Index of the headings (KT-1880) ─────────────────────────────────── */
+.ds-index {
+  margin-top: var(--kr-space-4);
+  padding: var(--kr-space-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-radius-surface);
+}
+
+.ds-index ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-space-1) var(--kr-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ds-index a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--kr-control-h-sm);
+  font-size: var(--kr-type-sm);
+  font-weight: var(--kr-weight-medium);
+  color: var(--kr-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ds-part {
+  margin-top: var(--kr-space-7);
+}
+
+.ds-part-title {
+  margin: 0 0 var(--kr-space-2);
+  font-size: var(--kr-type-xl);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+/* ── Components (KT-1880) ────────────────────────────────────────────── */
+.ds-component {
+  margin-top: var(--kr-space-6);
+  padding-top: var(--kr-space-4);
+  border-top: 1px solid var(--kr-border-light);
+}
+
+.ds-component-title {
+  margin: 0;
+  font-size: var(--kr-type-md);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+.ds-component-title code {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-type-md);
+}
+
+.ds-caption,
+.ds-demo-note {
+  margin: var(--kr-space-1) 0 var(--kr-space-3);
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-secondary);
+}
+
+.ds-demo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-3);
+}
+
+.ds-demo-row {
+  display: grid;
+  grid-template-columns: calc(var(--kr-space-8) * 2) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--kr-space-3);
+}
+
+.ds-demo-label {
+  font-size: var(--kr-type-sm);
+  color: var(--kr-text-muted);
+}
+
+.ds-demo-items {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-space-2);
+  min-width: 0;
+}
+
+.ds-demo-items > .ui-tabs,
+.ds-demo-items > .ui-search-field {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 8);
+}
+
+/* KT-1885 — the agent picker's field mode takes the width of a form field. */
+.ds-demo-agent-field {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 8);
+}
+
+/* KT-1936 — a participants strip narrower than its chips: it scrolls
+   sideways, its right edge fades and « +N » opens the full list. */
+.ds-demo-identity-strip {
+  display: flex;
+  position: relative;
+  width: min(100%, calc(var(--kr-space-8) * 10));
+  padding: var(--kr-space-1);
+  border: 1px dashed var(--kr-border);
+  border-radius: var(--kr-radius-control);
+}
+
+/* KT-1881 — the content of the Dialog and Drawer demos. */
+.ds-demo-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-1);
+  font-size: var(--kr-type-md);
+  color: var(--kr-text-secondary);
+}
+
+.ds-demo-field input {
+  min-height: var(--kr-control-h-md);
+  padding: 0 var(--kr-space-3);
+  font: inherit;
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-input);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+}
+
+.ds-demo-list {
+  margin: 0;
+  padding-left: var(--kr-space-4);
+  line-height: 1.6;
+  color: var(--kr-text-primary);
+}
+
+/* KT-1882 — the form demos: a field fills its row up to a readable width; the
+   FormFooter demo is a short form that scrolls under its pinned footer. */
+.ds-demo-items > .ui-field,
+.ds-demo-items > .ui-form-footer {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 8);
+}
+
+.ds-demo-form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--kr-space-3);
+  max-width: calc(var(--kr-space-8) * 8);
+  max-height: calc(var(--kr-space-8) * 5);
+  overflow-y: auto;
+  padding: var(--kr-space-3) var(--kr-space-3) 0;
+  background-color: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-radius-surface);
+}
+
+/* KT-1883 — the feedback demos: a notice fills its row up to a readable
+   width; an empty state, a loading state at md or lg and a skeleton sit in a
+   framed box, as in the pane they are made for (the box bounds their height). */
+.ds-demo-items > .ui-notice {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 12);
+}
+
+.ds-demo-frame {
+  flex: 1 1 auto;
+  max-width: calc(var(--kr-space-8) * 12);
+  background-color: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-radius-surface);
+}
+
+/* KT-1884 — a header demo takes the whole row and may shrink below its
+   title: the title ellipsizes, the actions stay inside the frame (400px). */
+.ds-demo-header-frame {
+  flex-basis: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ds-demo-header-frame > .ui-tab-header,
+.ds-demo-header-frame > .ui-section-header {
+  padding-inline: var(--kr-space-3);
+}
+
+.ds-demo-header-frame > .ui-section-header {
+  padding-block-start: var(--kr-space-2);
+}
+
+.ds-demo-card {
+  padding: var(--kr-space-3);
+}
+
+.ds-demo-frame > .ui-loading-state[data-size="md"],
+.ds-demo-frame > .ui-loading-state[data-size="lg"] {
+  min-height: calc(var(--kr-space-8) * 5);
+}
+
+/* KT-1886 — a data component in a wide container on its own line, then its
+   narrow demos together on the next line. The narrow containers are 20rem
+   wide whatever the window: the components take their narrow form from their
+   container's width. The wide one takes the whole line (40rem, --kr-bp-sm,
+   and more on a desktop window, so a Table keeps its columns there); it has
+   no padding, which would take it under 40rem. In a narrow window the narrow
+   containers wrap under each other. */
+.ds-demo-pair {
+  display: flex;
+  flex: 1 1 100%;
+  flex-direction: column;
+  gap: var(--kr-space-4);
+  min-width: 0;
+}
+
+.ds-demo-narrow-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--kr-space-4);
+  min-width: 0;
+}
+
+.ds-demo-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-2);
+  min-width: 0;
+}
+
+/* A demo container holds a size container (ui-table, ui-kv), whose
+   intrinsic width is zero: inline-size containment ignores its content. So
+   each container has a width of its own; as a flex item of a labelled row,
+   with no width, it would collapse to 0 px and its demo vanish. */
+.ds-demo-container[data-form="wide"] {
+  align-self: stretch;
+  width: 100%;
+}
+
+.ds-demo-container[data-form="narrow"] {
+  flex: 0 1 20rem;
+  max-width: 20rem;
+  outline: 1px dashed var(--kr-border-medium);
+  outline-offset: var(--kr-space-1);
+}
+
+.ds-demo-copy-line {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.ds-demo-copy-line code {
+  min-width: 0;
+  font-size: var(--kr-type-sm);
+  overflow-wrap: anywhere;
+}
+
+.ds-demo-stack {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--kr-space-3);
+  min-width: 0;
+  max-width: calc(var(--kr-space-8) * 8);
+}
+
+/* Narrower than --kr-bp-md (768px): a custom property cannot be read in @media.
+   Each token becomes a small block: its name on one unbroken line, then its
+   value, its use and its preview. */
+@media (max-width: 767px) {
+  .ds-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .ds-table,
+  .ds-table tbody {
+    display: block;
+  }
+  .ds-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--kr-space-1) var(--kr-space-3);
+    padding: var(--kr-space-2) 0;
+    border-bottom: 1px solid var(--kr-border-light);
+  }
+  .ds-table tbody th,
+  .ds-table tbody td {
+    display: block;
+    padding: 0;
+    border-bottom: 0;
+  }
+  .ds-table tbody th {
+    grid-column: 1 / -1;
+    white-space: nowrap;
+  }
+  .ds-value {
+    grid-column: 1;
+  }
+  .ds-use {
+    grid-column: 1;
+  }
+  .ds-preview-cell {
+    grid-column: 2;
+    grid-row: 2 / span 2;
+    width: auto;
+    align-self: center;
+    max-width: calc(var(--kr-space-8) * 3);
+    overflow: hidden;
+  }
+  .ds-demo-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--kr-space-1);
+  }
+}

@@ -54,8 +54,8 @@ autocomplete must always show which one is being picked (KT-211).
   Claude CLI unless Claude is the room's own agent. That CLI gets the
   wake and no punctual agent is spawned; with two candidate CLIs and no
   reply context nothing is guessed.
-  [src: file: backend/src/db/discussions.rs:4065-4091#agent_alias_cli_target]
-  [src: file: backend/src/db/discussions.rs:1967-2010#providers_resolved_to_cli]
+  [src: file: backend/src/db/discussions.rs:4075-4101#agent_alias_cli_target]
+  [src: file: backend/src/db/discussions.rs:1977-2020#providers_resolved_to_cli]
   [src: file: backend/src/api/disc_source.rs:678-730#agent_alias_cli_target]
 
 ## 3. Wake vs awareness (per identity, post-KT-189)
@@ -109,11 +109,11 @@ rows too: an untargeted agent turn replying to this session's message is
 do not poll. A punctual agent is also told it is a one-off, not the
 joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
-[src: file: backend/src/db/discussions.rs:2096-2099#reply_author]
+[src: file: backend/src/db/discussions.rs:2106-2109#reply_author]
 [src: file: backend/src/api/disc_invite.rs:2062-2082#addressed_to_session]
 [src: file: backend/src/api/disc_invite.rs:1725-1735#addressed_to_caller]
-[src: file: backend/scripts/disc-introspection-mcp.py:11440-11450#attention_required]
-[src: file: backend/src/api/discussions/streaming.rs:2549-2597#punctual_identity_notice]
+[src: file: backend/scripts/disc-introspection-mcp.py:11444-11454#attention_required]
+[src: file: backend/src/api/discussions/streaming.rs:2608-2656#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1742-1750#reply_target]
 
@@ -141,12 +141,12 @@ context the short alias stays free (both identities may be wanted).
   `next_poll_at`. Eligibility = unexpired lease or next_poll grace. A
   session identified only by its session id (provider unknown) keeps
   full presence via the agent type stored on its row.
-  [src: file: backend/src/api/disc_invite.rs:1352-1365#ACTIVITY_LISTENING_MARGIN_SECS] [src: file: backend/src/api/disc_invite.rs:1438-1440#presence_agent] [src: file: backend/src/db/discussion_sessions.rs:1253-1278#RESPONDER_ELIGIBLE_PREDICATE]
+  [src: file: backend/src/api/disc_invite.rs:1352-1365#ACTIVITY_LISTENING_MARGIN_SECS] [src: file: backend/src/api/disc_invite.rs:1438-1440#presence_agent] [src: file: backend/src/db/discussion_sessions.rs:1435-1460#RESPONDER_ELIGIBLE_PREDICATE]
 - **Untargeted human turn**: in a room with a native agent it always
   belongs to the configured discussion agent, whatever the CLI presence
   (target identity, not presence, decides ownership); the turn reaches the
   joined CLIs as awareness and is marked for their one-shot catch-up.
-  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2229-2240#native_fallback_candidate]
+  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2239-2250#native_fallback_candidate]
 - **Reload**: a bridge reload re-attaches the durable session through
   the 0600 resume credential (`/peer-resume`, no token). A CLI whose
   native identity rotated (fresh session id) needs one `disc_join` with

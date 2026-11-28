@@ -2292,6 +2292,65 @@ fn prepend_initial_event(stream: SseStream, initial_event: Option<Event>) -> Sse
     }
 }
 
+/// KT-2012 — whether a turn runs on the discussion's own agent and connection,
+/// the only target the discussion's exact model belongs to. A mention or a
+/// second participant runs on another agent; a mentioned connection is named by
+/// the dispatch and differs from the discussion's. A turn that only inherits the
+/// discussion's connection (`dispatch_connection_id` absent) is its own.
+pub(crate) fn turn_runs_on_discussion_target(
+    discussion_agent: &AgentType,
+    discussion_connection_id: Option<&str>,
+    turn_agent: &AgentType,
+    dispatch_connection_id: Option<&str>,
+) -> bool {
+    turn_agent == discussion_agent
+        && dispatch_connection_id
+            .is_none_or(|connection| Some(connection) == discussion_connection_id)
+}
+
+/// KT-1993 — the exact model a turn runs on, before the connection's tier map
+/// (which applies only when this returns `None`). Highest first: a fallback pin
+/// (a turn continued on a fallback runs on the link's own model, KT-1518); a
+/// per-message tier override, which drops the discussion's exact model; the
+/// discussion's exact model, only for a turn of the discussion's own agent and
+/// connection (`own_turn`, KT-2012); otherwise `None`, so the tier decides.
+pub(crate) fn turn_exact_model(
+    discussion_model: Option<&str>,
+    own_turn: bool,
+    tier_override: Option<ModelTier>,
+    fallback_pin: Option<&crate::core::agent_fallback::Pin>,
+) -> Option<String> {
+    match fallback_pin {
+        Some(pin) => pin.model.clone(),
+        None if tier_override.is_some() || !own_turn => None,
+        None => discussion_model.map(str::to_string),
+    }
+}
+
+/// KT-2012 — the model a turn is asked to run, before the CLI's own tier map:
+/// [`turn_exact_model`], else the model the turn's own connection maps to its
+/// mode (the per-message mode, else the discussion's).
+pub(crate) fn resolve_turn_model(
+    disc: &Discussion,
+    turn_agent: &AgentType,
+    dispatch_connection_id: Option<&str>,
+    turn_connection: Option<&ExternalApiConnection>,
+    tier_override: Option<ModelTier>,
+    fallback_pin: Option<&crate::core::agent_fallback::Pin>,
+) -> Option<String> {
+    let own_turn = turn_runs_on_discussion_target(
+        &disc.agent,
+        disc.connection_id.as_deref(),
+        turn_agent,
+        dispatch_connection_id,
+    );
+    let tier = tier_override.unwrap_or(disc.tier);
+    turn_exact_model(disc.model.as_deref(), own_turn, tier_override, fallback_pin).or_else(|| {
+        turn_connection
+            .and_then(|connection| crate::http_transport::connection_tier_model(connection, tier))
+    })
+}
+
 /// Freeze the conversational view at the message that owns this dispatch.
 ///
 /// Plural targets are executed one at a time inside a discussion so their
@@ -3156,16 +3215,16 @@ pub(super) async fn make_agent_stream_inner(
             .flatten(),
         None => None,
     };
-    let disc_model = match &fallback_pin {
-        Some(pin) => pin.model.clone(),
-        None if tier_override.is_some() => None,
-        None => disc.model.clone(),
-    };
-    let disc_model = disc_model.or_else(|| {
-        external_connection.as_ref().and_then(|connection| {
-            crate::http_transport::connection_tier_model(connection, disc_tier)
-        })
-    });
+    // KT-2012 — the discussion's exact model belongs to its own agent and
+    // connection: a mention or a second participant resolves its own mode.
+    let disc_model = resolve_turn_model(
+        &disc,
+        &agent_type,
+        dispatch_connection_id.as_deref(),
+        external_connection.as_ref(),
+        tier_override,
+        fallback_pin.as_ref(),
+    );
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();

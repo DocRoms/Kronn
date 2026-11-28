@@ -1,4 +1,7 @@
 import type { Page, Locator } from '@playwright/test';
+import { SETTINGS_SUB_PAGES, settingsSectionOf, type SettingsSubPage } from '../../src/lib/routes';
+
+export { SETTINGS_SUB_PAGES, type SettingsSubPage };
 
 /**
  * Dashboard nav (top bar with Projets / Discussions / Plugins / Automatisation
@@ -26,6 +29,51 @@ export class DashboardPage {
 
   async clickWorkflows() { await this.openWorkflows(); }
   async clickSettings() { await this.navSettings.click(); }
+
+  /** KT-1923 — the visible Settings sub-page (the others stay drawn, hidden). */
+  get settingsSubPage(): Locator { return this.page.locator('.set-subpage:not([hidden])'); }
+
+  /**
+   * KT-1923 — Settings is five sub-pages (`/config/you` … `/config/system`)
+   * and its tab opens the first. Opens Settings from its tab, then the
+   * sub-page from the list on the left, and waits for its heading.
+   */
+  async openSettings(subPage: SettingsSubPage = 'you') {
+    await this.navSettings.click();
+    await this.selectSettingsSubPage(subPage);
+  }
+
+  /** KT-1923 — Settings already open: shows one of its sub-pages from the list. */
+  async selectSettingsSubPage(subPage: SettingsSubPage) {
+    const entry = this.page.getByTestId(`settings-subpage-${subPage}`);
+    await entry.waitFor({ state: 'visible', timeout: 15_000 });
+    if ((await entry.getAttribute('aria-current')) !== 'page') await entry.click();
+    await this.page.locator(`#settings-subpage-${subPage}-title`).waitFor({ state: 'visible', timeout: 15_000 });
+  }
+
+  /**
+   * KT-1923 — opens the sub-page that holds a section (or an anchor inside
+   * one: `settings-skills`, `settings-debug-logs`), opens every fold of that
+   * sub-page, and brings the anchor into view.
+   */
+  async openSettingsSection(anchor: string): Promise<Locator> {
+    const section = settingsSectionOf(anchor);
+    if (!section) throw new Error(`No Settings section holds #${anchor}`);
+    await this.openSettings(section.page);
+    await this.openSettingsFolds();
+    const target = this.page.locator(`[id="${anchor}"]`);
+    await target.scrollIntoViewIfNeeded();
+    return target;
+  }
+
+  /** KT-1923 — opens every fold of the visible sub-page (catalogue, usage,
+   *  API call log, debug log viewer); a fold can hold another. */
+  async openSettingsFolds() {
+    const closed = this.settingsSubPage.locator('[data-testid^="fold-"][aria-expanded="false"]');
+    for (let guard = 0; guard < 10 && (await closed.count()) > 0; guard += 1) {
+      await closed.first().click();
+    }
+  }
   async clickProjects() { await this.navProjects.click(); }
 
   async openWorkflows() {

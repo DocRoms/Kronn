@@ -1,0 +1,72 @@
+/* KT-1882 — Select: the native select with one look. Design tokens only; no
+   theme is named. */
+
+.ui-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.ui-select-input {
+  width: 100%;
+  min-height: var(--kr-control-h-md);
+  padding: 0 var(--kr-space-7) 0 var(--kr-space-3);
+  font-family: inherit;
+  font-size: var(--kr-type-md);
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-input);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-radius-control);
+  appearance: none;
+  cursor: pointer;
+  transition: border-color var(--kr-duration-fast) ease-out;
+}
+
+/* The placeholder reads as one while it is the value. */
+.ui-select-input[data-empty="true"] {
+  color: var(--kr-text-muted);
+}
+
+.ui-select-input option,
+.ui-select-input optgroup {
+  color: var(--kr-text-primary);
+  background-color: var(--kr-bg-elevated);
+}
+
+.ui-select-input:hover:not(:disabled) {
+  border-color: var(--kr-border-strong);
+}
+
+.ui-select-input[aria-invalid="true"] {
+  border-color: var(--kr-status-danger);
+}
+
+.ui-select-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ui-select-chevron {
+  position: absolute;
+  right: var(--kr-space-2);
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
+  color: var(--kr-text-muted);
+  pointer-events: none;
+}
+
+.ui-select[data-size="sm"] .ui-select-input {
+  min-height: var(--kr-control-h-sm);
+  font-size: var(--kr-type-sm);
+}
+
+/* A larger target for a finger, and 16px text so a phone does not zoom into
+   the field when it takes the focus. */
+@media (pointer: coarse) {
+  .ui-select-input,
+  .ui-select[data-size="sm"] .ui-select-input {
+    min-height: var(--kr-control-h-touch);
+    font-size: var(--kr-type-xl);
+  }
+}

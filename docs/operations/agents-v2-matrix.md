@@ -117,8 +117,8 @@ the same job.
   See [native ACP continuity](../gotchas/native-acp-resume-continuity.md) for the
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2872-2932#load_completed_checkpoint]
-  [src: file: backend/src/api/discussions/streaming.rs:2759-2890#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:9185-9506#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:2818-2949#resume_with_delta_if_possible]
+  [src: file: backend/src/api/discussions/streaming.rs:9244-9565#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -151,7 +151,7 @@ the same job.
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3987-4005#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:4074-4092#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -171,8 +171,8 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:6200-6210#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:16398-16679#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:6249-6259#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:16491-16772#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:2889-2917#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
@@ -189,9 +189,9 @@ read; opening a selector additionally refreshes stale CLI targets in the
 background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:206-207#useModelCatalogSnapshot]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:891-903#SearchableSelect]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:235-236#useModelCatalogSnapshot]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:920-932#SearchableSelect]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:132-194#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
 [src: file: backend/src/core/model_catalog/mod.rs:420-430#discover_inner]
 

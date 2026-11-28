@@ -978,7 +978,7 @@ describe('WorkflowWizard — rollback step kinds', () => {
     fireEvent.change(prompt, { target: { value: 'roll it back' } });
     expect(prompt.value).toBe('roll it back');
     const row = prompt.closest('.wf-rollback-step') as HTMLElement;
-    expect(within(row).getByRole('button', { name: 'wiz.agentAndTierLabel' })).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ })).toBeInTheDocument();
   });
 
   it.each([
@@ -994,7 +994,7 @@ describe('WorkflowWizard — rollback step kinds', () => {
       { agent: 'Codex' },
     ], editWorkflow: mkWorkflow({ steps: [main], on_failure: [mkStep({ name: 'recover', agent: 'Custom', agent_settings: settings })] }) });
     const row = screen.getByDisplayValue('recover').closest('.wf-rollback-step') as HTMLElement;
-    fireEvent.click(within(row).getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(within(row).getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: label }));
     fireEvent.click(screen.getByText('wiz.save'));
     await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
@@ -1032,7 +1032,7 @@ describe('WorkflowWizard — rollback step kinds', () => {
       { agent: 'Custom', connectionId: 'two', label: 'Two' },
     ], editWorkflow: mkWorkflow({ on_failure: [mkStep({ name: 'recover' })] }) });
     const row = screen.getByDisplayValue('recover').closest('.wf-rollback-step') as HTMLElement;
-    fireEvent.click(within(row).getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(within(row).getByRole('button', { name: /^wiz\.agentAndTierLabel( — |$)/ }));
     const unavailable = await screen.findByRole('menuitem', { name: 'One · disc.tier.reasoning' });
     await waitFor(() => expect(unavailable).toBeDisabled());
     fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'recuperation' } });

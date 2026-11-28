@@ -49,6 +49,8 @@ export const SYNCED_KEYS: readonly string[] = [
   'kronn:automationGroupBy',
   'kronn:mcpSort',
   'kronn:automationSkillFavorites',
+  // KT-1994 — the agent picker's « Récents » (lib/agentPickerRecents.ts).
+  'kronn:agentPicker:recents',
   'kronn:fullAccessNoticeDismissed',
   'kronn:runRetentionBannerDismissed',
   'kronn:githubUpgradeNoticeDismissed',

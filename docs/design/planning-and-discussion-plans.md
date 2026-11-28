@@ -8,7 +8,7 @@ human-gated proposal cards and delta-only prompt notifications are implemented.
 `[src: file: backend/src/api/planning.rs:405-613#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:660-707#decide_proposal_item]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
 `[src: file: frontend/src/pages/PlanningPage.tsx:191-216#withDiscussion]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3939-3970#planning_change_count]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3998-4029#planning_change_count]`
 
 This document is the implementation brief for a future Planning workspace and
 the smaller discussion-plan panel that exposes the same task data inside a
@@ -115,8 +115,8 @@ The selected view is saved per discussion in session storage. A small spinner
 on in-progress rows reflects Planning status only, not a worker heartbeat; it
 stops animating when reduced motion is requested. Background plan refreshes
 update membership and indicators without resetting the selected view.
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:842-872#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:240-249#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:407-440#filteredAllRelations]`
-`[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:133-138#writePlanOrchestrationState]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:873-903#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:240-249#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:407-440#filteredAllRelations]`
+`[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:134-139#writePlanOrchestrationState]`
 `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:561-565#renderProgress]` `[src: file: frontend/src/components/DiscussionPlanPanel.css:161-178#plan-task-progress]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:163-174#applyPlan]`
 
 Agents may instead emit structured proposals that the UI renders as existing
@@ -171,7 +171,7 @@ Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
 new room. `[src: file: backend/src/api/disc_prompts.rs:491-538#planning_notice]`
-`[src: file: backend/src/api/discussions/streaming.rs:3939-3970#planning_change_count]`
+`[src: file: backend/src/api/discussions/streaming.rs:3998-4029#planning_change_count]`
 
 The intended read surface is:
 

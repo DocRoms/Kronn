@@ -23,6 +23,7 @@ import type {
 import type { CatalogModelEntry, FallbackMode } from '../../types/generated';
 import { useModelCatalogSnapshot } from '../../hooks/useModelCatalogSnapshot';
 import { modelCallVerdict, modelSweepCounts } from '../../lib/modelCatalogSelection';
+import { serverReasonText } from '../../lib/serverReason';
 import { userError } from '../../lib/userError';
 import type { ToastFn } from '../../hooks/useToast';
 import { ContextHelp } from '../ContextHelp';
@@ -464,7 +465,7 @@ function ConnectionForm({
                         label: `${verdict?.state === 'answered' ? '✅ ' : verdict?.state === 'refused' ? '❌ ' : ''}${model}`,
                         keywords: `${model.replaceAll('/', ' ')} ${available.find(entry => entry.id === model)?.display_name ?? ''}`,
                         description: verdict?.state === 'refused'
-                          ? [t('modelCatalog.unavailable'), verdict.detail].filter(Boolean).join(' — ')
+                          ? [t('modelCatalog.unavailable'), serverReasonText(t, verdict)].filter(Boolean).join(' — ')
                           : listed
                             ? t('config.extApi.testedCatalog')
                             : t('modelCatalog.unavailable'),
@@ -579,7 +580,7 @@ function ConnectionForm({
                           keywords: model.replaceAll('/', ' '),
                           disabled: absent || verdict?.state === 'refused',
                           description: verdict?.state === 'refused'
-                            ? [t('modelCatalog.unavailable'), verdict.detail].filter(Boolean).join(' — ')
+                            ? [t('modelCatalog.unavailable'), serverReasonText(t, verdict)].filter(Boolean).join(' — ')
                             : absent ? t('modelCatalog.unavailable') : model,
                         };
                       })}

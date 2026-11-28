@@ -2,7 +2,7 @@
  * E2E smoke for the Custom API AI helper bubble (0.8.1).
  *
  * Covers the UX scaffold ONLY — open the bubble, see welcome state,
- * click a starter chip, see input populated, open the agent dropdown.
+ * click a starter chip, see input populated, open the agent picker.
  * We deliberately do NOT fire the agent: a real Claude/Codex round-trip
  * is expensive and tested separately by component unit tests (parser +
  * applyToCustomForm wire contract). What's left to pin here is the
@@ -76,11 +76,18 @@ test.describe('Custom API helper bubble', () => {
     const value = await textarea.inputValue();
     expect(value.length).toBeGreaterThan(0);
 
-    // Open the agent dropdown via aria-haspopup="listbox".
-    const agentTrigger = bubble.locator('button[aria-haspopup="listbox"]');
+    // KT-1885 — the agent is chosen with the shared agent picker: its trigger
+    // sits in the bubble, its popover is portalled to the body.
+    const agentTrigger = bubble.locator('button.kr-agent-switch-btn[aria-haspopup="dialog"]');
     await expect(agentTrigger).toBeVisible();
     await agentTrigger.click();
-    await expect(bubble.locator('[role="listbox"]')).toBeVisible();
+    await expect(agentTrigger).toHaveAttribute('aria-expanded', 'true');
+    const agentPopover = page.locator('.kr-agent-switch-popover[role="dialog"]');
+    await expect(agentPopover).toBeVisible();
+    await expect(agentPopover.getByRole('menu')).toBeVisible();
+    await expect(agentPopover.getByRole('menuitem').first()).toBeVisible();
+    await agentTrigger.click();
+    await expect(agentPopover).not.toBeVisible();
 
     // Close the bubble (Close button has aria-label tied to the i18n
     // `helper.close` key).

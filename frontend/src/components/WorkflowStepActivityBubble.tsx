@@ -3,7 +3,9 @@ import type { ActiveWorkflowStep } from '../types/generated';
 import { AGENT_LABELS, AGENT_MENTIONS, agentTextColor } from '../lib/constants';
 import { useT } from '../lib/I18nContext';
 import { useLiveRunById } from '../lib/agentRunProgress';
+import { AgentIdentity } from './ui/AgentIdentity';
 import { AgentRunProgressPanel } from './AgentRunProgressPanel';
+import { Message } from './Message';
 
 /**
  * A workflow step working for this room (KT-1252): the step's identity, then
@@ -28,24 +30,30 @@ export function WorkflowStepActivityBubble({
   const preparing = step.preparing === true;
 
   return (
-    <div
-      className="disc-msg-row"
-      data-role="agent"
-      data-testid={`workflow-step-running-${step.run_id}-${step.step_key}`}
-      data-preparing={preparing ? 'true' : undefined}
-      aria-live="polite"
-    >
-      <div className="disc-msg-bubble" data-role="agent">
-        <div
-          className="disc-msg-agent-label"
-          style={{ color: agentTextColor(step.agent_type), justifyContent: 'space-between' }}
-        >
-          <span className="flex-row gap-2">
-            <Cpu size={10} /> {trigger}
-            <span className="disc-msg-agent-kind"> · {t('disc.targetDiscussionAgent')}</span>
-          </span>
-          <Loader2 size={10} className="spin" aria-hidden="true" />
+    <Message
+      variant="streaming"
+      tone="workflow-step"
+      rowProps={{
+        'data-testid': `workflow-step-running-${step.run_id}-${step.step_key}`,
+        'data-preparing': preparing ? 'true' : undefined,
+        'aria-live': 'polite',
+      }}
+      header={(
+        <div className="disc-msg-agent-label" data-testid="workflow-step-agent-identity">
+          {/* KT-1936 — the step's agent, its role « workflow step ». The step
+           *  reports no model until its reply names one: the explicit
+           *  « default model » state, never a blank. */}
+          <AgentIdentity
+            icon={<Cpu size={12} />}
+            name={trigger}
+            color={agentTextColor(step.agent_type)}
+            model={{ kind: 'providerDefault' }}
+            role="workflowStep"
+          />
+          <Loader2 size={12} className="spin" aria-hidden="true" />
         </div>
+      )}
+    >
         <div className="disc-workflow-step-identity" data-testid="workflow-step-identity">
           <Workflow size={12} aria-hidden="true" />
           <strong>{step.workflow_name}</strong>
@@ -61,7 +69,6 @@ export function WorkflowStepActivityBubble({
             {preparing ? t('disc.workflowStepPreparing') : t('disc.workflowStepRunning')}
           </div>
         )}
-      </div>
-    </div>
+    </Message>
   );
 }

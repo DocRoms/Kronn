@@ -99,9 +99,267 @@ export interface SettingsIntent {
   modelTier?: { agentType: string; tier: ModelTierName };
 }
 
-/** Configuration scrolled to one of its sections (`settings-…`), named by the hash. */
+/**
+ * KT-1923 — Settings is five sub-pages, one address each under `/config`,
+ * with language-neutral segments; a section is the hash
+ * (`/config/agents#settings-usage`). `/config` alone opens the first one.
+ */
+export type SettingsSubPage = 'you' | 'agents' | 'work' | 'security' | 'system';
+
+export const SETTINGS_SUB_PAGES: readonly SettingsSubPage[] = ['you', 'agents', 'work', 'security', 'system'];
+
+export const DEFAULT_SETTINGS_SUB_PAGE: SettingsSubPage = 'you';
+
+/** The route segment of a sub-page, for the route table. */
+export const SETTINGS_SUB_PAGE_ROUTE = '/:settingsSubPage';
+
+/** The address of a sub-page of Settings, optionally on one of its anchors. */
+export function settingsSubPagePath(page: SettingsSubPage, anchor?: string | null): string {
+  const path = `${PAGE_PATHS.settings}/${page}`;
+  return anchor ? `${path}#${encodeURIComponent(anchor)}` : path;
+}
+
+/** The sub-page a `:settingsSubPage` route segment names, or null when it names none. */
+export function settingsSubPageFromSegment(segment: string | undefined): SettingsSubPage | null {
+  return SETTINGS_SUB_PAGES.find(page => page === segment) ?? null;
+}
+
+/**
+ * A name the search finds in a section: the i18n key of a field's label, of a
+ * group heading or of the card's own heading; with `also`, the keys of the
+ * hint its label draws, whose words find it too (it is shown by its label).
+ */
+export type SettingsFieldDef = string | { label: string; also: readonly string[] };
+
+/** A part of a section that stays folded until opened (the debug log viewer). */
+export interface SettingsFoldDef {
+  /** Its anchor, and the id its fold control keeps open. */
+  id: string;
+  /** The names drawn inside it, for the search. */
+  fields: readonly SettingsFieldDef[];
+}
+
+/** One section of Settings: where it lives, what it is called, what it holds. */
+export interface SettingsSectionDef {
+  /** Its anchor, the id of its element (`settings-…`). */
+  id: string;
+  page: SettingsSubPage;
+  /** The i18n key of its name, in the list, the section links and the search. */
+  title: string;
+  /** The names it draws (field labels, group and card headings), for the search. */
+  fields: readonly SettingsFieldDef[];
+  /** Folded until opened: its fold is its id. */
+  folded?: boolean;
+  /** Folded parts inside it. */
+  folds?: readonly SettingsFoldDef[];
+  /** The anchors inside it an address may name (a group, a field). */
+  anchors?: readonly string[];
+  /** The anchor prefixes of the rows it draws per item (`agent-config-<agent>`). */
+  anchorPrefixes?: readonly string[];
+  /** Shown only once an API plugin has a config (the API call log). */
+  requiresConfiguredApi?: boolean;
+}
+
+/**
+ * The sections of Settings, sub-page by sub-page, in their order: the single
+ * source of the list, the section links, the redirects of the old anchors and
+ * the search. No setting is named in storage by any of this.
+ */
+export const SETTINGS_SECTIONS: readonly SettingsSectionDef[] = [
+  // Vous
+  {
+    id: 'settings-identity', page: 'you', title: 'settings.identity',
+    fields: [
+      'settings.identityProfileTitle', 'settings.pseudo', 'settings.avatarEmail', 'settings.bio',
+      'settings.identityContextTitle', 'settings.identityNetworkTitle', 'settings.exposeProxyOrigin', 'settings.frontendOrigins',
+      'settings.desktopPort',
+    ],
+  },
+  {
+    id: 'settings-appearance', page: 'you', title: 'config.preferences',
+    fields: ['config.appearance', 'config.themeLabel', 'config.layoutDensity', 'config.languages', 'config.uiLanguage', 'config.outputLanguage'],
+    anchors: ['settings-languages'],
+  },
+  { id: 'settings-voice', page: 'you', title: 'settings.voice', fields: ['settings.sttLabel', 'settings.ttsLabel'] },
+  { id: 'settings-user-context', page: 'you', title: 'userContext.title', fields: ['userContext.newNameAria'] },
+  // Agents et modèles
+  {
+    id: 'settings-agent-config', page: 'agents', title: 'config.agents',
+    fields: [
+      'config.maxAgents', 'settings.globalTimeout', 'settings.localGlobalTimeout', 'settings.stallTimeout',
+      'config.agentDefaultsTitle', 'config.defaultTierLabel', 'config.defaultSummaryLabel', 'config.agentHandoffTitle',
+      'config.agentFleetTitle', 'agents.concurrency', 'config.discoverKeys',
+    ],
+    anchors: ['settings-agent-handoffs'],
+    anchorPrefixes: ['agent-config-'],
+  },
+  {
+    id: 'settings-local-models', page: 'agents', title: 'settings.sections.localModels',
+    fields: ['agents.concurrency', 'agents.tools', 'ollama.decisionSlot', 'ollama.contextOverride'],
+  },
+  {
+    id: 'settings-media', page: 'agents', title: 'settings.sections.media',
+    fields: [
+      'comfyui.settings.endpoint', 'comfyui.settings.installDir', 'comfyui.settings.steps', 'comfyui.settings.cfg',
+      'comfyui.settings.denoise', 'comfyui.settings.sampler', 'comfyui.settings.scheduler', 'media.references.limit',
+    ],
+  },
+  { id: 'settings-compression', page: 'agents', title: 'settings.sections.compression', fields: ['config.rtk.title'] },
+  {
+    id: 'settings-catalogue', page: 'agents', title: 'settings.sections.catalogue', folded: true,
+    fields: [
+      'modelCatalog.title', 'modelCatalog.target', 'modelCatalog.modelId', 'modelCatalog.displayName', 'modelCatalog.tier',
+      'modelCatalog.reasoningModes',
+    ],
+  },
+  {
+    id: 'settings-usage', page: 'agents', title: 'settings.sections.usage', folded: true,
+    fields: ['usage.title', 'usage.period', 'usage.filter.agent', 'usage.filter.model', 'telemetryCoverage.title'],
+  },
+  {
+    id: 'settings-capabilities', page: 'agents', title: 'config.capabilities',
+    fields: ['skills.title', 'profiles.title', 'directives.title', 'config.externalMcps'],
+    anchors: ['settings-skills', 'settings-profiles', 'settings-directives', 'settings-host-mcps'],
+  },
+  // Travail
+  {
+    id: 'settings-scan', page: 'work', title: 'config.scan',
+    fields: ['config.scanDepth', 'config.scanPaths', 'config.defaultDocsDir', 'config.scanIgnore'],
+  },
+  {
+    id: 'settings-workers', page: 'work', title: 'config.workers.title',
+    fields: [
+      'config.workers.reviewRounds', 'config.workers.backgroundPriority', 'config.workers.maxConcurrent',
+      'config.workers.validationCeiling', 'config.workers.heavyOutput', 'config.workers.bashDefault', 'config.workers.bashMax', 'config.workers.osJunk',
+      'config.workers.managedRoots', 'config.workers.commitName', 'config.workers.commitEmail', 'laneWarm.seedAlignment', 'laneWarm.compilerEnv', 'laneWarm.command', 'laneWarm.timeout',
+    ],
+  },
+  {
+    id: 'settings-worktrees', page: 'work', title: 'settings.worktrees.title',
+    fields: ['settings.worktrees.copy', 'settings.worktrees.adopt', 'settings.worktrees.confirm'],
+  },
+  {
+    id: 'settings-sourcing', page: 'work', title: 'config.sourcing',
+    fields: ['settings.sourcingTitle', 'settings.antiHalluc'], anchors: ['settings-sourcing-spec'],
+  },
+  {
+    id: 'settings-continual-learning', page: 'work', title: 'config.learning',
+    fields: ['settings.clTitle', 'settings.clToggleLabel', 'settings.clRiskTitle'],
+  },
+  {
+    id: 'settings-artifacts', page: 'work', title: 'config.artifacts',
+    fields: ['settings.embeds.originLabel'], anchors: ['settings-embed-origin'],
+  },
+  // Sécurité
+  {
+    id: 'settings-recovery', page: 'security', title: 'settings.recovery.title',
+    fields: ['settings.recovery.setLabel', 'settings.recovery.replaceLabel'],
+  },
+  {
+    id: 'settings-authenticator', page: 'security', title: 'trust.proof.nav',
+    fields: ['trust.proof.step1', 'trust.proof.adminSecret', 'trust.proof.firstCode', 'trust.proof.actionCode'],
+  },
+  { id: 'settings-trust', page: 'security', title: 'trust.nav', fields: ['trust.section.title', 'trust.audit.title'] },
+  {
+    id: 'settings-server', page: 'security', title: 'config.server',
+    fields: ['config.authToken', 'config.domain', 'config.timezone'],
+  },
+  { id: 'credentials', page: 'security', title: 'settings.credentials.title', fields: [
+    'settings.credentials.authorityLabel', 'settings.credentials.newLabel', 'settings.credentials.newRole',
+  ] },
+  // Système
+  {
+    id: 'settings-database', page: 'system', title: 'config.database',
+    fields: [
+      'config.dbUsage.title',
+      { label: 'config.executionVariableRetention', also: ['config.executionVariableRetentionHint'] },
+      { label: 'config.runPayloadRetention', also: ['config.runPayloadRetentionHint'] },
+      'config.export', 'config.dbBackup', 'config.import',
+    ],
+    anchors: ['run-payload-retention'],
+  },
+  {
+    id: 'settings-disk', page: 'system', title: 'settings.disk.title',
+    fields: ['settings.disk.launchMin', 'settings.disk.idleHours', 'settings.disk.stalledDays'],
+  },
+  {
+    id: 'settings-api-audit', page: 'system', title: 'apiCallLogs.title', folded: true, requiresConfiguredApi: true,
+    fields: ['apiCallLogs.filterSource', 'apiCallLogs.filterStatus', 'apiCallLogs.filterPlugin', 'apiCallLogs.autoRefresh'],
+  },
+  {
+    id: 'settings-debug', page: 'system', title: 'settings.debugSection',
+    fields: ['settings.debugMode', 'settings.discussionNotes', 'settings.discWeightTitle', 'settings.discWeightAmber', 'settings.discWeightRed'],
+    folds: [{ id: 'settings-debug-logs', fields: ['settings.debugLogsTitle'] }],
+  },
+  { id: 'settings-general', page: 'system', title: 'config.general', fields: ['tour.replay', 'config.reset'] },
+];
+
+/** Anchors that named a section under another id before (`#artifacts`). */
+const SETTINGS_ANCHOR_ALIASES: Readonly<Record<string, string>> = {
+  artifacts: 'settings-artifacts',
+};
+
+/** The sections of one sub-page, in their order. */
+export function settingsSectionsOf(page: SettingsSubPage): SettingsSectionDef[] {
+  return SETTINGS_SECTIONS.filter(section => section.page === page);
+}
+
+/** The section an anchor of Settings lies in (the section itself, a group or a field of it), or null. */
+export function settingsSectionOf(anchor: string | null | undefined): SettingsSectionDef | null {
+  if (!anchor) return null;
+  const id = SETTINGS_ANCHOR_ALIASES[anchor] ?? anchor;
+  return SETTINGS_SECTIONS.find(section => section.id === id
+    || section.anchors?.includes(id)
+    || section.folds?.some(fold => fold.id === id)
+    || section.anchorPrefixes?.some(prefix => id.startsWith(prefix) && id.length > prefix.length)) ?? null;
+}
+
+/** The fold an anchor opens when an address or a search hit lands on it, or null. */
+export function settingsFoldOf(anchor: string | null | undefined): string | null {
+  const section = settingsSectionOf(anchor);
+  if (!section || !anchor) return null;
+  const id = SETTINGS_ANCHOR_ALIASES[anchor] ?? anchor;
+  const fold = section.folds?.find(candidate => candidate.id === id);
+  if (fold) return fold.id;
+  return section.folded ? section.id : null;
+}
+
+/**
+ * Settings on one of its anchors (a section `settings-…`, or a field such as
+ * `run-payload-retention`): the address of its sub-page, the anchor in the
+ * hash. An anchor of no known section stays on `/config`, which opens the
+ * first sub-page.
+ */
 export function settingsSectionPath(sectionId: string): string {
-  return `${PAGE_PATHS.settings}#${encodeURIComponent(sectionId)}`;
+  const section = settingsSectionOf(sectionId);
+  if (!section) return `${PAGE_PATHS.settings}#${encodeURIComponent(sectionId)}`;
+  return settingsSubPagePath(section.page, SETTINGS_ANCHOR_ALIASES[sectionId] ?? sectionId);
+}
+
+/** The anchor a hash names (`#settings-usage` → `settings-usage`), or null for none or a malformed one. */
+export function anchorOfHash(hash: string): string | null {
+  try {
+    return decodeURIComponent(hash.slice(1)) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where a Settings address belongs, or null when it is already there
+ * (KT-1923): `/config#settings-usage` and every other anchor of the single
+ * page land on their sub-page (`/config/agents#settings-usage`), an anchor
+ * asked on another sub-page's address moves to its own, and `/config`, an
+ * unknown sub-page or an unknown anchor on `/config` open the first sub-page.
+ * `segment` is the `:settingsSubPage` route segment, if any.
+ */
+export function settingsRedirectPath(pathname: string, hash: string, segment: string | undefined): string | null {
+  const anchor = anchorOfHash(hash);
+  if (anchor && settingsSectionOf(anchor)) {
+    const canonical = settingsSectionPath(anchor);
+    return `${pathname.replace(/\/+$/, '')}${hash}` === canonical ? null : canonical;
+  }
+  return settingsSubPageFromSegment(segment) ? null : settingsSubPagePath(DEFAULT_SETTINGS_SUB_PAGE);
 }
 
 /** The Configuration section of the sites Live Pages may embed content from. */
@@ -111,6 +369,81 @@ export const EMBED_SETTINGS_PATH = `${PAGE_PATHS.settings}${EMBED_SETTINGS_SEGME
 /** That section, optionally with a site typed in: only typed, never added, the user confirms. */
 export function embedSettingsPath(origin?: string | null): string {
   return origin ? `${EMBED_SETTINGS_PATH}?origin=${encodeURIComponent(origin)}` : EMBED_SETTINGS_PATH;
+}
+
+/**
+ * KT-1987 — the design system, a sub-page of Configuration: the tokens at
+ * `/config/design-system`, the components at `/config/design-system/components`.
+ * An entry of its index is the anchor of its heading, in the hash.
+ */
+export type DesignSystemTab = 'tokens' | 'components';
+
+export const DESIGN_SYSTEM_TABS: readonly DesignSystemTab[] = ['tokens', 'components'];
+
+const DESIGN_SYSTEM_SEGMENT = '/design-system';
+export const DESIGN_SYSTEM_PATH = `${PAGE_PATHS.settings}${DESIGN_SYSTEM_SEGMENT}`;
+/** The route segment of the sub-page, for the route table. */
+export const DESIGN_SYSTEM_ROUTE = `${DESIGN_SYSTEM_SEGMENT}/:designSystemTab?`;
+
+/** The path segment of each tab but the first, which is the sub-page itself. */
+const DESIGN_SYSTEM_TAB_SEGMENTS: Record<Exclude<DesignSystemTab, 'tokens'>, string> = {
+  components: 'components',
+};
+
+/** Where the design system opens: a tab and, optionally, one entry of it. */
+export interface DesignSystemLocation {
+  tab?: DesignSystemTab;
+  /** The id of an entry's heading (`ds-tokens`, `ds-text`, `ds-c-menu`…). */
+  anchor?: string | null;
+}
+
+/** The address of the design system, on a tab and optionally one of its entries. */
+export function designSystemPath({ tab = 'tokens', anchor }: DesignSystemLocation = {}): string {
+  const path = tab === 'tokens' ? DESIGN_SYSTEM_PATH : `${DESIGN_SYSTEM_PATH}/${DESIGN_SYSTEM_TAB_SEGMENTS[tab]}`;
+  return anchor ? `${path}#${encodeURIComponent(anchor)}` : path;
+}
+
+/** The tab a `:designSystemTab` route segment names, or null when it names none. */
+export function designSystemTabFromSegment(segment: string | undefined): DesignSystemTab | null {
+  if (!segment) return 'tokens';
+  const tab = (Object.keys(DESIGN_SYSTEM_TAB_SEGMENTS) as Exclude<DesignSystemTab, 'tokens'>[])
+    .find(candidate => DESIGN_SYSTEM_TAB_SEGMENTS[candidate] === segment);
+  return tab ?? null;
+}
+
+/** The Configuration section that holds the link to the design system. */
+export const SETTINGS_APPEARANCE_SECTION_ID = 'settings-appearance';
+
+/** The anchor `/config#…` named the design system by, before it had its own page. */
+export const DESIGN_SYSTEM_SECTION_ID = 'design-system';
+
+/**
+ * The tab of each anchor of the design system, first match wins: the
+ * components part (`ds-components`) and each component entry (`ds-c-<id>`),
+ * then the tokens part (`ds-tokens`) and each scale (`ds-<scale>`).
+ */
+const DESIGN_SYSTEM_ANCHOR_TABS: readonly (readonly [RegExp, DesignSystemTab])[] = [
+  [/^ds-components$/, 'components'],
+  [/^ds-c-[\w-]+$/, 'components'],
+  [/^ds-[\w-]+$/, 'tokens'],
+];
+
+/** The tab an entry anchor of the design system belongs to, or null when it is not one. */
+export function designSystemAnchorTab(anchor: string): DesignSystemTab | null {
+  return DESIGN_SYSTEM_ANCHOR_TABS.find(([pattern]) => pattern.test(anchor))?.[1] ?? null;
+}
+
+/**
+ * Where an old Configuration anchor of the design system lands now:
+ * `/config#design-system` on the sub-page, `/config#ds-c-menu` on the
+ * Components tab at the Menu entry, `/config#ds-text` on the Tokens tab at
+ * that scale. Null for an anchor of Configuration itself.
+ */
+export function legacyDesignSystemLocation(anchor: string | null | undefined): DesignSystemLocation | null {
+  if (!anchor) return null;
+  if (anchor === DESIGN_SYSTEM_SECTION_ID) return { tab: 'tokens', anchor: null };
+  const tab = designSystemAnchorTab(anchor);
+  return tab ? { tab, anchor } : null;
 }
 
 /**

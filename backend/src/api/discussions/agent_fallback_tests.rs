@@ -695,3 +695,105 @@ async fn the_discussion_settings_store_replace_cancel_and_remove_the_override_pe
     .await;
     assert!(!unknown.0.success);
 }
+
+// ─── KT-2012: the model the room line credits to the failing agent ───────
+
+/// [`state_with_chain`], the room holding the exact model `claude-room-exact`
+/// and Codex chained to Gemini CLI, so a mentioned Codex can fall back too.
+async fn state_with_room_model() -> crate::AppState {
+    let state = state_with_chain(link(AgentType::Codex), None).await;
+    {
+        let mut config = state.config.write().await;
+        config.agents.codex.fallback_chain = vec![link(AgentType::GeminiCli)];
+        crate::core::agent_fallback::migrate_legacy_chains(&mut config.agents);
+    }
+    state
+        .db
+        .with_conn(|conn| {
+            crate::db::discussions::update_discussion_model(conn, ROOM, Some("claude-room-exact"))
+        })
+        .await
+        .unwrap();
+    state
+}
+
+/// The dispatch `job_id` now runs `@codex`: a mention, not the room's agent.
+async fn mention_codex(state: &crate::AppState, job: &mut AgentDispatchJob) {
+    let job_id = job.id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET agent_override_json = ?2 WHERE id = ?1",
+                rusqlite::params![job_id, serde_json::to_string(&AgentType::Codex)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    job.agent_override = Some(AgentType::Codex);
+}
+
+#[tokio::test]
+async fn the_room_line_credits_the_discussions_exact_model_to_its_own_agent() {
+    let state = state_with_room_model().await;
+    let job = running_dispatch(&state, 1).await;
+    assert!(intercept_failed_turn_among(&state, &job, CLAUDE_LIMIT, Some(everyone())).await);
+    let lines = room_system_lines(&state).await;
+    assert!(
+        lines[0].starts_with("Claude Code · claude-room-exact: quota exhausted"),
+        "the room's own agent ran the exact model: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn the_room_line_never_credits_the_discussions_exact_model_to_a_mentioned_agent() {
+    let state = state_with_room_model().await;
+    let mut job = running_dispatch(&state, 1).await;
+    mention_codex(&state, &mut job).await;
+    assert!(intercept_failed_turn_among(&state, &job, CLAUDE_LIMIT, Some(everyone())).await);
+    let lines = room_system_lines(&state).await;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("Codex · eco mode: quota exhausted"),
+        "Codex was asked to run its own mode, not the room's model: {}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("claude-room-exact"), "{}", lines[0]);
+}
+
+#[tokio::test]
+async fn a_mentioned_turn_moved_off_a_cooling_agent_never_names_the_rooms_model() {
+    let state = state_with_room_model().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now();
+            fallback::set_cooldown(
+                conn,
+                &AgentType::Codex,
+                fallback::Trigger::QuotaExhausted,
+                Some(now + chrono::Duration::hours(1)),
+                now,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut next = running_dispatch(&state, 1).await;
+    mention_codex(&state, &mut next).await;
+    let moved = start_on_fallback_among(&state, next, Some(everyone())).await;
+    assert_eq!(moved.agent_override, Some(AgentType::GeminiCli));
+    let lines = room_system_lines(&state).await;
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("Codex · eco mode: quota exhausted")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("claude-room-exact")),
+        "{lines:?}"
+    );
+}

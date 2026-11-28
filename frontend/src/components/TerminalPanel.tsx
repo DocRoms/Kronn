@@ -3,6 +3,7 @@ import { Loader2, Terminal, X } from 'lucide-react';
 import { discussions as discussionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import type { DiscussionWorkspace } from '../types/generated';
+import { SidePanelHeaderSlot } from './SidePanelHeaderSlot';
 import './DiscussionToolPanel.css';
 import './TerminalPanel.css';
 
@@ -127,24 +128,26 @@ export function TerminalPanel({ discussionId, onClose }: TerminalPanelProps) {
 
   return (
     <aside className="disc-tool-panel terminal-panel" aria-label={t('git.terminal')}>
-      <header className="disc-tool-panel-header">
-        <div className="disc-tool-panel-title">
-          <Terminal size={15} />
-          <span>{t('git.terminal')}</span>
-        </div>
-        <div className="disc-tool-panel-actions">
-          {onClose && (
-            <button
-              type="button"
-              className="disc-tool-panel-icon"
-              onClick={onClose}
-              aria-label={t('common.close')}
-            >
-              <X size={14} />
-            </button>
-          )}
-        </div>
-      </header>
+      <SidePanelHeaderSlot standalone={(
+        <header className="disc-tool-panel-header">
+          <div className="disc-tool-panel-title">
+            <Terminal size={15} />
+            <span>{t('git.terminal')}</span>
+          </div>
+          <div className="disc-tool-panel-actions">
+            {onClose && (
+              <button
+                type="button"
+                className="disc-tool-panel-icon"
+                onClick={onClose}
+                aria-label={t('common.close')}
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        </header>
+      )} />
 
       {workspaces.length > 0 && (
         <label className="terminal-workspace-picker">

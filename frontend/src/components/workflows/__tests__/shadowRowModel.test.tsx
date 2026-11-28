@@ -78,8 +78,8 @@ describe('one resolved model on the three surfaces', () => {
     expect(screen.getByTestId('wf-shadow-rows-kimi-agent')).toHaveTextContent('OpenCode · opencode-go/kimi-k3.1-thinking');
     expect(screen.getByTestId('wf-shadow-rows-principal-agent')).toHaveTextContent('Ollama · qwen3.8:27b-mlx');
     // Nothing configures Claude Code's model: « default model » is all that can be said.
-    expect(screen.getByTestId('wf-shadow-rows-bare-agent')).toHaveTextContent('Claude Code · DEFAULT-MODEL');
-    for (const id of ['principal', 'twin', 'argon', 'kimi']) expect(screen.getByTestId(`wf-shadow-rows-${id}-agent`)).not.toHaveTextContent('DEFAULT-MODEL');
+    expect(screen.getByTestId('wf-shadow-rows-bare-agent')).toHaveTextContent('Claude Code · wf.shadow.rows.defaultModel'); // the shared picker names it in the app's language (KT-1885)
+    for (const id of ['principal', 'twin', 'argon', 'kimi']) expect(screen.getByTestId(`wf-shadow-rows-${id}-agent`)).not.toHaveTextContent('wf.shadow.rows.defaultModel');
   });
 
   it('shadow rows: the summary and the « merged by » menu name the resolved model', () => {

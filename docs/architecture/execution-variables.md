@@ -21,7 +21,7 @@ The editor lists only the names available to the selected project and inserts
 the recommended form; it never receives or displays their values.
 
 [src: file: backend/src/models/quick.rs:301-308#declarations_with_template_environment_variables]
-[src: file: backend/src/api/quick_prompts.rs:1032-1044#declarations_with_template_environment_variables]
+[src: file: backend/src/api/quick_prompts.rs:1046-1058#declarations_with_template_environment_variables]
 [src: file: backend/src/api/mcps.rs:189-210#project_environment_names]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:162-166#insertEnvironmentVariable]
 
@@ -75,7 +75,7 @@ durable discussion/run and project scope. Reveals are audited without storing
 the returned value.
 
 [src: file: backend/src/db/execution_variable_snapshots.rs:151-222#insert_execution_context_message] [src: file: backend/src/db/execution_variable_snapshots.rs:33-41#has_live_owner]
-[src: file: frontend/src/components/MessageBubble.tsx:1072-1104#revealExecutionVariable]
+[src: file: frontend/src/components/MessageBubble.tsx:644-676#revealExecutionVariable]
 
 ## Retention
 

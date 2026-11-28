@@ -38,9 +38,16 @@ import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, SessionContinuity, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity } from '../types/generated';
+import type { DiscussionMessage, SessionContinuity, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity, ModelTier } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
+import { Message } from './Message';
+import type { MessageActionSet } from './messageKinds';
+import { CodeBlock } from './CodeBlock';
+import { languageOfClass } from '../lib/diff-syntax';
+import { CopyButton } from './ui/CopyButton';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
+import { AgentIdentity } from './ui/AgentIdentity';
+import { agentIdentityText, agentModel, type AgentIdentityRole } from './ui/agentIdentityKinds';
 import { externalAgentColor } from '../lib/externalAgentIdentity';
 import { gravatarUrl } from '../lib/gravatar';
 import {
@@ -447,15 +454,18 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const externalAgentBorderColor = agentType === 'Custom'
     ? externalAgentColor(defaultAgentAlias)
     : null;
-  const agentIdentityLabel = isTourDemo
-    ? t('disc.tourDemoKind')
-    : workflowStep
-      ? t('disc.targetDiscussionAgent')
-      : msg.source_msg_id
-        ? t('disc.targetCli')
-        : agentType === defaultAgent
-          ? t('disc.targetDiscussionAgent')
-          : t('disc.targetPunctualAgent');
+  // KT-1936 — the role, its own chip next to the model: a workflow step, a
+  // joined CLI session, the main agent or a one-off agent.
+  const messageTier: ModelTier | null = msg.model_tier && msg.model_tier in MODEL_TIER_ICONS
+    ? msg.model_tier as ModelTier
+    : null;
+  const agentIdentityRole: AgentIdentityRole = workflowStep
+    ? 'workflowStep'
+    : msg.source_msg_id
+      ? 'cli'
+      : agentType === defaultAgent
+        ? 'main'
+        : 'oneOff';
   const replyAuthor = useMemo(() => {
     if (!replyTarget) return '';
     if (replyTarget.agent_type) {
@@ -540,17 +550,6 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     const timer = setTimeout(() => setDecodeDone(true), 700);
     return () => clearTimeout(timer);
   }, [isMatrixLastUser, msg.id]);
-
-  const copyBtn = (size: number, showLabel: boolean) => (
-    <button
-      className="disc-copy-btn"
-      data-copied={isCopied}
-      onClick={() => onCopy(msg.id, visibleContent)}
-      title={t('disc.copyMessage')}
-    >
-      {isCopied ? <><Check size={size} /> {t('disc.copied')}</> : <><Copy size={size} /> {showLabel && t('disc.copy')}</>}
-    </button>
-  );
 
   // 0.8.7 anti-hallucination — pill state + derived severity.
   const [showLint, setShowLint] = useState(false);
@@ -667,72 +666,52 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         ? agentTrigger
         : msg.author_pseudo || t('disc.humanAuthor');
     return (
-      <div
-        className="disc-msg-row"
-        data-role="deleted"
-        data-former-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
-        data-message-id={msg.id}
+      <Message
+        variant="deleted"
+        bubbleClassName="disc-msg-deleted"
+        rowProps={{
+          'data-former-role': isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent',
+          'data-message-id': msg.id,
+        }}
       >
-        <div className="disc-msg-bubble disc-msg-deleted" data-role="deleted">
-          <Trash2 size={12} aria-hidden="true" />
-          <span>{t('disc.deletedMessage')}</span>
-          <span className="disc-msg-deleted-meta">· {deletedAuthor} · {formattedTime}</span>
-          <button
-            type="button"
-            className="disc-id-pill disc-message-id-pill"
-            data-copied={isMessageIdCopied}
-            onClick={copyMessageId}
-            title={t('disc.idPillTooltip', msg.id)}
-            aria-label={t('disc.idPillTooltip', msg.id)}
-          >
-            {isMessageIdCopied ? <Check size={8} /> : null}
-            {messageShortLabel(msg.id)}
-          </button>
-        </div>
-      </div>
+        <Trash2 size={12} aria-hidden="true" />
+        <span>{t('disc.deletedMessage')}</span>
+        <span className="disc-msg-deleted-meta">· {deletedAuthor} · {formattedTime}</span>
+        <button
+          type="button"
+          className="disc-id-pill disc-message-id-pill"
+          data-copied={isMessageIdCopied}
+          onClick={copyMessageId}
+          title={t('disc.idPillTooltip', msg.id)}
+          aria-label={t('disc.idPillTooltip', msg.id)}
+        >
+          {isMessageIdCopied ? <Check size={8} /> : null}
+          {messageShortLabel(msg.id)}
+        </button>
+      </Message>
     );
   }
 
-  const visualRole = isOrchestrator
+  const tone = isOrchestrator ? 'orchestration' : msg.role === 'System' ? (
+    isKronnTool ? 'kronn-tool'
+    : isKronnPlanning ? 'kronn-planning'
+    : activationCard ? 'kronn-activation'
+    : msg.content.startsWith('summary cached') ? 'summary'
+    : executionContext ? 'execution-context'
+    : 'error'
+  ) : undefined;
+  const variant = isOrchestrator
     ? 'orchestrator'
     : isUser
       ? 'user'
       : msg.role === 'System'
-        ? 'system'
+        ? (tone === 'error' ? 'error' : 'system')
         : 'agent';
+  // A card that asks the human to decide is never folded out of sight.
+  const carriesCard = /```\s*kronn-(?:question|plan-action|important)\b/.test(msg.content);
 
-
-
-  return (
-    <MessageFileLinkContext.Provider value={fileLinkContext}>
-    {/* KT-58 — `data-target-agent` carries the message's durable dispatch
-     *  target, so CSS can single out the mention actually awaiting a reply
-     *  instead of giving every mention the same weight. */}
-    <div
-      className="disc-msg-row"
-      data-role={visualRole}
-      data-target-agent={msg.target_agent ?? undefined}
-      data-message-id={msg.id}
-      data-search-current={isSearchCurrent || undefined}
-    >
-      <div
-        className={`disc-msg-bubble${isOrchestrator ? ' disc-msg-bubble-full' : ''}`}
-        data-role={visualRole}
-        data-editing={isEditing || undefined}
-        data-variant={isOrchestrator ? 'orchestration' : msg.role === 'System' ? (
-          isKronnTool ? 'kronn-tool'
-          : isKronnPlanning ? 'kronn-planning'
-          : activationCard ? 'kronn-activation'
-          : msg.content.startsWith('summary cached') ? 'summary'
-                  : executionContext ? 'execution-context'
-                  : 'error'
-        ) : undefined}
-        style={msg.role === 'Agent'
-          ? { borderLeftColor: externalAgentBorderColor ?? agentColor(agentType, mentionColors) }
-          : undefined}
-      >
-        <div className="disc-msg-header-row">
-          <div className="disc-msg-header-main">
+  const header = (
+          <>
             {isUser && (
               // Always render a clear HUMAN attribution on user messages — even with
               // no pseudo (federated from a peer whose pseudo is unset → "anonyme").
@@ -837,15 +816,42 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               </div>
             )}
             {msg.role === 'Agent' && (
-              <div className="disc-msg-agent-label" style={{ color: agentTextColor(agentType, mentionColors), justifyContent: 'space-between' }}>
-                <span className="flex-row gap-2">
+              <div className="disc-msg-agent-label" style={{ justifyContent: 'space-between' }}>
+                {/* The agent colour on the identity's line only (its workflow,
+                 *  CLI and session notes), not on the whole header row. */}
+                {/* KT-1902 — at 400 px the line shrinks with the header (Message.css):
+                 *  the model truncates, the pieces wrap whole, and the full
+                 *  identity stays in the tooltip. */}
+                <span
+                  className="flex-row gap-2 disc-msg-agent-identity-line"
+                  style={{ color: agentTextColor(agentType, mentionColors) }}
+                  title={agentIdentityText({
+                    name: agentTrigger,
+                    model: agentModel(msg.model?.trim() || workflowStep?.model, 'notRecorded'),
+                    role: agentIdentityRole,
+                    roleLabel: isTourDemo ? t('disc.tourDemoKind') : undefined,
+                    tierLabel: messageTier ? t(`disc.tier.${messageTier}`) : undefined,
+                  }, t)}
+                >
                   {/* "<agent>[ · <model>][ · <owner>]" — answers WHO + WHAT at a
                    *  glance. model_tier is present on local agent messages; a
                    *  federated agent reply also carries its owner's pseudo
                    *  (handle_incoming_chat_message) so "ClaudeCode · reasoning · Romu"
                    *  reads as "Romu's ClaudeCode on the other instance". */}
-                  <Cpu size={10} /> {agentTrigger}
-                  <span className="disc-msg-agent-kind"> · {agentIdentityLabel}</span>
+                  {/* KT-1936 — name, model (or « model not recorded »: never the
+                   *  tier name), its mode's icon and its role, one component.
+                   *  KT-2009 — a step message without its own model writes the
+                   *  one its run recorded for the attempt that posted it. */}
+                  <AgentIdentity
+                    icon={<Cpu size={12} />}
+                    name={agentTrigger}
+                    color={agentTextColor(agentType, mentionColors)}
+                    model={agentModel(msg.model?.trim() || workflowStep?.model, 'notRecorded')}
+                    role={agentIdentityRole}
+                    roleLabel={isTourDemo ? t('disc.tourDemoKind') : undefined}
+                    tier={messageTier}
+                    tierLabel={messageTier ? t(`disc.tier.${messageTier}`) : undefined}
+                  />
                   {/* KT-247 — stable per-provider CLI ordinal, so two joined
                    *  Claude Code (or two Codex) are distinguishable in the
                    *  timeline. Matches the `@claude-cli-2` room alias. */}
@@ -865,18 +871,6 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                       title={`Session ${agentTrigger}-cli${msg.author_cli_ordinal > 1 ? `-${msg.author_cli_ordinal}` : ''}`}
                     >
                       {' '}· CLI{msg.author_cli_ordinal > 1 ? ` ${msg.author_cli_ordinal}` : ''}
-                    </span>
-                  )}
-                  {/* Prefer the CONCRETE model ("qwen3:32b", "sonnet") — a disc can
-                   *  switch models mid-thread, so this is per-message. Fall back to
-                   *  the tier when the model wasn't recorded (legacy rows / a
-                   *  provider-default run with no explicit flag). */}
-                  {(msg.model || msg.model_tier) && (
-                    <span
-                      style={{ opacity: 0.6, fontWeight: 400 }}
-                      title={msg.model ? `Modèle : ${msg.model}` : `Palier : ${msg.model_tier}`}
-                    >
-                      · {msg.model ?? msg.model_tier}
                     </span>
                   )}
                   {/* KT-1202 — whether this turn continued the agent's conversation. */}
@@ -901,7 +895,6 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                     </span>
                   )}
                 </span>
-                {copyBtn(9, false)}
               </div>
             )}
             {msg.role === 'System' && isKronnTool && (
@@ -981,8 +974,10 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 )}
               </div>
             )}
-          </div>
-          <div className="disc-msg-header-actions">
+          </>
+  );
+  const headerActions = (
+          <>
             {isOrchestrator && !orchestratorAsks && (
               <button
                 type="button"
@@ -1007,8 +1002,10 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               {isMessageIdCopied ? <Check size={8} /> : null}
               {messageShortLabel(msg.id)}
             </button>
-          </div>
-        </div>
+          </>
+  );
+  const lead = (
+        <>
         {msg.role !== 'System' && msg.reply_to_message_id && (
           <button
             type="button"
@@ -1033,6 +1030,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             {summaryCache}
           </div>
         )}
+        </>
+  );
+  const body = (
         <div data-message-search-content>
         {isEditing ? (
           <div className="disc-edit-layout">
@@ -1223,6 +1223,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           })()
         )}
         </div>
+  );
+  const trail = (
+        <>
         {((attachments?.length ?? 0) > 0 || fileOpenRequest) && discussionId && (
           <MessageAttachments
             openRequest={fileOpenRequest}
@@ -1260,18 +1263,6 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               </span>
             ))}
           </div>
-        )}
-        {msg.role === 'Agent' && (
-          <button
-            className="disc-tts-btn"
-            onClick={() => onTts(msg.id, visibleContent, language)}
-            title={isTtsActive ? (tts === 'loading' ? 'Chargement...' : tts === 'playing' ? 'Pause' : tts === 'paused' ? 'Reprendre' : 'Lire') : 'Lire \u00e0 voix haute'}
-          >
-            {isTtsActive && tts === 'loading' ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> TTS</>
-              : isTtsActive && tts === 'playing' ? <><Pause size={9} /> Pause</>
-              : isTtsActive && tts === 'paused' ? <><Play size={9} /> Reprendre</>
-              : <><Play size={9} /> TTS</>}
-          </button>
         )}
         {!modelError && RE_AUTH_ERROR.test(msg.content) && (
           <div className="disc-auth-error-cta">
@@ -1382,9 +1373,10 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             </span>
           </p>
         )}
-        <div className="disc-msg-footer">
-          <div className="disc-msg-time-row">
-            <span className="disc-msg-time">{formattedTime}</span>
+        </>
+  );
+  const footerInfo = (
+          <>
             {msg.tokens_used > 0 && <span className="disc-msg-token-count">{msg.tokens_used.toLocaleString()} tok</span>}
             {/* KT-190 — a joined CLI's spend cannot be cut per message: between
                 two room messages it also reads files, runs tests, and may answer
@@ -1468,8 +1460,20 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 <GitBranch size={8} /> {laneCount} {t('disc.lintLane')}
               </button>
             )}
-          </div>
-          <div className="disc-msg-footer-right">
+            {msg.role === 'Agent' && hasFullAccess && (
+              <span className="disc-full-access-badge">
+                <AlertTriangle size={8} /> {t('config.fullAccessBadge')}
+              </span>
+            )}
+            {msg.role === 'Agent' && msg.model_tier && (
+              <span
+                className="disc-model-tier-badge"
+                data-tier={msg.model_tier}
+                title={msg.model ? `${msg.model} (${t(`disc.tier.${msg.model_tier}`)})` : undefined}
+              >
+                {msg.model_tier === 'economy' ? '⚡' : '🧠'} {t(`disc.tier.${msg.model_tier}`)}
+              </span>
+            )}
             {replies.filter(reply => reply.role !== 'System').map(reply => {
               const agentMention = reply.agent_type
                 ? AGENT_MENTIONS.find(mention => mention.type === reply.agent_type)?.trigger
@@ -1493,61 +1497,57 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 </button>
               );
             })}
-            {msg.role !== 'System' && !isEditing && onReply && (
-              <button
-                type="button"
-                className="disc-icon-btn disc-reply-action"
-                onClick={() => onReply(msg)}
-                title={t('disc.reply')}
-                aria-label={t('disc.reply')}
-              >
-                <Reply size={10} />
-                <span>{t('disc.reply')}</span>
-              </button>
-            )}
-            {!isEditing && onDelete && (
-              <button
-                type="button"
-                className="disc-icon-btn disc-delete-message-action"
-                onClick={() => onDelete(msg)}
-                disabled={isDeleting || sending}
-                title={t('disc.deleteMessage')}
-                aria-label={t('disc.deleteMessage')}
-              >
-                {isDeleting ? <Loader2 size={10} className="spin" /> : <Trash2 size={10} />}
-              </button>
-            )}
-            {msg.role === 'Agent' && copyBtn(9, true)}
-            {msg.role === 'Agent' && hasFullAccess && (
-              <span className="disc-full-access-badge">
-                <AlertTriangle size={8} /> {t('config.fullAccessBadge')}
-              </span>
-            )}
-            {msg.role === 'Agent' && msg.model_tier && (
-              <span
-                className="disc-model-tier-badge"
-                data-tier={msg.model_tier}
-                title={msg.model ? `${msg.model} (${t(`disc.tier.${msg.model_tier}`)})` : undefined}
-              >
-                {msg.model_tier === 'economy' ? '⚡' : '\ud83e\udde0'} {t(`disc.tier.${msg.model_tier}`)}
-              </span>
-            )}
-            {!sending && !isEditing && (isLastUser || isLastAgent) && (
-              <div className="flex-row gap-2">
-                {isLastUser && !isOrchestrator && (
-                  <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'var(--kr-text-dim)' }} onClick={() => onEditStart(msg.id, visibleContent)} title={t('disc.editResend')} aria-label={t('disc.editResend')}>
-                    <Pencil size={10} />
-                  </button>
-                )}
-                {isLastAgent && (
-                  <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'var(--kr-text-dim)' }} onClick={onRetry} title={t('disc.retryResponse')} aria-label={t('disc.retryResponse')}>
-                    <RotateCcw size={10} />
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
+          </>
+  );
+  // KT-1902 — one place per action, in one order: Reply, Copy, Edit or Retry,
+  // Delete (listening sits with Copy). What does not apply is left out.
+  const ttsLabel = t(isTtsActive && tts === 'loading'
+    ? 'disc.tts.loading'
+    : isTtsActive && tts === 'playing'
+      ? 'disc.tts.pause'
+      : isTtsActive && tts === 'paused' ? 'disc.tts.resume' : 'disc.tts.read');
+  const messageActions: MessageActionSet = isEditing ? {} : {
+    reply: msg.role !== 'System' && onReply ? {
+      label: t('disc.reply'),
+      icon: <Reply />,
+      onSelect: () => onReply(msg),
+      className: 'disc-reply-action',
+    } : undefined,
+    copy: {
+      label: t('disc.copyMessage'),
+      icon: isCopied ? <Check /> : <Copy />,
+      onSelect: () => onCopy(msg.id, visibleContent),
+      className: 'disc-copy-btn',
+      state: isCopied ? 'copied' : undefined,
+    },
+    listen: msg.role === 'Agent' ? {
+      label: ttsLabel,
+      icon: isTtsActive && tts === 'loading'
+        ? <Loader2 className="spin" />
+        : isTtsActive && tts === 'playing' ? <Pause /> : <Play />,
+      onSelect: () => onTts(msg.id, visibleContent, language),
+      className: 'disc-tts-btn',
+    } : undefined,
+    edit: !sending && isLastUser && !isOrchestrator ? {
+      label: t('disc.editResend'),
+      icon: <Pencil />,
+      onSelect: () => onEditStart(msg.id, visibleContent),
+    } : undefined,
+    retry: !sending && isLastAgent ? {
+      label: t('disc.retryResponse'),
+      icon: <RotateCcw />,
+      onSelect: onRetry,
+    } : undefined,
+    delete: onDelete ? {
+      label: t('disc.deleteMessage'),
+      icon: isDeleting ? <Loader2 className="spin" /> : <Trash2 />,
+      onSelect: () => onDelete(msg),
+      disabled: isDeleting || sending,
+      className: 'disc-delete-message-action',
+    } : undefined,
+  };
+  const after = (
+        <>
         {/* KT-1401 — a `kronn-question` fence Kronn could not record: said
             plainly, always visible, so it is never read as a card to answer. */}
         {msg.role === 'Agent' && lint?.invalid_cards?.map((card, i) => (
@@ -1647,8 +1647,46 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             <div className="disc-lint-caveat">{t('disc.lintCaveat')}</div>
           </div>
         )}
-      </div>
-    </div>
+        </>
+  );
+
+  return (
+    <MessageFileLinkContext.Provider value={fileLinkContext}>
+      {/* KT-58 — `data-target-agent` carries the message's durable dispatch
+       *  target, so CSS can single out the mention actually awaiting a reply
+       *  instead of giving every mention the same weight. */}
+      <Message
+        variant={variant}
+        tone={tone}
+        rowProps={{
+          'data-target-agent': msg.target_agent ?? undefined,
+          'data-message-id': msg.id,
+          'data-search-current': isSearchCurrent || undefined,
+        }}
+        bubbleClassName={isOrchestrator ? 'disc-msg-bubble-full' : undefined}
+        bubbleStyle={msg.role === 'Agent'
+          ? { borderLeftColor: externalAgentBorderColor ?? agentColor(agentType, mentionColors) }
+          : undefined}
+        editing={isEditing}
+        header={header}
+        headerActions={headerActions}
+        time={{ label: formattedTime, dateTime: msg.timestamp }}
+        lead={lead}
+        trail={trail}
+        footerInfo={footerInfo}
+        actions={messageActions}
+        // A search hit or a jump to this message unfolds it; a message being
+        // edited, an orchestrator notice (its own toggle) or one carrying a
+        // card to decide on never folds.
+        fold={{
+          id: msg.id,
+          reveal: isSearchCurrent === true,
+          disabled: isEditing || isOrchestrator || carriesCard,
+        }}
+        after={after}
+      >
+        {body}
+      </Message>
     </MessageFileLinkContext.Provider>
   );
 });
@@ -1718,32 +1756,29 @@ function extractText(node: HTMLElement): string {
   return node.textContent ?? '';
 }
 
-/** Tiny copy button overlaid on a block (table or code). */
-function CopyableBlock({ children, className, tag }: { children: ReactNode; className?: string; tag: 'table' | 'pre' }) {
+/** A table with a named copy button over its corner (tab-separated cells). */
+function CopyableTable({ children }: { children: ReactNode }) {
+  const { t } = useT();
   const ref = useRef<HTMLDivElement>(null);
-  const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    const el = ref.current?.querySelector(tag);
-    if (el) {
-      navigator.clipboard.writeText(extractText(el as HTMLElement));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    }
+  const read = () => {
+    const table = ref.current?.querySelector('table');
+    return table ? extractText(table) : '';
   };
   return (
-    <div ref={ref} className={`relative ${className || ''}`}>
+    <div ref={ref} className="relative overflow-hidden">
       {children}
-      <button
-        onClick={handleCopy}
-        className="disc-copyable-block-btn"
-        data-copied={copied}
-        onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
-        onMouseLeave={e => (e.currentTarget.style.opacity = '0.6')}
-      >
-        {copied ? <>{'\u2713'}</> : <>{'\u2398'}</>}
-      </button>
+      <CopyButton label={t('disc.table.copy')} getText={read} size="sm" className="disc-copyable-block-btn" />
     </div>
   );
+}
+
+/** The source text of react-markdown's `<code>` child of a `<pre>`. */
+function fencedCode(children: ReactNode): { language: string | null; code: string } {
+  const child = Array.isArray(children) ? children[0] : children;
+  const props = (child as { props?: { className?: string; children?: ReactNode } } | undefined)?.props;
+  const raw = props?.children;
+  const code = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
+  return { language: languageOfClass(props?.className), code: code.replace(/\n$/, '') };
 }
 
 // react-markdown's component override prop type is essentially
@@ -1973,21 +2008,15 @@ const mdComponents = {
   ul: ({ children }: MdProps) => <ul>{children}</ul>,
   ol: ({ children }: MdProps) => <ol>{children}</ol>,
   li: ({ children }: MdProps) => <li>{children}</li>,
-  code: ({ className, children }: MdProps) => {
-    const isBlock = className?.includes('language-');
-    return isBlock
-      ? <code className="disc-md-pre-code">{children}</code>
-      : <code>{children}</code>;
+  code: ({ className, children }: MdProps) => <code className={className}>{children}</code>,
+  pre: ({ children }: MdProps) => {
+    const { language, code } = fencedCode(children);
+    return <CodeBlock code={code} language={language} />;
   },
-  pre: ({ children }: MdProps) => (
-    <CopyableBlock tag="pre">
-      <pre>{children}</pre>
-    </CopyableBlock>
-  ),
   table: ({ children }: MdProps) => (
-    <CopyableBlock tag="table" className="overflow-hidden">
+    <CopyableTable>
       <table>{children}</table>
-    </CopyableBlock>
+    </CopyableTable>
   ),
   th: ({ children }: MdProps) => <th>{children}</th>,
   td: ({ children }: MdProps) => <td>{children}</td>,
@@ -2155,7 +2184,8 @@ function MarkdownPre({ children, node }: {
       }
     }
   }
-  return <CopyableBlock tag="pre"><pre>{children}</pre></CopyableBlock>;
+  const fence = fencedCode(children);
+  return <CodeBlock code={fence.code} language={fence.language} />;
 }
 
 const discussionMdComponents = {

@@ -1,5 +1,5 @@
 import { FULL_ACCESS_REQUIRED_AGENTS } from '../lib/agentFullAccess';
-import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useId } from 'react';
 import '../pages/DiscussionsPage.css';
 import type {
   Discussion,
@@ -42,10 +42,12 @@ import { formatRelativeTime } from '../lib/relativeTime';
 import { discussions as discussionsApi, autoTriggersApi, config as configApi } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
+import { fullAccessRequiredText, serverReasonText } from '../lib/serverReason';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
 import { useTargetReachability, reachabilityKey } from '../hooks/useTargetReachability';
 import { composerTargetWarning, formatWarningDate, type ComposerTargetWarning } from '../lib/composerTargetWarnings';
-import { MentionTierChoices } from './MentionTierChoices';
+import { AgentPickerPalette, type AgentPickerPaletteRow } from './AgentSwitchPicker';
+import { agentPaletteFieldAria, composerMentionBoundary } from '../lib/agentPickerPalette';
 import { MENTION_TIER_CHOICES, nextMentionTierIndex } from '../lib/mentionTierSelection';
 import { detectTriggeredSkills } from '../lib/autoTriggers';
 import {
@@ -771,6 +773,13 @@ export function ChatInput({
     () => mentionQuery === null ? [] : DISABLED_MENTION_OPTIONS.filter(mention => mentionMatchesQuery(mention, mentionQuery))
       .sort((a, b) => mentionMatchRank(a.trigger, mentionQuery) - mentionMatchRank(b.trigger, mentionQuery)),
     [mentionQuery, DISABLED_MENTION_OPTIONS, mentionMatchesQuery],
+  );
+  // KT-1885 — the textarea names the @ menu and its highlighted row for assistive tech.
+  const mentionListId = `${useId()}-mentions`;
+  const mentionMenuOpen = mentionQuery !== null
+    && (filteredMentionOptions.length > 0 || filteredDisabledMentionOptions.length > 0);
+  const mentionFieldAria = agentPaletteFieldAria(
+    mentionListId, mentionMenuOpen, filteredMentionOptions[mentionIndex]?.mention.trigger,
   );
   const mentionRoutingMode = useCallback((mention: (typeof AGENT_MENTIONS)[number]) => {
     const target = mention.target;
@@ -1517,102 +1526,77 @@ export function ChatInput({
           ta.dispatchEvent(new Event('input', { bubbles: true }));
         }}
       >
-        {/* @mention autocomplete dropdown */}
+        {/* @mention autocomplete (KT-1885): the shared agent picker's palette —
+            its rows, tier choices and availability badges — driven by the
+            textarea's own keys (open on @, arrows, Left/Right for the tier,
+            Enter/Tab, Escape). */}
         {mentionQuery !== null
           && (filteredMentionOptions.length > 0 || filteredDisabledMentionOptions.length > 0)
           && (
-            <div className="disc-mention-popover">
-              {catalogError && <div role="status">{t('modelCatalog.loadError')}</div>}
-              {filteredMentionOptions.map(({ mention: m, group }, i) => (
-                <Fragment key={m.trigger}>
-                  {(i === 0 || filteredMentionOptions[i - 1].group !== group) && (
-                    <div className="disc-mention-group">
-                      {t(group === 'active'
-                        ? 'disc.routingActiveAgents'
-                        : 'disc.routingAvailableAgents')}
-                    </div>
-                  )}
-                  <div
-                    className="disc-mention-item"
-                    data-highlighted={i === mentionIndex}
-                    onMouseEnter={() => { setMentionIndex(i); setMentionTierIndex(null); }}
-                  >
-                    <button
-                      type="button"
-                      className="disc-mention-main"
-                      disabled={mentionRoutingMode(m)?.unavailable}
-                      onMouseDown={e => {
-                        e.preventDefault();
-                        selectMention(m);
-                      }}
-                    >
-                      {m.type
-                        ? <Cpu size={12} style={{ color: agentTextColor(m.type) }} />
-                        : <Users size={12} className="text-accent" />}
+            <AgentPickerPalette
+              id={mentionListId}
+              className="disc-mention-popover"
+              boundary={() => composerMentionBoundary(chatInputRef.current)}
+              ariaLabel={t('disc.mentionAgents')}
+              status={catalogError ? t('modelCatalog.loadError') : undefined}
+              t={t}
+              rows={[
+                ...filteredMentionOptions.map(({ mention: m, group }, i): AgentPickerPaletteRow => {
+                  const mode = mentionRoutingMode(m);
+                  const tierable = Boolean(m.type && m.target && m.target.kind !== 'cli');
+                  return {
+                    key: m.trigger,
+                    agent: m.type ?? null,
+                    label: m.displayTrigger,
+                    detail: m.label,
+                    group: t(group === 'active' ? 'disc.routingActiveAgents' : 'disc.routingAvailableAgents'),
+                    availability: mode?.unavailable
+                      ? { state: 'unavailable', label: t('modelCatalog.unavailable'), title: serverReasonText(t, mode.resolved?.refusalSource) || undefined }
+                      : null,
+                    trailing: m.target?.kind === 'cli' ? (
                       <span
-                        className="font-semibold"
-                        style={m.type ? { color: agentTextColor(m.type) } : undefined}
+                        className="disc-mention-routing-mode"
+                        title={t('disc.routingCliModelManaged')}
+                        aria-label={t('disc.routingCliModelManaged')}
                       >
-                        {m.displayTrigger}
+                        <Terminal size={12} aria-hidden="true" />
                       </span>
-                      <span className="text-muted">{m.label}</span>
-                      {m.target?.kind === 'cli' && (
-                        <span
-                          className="disc-mention-routing-mode"
-                          title={t('disc.routingCliModelManaged')}
-                          aria-label={t('disc.routingCliModelManaged')}
-                        >
-                          <Terminal size={12} aria-hidden="true" />
-                        </span>
-                      )}
-                    </button>
-                    {m.type && m.target && m.target.kind !== 'cli' && (
-                        <MentionTierChoices
-                          trigger={m.displayTrigger}
-                          currentTier={mentionRoutingMode(m)?.tier}
-                          keyboardTier={i === mentionIndex && mentionTierIndex !== null ? MENTION_TIER_CHOICES[mentionTierIndex] : undefined}
-                          ariaLabel={mentionRoutingMode(m)?.title}
-                          resolve={tier => mentionTierResolution(m, tier)}
-                          onSelect={tier => selectMention(m, tier)}
-                          t={t}
-                        />
-                    )}
-                  </div>
-                </Fragment>
-              ))}
-              {filteredDisabledMentionOptions.length > 0 && (
-                <>
-                  <div className="disc-mention-group">
-                    {t('disc.routingDisabledAgent')}
-                  </div>
-                  {filteredDisabledMentionOptions.map(mention => (
-                    <div
-                      key={`disabled:${mention.trigger}`}
-                      className="disc-mention-item disc-mention-item-disabled"
-                      aria-disabled="true"
-                    >
-                      <Cpu
-                        size={12}
-                        style={{ color: mention.type ? agentTextColor(mention.type) : undefined }}
-                      />
-                      <span className="font-semibold">
-                        {mention.displayTrigger}
+                    ) : undefined,
+                    highlighted: i === mentionIndex,
+                    onHover: () => { setMentionIndex(i); setMentionTierIndex(null); },
+                    onSelect: () => selectMention(m),
+                    tiers: tierable ? {
+                      targetLabel: m.displayTrigger,
+                      currentTier: mode?.tier,
+                      keyboardTier: i === mentionIndex && mentionTierIndex !== null ? MENTION_TIER_CHOICES[mentionTierIndex] : undefined,
+                      ariaLabel: mode?.title,
+                      resolve: tier => mentionTierResolution(m, tier),
+                      tierLabel: tier => t(`disc.tier.${tier}`),
+                      modelLabel: tier => mentionTierResolution(m, tier).model || t('disc.defaultAgentModel'),
+                      titleFor: tier => t('disc.routingInvokeTier', t(`disc.tier.${tier}`),
+                        mentionTierResolution(m, tier).model || t('disc.defaultAgentModel')),
+                      defaultLabel: t('disc.defaultAgentModel'),
+                      onSelect: tier => { if (tier) selectMention(m, tier); },
+                    } : undefined,
+                  };
+                }),
+                ...filteredDisabledMentionOptions.map((mention): AgentPickerPaletteRow => {
+                  const mode = mentionRoutingMode(mention);
+                  return {
+                    key: `disabled:${mention.trigger}`,
+                    agent: mention.type ?? null,
+                    label: mention.displayTrigger,
+                    group: t('disc.routingDisabledAgent'),
+                    availability: { state: 'disabled', label: t('disc.nativeAgentDisabled') },
+                    trailing: mode ? (
+                      <span className="disc-mention-routing-mode" title={mode.title} aria-label={mode.title}>
+                        <span aria-hidden="true">{mode.icon}</span>
                       </span>
-                      <span className="text-muted">{t('disc.nativeAgentDisabled')}</span>
-                      {mentionRoutingMode(mention) && (
-                          <span
-                            className="disc-mention-routing-mode"
-                            title={mentionRoutingMode(mention)?.title}
-                            aria-label={mentionRoutingMode(mention)?.title}
-                          >
-                            <span aria-hidden="true">{mentionRoutingMode(mention)?.icon}</span>
-                          </span>
-                      )}
-                    </div>
-                  ))}
-                </>
-              )}
-            </div>
+                    ) : undefined,
+                  };
+                }),
+              ]}
+            />
           )}
 
         {/* Emoji shortcode autocomplete (:tada: → 🎉). Reuses the same CSS
@@ -1936,6 +1920,7 @@ export function ChatInput({
           className="disc-composer-textarea"
           rows={1}
           aria-label={t('disc.messagePlaceholder')}
+          {...mentionFieldAria}
           placeholder={t('disc.messagePlaceholder')}
           defaultValue=""
           onChange={e => {
@@ -2057,7 +2042,10 @@ export function ChatInput({
                 );
                 return;
               }
-              if (e.key === 'Escape') { setMentionQuery(null); return; }
+              // KT-2015 — consumed like the emoji menu's Escape: the page's
+              // window listener skips a handled key, so the side panel behind
+              // stays open until the next Escape.
+              if (e.key === 'Escape') { e.preventDefault(); setMentionQuery(null); return; }
             }
             // `nativeEvent.isComposing` is true while an IME is
             // composing a candidate (CJK, accented dead keys on some
@@ -2320,7 +2308,7 @@ export function ChatInput({
                       <AlertTriangle size={10} className="text-warning flex-shrink-0" />
                       <span className="disc-restricted-warn-text">
                         {debateAgents.some(a => isAgentRestricted(a) && FULL_ACCESS_REQUIRED_AGENTS.includes(a))
-                          ? t('config.fullAccessRequired', debateAgents
+                          ? fullAccessRequiredText(t, debateAgents
                             .filter(a => isAgentRestricted(a) && FULL_ACCESS_REQUIRED_AGENTS.includes(a))
                             .map(a => AGENT_LABELS[a] ?? a)
                             .join(', '))

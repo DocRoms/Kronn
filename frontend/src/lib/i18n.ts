@@ -1,6 +1,8 @@
 // ─── Kronn i18n — lightweight translation system ───────────────────────────
 // UI language (stored in localStorage) is separate from agent output language (stored in backend config).
 
+import { pluralForm } from './i18n/plural';
+
 export type UILocale = 'fr' | 'en' | 'es' | 'zh';
 
 export const UI_LOCALES: { code: UILocale; label: string; flag: string }[] = [
@@ -99,6 +101,16 @@ export function t(locale: UILocale, key: string, ...args: (string | number)[]): 
     str = str.split(`{${i}}`).join(String(args[i]));
   }
   return str;
+}
+
+/**
+ * Translate a countable label: reads `<key>.one` or `<key>.other` (the form
+ * `pluralForm` picks for this locale) with the count as `{0}` and the other
+ * arguments as `{1}`, `{2}`… Every locale declares both forms, even zh, whose
+ * `.one` is never read. Convention: docs/conventions/ui-text.md
+ */
+export function tPlural(locale: UILocale, key: string, count: number, ...args: (string | number)[]): string {
+  return t(locale, `${key}.${pluralForm(locale, count)}`, count, ...args);
 }
 
 /** Test-only seam for loader failure/race coverage without eager locale imports. */

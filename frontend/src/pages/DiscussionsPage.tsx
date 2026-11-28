@@ -4,7 +4,16 @@ import { PAGE_PATHS, projectPath, type ProjectLocation, type SettingsIntent } fr
 import { AppLink } from '../components/AppLink';
 import { newTabClickProps } from '../lib/newTabNavigation';
 import './DiscussionsPage.css';
-import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
+import { MessageBubble } from '../components/MessageBubble';
+import { MessageCompactContext, MessageFoldContext } from '../components/messageKinds';
+import {
+  DebateLaunchingMessage,
+  DebateStreamMessage,
+  PendingAgentReplyMessage,
+  QueuedMessages,
+  StreamingAgentReplyMessage,
+} from '../components/MessageVariants';
+import { BREAKPOINTS } from '../styles/designTokens';
 import { DiscussionNote } from '../components/DiscussionNote';
 import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
 import { WorkflowStepActivityBubble } from '../components/WorkflowStepActivityBubble';
@@ -66,13 +75,15 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
 import { useSustainedFlag } from '../hooks/useSustainedFlag';
-import { AGENT_LABELS, agentColor, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isRoomAgentDisabled, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
+import type { AgentIdentityModel } from '../components/ui/agentIdentityKinds';
+import { discussionAgentModel } from '../lib/agentModelResolution';
+import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isRoomAgentDisabled, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  ChevronRight, Cpu, Loader2,
+  Loader2,
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
-  Menu, X, Clock, ExternalLink, WifiOff, Square,
+  Menu, X, ExternalLink, WifiOff,
   Images,
   NotebookPen,
   GitBranch,
@@ -92,8 +103,7 @@ import {
 import { inertAgentMentions, inertMentionsFor } from '../lib/agentDelegation';
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 import { safeGetItem, safeSetItem } from '../lib/safeStorage';
-import { receiveRunFrame, receiveRunSnapshot, useLiveRun, type AgentRunProgressFrame, type ReplyIds } from '../lib/agentRunProgress';
-import { AgentRunProgressPanel } from '../components/AgentRunProgressPanel';
+import { receiveRunFrame, receiveRunSnapshot, type AgentRunProgressFrame, type ReplyIds } from '../lib/agentRunProgress';
 
 type LoadedDiscussion = Discussion
   & Partial<Pick<DiscussionDetail,
@@ -137,208 +147,9 @@ function newClientMessageId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function PendingAgentReplyBubble({
-  replyId,
-  discussionId,
-  replyIds,
-  agent,
-  triggerMessageId,
-  status,
-  lastError,
-  stopping,
-  onStop,
-}: {
-  replyId: string;
-  discussionId: string;
-  replyIds: ReplyIds;
-  agent: AgentType;
-  triggerMessageId: string;
-  status: string;
-  lastError?: string | null;
-  stopping: boolean;
-  onStop: () => void;
-}) {
-  const { t } = useT();
-  const run = useLiveRun(discussionId, { id: replyId, agent, triggerMessageId }, replyIds);
-  // A refused sibling used to vanish: the placeholder disappeared and the room
-  // showed nothing, while Kronn had written down exactly why. Mention three
-  // agents, watch two of them go, and the only way to learn the cause was to
-  // open the database.
-  if (status === 'Failed') {
-    return (
-      <div
-        className="disc-msg-row"
-        data-role="agent"
-        data-reply-trigger={triggerMessageId}
-        data-testid={`failed-agent-${agent}`}
-      >
-        <div className="disc-msg-bubble" data-role="agent">
-          <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent) }}>
-            <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
-          </div>
-          <div className="disc-failed-agent">
-            <AlertTriangle size={11} />
-            <span>{t('disc.agentDidNotStart')}</span>
-          </div>
-          {/* The reason as the backend wrote it. Not translated: it names a
-              connection, a model or a path, and a paraphrase would lose the
-              part that tells you what to change. */}
-          {lastError && <p className="disc-failed-agent-reason">{lastError}</p>}
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div
-      className="disc-msg-row"
-      data-role="agent"
-      data-reply-trigger={triggerMessageId}
-      data-testid={`pending-agent-${agent}`}
-      aria-live={run ? undefined : 'polite'}
-    >
-      <div className="disc-msg-bubble" data-role="agent">
-        <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent) }}>
-          <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
-          <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
-        </div>
-        <div className="disc-pending-agent-status">
-          <div className="disc-streaming-waiting">
-            <span className="disc-pulse-dot" />
-            {status === 'Pending' ? t('disc.queued') : t('disc.running')}
-          </div>
-          <button
-            type="button"
-            className="disc-pending-agent-stop"
-            onClick={onStop}
-            disabled={stopping}
-            aria-label={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
-            title={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
-          >
-            {stopping
-              ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-              : <Square size={10} fill="currentColor" />}
-            {stopping ? t('disc.stoppingReply') : t('disc.stopReply')}
-          </button>
-        </div>
-        {run && <AgentRunProgressPanel run={run} agentLabel={AGENT_LABELS[agent] ?? agent} />}
-      </div>
-    </div>
-  );
-}
-
-function StreamingAgentReplyBubble({
-  replyId,
-  discussionId,
-  replyIds,
-  agent,
-  triggerMessageId,
-  elapsed,
-  text,
-  logs,
-  showLogs,
-  onToggleLogs,
-  stopping,
-  onStop,
-  recovering,
-  recoveryLabel,
-  agentLabel,
-  waitingUpstream,
-}: {
-  replyId: string;
-  discussionId: string;
-  replyIds: ReplyIds;
-  agent: AgentType;
-  triggerMessageId: string;
-  elapsed: number;
-  text: string;
-  logs: string[];
-  showLogs: boolean;
-  onToggleLogs: () => void;
-  stopping: boolean;
-  onStop: () => void;
-  recovering: boolean;
-  recoveryLabel: string | null;
-  agentLabel?: string;
-  /** Queued behind another run rather than working — worth saying so. */
-  waitingUpstream: boolean;
-}) {
-  const { t } = useT();
-  const displayAgent = agentLabel ?? AGENT_LABELS[agent] ?? agent;
-  const run = useLiveRun(discussionId, { id: replyId, agent, triggerMessageId }, replyIds);
-  return (
-    <div
-      className="disc-msg-row"
-      data-role="agent"
-      data-reply-trigger={triggerMessageId}
-      data-testid={`streaming-agent-${agent}`}
-      aria-live={run ? undefined : 'polite'}
-    >
-      <div className="disc-msg-bubble" data-role="agent">
-        <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent), justifyContent: 'space-between' }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <Cpu size={10} /> {displayAgent}
-            {recovering
-              ? <AlertTriangle size={10} style={{ marginLeft: 4 }} />
-              : <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />}
-          </span>
-          <span className="disc-pending-agent-actions">
-            <span className="disc-streaming-elapsed">
-              {elapsed >= 60
-                ? `${Math.floor(elapsed / 60)}m${String(elapsed % 60).padStart(2, '0')}s`
-                : `${elapsed}s`}
-            </span>
-            <button
-              type="button"
-              className="disc-pending-agent-stop"
-              onClick={onStop}
-              disabled={stopping}
-              aria-label={t('disc.stopThisReply', displayAgent)}
-              title={t('disc.stopThisReply', displayAgent)}
-            >
-              {stopping
-                ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-                : <Square size={10} fill="currentColor" />}
-              {stopping ? t('disc.stoppingReply') : t('disc.stopReply')}
-            </button>
-          </span>
-        </div>
-        {recoveryLabel && (
-          <div className="disc-stream-recovery" role="status">
-            <AlertTriangle size={12} />
-            <span>{recoveryLabel}</span>
-          </div>
-        )}
-        {text ? (
-          <div className="disc-streaming-md">
-            <MarkdownContent content={text} />
-          </div>
-        ) : run ? null : (
-          <div className="disc-streaming-waiting" aria-live="assertive">
-            <span className="disc-pulse-dot" />
-            {waitingUpstream ? t('disc.waitingForSlot') : t('disc.running')}
-            {logs.length > 0 && (
-              <span className="disc-streaming-log-hint">— {logs.at(-1)?.slice(0, 60)}</span>
-            )}
-          </div>
-        )}
-        {run && <AgentRunProgressPanel run={run} agentLabel={displayAgent} />}
-        {logs.length > 0 && (
-          <div style={{ marginTop: 6 }}>
-            <button className="disc-logs-toggle" onClick={onToggleLogs}>
-              <ChevronRight size={10} className="disc-chevron" data-expanded={showLogs} />
-              {t('disc.logs')} ({logs.length})
-            </button>
-            {showLogs && (
-              <div className="disc-logs-panel">
-                {logs.map((log, index) => <div key={index}>{log}</div>)}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+/** KT-1936 — a one-off agent's reply: its mode is not known before the reply
+ *  names its model. */
+const ONE_OFF_REPLY_MODEL: AgentIdentityModel = { kind: 'providerDefault' };
 
 interface GlobalSearchTarget {
   discussionId: string;
@@ -510,6 +321,8 @@ export function DiscussionsPage({
 }: DiscussionsPageProps) {
   const { t, locale } = useT();
   const isMobile = useIsMobile();
+  // KT-1902 — under the first breakpoint, a message's actions go into its menu.
+  const compactMessageActions = useIsMobile(BREAKPOINTS.sm);
 
   // ─── Internal state ──────────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(true); // always start open; mobile auto-closes on select
@@ -518,6 +331,10 @@ export function DiscussionsPage({
   });
   const [focusCollapsedSidebarRail, setFocusCollapsedSidebarRail] = useState(false);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
+  // KT-1902 — the messages unfolded in the open thread; opening another
+  // discussion (or reloading) starts folded again.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const messageFoldStore = useMemo(() => new Set<string>(), [activeDiscussionId]);
   // Async media relists can finish after the user has switched discussions.
   // Keep the current id outside callback closures so a late response can
   // never replace the visible discussion's placeholders.
@@ -700,7 +517,9 @@ export function DiscussionsPage({
     if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel
       && !showNotesPanel) return;
     const closePanel = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      // KT-2015 — a key a menu already handled (the composer's @ or emoji
+      // menu closing) is not also a request to close the panel behind it.
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
       setShowGitPanel(false);
       setShowTerminalPanel(false);
       setShowPlanPanel(false);
@@ -1220,6 +1039,27 @@ export function DiscussionsPage({
   const activeExternalConnection = activeDiscussion
     ? externalConnectionForDiscussion(activeDiscussion, externalConnections)
     : null;
+  // KT-1936 — the main agent's model, resolved as the header resolves it
+  // (exact model, the mode's model, the last reply, else « default model »):
+  // the activity bubbles and the list row never contradict the header.
+  const familyModelTiers = agentAccess?.model_tiers ?? null;
+  const activeAgentModel = useMemo<AgentIdentityModel>(
+    () => activeDiscussion
+      ? discussionAgentModel(activeDiscussion, { familyTiers: familyModelTiers, connection: activeExternalConnection })
+      : ONE_OFF_REPLY_MODEL,
+    [activeDiscussion, familyModelTiers, activeExternalConnection],
+  );
+  const sidebarAgentModels = useMemo(() => {
+    const detailedById = new Map<string, LoadedDiscussion>();
+    Object.values(loadedDiscussions).forEach(discussion => detailedById.set(discussion.id, discussion));
+    return Object.fromEntries(allDiscussions.map(discussion => {
+      const detailed = detailedById.get(discussion.id) ?? discussion;
+      return [discussion.id, discussionAgentModel(detailed, {
+        familyTiers: familyModelTiers,
+        connection: externalConnectionForDiscussion(detailed, externalConnections),
+      })];
+    }));
+  }, [allDiscussions, loadedDiscussions, familyModelTiers, externalConnections]);
   const sidebarAgentLabels = useMemo(() => {
     const detailedById = new Map<string, LoadedDiscussion>();
     Object.values(loadedDiscussions).forEach(discussion => detailedById.set(discussion.id, discussion));
@@ -2465,6 +2305,8 @@ export function DiscussionsPage({
         workspace_mode: config.workspaceMode === 'Isolated' ? 'Isolated' : undefined,
         base_branch: config.workspaceMode === 'Isolated' ? config.baseBranch : undefined,
         tier: config.tier !== 'default' ? config.tier : undefined,
+        // KT-1994 — the picker's « Personnalisé »: an exact model that wins over the tier.
+        ...(config.model ? { model: config.model } : {}),
         // A disc created as a waiting room for invited peers must not keep a
         // live discussion agent. The `agent` above is only a placeholder for a
         // NOT NULL column — left active, the first invited CLI produced a
@@ -3957,7 +3799,7 @@ export function DiscussionsPage({
           return replies.map(reply => (
             reply.id === visibleStreamingReply?.id && (sending || !!resilientStreamingText)
               ? (
-                  <StreamingAgentReplyBubble
+                  <StreamingAgentReplyMessage
                     key={reply.id}
                     replyId={reply.id}
                     discussionId={activeDiscussion.id}
@@ -3981,10 +3823,12 @@ export function DiscussionsPage({
                           : null
                     }
                     agentLabel={recoveryAgentLabel}
+                    role={reply.agent === activeDiscussion.agent ? 'main' : 'oneOff'}
+                    model={reply.agent === activeDiscussion.agent ? activeAgentModel : ONE_OFF_REPLY_MODEL}
                     />
                 )
               : (
-                  <PendingAgentReplyBubble
+                  <PendingAgentReplyMessage
                     key={reply.id}
                     replyId={reply.id}
                     discussionId={activeDiscussion.id}
@@ -3995,6 +3839,8 @@ export function DiscussionsPage({
                     lastError={reply.lastError}
                     stopping={stoppingDispatchIds.has(reply.id)}
                     onStop={() => { void handleStopDispatch(reply.id); }}
+                    role={reply.agent === activeDiscussion.agent ? 'main' : 'oneOff'}
+                    model={reply.agent === activeDiscussion.agent ? activeAgentModel : ONE_OFF_REPLY_MODEL}
                   />
                 )
           ));
@@ -4157,7 +4003,7 @@ export function DiscussionsPage({
             </Fragment>
           );
         });
-  }, [activeContextFiles, activeDiscussion, activeExternalConnection, agentLogs, attachmentsByMessageId, inertMentionsByMessage,
+  }, [activeAgentModel, activeContextFiles, activeDiscussion, activeExternalConnection, agentLogs, attachmentsByMessageId, inertMentionsByMessage,
     chainableQPs, copiedMsgId, deferredStreamingText, deletingMessageIds, discussionActionsByMessageId,
     durablePartial, editingMsgId, editingText, expandedSummaryMsgId, externalConnectionAliases,
     globalSearchTarget, handleDiscussionActionChanged, handleMsgCopy, handleMsgDelete, handleMsgEditCancel,
@@ -4186,6 +4032,7 @@ export function DiscussionsPage({
         <DiscussionSidebar
           discussions={allDiscussions}
           agentLabels={sidebarAgentLabels}
+          agentModels={sidebarAgentModels}
           projects={projects}
           activeId={activeDiscussionId}
           sendingMap={sendingMap}
@@ -4646,6 +4493,8 @@ export function DiscussionsPage({
               ref={messagesContainerRef}
               onScroll={handleMessagesScroll}
             >
+              <MessageCompactContext.Provider value={compactMessageActions}>
+              <MessageFoldContext.Provider value={messageFoldStore}>
               {!loadedDiscussions[activeDiscussion.id] && detailLoadErrors[activeDiscussion.id] && (
                 <div className="disc-worktree-error" role="alert">
                   <AlertTriangle size={14} className="text-error flex-shrink-0" />
@@ -4686,21 +4535,7 @@ export function DiscussionsPage({
                         it's actually running. The placeholder hides as
                         soon as the first agent stream lands. */}
                     {orch.active && orch.agentStreams.length === 0 && (
-                      <div className="disc-msg-row" data-role="agent" aria-live="polite">
-                        <div className="disc-msg-bubble" data-role="agent">
-                          <div className="disc-streaming-waiting">
-                            <span className="disc-pulse-dot" />
-                            {t('disc.debateLaunching')}
-                          </div>
-                          {orch.systemMessages.length > 0 && (
-                            <ul className="disc-orch-systems" style={{ marginTop: 6, paddingLeft: 18, fontSize: 11, color: 'var(--kr-text-muted)' }}>
-                              {orch.systemMessages.slice(-5).map((m, i) => (
-                                <li key={i}>{m}</li>
-                              ))}
-                            </ul>
-                          )}
-                        </div>
-                      </div>
+                      <DebateLaunchingMessage systemMessages={orch.systemMessages} />
                     )}
                     {/* When agent streams have started but new system
                         messages keep arriving (round transitions, status
@@ -4712,35 +4547,14 @@ export function DiscussionsPage({
                       </div>
                     )}
                     {orch.agentStreams.map((as_, i) => (
-                      <div key={i} className="disc-msg-row" data-role="agent">
-                        <div
-                          className="disc-msg-bubble" data-role="agent"
-                          style={{ borderLeft: `3px solid ${agentColor(as_.agentType || as_.agent)}` }}
-                        >
-                          <div className="disc-orch-stream-agent" style={{ color: agentTextColor(as_.agentType || as_.agent) }}>
-                            <Cpu size={10} /> {as_.agent}
-                            <span className="disc-orch-round">
-                              {as_.round === 'synthesis' ? t('disc.synthesis') : `Round ${as_.round}`}
-                            </span>
-                            {!as_.done && <Loader2 size={9} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />}
-                          </div>
-                          {as_.text ? (
-                            <MarkdownContent content={as_.text} />
-                          ) : !as_.done ? (
-                            <div className="disc-orch-thinking">
-                              {t('disc.thinking', as_.agent)}
-                            </div>
-                          ) : (
-                            // Agent finished with NO chunks — typically a CLI
-                            // that crashed before printing or returned empty.
-                            // Without an explicit message the user sees a
-                            // ghost bubble and can't tell whether to retry.
-                            <div className="disc-orch-empty" style={{ fontSize: 12, color: 'var(--kr-warning)', fontStyle: 'italic' }}>
-                              ⚠️ {t('disc.debateAgentEmpty', as_.agent)}
-                            </div>
-                          )}
-                        </div>
-                      </div>
+                      <DebateStreamMessage
+                        key={i}
+                        agent={as_.agent}
+                        agentType={as_.agentType}
+                        round={as_.round}
+                        text={as_.text}
+                        done={as_.done}
+                      />
                     ))}
                   </>
                 );
@@ -5315,72 +5129,16 @@ export function DiscussionsPage({
                   live agent reply. Keeping this inside `.disc-messages` makes
                   the outbox visible in chronological order and lets the normal
                   bottom-scroll machinery follow it. */}
-              {queuedMessages.length > 0 && (
-                <div className="disc-queued-msgs" aria-label={t('disc.queuedAria')}>
-                  {/* ONE growing "outbox" bubble — each queued part on its own
-                      line, all sent together as a single merged message. */}
-                  <div className="disc-queued-bubble" title={t('disc.queuedHint')}>
-                    <div className="disc-queued-head">
-                      <Clock size={11} className="disc-queued-clock" />
-                      <span className="disc-queued-label">{t('disc.queuedAria')}</span>
-                      {queuedMessages.length > 1 && (
-                        <button
-                          type="button"
-                          className="disc-queued-clear"
-                          onClick={clearMessageQueue}
-                          aria-label={t('disc.queuedClearAll')}
-                          title={t('disc.queuedClearAll')}
-                        >
-                          {t('disc.queuedClearAll')}
-                        </button>
-                      )}
-                    </div>
-                    {queuedMessages.map(qm => (
-                      <div key={qm.id} className="disc-queued-line" data-status={qm.status}>
-                        {qm.targets?.map(target => (
-                          <span
-                            key={`${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}`}
-                            className="disc-queued-agent"
-                          >
-                            @{target.agent_type}
-                          </span>
-                        ))}
-                        {qm.replyToMessageId && (
-                          <span className="disc-queued-agent">
-                            {t('disc.reply')} #{qm.replyToMessageId.slice(0, 8)}
-                          </span>
-                        )}
-                        <span className="disc-queued-text">{qm.content}</span>
-                        <span className="disc-queued-status">
-                          {qm.status === 'sending' && <Loader2 size={10} className="spin" />}
-                          {t(`disc.queuedStatus.${qm.status}`)}
-                        </span>
-                        {qm.status === 'failed' && (
-                          <button
-                            type="button"
-                            className="disc-queued-retry"
-                            onClick={() => retryQueuedMessage(qm.id)}
-                            aria-label={t('disc.queuedRetry')}
-                            title={qm.error || t('disc.queuedRetry')}
-                          >
-                            <Play size={10} /> {t('disc.queuedRetry')}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="disc-queued-cancel"
-                          onClick={() => removeQueuedMessage(qm.id)}
-                          disabled={qm.status === 'sending'}
-                          aria-label={t('disc.queuedCancel')}
-                          title={t('disc.queuedCancel')}
-                        >
-                          <X size={11} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              <QueuedMessages
+                messages={queuedMessages}
+                copiedId={copiedMsgId}
+                onCopy={handleMsgCopy}
+                onRetry={retryQueuedMessage}
+                onRemove={removeQueuedMessage}
+                onClearAll={clearMessageQueue}
+              />
+              </MessageFoldContext.Provider>
+              </MessageCompactContext.Provider>
 
               <div ref={chatEndRef} />
             </div>

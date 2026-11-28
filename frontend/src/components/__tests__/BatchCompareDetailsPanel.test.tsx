@@ -91,7 +91,9 @@ describe('BatchCompareDetailsPanel — model identity in the ranking list', () =
     );
 
     await screen.findByLabelText('disc.compare.rankBy');
-    expect(screen.queryByText('codex-reasoning-v9-today')).not.toBeInTheDocument();
+    // The judge picker's trigger writes the model its mode runs now (KT-1936,
+    // AgentIdentity); the ranking list never borrows it for a past run.
+    expect(screen.queryAllByText('codex-reasoning-v9-today').filter(el => !el.closest('.kr-agent-switch'))).toEqual([]);
     expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
   });
 
@@ -129,7 +131,9 @@ describe('BatchCompareDetailsPanel — model identity in the ranking list', () =
     );
 
     await screen.findByLabelText('disc.compare.rankBy');
-    expect(screen.queryByText('claude-reasoning-today')).not.toBeInTheDocument();
+    // The judge picker's trigger writes the model its mode runs now (KT-1936,
+    // AgentIdentity); the ranking list never borrows it for a past run.
+    expect(screen.queryAllByText('claude-reasoning-today').filter(el => !el.closest('.kr-agent-switch'))).toEqual([]);
     expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
     expect(screen.getByText(/authentication is not ready/)).toBeInTheDocument();
   });

@@ -157,6 +157,7 @@ export function PlanningProposalReview({
                     type="button"
                     onClick={() => void decide(item, 'reject', rejectReason)}
                     disabled={isSaving}
+                    aria-label={t('planning.rejectProposal')}
                   >
                     {isSaving ? <Loader2 size={11} className="spin" /> : <Check size={11} />}
                   </button>

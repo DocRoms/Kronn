@@ -2,6 +2,9 @@
 /target/
 backend/target/
 backend/bindings/
+# A plain `cargo test` in a crate writes ts-rs bindings to its own ./bindings
+# (`make typegen` and CI set TS_RS_EXPORT_DIR and write backend/bindings/).
+backend/crates/*/bindings/
 
 # Tauri desktop
 desktop/src-tauri/target/

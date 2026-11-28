@@ -29,11 +29,14 @@ import {
   RefreshCw, Copy,
 } from 'lucide-react';
 import { ASSISTANT_CONVERSATIONS_CHANGED } from './assistantConversation';
+import type { AgentIdentityModel } from './ui/agentIdentityKinds';
 
 export interface DiscussionSidebarProps {
   discussions: Discussion[];
   /** Human-facing agent/provider label by discussion id. */
   agentLabels?: Record<string, string>;
+  /** KT-1936 — the agent's model by discussion id, resolved as the header resolves it. */
+  agentModels?: Record<string, AgentIdentityModel>;
   projects: Project[];
   activeId: string | null;
   sendingMap: Record<string, boolean>;
@@ -156,6 +159,7 @@ function formatBatchParent(summary: BatchRunSummary | undefined, t: (k: string, 
 export function DiscussionSidebar({
   discussions,
   agentLabels = {},
+  agentModels = {},
   projects,
   activeId,
   sendingMap,
@@ -588,6 +592,7 @@ export function DiscussionSidebar({
       disc={disc}
       weightBadge={weightBadgeFor(disc.id)}
       agentLabel={agentLabels[disc.id]}
+      agentModel={agentModels[disc.id]}
       isActive={disc.id === activeId}
       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
       isSending={isRunningDisc(disc)}
@@ -631,6 +636,7 @@ export function DiscussionSidebar({
           disc={disc}
           weightBadge={weightBadgeFor(disc.id)}
           agentLabel={agentLabels[disc.id]}
+          agentModel={agentModels[disc.id]}
           isActive={disc.id === activeId}
           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
           isSending={isRunningDisc(disc)}
@@ -675,6 +681,7 @@ export function DiscussionSidebar({
                     disc={child}
                     weightBadge={weightBadgeFor(child.id)}
                     agentLabel={agentLabels[child.id]}
+                    agentModel={agentModels[child.id]}
                     isActive={child.id === activeId}
                     lastSeenCount={lastSeenMsgCount[child.id] ?? 0}
                     isSending={isRunningDisc(child)}
@@ -1033,6 +1040,7 @@ export function DiscussionSidebar({
                                           disc={disc}
                                           weightBadge={weightBadgeFor(disc.id)}
                                           agentLabel={agentLabels[disc.id]}
+                                          agentModel={agentModels[disc.id]}
                                           isActive={disc.id === activeId}
                                           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                                           isSending={!!sendingMap[disc.id]}
@@ -1851,6 +1859,7 @@ export function DiscussionSidebar({
                       disc={disc}
                       weightBadge={weightBadgeFor(disc.id)}
                       agentLabel={agentLabels[disc.id]}
+                      agentModel={agentModels[disc.id]}
                       isActive={disc.id === activeId}
                       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                       isSending={!!sendingMap[disc.id]}

@@ -2034,7 +2034,7 @@ describe('deleting runs or a workflow counts the library Artifacts made from the
     const deleteBtn = screen.getByTestId('wf-delete-wf-games');
     await act(async () => { fireEvent.click(deleteBtn); });
     await waitFor(() => expect(
-      screen.getByText('4 exécution(s) et 2 Artifact(s) de la bibliothèque supprimés avec lui ; leurs discussions restent'),
+      screen.getByText('4 run(s) et 2 Artifact(s) de la bibliothèque supprimés avec lui ; leurs discussions restent'),
     ).toBeInTheDocument());
     expect(mockWorkflowsApi.delete).not.toHaveBeenCalled();
   });
@@ -2771,7 +2771,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     }
     await waitFor(() => expect(screen.getByDisplayValue('prnum')).toBeInTheDocument());
 
-    const agentTierPicker = screen.getAllByRole('button', { name: 'Agent et mode IA' })[0];
+    const agentTierPicker = screen.getAllByRole('button', { name: /^Agent et mode IA( — |$)/ })[0];
     expect(agentTierPicker).toHaveTextContent('🎯');
     fireEvent.click(agentTierPicker);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Claude Code · Avancé' }));

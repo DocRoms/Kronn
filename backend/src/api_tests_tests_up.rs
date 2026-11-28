@@ -306,6 +306,398 @@ async fn discussion_questions_http_requires_authentication() {
     }
 }
 
+/// KT-1955 — `POST …/decline` without a message closes the card for the
+/// banner and the room list and writes nothing an agent would read as a
+/// decision: only the card's row changes.
+#[tokio::test]
+async fn question_cancel_http_a_blank_refusal_closes_the_card_without_waking_anyone() {
+    let state = test_state();
+    insert_test_discussion(&state, "cancel-room", "Arbitration").await;
+    insert_test_message(&state, "cancel-room", "Agent", r#"```kronn-question
+{"version":1,"key":"settled-in-cli","question":"Which policy?","options":[{"id":"a","label":"First"}]}
+```"#).await;
+    let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let post = |uri: &str, body: serde_json::Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let (_, listed) = send(
+        state.clone(),
+        false,
+        get("/api/discussions/cancel-room/questions"),
+    )
+    .await;
+    assert_eq!(listed["data"]["pending_count"], 1);
+    let id = listed["data"]["questions"][0]["id"].as_str().unwrap();
+    let uri = format!("/api/discussions/cancel-room/questions/{id}/decline");
+    let before = side_effect_counts(&state).await;
+
+    assert_eq!(
+        send(
+            state.clone(),
+            false,
+            post(
+                &format!("/api/discussions/missing/questions/{id}/decline"),
+                serde_json::json!({"idempotency_key": "blank-0"})
+            )
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, first) = send(
+        state.clone(),
+        false,
+        post(&uri, serde_json::json!({"idempotency_key": "blank-1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["state"], "cancelled");
+    assert!(first["data"]["answer"].is_null());
+    assert!(first["data"]["cancellation"]["author_pseudo"].is_string());
+    assert!(first["data"]["cancellation"]["cancelled_at"].is_string());
+    // A second click, whitespace this time and another key: the same card.
+    let (status, replay) = send(
+        state.clone(),
+        false,
+        post(
+            &uri,
+            serde_json::json!({"idempotency_key": "blank-2", "reason": "  \n "}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        first, replay,
+        "a repeated blank refusal returns the same card"
+    );
+    assert_eq!(
+        side_effect_counts(&state).await,
+        before,
+        "no message, no target, no dispatch job, no resume run"
+    );
+    assert!(
+        !dispatcher_woken(&state).await,
+        "the dispatcher is not woken"
+    );
+    assert_eq!(first["data"]["cancellation"]["relayed_answers"], false);
+
+    let (_, listed) = send(
+        state.clone(),
+        false,
+        get("/api/discussions/cancel-room/questions"),
+    )
+    .await;
+    assert_eq!(listed["data"]["pending_count"], 0, "the banner clears");
+    assert_eq!(listed["data"]["questions"][0], first["data"]);
+    let (_, rows) = send(state.clone(), false, get("/api/discussions")).await;
+    assert_eq!(
+        rows["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "cancel-room")
+            .unwrap()["pending_question_count"],
+        0,
+        "the list badge clears"
+    );
+    for (path, body) in [
+        (
+            "answer",
+            serde_json::json!({"selected_option_ids": ["a"], "idempotency_key": "late"}),
+        ),
+        (
+            "decline",
+            serde_json::json!({"idempotency_key": "late", "reason": "Finalement non."}),
+        ),
+    ] {
+        assert_eq!(
+            send(
+                state.clone(),
+                false,
+                post(
+                    &format!("/api/discussions/cancel-room/questions/{id}/{path}"),
+                    body
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT,
+            "{path} after a blank refusal"
+        );
+    }
+    assert_eq!(side_effect_counts(&state).await, before);
+}
+
+/// Whether the dispatcher was woken since the last call (a stored permit).
+async fn dispatcher_woken(state: &AppState) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        state.agent_dispatch_notify.notified(),
+    )
+    .await
+    .is_ok()
+}
+
+/// KT-1401 — the step that asked has ended, its first card was answered and
+/// that answer waits for the last card. A blank refusal of the last card
+/// relays it: the handler wakes the dispatcher for that one job, once.
+#[tokio::test]
+async fn question_cancel_http_a_blank_refusal_wakes_the_dispatcher_only_to_relay_earlier_answers() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id,title,agent,created_at,updated_at) VALUES ('d','D','Codex','now','now')",
+                [],
+            )?;
+            conn.execute_batch(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                     VALUES ('source-workflow', 'Implementation', '{}', '[]', 'now', 'now');
+                 INSERT INTO workflow_runs (id, workflow_id, status, started_at)
+                     VALUES ('source-run', 'source-workflow', 'Running', 'now');",
+            )?;
+            crate::db::workflow_step_rooms::begin_activity(
+                conn,
+                "source-run",
+                "orchestrate",
+                "Orchestrate",
+                "d",
+                "Codex",
+            )?;
+            let session = crate::db::workflow_step_rooms::join(
+                conn,
+                "source-run",
+                "orchestrate",
+                "d",
+                "Codex",
+                "step-session",
+            )?;
+            let card = |key: &str| {
+                format!(
+                    "```kronn-question\n{}\n```",
+                    serde_json::json!({"version":1,"key":key,"question":format!("Question {key} ?"),
+                        "options":[{"id":"retry","label":"Réarmer"},{"id":"wait","label":"Attendre"}]})
+                )
+            };
+            let message = crate::models::DiscussionMessage {
+                id: "step-question".into(),
+                role: crate::models::MessageRole::Agent,
+                channel: crate::models::MessageChannel::Main,
+                content: format!("{}\n\n{}", card("first"), card("second")),
+                agent_type: Some(crate::models::AgentType::Codex),
+                timestamp: chrono::Utc::now(),
+                tokens_used: 0,
+                auth_mode: None,
+                model_tier: None,
+                cost_usd: None,
+                author_pseudo: None,
+                author_avatar_email: None,
+                source_msg_id: None,
+                duration_ms: None,
+                target_agent: None,
+                reply_to_message_id: None,
+                recovered_partial: false,
+                session_tokens_at_message: None,
+                author_cli_ordinal: None,
+                session_continuity: None,
+                kind: Default::default(),
+                model: None,
+                lint_report: None,
+            };
+            crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
+                conn,
+                "d",
+                &message,
+                &[],
+                &[],
+                session.session_pk,
+            )?;
+            crate::db::workflow_step_rooms::finish_activity(conn, "source-run", "orchestrate")?;
+            crate::db::workflow_step_rooms::revoke(conn, &[session.session_pk])?;
+            conn.execute(
+                "UPDATE workflow_runs SET status='Success', finished_at='now' WHERE id='source-run'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let post = |uri: &str, body: serde_json::Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let (status, answered) = send(
+        state.clone(),
+        false,
+        post(
+            "/api/discussions/d/questions/question:step-question:0/answer",
+            serde_json::json!({"selected_option_ids": ["retry"], "idempotency_key": "a-0"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    let _ = dispatcher_woken(&state).await;
+    assert_eq!(side_effect_counts(&state).await.2, 0, "the answer waits");
+
+    let last = "/api/discussions/d/questions/question:step-question:1/decline";
+    let (status, closed) = send(
+        state.clone(),
+        false,
+        post(last, serde_json::json!({"idempotency_key": "blank-1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed["data"]["state"], "cancelled");
+    assert!(closed["data"]["answer"].is_null());
+    assert_eq!(closed["data"]["cancellation"]["relayed_answers"], true);
+    assert!(
+        dispatcher_woken(&state).await,
+        "the relay is dispatched now"
+    );
+    assert_eq!(side_effect_counts(&state).await.2, 1, "one dispatch job");
+
+    let (status, replay) = send(
+        state.clone(),
+        false,
+        post(last, serde_json::json!({"idempotency_key": "blank-2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay, closed);
+    assert!(!dispatcher_woken(&state).await, "nothing new to dispatch");
+    assert_eq!(side_effect_counts(&state).await.2, 1);
+}
+
+/// Messages, targets, dispatch jobs and workflow runs: everything a
+/// resolution could have started.
+async fn side_effect_counts(state: &AppState) -> (i64, i64, i64, i64) {
+    state
+        .db
+        .with_conn(|conn| {
+            let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0));
+            Ok((
+                count("SELECT COUNT(*) FROM messages")?,
+                count("SELECT COUNT(*) FROM message_targets")?,
+                count("SELECT COUNT(*) FROM agent_dispatch_jobs")?,
+                count("SELECT COUNT(*) FROM workflow_runs")?,
+            ))
+        })
+        .await
+        .unwrap()
+}
+
+/// A refusal WITH a message is unchanged by KT-1955: published in the room,
+/// routed to the asker, dispatched.
+#[tokio::test]
+async fn question_cancel_http_a_refusal_with_a_message_still_reaches_the_agent() {
+    let state = test_state();
+    insert_test_discussion(&state, "refuse-room", "Arbitration").await;
+    insert_test_message(
+        &state,
+        "refuse-room",
+        "Agent",
+        r#"```kronn-question
+{"version":1,"key":"still-open","question":"Which policy?","options":[{"id":"a","label":"First"}]}
+```"#,
+    )
+    .await;
+    let (_, listed) = send(
+        state.clone(),
+        false,
+        Request::builder()
+            .uri("/api/discussions/refuse-room/questions")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let id = listed["data"]["questions"][0]["id"].as_str().unwrap();
+    let before = side_effect_counts(&state).await;
+    let (status, refused) = send(
+        state.clone(),
+        false,
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/discussions/refuse-room/questions/{id}/decline"
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"idempotency_key": "r-1", "reason": "Hors périmètre."})
+                    .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refused}");
+    assert_eq!(refused["data"]["state"], "declined");
+    assert_eq!(refused["data"]["answer"]["text"], "Hors périmètre.");
+    assert!(refused["data"]["cancellation"].is_null());
+    let after = side_effect_counts(&state).await;
+    assert_eq!(after.0, before.0 + 1, "the refusal is published");
+    assert_eq!(after.2, before.2 + 1, "the asker is woken");
+    let message_id = format!("question-decline:{id}");
+    state
+        .db
+        .with_conn(move |conn| {
+            let content: String = conn.query_row(
+                "SELECT content FROM messages WHERE id=?1",
+                [&message_id],
+                |r| r.get(0),
+            )?;
+            assert!(content.contains("Hors périmètre."), "{content}");
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Only a human refuses: the route needs the instance's authentication and no
+/// agent bridge token reaches it. The former `/cancel` door is gone.
+#[tokio::test]
+async fn question_cancel_http_is_human_only() {
+    let state = test_state_with_token("question-cancel-token");
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/discussions/room/questions/q/decline")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"idempotency_key":"k"}"#))
+        .unwrap();
+    assert_eq!(
+        send(state.clone(), true, request).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        crate::core::bridge_token::route_for(
+            "POST",
+            "/api/discussions/{id}/questions/{question_id}/decline"
+        )
+        .is_none(),
+        "an agent token cannot refuse a card"
+    );
+    let state = test_state();
+    insert_test_discussion(&state, "room", "Arbitration").await;
+    let gone = Request::builder()
+        .method("POST")
+        .uri("/api/discussions/room/questions/q/cancel")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = send(state, false, gone).await;
+    assert!(
+        status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED,
+        "the /cancel route no longer exists: {status}"
+    );
+}
+
 /// Project worktree hooks round-trip through the API and storage.
 #[tokio::test]
 async fn a_project_declares_once_how_its_worktrees_are_prepared() {

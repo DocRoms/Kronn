@@ -1,0 +1,13 @@
+/* Shared by the components of components/ui/ (SearchField, Switch,
+   FormFooter): text for assistive technology only. Moved out of
+   SearchField.css in KT-1882 so each component that needs it loads it. */
+
+.ui-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

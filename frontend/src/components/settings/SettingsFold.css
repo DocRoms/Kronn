@@ -1,0 +1,17 @@
+/* KT-1923 — a folded part of Settings: its header and the fold button. */
+
+.set-fold-header {
+  margin-bottom: var(--kr-space-2);
+}
+
+.set-fold-chevron {
+  transition: transform var(--kr-duration-fast, 120ms) ease;
+}
+
+.set-fold[data-open='true'] .set-fold-chevron {
+  transform: rotate(180deg);
+}
+
+.set-fold-content[hidden] {
+  display: none;
+}

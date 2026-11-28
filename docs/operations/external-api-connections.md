@@ -4,14 +4,14 @@ Kronn's **Settings → Agents → External API mode** manages named connections 
 OpenAI-compatible chat services. LiteLLM, NVIDIA and OpenRouter provide endpoint
 presets; `Other` uses the same contract for an operator-supplied service. Every
 connection owns a display name, a unique discussion alias, an endpoint and
-optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1949-1965#ExternalApiSection]
+optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1998-2014#ExternalApiSection]
 [src: file: backend/src/models/external_api_connection.rs:11-20#ExternalApiConnection]
 
 The required HTTP surface is `GET /v1/models` plus
 `POST /v1/chat/completions`. Kronn stores a base URL without a trailing `/v1`
 and appends the route itself, so an endpoint copied with or without `/v1` reaches
 the same final route. Only a final `/v1` path segment is removed: `/v1beta`,
-`/api/v1/proxy` and a host such as `v1.example.com` are kept. [src: file: backend/src/api/external_api_connections.rs:282-301#normalize_endpoint]
+`/api/v1/proxy` and a host such as `v1.example.com` are kept. [src: file: backend/src/api/external_api_connections.rs:301-320#normalize_endpoint]
 
 ## Add and test a connection
 
@@ -23,14 +23,14 @@ the same final route. Only a final `/v1` path segment is removed: `/v1beta`,
    [src: file: frontend/src/components/settings/ExternalApiSection.tsx:61-68#PRESET_ENDPOINTS]
 3. Enter a display name and a unique mention alias. The stored alias is
    lower-cased without its leading `@`; `@name` is what a discussion uses.
-   Whitespace and a second `@` are rejected. [src: file: backend/src/api/external_api_connections.rs:263-280#canonicalize_alias]
+   Whitespace and a second `@` are rejected. [src: file: backend/src/api/external_api_connections.rs:282-299#canonicalize_alias]
 4. Enter the optional API key and select **Test connection**. Kronn first reads
    `/v1/models`. When a key and at least one model are available, it also sends a
    minimal non-streaming chat request with `max_tokens: 1` to distinguish a
    valid credential from a public model catalogue. This second request reaches
    the configured provider and may be accounted for by that provider.
-   [src: file: backend/src/api/external_api_connections.rs:314-325#probe_models]
-   [src: file: backend/src/api/external_api_connections.rs:704-710#chat_probe]
+   [src: file: backend/src/api/external_api_connections.rs:333-344#probe_models]
+   [src: file: backend/src/api/external_api_connections.rs:723-729#chat_probe]
    NVIDIA and OpenRouter are exceptions: their public catalogues are not
    entitlement lists, so Kronn never probes an arbitrary first entry. OpenRouter
    first validates the key through its non-billable current-key endpoint. The
@@ -38,16 +38,16 @@ the same final route. Only a final `/v1` path segment is removed: `/v1beta`,
    again invokes each unique selected model. On NVIDIA, a model-specific `404`
    keeps the catalogue available and is reported as an inaccessible model rather
    than a broken endpoint.
-   [src: file: backend/src/api/external_api_connections.rs:581-587#probe_openrouter_credential]
-   [src: file: backend/src/api/external_api_connections.rs:369-391#requested_models]
-   [src: file: backend/src/api/external_api_connections.rs:562-567#http_error_hint]
+   [src: file: backend/src/api/external_api_connections.rs:600-606#probe_openrouter_credential]
+   [src: file: backend/src/api/external_api_connections.rs:398-420#requested_models]
+   [src: file: backend/src/api/external_api_connections.rs:581-586#http_error_hint]
 5. After a successful test, map any returned models to Economy, Default and
    Reasoning, then save. The model fields remain read-only until the current
    endpoint and credential have passed that test. Changing the endpoint, key or
    preset invalidates the prior result; previous mappings stay visible but
    cannot be changed until the new connection state succeeds.
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:253#modelsUnlocked]
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:684-690#changeConnection]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:254#modelsUnlocked]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:685-691#changeConnection]
 
 The model tiers remain optional: leaving one blank stores no per-connection
 override for that tier. The connection card shows the saved endpoint,
@@ -55,10 +55,10 @@ credential presence and all three mappings, and supports a fresh test without
 returning the stored key to the browser. Editing shows a masked key state; only
 an explicit click on the eye requests the stored value. **Replace** opens a
 blank editable field, while saving without replacement preserves the current
-credential. [src: file: backend/src/api/external_api_connections.rs:1847-1853#reveal_credential]
-[src: file: backend/src/api/external_api_connections.rs:1801-1804#set_credential]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:1116-1127#has_credential]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:334-348#SecretField]
+credential. [src: file: backend/src/api/external_api_connections.rs:1866-1872#reveal_credential]
+[src: file: backend/src/api/external_api_connections.rs:1820-1823#set_credential]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:1117-1128#has_credential]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:335-349#SecretField]
 
 ## LiteLLM proxy
 
@@ -92,8 +92,8 @@ Kronn validates the credential separately before treating the connection as
 ready. Testing selected tiers can make billed chat requests; the credential
 check and catalogue request do not select a paid model.
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:61-68#PRESET_ENDPOINTS]
-[src: file: backend/src/api/external_api_connections.rs:250-261#validate_credential_format]
-[src: file: backend/src/api/external_api_connections.rs:581-592#probe_openrouter_credential]
+[src: file: backend/src/api/external_api_connections.rs:269-280#validate_credential_format]
+[src: file: backend/src/api/external_api_connections.rs:600-611#probe_openrouter_credential]
 
 OpenRouter remains a named external connection internally. Agent selectors show
 its display name and current tier model, and Quick Prompt comparisons persist
@@ -115,9 +115,9 @@ request. Create/update accepts the key as a write-only field: omitting it during
 an edit preserves the current key, while an explicit blank value clears it.
 [src: file: backend/src/models/external_api_connection.rs:5-16#credential_slug]
 [src: file: backend/src/api/external_api_connections.rs:27-35#has_credential]
-[src: file: backend/src/api/external_api_connections.rs:1847-1853#reveal_credential]
+[src: file: backend/src/api/external_api_connections.rs:1866-1872#reveal_credential]
 [src: file: backend/src/api/external_api_connections.rs:37-49#api_key]
-[src: file: backend/src/api/external_api_connections.rs:1801-1805#set_credential]
+[src: file: backend/src/api/external_api_connections.rs:1820-1824#set_credential]
 
 Connection keys are `ApiKey` entries of the live configuration, persisted
 encrypted with the instance key in the `stored_credentials` table since 0.14.3
@@ -133,7 +133,7 @@ copy of the configuration and saves it. If that save fails, the failure is
 logged and the API returns an error saying the connection was removed but its
 key was not; the live configuration keeps the key, which must then be deleted
 from the API keys.
-[src: file: backend/src/api/external_api_connections.rs:2172-2196#delete]
+[src: file: backend/src/api/external_api_connections.rs:2202-2226#delete]
 
 ## Use in a discussion
 
@@ -147,9 +147,9 @@ The new-discussion form merges configured OpenRouter/Other aliases with native
 agent aliases. Each alias exposes its Economy, Default and Reasoning model in
 the shared selector, and creation persists the connection-qualified initial
 target rather than only the generic `Custom` wire type.
-[src: file: frontend/src/components/NewDiscussionForm.tsx:219-230#launchTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:227-238#launchTargets]
 [src: file: frontend/src/lib/externalAgentIdentity.ts:63-79#externalAgentTargets]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:646-653#initialTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:659-666#initialTargets]
 
 Discussion headers, messages and comparison views recover the provider name
 from that durable `MessageTarget.connection_id`; editable titles are not the
@@ -157,7 +157,7 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:15684-15715#ollama_tokens]
+[src: file: backend/src/agents/runner.rs:15804-15835#ollama_tokens]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
@@ -204,9 +204,9 @@ their endpoint and Economy, Default and Reasoning models. Saving either card
 immediately refreshes the global agent selectors, and startup projects any
 previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
-stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2152-2156#sync_runtime_config]
+stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2177-2181#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:44-69#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1962-1967#onModelTiersChanged]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:2013-2018#onModelTiersChanged]
 
 The former standalone LiteLLM settings card (`LiteLlmCard`) and its frontend
 client were removed (KT-668): nothing mounted them, and the named connection
@@ -291,25 +291,25 @@ those tokens ahead of the call.
 
 - **No models:** confirm that `GET <base>/v1/models` returns a JSON `data` array
   from the network namespace where the Kronn backend runs.
-  [src: file: backend/src/api/external_api_connections.rs:1322-1369#fetch_catalogue]
+  [src: file: backend/src/api/external_api_connections.rs:1341-1388#fetch_catalogue]
 - **Authentication error:** re-enter the key. Kronn intentionally refuses to
   reuse a stored credential when the preset or canonical endpoint no longer
-  matches the saved row. [src: file: backend/src/api/external_api_connections.rs:1572-1584#saved_connection]
+  matches the saved row. [src: file: backend/src/api/external_api_connections.rs:1609-1621#saved_connection]
 - **HTTP error during test:** the model catalogue may be public while chat is
   restricted. A connection is considered usable only when both the catalogue
   and, when a key is supplied, the authenticated chat probe succeed. On a
   LiteLLM proxy a refused tier model is reported per tier instead of failing the
   connection.
-  [src: file: backend/src/api/external_api_connections.rs:314-325#probe_models]
-  [src: file: backend/src/api/external_api_connections.rs:815-827#probe_tier_models]
+  [src: file: backend/src/api/external_api_connections.rs:333-344#probe_models]
+  [src: file: backend/src/api/external_api_connections.rs:834-846#probe_tier_models]
 - **The test failed but the connection works:** fixed in 0.13.0. The probe used
   to send a model of its own choosing rather than one of the three the operator
   had configured, so a connection that only serves the models it was set up for
   failed a test it should have passed. The probe now chats with a configured
   model when one is set, and an HTTP failure is reported with a hint keyed to the status and the
   model actually tried — not a bare code.
-  [src: file: backend/src/api/external_api_connections.rs:1625-1643#requested_models]
-  [src: file: backend/src/api/external_api_connections.rs:562-574#http_error_hint]
+  [src: file: backend/src/api/external_api_connections.rs:1654-1672#requested_models]
+  [src: file: backend/src/api/external_api_connections.rs:581-593#http_error_hint]
 - **An agent cannot find the connection to generate an image or a video:**
   fixed in 0.13.2. In a plain discussion, `agent_list`, the only place the
   connection id appears, refused any agent that was not a member of a room, and

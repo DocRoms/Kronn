@@ -43,7 +43,7 @@ describe('useSystemNotices', () => {
     render(<Host />);
     await waitFor(() => expect(kinds()).toEqual(['key_locked']));
     const [notice] = getNotifications().notices;
-    expect(notice.link).toBe('/config#settings-recovery');
+    expect(notice.link).toBe('/config/security#settings-recovery');
     expect(notice.args?.[0]).toContain('Anthropic');
     expect(notice.dismiss).toBeUndefined();
   });

@@ -21,7 +21,7 @@ Normal resolution prefers explicit configuration and then available durable
 tier assignments. HTTP agents may use their explicit/durable default tier;
 they do not revive the old embedded model list. Frontend display fallback is
 also configuration/caller supplied, rather than a second embedded catalogue.
-[src: file: backend/src/agents/runner.rs:3654-3705#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3621-3672#configured_model_flag]
 [src: file: backend/src/agents/runner.rs:3674-3693#resolve_model_flag]
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 
@@ -45,20 +45,20 @@ disables unavailable choices, and displays provenance/check time/diagnostics.
 An expired or failed live snapshot renders as cached without changing the
 stored model's availability or operator metadata. Opening a mention/picker
 reads a snapshot once; typing filters locally, without provider discovery.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:64-75#AGENT_RUNTIME_TARGETS]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:86-97#AGENT_RUNTIME_TARGETS]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:112-115#catalogModelProvenance]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:132-195#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 
 | Surface | Shared path and source |
 |---|---|
-| Discussion creation and header | `AgentSwitchPicker`. [src: file: frontend/src/components/NewDiscussionForm.tsx:1239#AgentSwitchPicker] [src: file: frontend/src/components/ChatHeader.tsx:296#AgentSwitchPicker] The project audit selector is not on this path: its tier buttons show the model configured in settings (or on the named connection), read without the catalogue. [src: file: frontend/src/components/AuditTimeline.tsx:522-527#tierModel] |
-| Chat and creation mentions | Shared catalogue resolver/search and `MentionTierChoices`; keyboard traversal skips unavailable tiers while preserving exact joined-CLI identity. [src: file: frontend/src/components/ChatInput.tsx:741-751#mentionTierResolution] [src: file: frontend/src/components/NewDiscussionForm.tsx:202-203#targetTierResolution] [src: file: frontend/src/lib/mentionTierSelection.ts:6-16#nextMentionTierIndex] |
-| QP and workflow authoring, including compensation and review | `AgentSwitchPicker` plus `ModelCatalogPicker`/`SearchableSelect` where a model or reasoning override is editable. [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:246#AgentSwitchPicker] [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:312#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:337#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4559#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4623#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1395#AgentSwitchPicker] [src: file: frontend/src/pages/WorkflowsPage.tsx:3389#AgentSwitchPicker] [src: file: frontend/src/components/AgentCompareSelector.tsx:85#AgentSwitchPicker] |
-| Planning launch/reassignment | The same agent and model controls, without clearing unrelated execution policy/history. [src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker] [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1170-1187#AgentSwitchPicker] |
+| Discussion creation and header | `AgentSwitchPicker`. [src: file: frontend/src/components/NewDiscussionForm.tsx:1252#AgentSwitchPicker] [src: file: frontend/src/components/ChatHeader.tsx:340#AgentSwitchPicker] The project audit selector is not on this path: its tier buttons show the model configured in settings (or on the named connection), read without the catalogue. [src: file: frontend/src/components/AuditTimeline.tsx:522-527#tierModel] |
+| Chat and creation mentions | Shared catalogue resolver/search and the agent picker's palette and tier choices (`AgentPickerPalette`, `AgentPickerTierChoices`, KT-1885); keyboard traversal skips unavailable tiers while preserving exact joined-CLI identity. [src: file: frontend/src/components/ChatInput.tsx:741-751#mentionTierResolution] [src: file: frontend/src/components/NewDiscussionForm.tsx:206-207#targetTierResolution] [src: file: frontend/src/lib/mentionTierSelection.ts:6-16#nextMentionTierIndex] |
+| QP and workflow authoring, including compensation and review | `AgentSwitchPicker` plus `ModelCatalogPicker`/`SearchableSelect` where a model or reasoning override is editable. [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:246#AgentSwitchPicker] [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:312#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:338#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4562#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4626#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1396#AgentSwitchPicker] [src: file: frontend/src/pages/WorkflowsPage.tsx:3397#AgentSwitchPicker] [src: file: frontend/src/components/AgentCompareSelector.tsx:85#AgentSwitchPicker] |
+| Planning launch/reassignment | The same agent and model controls, without clearing unrelated execution policy/history. [src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker] [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1189-1206#AgentSwitchPicker] |
 | Comparison rerun/reviewer | Shared target picker for new selections; historical identity stays recorded/attested/unknown rather than being replaced by current settings. [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343#AgentSwitchPicker] [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412#AgentSwitchPicker] See [comparison identity](compare-model-identity.md). |
-| Agent and Ollama settings | Shared `catalogModelOptions`, exact runtime target and searchable model choices. [src: file: frontend/src/components/settings/AgentsSection.tsx:895#catalogModelOptions] [src: file: frontend/src/components/settings/OllamaCard.tsx:498#catalogModelOptions] See [tier settings](agent-tier-catalogue-settings.md). |
-| HTTP connection draft | Searchable choices come from that draft's test result; missing/untested saved IDs remain visible but unverified. A changed endpoint cannot borrow another saved target's verified catalogue. [src: file: frontend/src/components/settings/ExternalApiSection.tsx:254-262#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:254-264#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:684-690#changeConnection] See [HTTP probe isolation](http-probe-catalogue-isolation.md). |
+| Agent and Ollama settings | Shared `catalogModelOptions`, exact runtime target and searchable model choices. [src: file: frontend/src/components/settings/AgentsSection.tsx:924#catalogModelOptions] [src: file: frontend/src/components/settings/OllamaCard.tsx:498#catalogModelOptions] See [tier settings](agent-tier-catalogue-settings.md). |
+| HTTP connection draft | Searchable choices come from that draft's test result; missing/untested saved IDs remain visible but unverified. A changed endpoint cannot borrow another saved target's verified catalogue. [src: file: frontend/src/components/settings/ExternalApiSection.tsx:255-263#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:255-265#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:685-691#changeConnection] See [HTTP probe isolation](http-probe-catalogue-isolation.md). |
 | Manual catalogue management | Searchable runtime target, model/ID/source filtering and shared derived provenance. Failed refresh/reload retains identities as cached; manual provenance is preserved. [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:104-114#visibleRows] [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:272-289#SearchableSelect] [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:92-102#rows] |
 
 `ModelCatalogPicker` additionally preserves an unrecognized saved reasoning
@@ -87,7 +87,7 @@ fallbacks. The OpenRouter GLM preset selects only a model actually returned by
 its test and preserves an existing choice; it is not an unconditional runtime
 fallback. Neither is removed by this inventory.
 [src: file: frontend/src/components/settings/OllamaCard.tsx:412-442#suggestions]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:710-719#open_router]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:712-721#open_router]
 
 This closes the catalogue migration/consumer audit only after its final gates
 pass and the exact change is integrated. It does not qualify KT-619/635,

@@ -1,0 +1,24 @@
+/* KT-1880 — IconButton: the Button base (Button.css), made square. */
+
+.ui-icon-button {
+  min-width: var(--kr-control-h-md);
+  padding: 0;
+}
+
+.ui-icon-button[data-size="sm"] {
+  min-width: var(--kr-control-h-sm);
+  padding: 0;
+}
+
+.ui-icon-button[data-size="lg"] {
+  min-width: var(--kr-control-h-lg);
+  padding: 0;
+}
+
+@media (pointer: coarse) {
+  .ui-icon-button,
+  .ui-icon-button[data-size="sm"] {
+    min-width: var(--kr-control-h-touch);
+    min-height: var(--kr-control-h-touch);
+  }
+}

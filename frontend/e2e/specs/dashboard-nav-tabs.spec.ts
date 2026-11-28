@@ -8,7 +8,7 @@
  */
 
 import { test, expect } from '../fixtures/kronn-fixture';
-import { DashboardPage } from '../pages/DashboardPage';
+import { DashboardPage, SETTINGS_SUB_PAGES } from '../pages/DashboardPage';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
 
 test.describe('Dashboard — every nav tab loads', () => {
@@ -36,7 +36,13 @@ test.describe('Dashboard — every nav tab loads', () => {
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
     await dashboard.clickSettings();
-    // Settings sections render their accordion headers.
-    await expect(page.locator('.set-accordion-header').first()).toBeVisible({ timeout: 5_000 });
+    // KT-1923 — the tab opens the first of the five sub-pages: the list on the
+    // left holds all five, the first is current, and its heading is drawn.
+    await expect(page).toHaveURL(/\/config\/you$/);
+    for (const subPage of SETTINGS_SUB_PAGES) {
+      await expect(page.getByTestId(`settings-subpage-${subPage}`)).toBeVisible({ timeout: 5_000 });
+    }
+    await expect(page.getByTestId('settings-subpage-you')).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('#settings-subpage-you-title')).toBeVisible();
   });
 });

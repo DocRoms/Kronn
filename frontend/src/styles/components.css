@@ -23,7 +23,7 @@
 
 .btn-primary {
   background: var(--kr-accent);
-  color: var(--kr-bg-base);
+  color: var(--kr-text-on-accent);
   border-color: transparent;
   font-weight: 700;
 }
@@ -446,24 +446,43 @@ select.input option {
 }
 
 /* ── MCP origin badges (shared: Plugins page + Project cards) ──────────── */
+/* KT-2006 — the label is `--kr-text-secondary` (6.8:1 or more on a registry
+   card in every theme); the origin hue stays on the dot and the border.
+   `--kr-success` / `--kr-warning` as text fell to 4.3:1 on a card in light,
+   and success to 3.1:1 in sakura. */
 .mcp-origin-badge {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 0.7rem;
   padding: 1px 6px;
   border-radius: 3px;
   font-weight: 500;
   letter-spacing: 0.02em;
+  color: var(--kr-text-secondary);
+}
+.mcp-origin-badge::before {
+  content: '';
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 .mcp-origin-official {
-  color: var(--kr-success);
-  border: 1px solid rgba(var(--kr-success-rgb), 0.3);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.45);
+}
+.mcp-origin-official::before {
+  background: var(--kr-success);
 }
 .mcp-origin-community {
-  color: var(--kr-warning);
-  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.3);
+  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.45);
+}
+.mcp-origin-community::before {
+  background: var(--kr-warning);
 }
 
-/* ── Plugin kind badge (MCP / API / hybrid) ─────────────────────────────── */
+/* ── Plugin kind badge (MCP / API / hybrid / CLI) ───────────────────────── */
 .mcp-kind-badge {
   display: inline-flex;
   align-items: center;
@@ -474,13 +493,32 @@ select.input option {
   font-weight: 500;
   letter-spacing: 0.02em;
 }
+/* KT-2006 — same split as the origin badge: the label in
+   `--kr-text-secondary`, the kind hue on the icon and the border
+   (`--kr-info` and `--kr-purple-soft` are 3.7–4.2:1 as text on a registry
+   card in sakura and euronews). */
 .mcp-kind-badge-mcp {
-  color: var(--kr-info);
+  color: var(--kr-text-secondary);
   border: 1px solid rgba(var(--kr-info-rgb), 0.35);
 }
+.mcp-kind-badge-mcp svg {
+  color: var(--kr-info);
+}
 .mcp-kind-badge-api {
-  color: var(--kr-purple-soft);
+  color: var(--kr-text-secondary);
   border: 1px solid rgba(var(--kr-purple-soft-rgb), 0.35);
+}
+.mcp-kind-badge-api svg {
+  color: var(--kr-purple-soft);
+}
+/* KT-2020 — a CLI wrapper: the terminal icon and the hue of the CLI
+   credential badge (`--kr-warning`), the label in `--kr-text-secondary`. */
+.mcp-kind-badge-cli {
+  color: var(--kr-text-secondary);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+}
+.mcp-kind-badge-cli svg {
+  color: var(--kr-warning);
 }
 .mcp-kind-badge-hybrid {
   color: var(--kr-text-primary);
@@ -536,7 +574,10 @@ select.input option {
   color: var(--kr-text-ghost);
 }
 
-.disc-participant-chip {
+/* KT-2026 — the principal badge's run state: the chip's frame, no identity of
+ * its own (the picker badge names the agent). */
+.disc-participant-chip,
+.disc-main-run-state {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
@@ -552,7 +593,9 @@ select.input option {
 }
 
 .disc-participant-chip:hover,
-.disc-participant-chip[aria-expanded="true"] {
+.disc-participant-chip[aria-expanded="true"],
+.disc-main-run-state:hover,
+.disc-main-run-state[aria-expanded="true"] {
   border-color: var(--kr-accent-border);
   background: var(--kr-accent-bg);
   color: var(--kr-accent-ink);
@@ -561,6 +604,14 @@ select.input option {
 .disc-participant-chip[data-status="paused"] {
   background: var(--kr-bg-hover);
   opacity: 0.6;
+}
+
+/* KT-2026 — the main run's row in the « +N » list: its state, then the identity. */
+.disc-main-run-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .disc-participant-presence-dot {
@@ -656,11 +707,11 @@ select.input option {
   background: var(--kr-error);
 }
 
+/* KT-1936 — a floating layer in document.body: ParticipantDetailsLayer sets
+   its fixed place under the chip, inside the window (useAnchoredStyle). */
 .disc-participant-details {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 5px);
-  left: 0;
+  z-index: var(--kr-z-popover);
+  box-sizing: border-box;
   width: min(320px, calc(100vw - 32px));
   padding: 10px;
   border: 1px solid var(--kr-border);
@@ -683,11 +734,38 @@ select.input option {
   gap: 8px;
 }
 
+/* KT-1936 review round 3 — the full-size identity is wider than the layer
+   (a long alias, a long model id, the longest role label): it shrinks inside
+   the header instead of pushing the close button out of the layer. */
 .disc-participant-details > header > strong {
+  flex: 1 1 auto;
+  min-width: 0;
   gap: 5px;
 }
 
+/* The identity wraps rather than overflows: the name, the model and the role
+   chip keep their whole width when they fit on a line, go to the next one when
+   they do not, and only a part wider than the whole layer is cut — the model
+   with an ellipsis (its full id is in the tooltip, the layer's name and the
+   model row below), the name and the role chip by wrapping their words. */
+.disc-participant-details .disc-participant-details-identity {
+  flex-wrap: wrap;
+  row-gap: var(--kr-space-1);
+}
+
+.disc-participant-details .disc-participant-details-identity .ui-agent-identity-name,
+.disc-participant-details .disc-participant-details-identity .ui-agent-identity-role {
+  flex-shrink: 1;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The close button never shrinks and stays at the top of the header when the
+   identity takes two lines: always inside the layer, always reachable. */
 .disc-participant-details > header > button {
+  flex-shrink: 0;
+  align-self: flex-start;
   display: inline-flex;
   padding: 3px;
   border: 0;
@@ -730,6 +808,29 @@ select.input option {
   color: var(--kr-text-secondary);
   font-size: var(--kr-fs-xs);
   text-align: right;
+}
+
+/* KT-2015 — a model a joined session declared: the id on the first line, whole
+   (it wraps, never cut), and under it, in the muted role, where it comes from. */
+.disc-participant-details dl > div[data-source='join'] {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  column-gap: 10px;
+  row-gap: 2px;
+}
+
+.disc-participant-details dl > div[data-source='join'] > .disc-participant-model {
+  grid-column: 2;
+  max-width: none;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.disc-participant-details dl > div[data-source='join'] > .disc-participant-model-source {
+  grid-column: 2;
+  color: var(--kr-text-muted);
 }
 
 /* The invite button is styled by `.disc-chat-header-btn--primary`

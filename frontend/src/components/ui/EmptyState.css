@@ -1,0 +1,53 @@
+/* KT-1883 — EmptyState: an icon, a title, a line of description and the way
+   out, centred in the space the content would take. The description is in
+   --kr-text-secondary, which holds 4.5:1 on every surface. */
+
+.ui-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-space-2);
+  padding: var(--kr-space-8) var(--kr-space-4);
+  text-align: center;
+  color: var(--kr-text-primary);
+}
+
+.ui-empty-state-icon {
+  display: inline-flex;
+  margin-bottom: var(--kr-space-1);
+  color: var(--kr-text-muted);
+}
+
+.ui-empty-state-icon svg {
+  width: var(--kr-space-8);
+  height: var(--kr-space-8);
+  stroke-width: 1.5;
+}
+
+.ui-empty-state-title {
+  margin: 0;
+  font-size: var(--kr-type-lg);
+  font-weight: var(--kr-weight-semibold);
+  color: var(--kr-text-primary);
+}
+
+.ui-empty-state-description {
+  max-width: 48ch;
+  margin: 0;
+  font-size: var(--kr-type-md);
+  line-height: 1.5;
+  color: var(--kr-text-secondary);
+}
+
+.ui-empty-state-action {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--kr-space-2);
+  margin-top: var(--kr-space-2);
+}
+
+.ui-empty-state[data-kind="nothingSelected"] {
+  height: 100%;
+}

@@ -1,6 +1,9 @@
 .kr-agent-switch-static {
-  color: var(--kr-text-faint);
-  font-size: var(--kr-fs-xs);
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-type-sm);
   font-weight: 600;
 }
 
@@ -8,22 +11,31 @@
   position: relative;
   display: inline-flex;
   min-width: 0;
+  max-width: 100%;
 }
 
+/* KT-1936 — the trigger's text is AgentIdentity, at the 12px floor. The border
+   takes the agent's brand colour (--agent-switch-tone, set inline): a brand
+   colour stays on borders, the name is written in its text-safe token. */
 .kr-agent-switch-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--kr-space-1);
+  min-width: 0;
   max-width: 100%;
-  padding: 2px 6px;
-  border: 1px solid currentColor;
+  padding: 2px var(--kr-space-1);
+  border: 1px solid var(--agent-switch-tone, var(--kr-border));
   border-radius: var(--kr-r-sm);
-  color: var(--kr-text-faint);
+  color: var(--kr-text-secondary);
   background: transparent;
   font-family: inherit;
-  font-size: var(--kr-fs-xs);
-  font-weight: 700;
+  font-size: var(--kr-type-sm);
+  font-weight: 600;
   cursor: pointer;
+}
+
+.kr-agent-switch-btn > svg {
+  flex-shrink: 0;
 }
 
 .kr-agent-switch-btn:hover,
@@ -36,27 +48,84 @@
   opacity: 0.65;
 }
 
-.kr-agent-switch-suffix {
-  color: var(--kr-text-tertiary);
-  font-weight: 500;
+/* The identity shrinks first: its model is cut with an ellipsis (17
+   characters at most), the full id stays in the button's title and name.
+   KT-1936 — on a row too narrow for the whole trigger (the room header at
+   400 and 768 px) the model gives way first (its shrink weight dwarfs the
+   others'); the name and the role chip give way only once the model is gone. */
+.kr-agent-switch-identity {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
+.kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-model {
+  flex-shrink: 1000;
+}
+
+.kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-name,
+.kr-agent-switch-identity.ui-agent-identity .ui-agent-identity-role {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The exact-model trigger's mode icon (the shadow editor). */
 .kr-agent-switch-current-tier {
   display: inline-grid;
+  flex-shrink: 0;
   place-items: center;
-  width: 15px;
-  height: 15px;
+  width: var(--kr-space-4);
+  height: var(--kr-space-4);
   border-radius: 50%;
   background: var(--kr-bg-subtle);
-  font-size: 9px;
+  font-size: var(--kr-type-sm);
+}
+
+.kr-agent-switch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* KT-1885 — the field variant: a full-width trigger that reads as a form field. */
+.kr-agent-switch[data-variant='field'] {
+  display: flex;
+  width: 100%;
+}
+
+.kr-agent-switch[data-variant='field'] .kr-agent-switch-btn {
+  width: 100%;
+  min-height: var(--kr-space-7);
+  padding: var(--kr-space-1) var(--kr-space-2);
+  border-color: var(--kr-border);
+  background: var(--kr-bg-surface);
+  font-size: var(--kr-type-md);
+  font-weight: 600;
+}
+
+.kr-agent-switch[data-variant='field'] .kr-agent-switch-btn > svg:last-child {
+  margin-left: auto;
+}
+
+.kr-agent-switch[data-variant='field'] .kr-agent-switch-btn:focus-visible,
+.kr-agent-switch-btn:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
 }
 
 .kr-agent-switch[data-compact='true'] .kr-agent-switch-btn {
-  gap: 3px;
+  gap: var(--kr-space-1);
   padding: 0;
   border: 0;
-  font-size: 9.5px;
+  font-size: var(--kr-type-sm);
   line-height: 1.1;
+}
+
+/* KT-1885 — the compact chip stays a 24px target, like the other modes. */
+.kr-agent-switch[data-compact='true'] > .kr-agent-switch-btn {
+  min-height: var(--kr-space-6);
 }
 
 .kr-agent-switch-popover {
@@ -66,7 +135,9 @@
   flex-direction: column;
   width: max-content;
   min-width: 170px;
-  max-width: calc(100vw - 16px);
+  /* KT-1885 — 480px at most (a tier row stays one line there), 580px with four
+     tracks (the assistants' « Défaut »), never wider than the window. */
+  max-width: min(480px, calc(100vw - 2 * var(--kr-space-2)));
   padding: 4px;
   border: 1px solid var(--kr-border);
   border-radius: var(--kr-r-md);
@@ -74,24 +145,13 @@
   box-shadow: var(--kr-shadow-lg);
 }
 
-.kr-agent-switch-search {
-  box-sizing: border-box;
-  flex: 0 0 auto;
-  width: 100%;
-  min-width: 0;
-  margin-bottom: 4px;
-  padding: 6px 8px;
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-sm);
-  background: var(--kr-bg-surface);
-  color: var(--kr-text-primary);
-  font-family: inherit;
-  font-size: var(--kr-fs-xs);
+.kr-agent-switch-popover:has([data-tier='agent-default']) {
+  max-width: min(580px, calc(100vw - 2 * var(--kr-space-2)));
 }
 
-.kr-agent-switch-search:focus-visible {
-  outline: 2px solid var(--kr-accent);
-  outline-offset: -1px;
+.kr-agent-switch-search {
+  flex: 0 0 auto;
+  margin-bottom: var(--kr-space-1);
 }
 
 .kr-agent-switch-results {
@@ -103,7 +163,7 @@
 .kr-agent-switch-status {
   padding: 4px 8px;
   color: var(--kr-text-tertiary);
-  font-size: var(--kr-fs-xs);
+  font-size: var(--kr-type-sm);
 }
 
 .kr-agent-switch-option {
@@ -117,7 +177,7 @@
   color: var(--kr-text-secondary);
   background: transparent;
   font-family: inherit;
-  font-size: var(--kr-fs-xs);
+  font-size: var(--kr-type-sm);
   text-align: left;
   cursor: pointer;
 }
@@ -147,13 +207,16 @@
   flex: 0 0 auto;
 }
 
+/* KT-1885 — a row with tier choices (the field and chip modes, the API
+   assistants, the @ palette): the agent on the left, its tiers on the right
+   in equal tracks, one line at desktop widths. Every row of a list has the
+   same tiers in the same tracks, so Éco / Standard / Avancé line up. */
 .kr-agent-switch-tier-row {
   display: grid;
-  grid-template-columns: minmax(112px, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--kr-sp-2);
-  min-height: 41px;
-  padding: 5px 6px 5px 8px;
+  gap: var(--kr-space-2);
+  padding: var(--kr-space-1) var(--kr-space-2);
   border-radius: var(--kr-r-sm);
 }
 
@@ -161,38 +224,89 @@
   background: var(--kr-bg-hover);
 }
 
+/* The dot, the name and ONE state badge; the dot and the name stay a single
+   non-breaking pair, and the badge wraps under the name as one piece rather
+   than being cut when the row is narrow. */
 .kr-agent-switch-tier-agent {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
+  gap: 0 var(--kr-space-2);
   min-width: 0;
+  overflow: hidden;
   color: var(--kr-text-secondary);
-  font-size: var(--kr-fs-xs);
+  font-size: var(--kr-type-sm);
   font-weight: 650;
+  line-height: 1.25;
 }
 
-.kr-agent-switch-tier-choices {
+.kr-agent-switch-tier-agent > .kr-agent-switch-badge {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+/* The dot and the name are one box, so they never separate. The box takes only
+   its own width: the state badge sits beside the name when there is room and
+   wraps under it only when there is not. */
+.kr-agent-switch-tier-id {
   display: inline-flex;
-  gap: 3px;
+  align-items: center;
+  gap: var(--kr-space-2);
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
+.kr-agent-switch-tier-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Equal tracks wide enough for « Avancé · Advanced · Avanzado » with its
+   icon; a longer tier name widens its track instead of being cut. The
+   count comes from the component (3 tiers, 4 with the agent's default). */
+.kr-agent-switch-tier-choices {
+  --agent-switch-tier-track: 88px;
+  display: grid;
+  grid-template-columns: repeat(var(--agent-switch-tier-count, 3), minmax(var(--agent-switch-tier-track), max-content));
+  gap: var(--kr-space-1);
+}
+
+/* A tier choice: icon and name on one line, 26px high. Only a tier whose
+   state differs from its row's carries that state, as a wrapped second line. */
 .kr-agent-switch-tier-option {
   position: relative;
   display: inline-flex;
+  flex-direction: column;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  min-width: 62px;
-  height: 38px;
-  padding: 0 6px 9px;
+  width: 100%;
+  min-height: calc(var(--kr-space-6) + var(--kr-space-1) / 2);
+  padding: 0 var(--kr-space-1);
   border: 1px solid var(--kr-border-ghost);
   border-radius: var(--kr-r-sm);
   background: var(--kr-bg-surface);
   color: var(--kr-text-secondary);
   font-family: inherit;
-  font-size: 9px;
+  font-size: var(--kr-type-sm);
   font-weight: 650;
+  line-height: 1.25;
   cursor: pointer;
+}
+
+.kr-agent-switch-tier-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  white-space: nowrap;
+}
+
+.kr-agent-switch-tier-option > .kr-agent-switch-catalog-meta {
+  max-width: calc(var(--agent-switch-tier-track) - 2 * var(--kr-space-1) - 2px);
+  padding-bottom: var(--kr-space-1);
 }
 
 .kr-agent-switch-badge {
@@ -201,29 +315,41 @@
   border-radius: var(--kr-radius-pill);
   background: var(--kr-warning-bg);
   color: var(--kr-warning-soft);
-  font-size: 9px;
+  font-size: var(--kr-type-sm);
   font-weight: 600;
   white-space: nowrap;
 }
 
-.kr-agent-switch-catalog-meta {
-  position: absolute;
-  right: 3px;
-  bottom: 2px;
-  left: 3px;
-  overflow: hidden;
-  color: var(--kr-text-tertiary);
-  font-size: 7px;
-  font-weight: 500;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* KT-1885 — one look per availability state, wherever an agent is chosen. */
+.kr-agent-switch-badge[data-state='unavailable'],
+.kr-agent-switch-badge[data-state='disabled'] {
+  background: rgba(var(--kr-danger-rgb), 0.12);
+  color: var(--kr-danger);
 }
 
-.kr-agent-switch-catalog-meta[data-catalog-warning='true'] {
+/* What the catalogue says of the model (« Détecté », « Cache à revérifier »): neutral. */
+.kr-agent-switch-badge[data-state='catalog'] {
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-tertiary);
+  font-weight: 500;
+}
+
+.kr-agent-switch-catalog-meta {
+  max-width: 100%;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+  font-weight: 500;
+  line-height: 1.2;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+.kr-agent-switch-catalog-meta[data-state='not-listed'] {
   color: var(--kr-warning);
 }
 
+.kr-agent-switch-catalog-meta[data-state='unavailable'],
 .kr-agent-switch-tier-option:disabled .kr-agent-switch-catalog-meta {
   color: var(--kr-danger);
 }
@@ -233,9 +359,20 @@
   background: var(--kr-accent-bg);
 }
 
-.kr-agent-switch-tier-option[data-current='true'] {
+.kr-agent-switch-tier-option[data-current='true'],
+.kr-agent-switch-tier-option[data-keyboard-selected='true'] {
   border-color: var(--kr-accent-border);
   background: var(--kr-accent-bg);
+}
+
+.kr-agent-switch-tier-option[data-keyboard-selected='true'] {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
+}
+
+.kr-agent-switch-tier-option:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
 }
 
 .kr-agent-switch-tier-option:disabled {
@@ -249,17 +386,514 @@
   color: var(--kr-accent);
 }
 
+.kr-agent-switch-option:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
+}
+
+/* Multi-choice: a check box per target. */
+.kr-agent-switch-check {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--kr-space-3);
+  height: var(--kr-space-3);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-surface);
+}
+
+.kr-agent-switch-check[data-checked='true'] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+}
+
+.kr-agent-switch-option .kr-agent-switch-check svg {
+  margin-left: 0;
+}
+
+/* Group headings (exact model's agents, the mention menu's groups). */
+.kr-agent-switch-group {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-2);
+  padding: var(--kr-space-2) var(--kr-space-2) var(--kr-space-1);
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.kr-agent-switch-group-block {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--kr-space-1);
+}
+
+.kr-agent-switch-group-block .kr-agent-switch-group {
+  color: var(--kr-text-secondary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* KT-1994 — the grouped list (the discussion's, the new discussion's and the
+   shadow editor's): one width whatever is unfolded, so the popover never jumps
+   when a long model id appears; never wider than the window. */
+.kr-agent-switch-popover:has(.kr-agent-switch-mode) {
+  width: min(440px, calc(100vw - 2 * var(--kr-space-2)));
+}
+
+/* An agent's header: dot and name, its kind, ONE state badge, its model count.
+   KT-2010 — a band on its own opaque surface, the full width of the list,
+   that sticks to the top of the list while its own rows scroll under it: the
+   agent of the rows in view is always written. Its padding is the rows', so
+   the dot lines up with them as before. The name is the primary role, one
+   step larger and semibold; the kind, the badge and the count stay tertiary.
+   A focused row is scrolled clear of it (`stickyHeaderHeight`). */
+.kr-agent-switch-group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex-wrap: wrap;
+  gap: 0 var(--kr-space-2);
+  padding: var(--kr-space-1) var(--kr-space-2);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-tertiary);
+  font-weight: 500;
+}
+
+.kr-agent-switch-group-block .kr-agent-switch-group-name {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-type-md);
+  font-weight: 600;
+}
+
+/* On the band, a state badge keeps the panel under its tint: it reads as it
+   does on any other row of the picker. */
+.kr-agent-switch-group-header > .kr-agent-switch-badge {
+  background: linear-gradient(var(--kr-warning-bg), var(--kr-warning-bg)), var(--kr-bg-elevated);
+}
+
+.kr-agent-switch-group-header > .kr-agent-switch-badge[data-state='unavailable'],
+.kr-agent-switch-group-header > .kr-agent-switch-badge[data-state='disabled'] {
+  background: linear-gradient(rgba(var(--kr-danger-rgb), 0.12), rgba(var(--kr-danger-rgb), 0.12)), var(--kr-bg-elevated);
+}
+
+.kr-agent-switch-group-header > .kr-agent-switch-badge[data-state='catalog'] {
+  background: linear-gradient(var(--kr-bg-subtle), var(--kr-bg-subtle)), var(--kr-bg-elevated);
+}
+
+.kr-agent-switch-kind,
+.kr-agent-switch-model-count {
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+  font-weight: 500;
+}
+
+.kr-agent-switch-group-header > .kr-agent-switch-model-count {
+  margin-left: auto;
+}
+
+/* A row of the list: the mode (icon and name) in an aligned column, the model
+   id in the code face, the check at the end. Other models, the custom model,
+   a typed id and the recents use the same columns. */
+.kr-agent-switch-mode {
+  display: grid;
+  grid-template-columns: var(--agent-switch-mode-label, 104px) minmax(0, 1fr) var(--kr-space-3);
+  align-items: center;
+  gap: var(--kr-space-2);
+  width: 100%;
+  min-height: calc(var(--kr-space-6) + var(--kr-space-1) / 2);
+  padding: var(--kr-space-1) var(--kr-space-2);
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font-family: inherit;
+  font-size: var(--kr-type-sm);
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kr-agent-switch-mode:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.kr-agent-switch-mode:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
+}
+
+.kr-agent-switch-mode[data-current='true'] {
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+}
+
+.kr-agent-switch-mode:disabled {
+  cursor: default;
+}
+
+.kr-agent-switch-mode:disabled:not([data-current='true']) {
+  opacity: 0.6;
+}
+
+.kr-agent-switch-mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  min-width: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.kr-agent-switch-mode-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--kr-space-2);
+  min-width: 0;
+}
+
+/* The model id, written whole: it wraps rather than being cut. */
+.kr-agent-switch-mode-model {
+  min-width: 0;
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-type-sm);
+  overflow-wrap: anywhere;
+}
+
+/* An agent that cannot be chosen: why, in one muted line under its header. */
+.kr-agent-switch-reason {
+  padding: 0 var(--kr-space-2) var(--kr-space-1) calc(var(--kr-space-2) + 7px + var(--kr-space-2));
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+  line-height: 1.25;
+}
+
+/* The typed id « as is »: one line at the end of the list. */
+.kr-agent-switch-free-block {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--kr-space-1);
+  padding-top: var(--kr-space-1);
+  border-top: 1px solid var(--kr-border-subtle);
+}
+
+.kr-agent-switch-mode[data-kind='free'] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.kr-agent-switch-mode-name,
+.kr-agent-switch-mode-default {
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+}
+
+.kr-agent-switch-mode-check {
+  display: inline-grid;
+  place-items: center;
+  color: var(--kr-accent);
+}
+
+.kr-agent-switch-mode[data-free='true'] .kr-agent-switch-mode-value {
+  font-style: italic;
+}
+
+.kr-agent-switch-mode[data-main='true'] {
+  color: var(--kr-text-faint);
+}
+
+/* KT-2010 — « Gratuit » / "Free" after the id of a free model: a small
+   neutral-positive chip (a green tint, the secondary text role), on every row
+   that shows the model. */
+.kr-agent-switch-free-badge {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0 var(--kr-space-1);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.4);
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-success-bg);
+  color: var(--kr-text-secondary);
+  font-family: inherit;
+  font-size: var(--kr-type-sm);
+  font-style: normal;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+/* « Autres modèles »: one control per agent, under its modes. */
+.kr-agent-switch-more-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  width: 100%;
+  min-height: var(--kr-space-6);
+  padding: var(--kr-space-1) var(--kr-space-2);
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-tertiary);
+  font-family: inherit;
+  font-size: var(--kr-type-sm);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kr-agent-switch-more-toggle:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.kr-agent-switch-more-toggle:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
+}
+
+.kr-agent-switch-more,
+.kr-agent-switch-error {
+  padding: var(--kr-space-1) var(--kr-space-2);
+  font-size: var(--kr-type-sm);
+}
+
+.kr-agent-switch-more {
+  color: var(--kr-text-tertiary);
+  font-style: italic;
+}
+
+/* The server's refusal of a typed id, next to the entry. */
+.kr-agent-switch-error {
+  color: var(--kr-danger);
+  overflow-wrap: anywhere;
+}
+
+/* « Récents »: on top, hidden while searching. */
+.kr-agent-switch-recents {
+  display: flex;
+  flex-direction: column;
+}
+
+.kr-agent-switch-recent-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-space-1);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+/* The agent's name stays on one line; the model column takes the rest and
+   ellipsizes (its full text is in the row's accessible name). */
+.kr-agent-switch-recent {
+  grid-template-columns: max-content minmax(0, 1fr) var(--kr-space-3);
+}
+
+.kr-agent-switch-recent .kr-agent-switch-tier-name {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.kr-agent-switch-recent .kr-agent-switch-mode-value {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.kr-agent-switch-recent .kr-agent-switch-mode-model,
+.kr-agent-switch-recent .kr-agent-switch-mode-default {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+/* The trigger's « Personnalisé », in place of the mode chip. */
+.kr-agent-switch-custom {
+  padding: 0 var(--kr-space-1);
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+  font-size: var(--kr-type-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* KT-1994 — the @ menu writes each tier's model under its name. The palette
+   measures its own width (it takes up to 760px from a 768px window, its
+   anchor allowing). A track is 192px: 1px border and a 4px padding on each
+   side of the cell leave a 182px text box, where 25 characters of the 12px
+   mono face (7.22px each, 180.5px) fit on one line. The wide layout applies
+   from a 748px content box: 3 tracks and 2 gaps of 4px (584px), the row's
+   8px column gap and 16px of padding, and an agent column of at least 140px
+   (its name and badge on one line). At 760px the content box is 750px, so
+   the agent column gets 142px; a classic scrollbar narrows the box and the
+   layout falls back. Narrower, the tiers go under the agent in three equal
+   columns. */
+.kr-agent-switch-palette {
+  container-type: inline-size;
+}
+
+.kr-agent-switch-tier-choices[data-models='true'] {
+  grid-template-columns: repeat(var(--agent-switch-tier-count, 3), minmax(0, 1fr));
+}
+
+.kr-agent-switch-palette-row:has(.kr-agent-switch-tier-choices[data-models='true']) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container (min-width: 748px) {
+  .kr-agent-switch-palette-row:has(.kr-agent-switch-tier-choices[data-models='true']) {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .kr-agent-switch-tier-choices[data-models='true'] {
+    --agent-switch-tier-track: 192px;
+    grid-template-columns: repeat(var(--agent-switch-tier-count, 3), var(--agent-switch-tier-track));
+  }
+}
+
+/* The id breaks only after `/` and `:` (a <wbr> between its parts, each part
+   unbroken), on two lines at most, then an ellipsis; the cell's title and
+   accessible name keep it whole. */
+.kr-agent-switch-tier-model {
+  display: -webkit-box;
+  max-width: 100%;
+  padding-bottom: var(--kr-space-1);
+  overflow: hidden;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+  font-weight: 500;
+  text-align: center;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+code.kr-agent-switch-tier-model {
+  font-family: var(--kr-font-mono);
+}
+
+.kr-agent-switch-id-part {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.kr-agent-switch-tier-model[data-default='true'] {
+  white-space: nowrap;
+}
+
+.kr-agent-switch-model {
+  padding-left: var(--kr-space-6);
+}
+
+.kr-agent-switch-results > .kr-agent-switch-model {
+  padding-left: var(--kr-space-2);
+}
+
+.kr-agent-switch-model > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kr-agent-switch-model[data-main='true'] {
+  color: var(--kr-text-faint);
+}
+
+.kr-agent-switch-model[data-free='true'] {
+  font-style: italic;
+}
+
+.kr-agent-switch-hint {
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-type-sm);
+}
+
+/* Palette: the list a text field drives (the composer's @ menu). */
+.kr-agent-switch-palette {
+  display: flex;
+  flex-direction: column;
+  padding: var(--kr-space-1);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* The same row as the picker's tier rows: the agent on the left, its tiers
+   on the right in the shared tracks. */
+.kr-agent-switch-palette-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--kr-space-1) var(--kr-space-2);
+  padding: var(--kr-space-1) var(--kr-space-2);
+  border-radius: var(--kr-r-sm);
+}
+
+.kr-agent-switch-palette-row[data-highlighted='true'] {
+  background: var(--kr-bg-hover);
+}
+
+.kr-agent-switch-palette-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--kr-space-2);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font-family: inherit;
+  font-size: var(--kr-type-sm);
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kr-agent-switch-palette-main:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.kr-agent-switch-palette-label {
+  min-width: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+/* The agent's kind, whole: it wraps under the name rather than being cut. */
+.kr-agent-switch-palette-detail {
+  min-width: 0;
+  color: var(--kr-text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* Under 420px the tiers go on their own line under the agent, in equal parts. */
 @media (max-width: 419px) {
-  .kr-agent-switch-tier-row {
-    grid-template-columns: 1fr;
+  .kr-agent-switch-tier-row,
+  .kr-agent-switch-palette-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .kr-agent-switch-tier-choices {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(var(--agent-switch-tier-count, 3), minmax(0, 1fr));
   }
 
-  .kr-agent-switch-tier-option {
-    width: 100%;
+  /* KT-1994 — a narrower mode column leaves the model id its room. */
+  .kr-agent-switch-mode {
+    --agent-switch-mode-label: 84px;
   }
 }

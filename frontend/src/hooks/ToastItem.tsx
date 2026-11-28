@@ -44,8 +44,8 @@ export function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () =>
         color: textVar,
         background: `rgba(var(--kr-${colorVar}-rgb), 0.95)`,
         border: `1px solid rgba(var(--kr-${colorVar}-rgb), 0.3)`,
-        backdropFilter: 'blur(10px)', maxWidth: 420, minWidth: 240,
-        animation: 'toastSlideIn 0.3s ease-out', pointerEvents: 'auto',
+        backdropFilter: 'blur(10px)',
+        // KT-1883 — width, entry motion and pointer events in toastStack.css.
         display: 'flex', flexDirection: 'column', gap: 6,
       }}
     >

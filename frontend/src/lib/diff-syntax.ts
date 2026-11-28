@@ -149,6 +149,38 @@ export function highlightLine(line: string, language: string | null): string {
   }
 }
 
+/** KT-1902 — the language a Markdown fence names (`ts`, `rust`, `sh`…):
+ *  its display name and the registered id, or `null` when Kronn does not
+ *  highlight it. The fence id is kept as the label for an unknown language. */
+export function fenceLanguage(fence: string | null | undefined): { id: string | null; label: string } | null {
+  const raw = fence?.trim();
+  if (!raw) return null;
+  const language = hljs.getLanguage(raw.toLowerCase());
+  return language
+    ? { id: raw.toLowerCase(), label: language.name ?? raw }
+    : { id: null, label: raw };
+}
+
+/** The language a fence names, from react-markdown's `language-…` class. */
+export function languageOfClass(className: string | undefined): string | null {
+  return /(?:^|\s)language-(\S+)/.exec(className ?? '')?.[1] ?? null;
+}
+
+/** Above this size a code block is shown as plain text: highlighting is
+ *  super-linear on pathological input. */
+export const CODE_BLOCK_HIGHLIGHT_LIMIT = 20_000;
+
+/** Highlight a whole code block (escaped HTML for `dangerouslySetInnerHTML`),
+ *  or `null` to render the text as is. */
+export function highlightBlock(code: string, language: string | null): string | null {
+  if (!language || !code || code.length > CODE_BLOCK_HIGHLIGHT_LIMIT) return null;
+  try {
+    return hljs.highlight(code, { language, ignoreIllegals: true }).value;
+  } catch {
+    return null;
+  }
+}
+
 /** Minimal HTML-escape for the no-language fallback. */
 function escapeHtml(s: string): string {
   return s

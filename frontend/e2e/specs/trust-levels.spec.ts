@@ -2,6 +2,8 @@ import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test, expect } from '../fixtures/kronn-fixture';
+// KT-1923 — the sub-page address of a section (`/config/security#settings-trust`).
+import { settingsSectionPath } from '../../src/lib/routes';
 
 // KT-1492 — Settings › Trust levels drives the real trust API: a level above
 // Standard goes through the risk panel, an explicit confirmation and a code from
@@ -68,7 +70,7 @@ test.describe('trust levels (KT-1492)', () => {
   });
 
   test('enrols an authenticator: QR, manual key, first code, recovery codes shown once', async ({ page }) => {
-    await page.goto('/config#settings-authenticator');
+    await page.goto(settingsSectionPath('settings-authenticator'));
     const section = page.getByTestId('trust-proof-section');
     await expect(section.getByTestId('trust-proof-status')).toBeVisible();
 
@@ -89,7 +91,7 @@ test.describe('trust levels (KT-1492)', () => {
   });
 
   test('Trusted needs the risk panel, its confirmation and a code, shows a badge and revokes in one click', async ({ page }) => {
-    await page.goto('/config#settings-trust');
+    await page.goto(settingsSectionPath('settings-trust'));
     const section = page.getByTestId('settings-trust');
     await expect(section).toBeVisible();
     await expect(page.getByTestId('trust-badge-instance')).toBeHidden();
@@ -138,7 +140,7 @@ test.describe('trust levels (KT-1492)', () => {
   });
 
   test('a wrong code keeps the panel open and the level unchanged', async ({ page }) => {
-    await page.goto('/config#settings-trust');
+    await page.goto(settingsSectionPath('settings-trust'));
     await page.getByTestId('trust-level-full').click();
     const panel = page.getByTestId('trust-risk-panel');
     await panel.getByTestId('trust-ack').check();
@@ -152,7 +154,7 @@ test.describe('trust levels (KT-1492)', () => {
   });
 
   test('Full access lists what Trusted does and more', async ({ page }) => {
-    await page.goto('/config#settings-trust');
+    await page.goto(settingsSectionPath('settings-trust'));
     await page.getByTestId('trust-level-full').click();
     const panel = page.getByTestId('trust-risk-panel');
     for (const approval of ['quick_exec_line', 'validations_docker', 'validations_unconfined', 'code_write_other_project']) {
