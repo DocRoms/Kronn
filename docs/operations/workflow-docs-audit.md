@@ -2,21 +2,21 @@
 
 Before launching an Agent step, Kronn records content fingerprints of regular
 files in the project's detected documentation directory (`docs/`, `doc/` or
-legacy `ai/`). [src: file: backend/src/core/docs_write_filter.rs:735-757#snapshot_docs] [src: file: backend/src/workflows/runner.rs:2824-2835#docs_before] The scope is Git-tracked files and non-ignored untracked files,
+legacy `ai/`). [src: file: backend/src/core/docs_write_filter.rs:793-815#snapshot_docs] [src: file: backend/src/workflows/runner.rs:2824-2835#docs_before] The scope is Git-tracked files and non-ignored untracked files,
 enumerated with `git ls-files --cached --others --exclude-standard`; tracked
 files remain included even if an ignore pattern matches them. Non-Git projects
-remain outside this audit, as in earlier releases. [src: file: backend/src/core/docs_write_filter.rs:675-750#document_paths]
+remain outside this audit, as in earlier releases. [src: file: backend/src/core/docs_write_filter.rs:717-792#document_paths]
 On Unix, Git's NUL-delimited filename bytes are kept intact for filesystem
 access, including non-UTF-8 names. Diagnostics preserve ordinary Unicode names;
 invalid names, control characters and literal backslashes use an explicit
 `[escaped path bytes]` label with byte escapes instead of replacement characters.
 The label is never used to open a file. Platforms without Unix byte paths keep
-the UTF-8 conversion and fail explicitly if a Git path cannot be represented. [src: file: backend/src/core/docs_write_filter.rs:616-657#native_document_path]
+the UTF-8 conversion and fail explicitly if a Git path cannot be represented. [src: file: backend/src/core/docs_write_filter.rs:674-715#native_document_path]
 After the step, it checks new or changed text for credential
 patterns and overlaps with the run's sensitive-file scan: either one fails the
 step, and the rejection names the file and the line, never the content. A
 rejected audit also drops the step's quota wait, which would run it again over
-the rejected content. [src: file: backend/src/core/docs_write_filter.rs:104-120#check_docs_content]
+the rejected content. [src: file: backend/src/core/docs_write_filter.rs:108-124#check_docs_content]
 
 A long run (32 characters or more among letters, digits and `_ - / + =`, at
 least 15 % digits, as a whole or in a part between `=` or `/`, so that a name
@@ -36,6 +36,15 @@ other: nothing is set aside as binary. A
 changed document that cannot be read whole (over 16 MiB, unreadable) fails
 the step once what the others hold is recorded. The
 sensitive files are scanned at the start of the run and again at each audit.
+Two kinds of value are not tracked, because a document cites them: the lines
+of a committed template (`.env.example`, `.env.dist`, `.env.sample`, a name
+ending in `.template`), which hold placeholders and public defaults, and a
+value that only names a host (`www.example.com`, `https://acme.atlassian.net/`,
+`api.example.com:8443`) under a key that declares an address (`URL`, `HOST`,
+`DOMAIN`, `BASE` or `ENDPOINT` in its name, and no `PASS`, `SECRET`, `TOKEN`,
+`KEY`, `AUTH` or `CRED`): a dotted password has the shape of a host, so the
+shape alone exempts nothing, and a user, a path or a query keeps the value
+tracked. [src: file: backend/src/core/docs_write_filter.rs:373-415#is_bare_host] [src: file: backend/src/core/docs_write_filter.rs:556-566#scan_sensitive_files]
 Any other run fails nothing: the step stands, and the run records, per step,
 the documents and the lines that hold one (50 documents and 5 lines each at
 most, then a count; never the content). A rejected document still lists its
@@ -56,13 +65,13 @@ shorter than 32 characters and reworded, a part of it without a digit and
 in one case, or in a sensitive file over 4 MiB, which is read by lines only),
 is reported and not blocked. A step
 cancelled or stopped by a guard while it runs is not audited at all
-(KT-1796). [src: file: backend/src/core/docs_write_filter.rs:127-163#possible_secret_lines] [src: file: backend/src/workflows/runner.rs:32-60#possible_secrets_report] [src: file: frontend/src/lib/docsPossibleSecrets.ts:49-54#runPossibleSecrets]
+(KT-1796). [src: file: backend/src/core/docs_write_filter.rs:131-167#possible_secret_lines] [src: file: backend/src/workflows/runner.rs:32-60#possible_secrets_report] [src: file: frontend/src/lib/docsPossibleSecrets.ts:49-54#runPossibleSecrets]
 Unchanged content that was already modified, staged or untracked before the
 step is outside this audit. Changes committed during the step are still checked.
 A document's size alone is not a leak signal. Fingerprinting uses a streaming
 hash; the post-step check retains at most 16 MiB per file and inspects the same
 bytes that were hashed. An unchanged larger file is allowed; a changed larger
-file fails with an explicit incomplete-audit diagnostic and remains intact. [src: file: backend/src/core/docs_write_filter.rs:590-630#MAX_AUDIT_BUFFER_BYTES] [src: file: backend/src/core/docs_write_filter.rs:776-864#audit_docs_writes]
+file fails with an explicit incomplete-audit diagnostic and remains intact. [src: file: backend/src/core/docs_write_filter.rs:634-674#MAX_AUDIT_BUFFER_BYTES] [src: file: backend/src/core/docs_write_filter.rs:834-922#audit_docs_writes]
 
 The audit never restores, deletes, stages or commits files. A change observed
 during the step may have been written concurrently by a person or another
