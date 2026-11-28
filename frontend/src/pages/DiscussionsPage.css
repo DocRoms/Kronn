@@ -6315,7 +6315,8 @@ button.disc-contact-open {
 
 .disc-restricted-warn-text {
   font-size: var(--kr-fs-xs);
-  color: rgba(var(--kr-warning-rgb), 0.7);
+  /* As in Notice: the tone is on the icon and the frame, the text stays AA. */
+  color: var(--kr-text-secondary);
   line-height: 1.4;
 }
 
@@ -6330,9 +6331,6 @@ button.disc-contact-open {
   display: flex;
   align-items: center;
   gap: var(--kr-sp-3);
-}
-.disc-rtk-warn .disc-restricted-warn-text {
-  color: rgba(var(--kr-error-rgb), 0.85);
 }
 
 /* ── Workspace mode toggle ────────────────────────────── */

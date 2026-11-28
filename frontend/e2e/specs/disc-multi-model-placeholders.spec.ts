@@ -195,8 +195,10 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
 
     const composer = page.locator('.disc-composer-textarea');
     await composer.fill('@cod');
-    const codexMention = page.locator('.disc-mention-item').filter({ hasText: '@codex' }).first();
-    await codexMention.locator('.disc-mention-tier-choice[data-tier="economy"]').click();
+    // KT-1885 — the @ menu renders the shared agent picker's palette rows and tier choices.
+    const codexMention = page.locator('.disc-mention-popover .kr-agent-switch-palette-row')
+      .filter({ hasText: '@codex' }).first();
+    await codexMention.locator('.kr-agent-switch-tier-option[data-tier="economy"]').click();
     await composer.fill('@codex Analyse rapidement');
     await page.locator('.disc-send-btn').click();
 

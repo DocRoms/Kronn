@@ -1295,7 +1295,8 @@
   border-radius: var(--kr-r-md);
   border: 1px solid var(--kr-accent-border);
   background: rgba(var(--kr-accent-rgb), 0.05);
-  color: var(--kr-accent);
+  /* The ink tone: the plain accent falls under 4.5:1 on a tinted card (light). */
+  color: var(--kr-accent-ink);
   cursor: pointer;
   font-size: var(--kr-fs-base);
   font-family: inherit;
