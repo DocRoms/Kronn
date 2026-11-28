@@ -36,7 +36,7 @@ const BASE: Record<string, readonly [number, number, number]> = {
   'settings-usage': [5, 0, 1],
   'settings-capabilities': [13, 0, 0],
   'settings-scan': [6, 4, 0],
-  'settings-workers': [2, 18, 0],
+  'settings-workers': [2, 19, 0],
   'settings-worktrees': [3, 0, 0],
   'settings-sourcing': [3, 0, 0],
   'settings-continual-learning': [1, 0, 0],
@@ -52,8 +52,8 @@ const BASE: Record<string, readonly [number, number, number]> = {
   'settings-debug': [8, 3, 1],
   'settings-general': [2, 0, 0],
 };
-/** The base page held 137 buttons, 75 fields and 19 links in its content, all in one of these sections. */
-const BASE_TOTAL: ControlCount = { buttons: 137, fields: 75, links: 19 };
+/** The base page held 137 buttons, 76 fields and 19 links in its content, all in one of these sections. */
+const BASE_TOTAL: ControlCount = { buttons: 137, fields: 76, links: 19 };
 
 /** The folds KT-1923 adds: one button each, in the section that holds it. */
 const FOLD_BUTTONS: Record<string, number> = {
@@ -111,6 +111,7 @@ const FORMER_LABELS: readonly (readonly [string, string])[] = [
   ['settings-workers', 'Nombre maximal de tours de revue par défaut'],
   ['settings-workers', "Lancer les workers en priorité d'arrière-plan"],
   ['settings-workers', 'Maximum de workers de tâche locaux simultanés'],
+  ['settings-workers', "Durée maximale d'une validation ou d'une commande Exec (secondes)"],
   ['settings-workers', "Seuil de sortie lourde d'un workflow (Ko)"],
   ['settings-workers', 'Par défaut, par commande (min)'],
   ['settings-workers', 'Maximum par commande (min)'],

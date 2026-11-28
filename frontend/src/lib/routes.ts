@@ -230,7 +230,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionDef[] = [
     id: 'settings-workers', page: 'work', title: 'config.workers.title',
     fields: [
       'config.workers.reviewRounds', 'config.workers.backgroundPriority', 'config.workers.maxConcurrent',
-      'config.workers.heavyOutput', 'config.workers.bashDefault', 'config.workers.bashMax', 'config.workers.osJunk',
+      'config.workers.validationCeiling', 'config.workers.heavyOutput', 'config.workers.bashDefault', 'config.workers.bashMax', 'config.workers.osJunk',
       'config.workers.managedRoots', 'config.workers.commitName', 'config.workers.commitEmail', 'laneWarm.seedAlignment', 'laneWarm.compilerEnv', 'laneWarm.command', 'laneWarm.timeout',
     ],
   },
