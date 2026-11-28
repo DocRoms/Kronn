@@ -81,6 +81,14 @@ impl TokenCounters {
                 cache_read_tokens,
                 cache_write_tokens,
             )),
+            // OpenCode's ACP `session/prompt` usage reports `inputTokens` net of
+            // `cachedReadTokens`/`cachedWriteTokens`, whatever the upstream.
+            "OpenCode" => Some(Self::from_disjoint_input(
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            )),
             "Codex" => Self::from_inclusive_input(
                 input_tokens,
                 output_tokens,
@@ -263,7 +271,10 @@ fn strip_snapshot_suffix(model: &str) -> &str {
 
 fn rates_for_model(model: &str) -> Option<ModelRates> {
     let normalized = model.trim().to_ascii_lowercase();
-    let family = strip_snapshot_suffix(&normalized);
+    // A routed id (`litellm/claude-sonnet-5`, `anthropic/claude-sonnet-5`)
+    // names the provider first: the rate is the model's.
+    let normalized = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let family = strip_snapshot_suffix(normalized);
     MODEL_RATES
         .iter()
         .find(|(id, _)| *id == family)
