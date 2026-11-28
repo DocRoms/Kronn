@@ -14036,6 +14036,13 @@ pub fn agent_command(
     )
 }
 
+/// The settings a Claude agent launched by Kronn reads: the project's and the
+/// checkout's local ones, never the user's. A user `~/.claude` carries hooks
+/// that fire on the agent's commands (a `gh pr ready` refused by a personal
+/// gate), skills and agents that shadow the run's own, and a CLAUDE.md written
+/// for interactive sessions: a run would depend on a machine, not on Kronn.
+pub const CLAUDE_SETTING_SOURCES: &str = "project,local";
+
 /// Build a provider command with the stricter policy required by a spawned
 /// task worker. A worktree is an ownership boundary, not a sandbox by itself:
 /// every CLI that offers a global bypass must ignore it for worker runs.
@@ -14090,6 +14097,13 @@ pub fn agent_command_with_task_worker_policy(
             if let Some(effort) = reasoning_effort {
                 args.push("--effort".into());
                 args.push(effort.into());
+            }
+            if !task_worker {
+                // Kronn's launch says what the agent may do; the user's own
+                // `~/.claude` (hooks, skills, agents, CLAUDE.md) does not
+                // follow it into a run. A task worker reads no source at all.
+                args.push("--setting-sources".into());
+                args.push(CLAUDE_SETTING_SOURCES.into());
             }
             if task_worker {
                 // Ignore user/project settings so a previously configured

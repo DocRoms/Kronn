@@ -306,6 +306,8 @@ impl AcpTransport for ClaudeAcpAdapter {
                 "stream-json".into(),
                 "--verbose".into(),
                 "--include-partial-messages".into(),
+                "--setting-sources".into(),
+                crate::agents::runner::CLAUDE_SETTING_SOURCES.into(),
             ]
         });
         args.push(if resuming {
@@ -1129,6 +1131,11 @@ exec sleep 30"#,
         let argv = std::fs::read_to_string(argv_file).unwrap();
         assert!(!argv.contains(secret_marker));
         assert!(argv.contains("--strict-mcp-config"));
+        assert!(
+            argv.contains("--setting-sources")
+                && argv.contains(crate::agents::runner::CLAUDE_SETTING_SOURCES),
+            "the user settings stay out of a discussion turn: {argv}"
+        );
         assert!(argv.contains("--allowedTools"));
         assert!(argv.contains("mcp__project-safe__*"));
         assert_eq!(std::fs::read_to_string(stdin_file).unwrap(), secret_prompt);

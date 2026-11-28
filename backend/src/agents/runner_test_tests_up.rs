@@ -10619,6 +10619,41 @@ fn a_scratch_home_keeps_the_discussion_folder_under_the_temp_dir() {
         .starts_with(std::env::temp_dir().canonicalize().unwrap()));
 }
 
+/// A Claude agent launched by Kronn reads the project's and the checkout's
+/// settings, never the user's `~/.claude` (hooks, skills, agents): a run
+/// depends on Kronn, not on the machine. A task worker reads none, once.
+#[test]
+fn a_claude_launch_never_reads_the_user_settings() {
+    let worktree = tempfile::tempdir().unwrap();
+    for task_worker in [false, true] {
+        let (_, _, args, _, _, _) = crate::agents::runner::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "test prompt",
+            false,
+            "context",
+            None,
+            None,
+            task_worker,
+            Some(worktree.path()),
+            None,
+        );
+        let at: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| *arg == "--setting-sources")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(at.len(), 1, "one --setting-sources: {args:?}");
+        let want = if task_worker {
+            ""
+        } else {
+            crate::agents::runner::CLAUDE_SETTING_SOURCES
+        };
+        assert_eq!(args[at[0] + 1], want, "{args:?}");
+        assert!(!args[at[0] + 1].contains("user"), "{args:?}");
+    }
+}
+
 #[test]
 fn claude_task_worker_keeps_its_narrow_tool_allowance() {
     let worktree = tempfile::tempdir().unwrap();

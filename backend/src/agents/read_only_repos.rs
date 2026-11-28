@@ -1513,7 +1513,15 @@ impl ReadOnlyRepos {
         args.retain(|arg| {
             arg != "--dangerously-skip-permissions" && !arg.starts_with("--sandbox=")
         });
-        args.extend(self.args(agent, work_dir));
+        let own = self.args(agent, work_dir);
+        // The policy's `--setting-sources` is stricter than the launch's: one
+        // flag on the command line, the policy's.
+        if own.iter().any(|arg| arg == "--setting-sources") {
+            if let Some(at) = args.iter().position(|arg| arg == "--setting-sources") {
+                args.drain(at..(at + 2).min(args.len()));
+            }
+        }
+        args.extend(own);
         // KT-1495 — one `--settings` document: the vault rules join the policy's.
         crate::core::vault_guard::fold_vault_into_claude_settings(args, &self.granted_dirs);
         args.push(prompt);
@@ -2011,6 +2019,27 @@ mod tests {
     /// The arguments the launch of `agent` gets, the way the adapters build them.
     fn launch_args(agent: &AgentType, work: &Path, policy: &ReadOnlyRepos) -> Vec<String> {
         crate::agents::runner::adapter_policy_args(agent, work, policy)
+    }
+
+    /// The policy's own `--setting-sources` replaces the launch's: Claude
+    /// receives the flag once, never the user source.
+    #[test]
+    #[serial_test::serial]
+    fn a_claude_launch_under_the_policy_carries_one_setting_sources() {
+        let (_temp, work, repo) = fixture();
+        let policy =
+            ReadOnlyRepos::resolve(&AgentType::ClaudeCode, &work, &[repo.display().to_string()])
+                .unwrap()
+                .unwrap();
+        let args = launch_args(&AgentType::ClaudeCode, &work, &policy);
+        let at: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| *arg == "--setting-sources")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(at.len(), 1, "{args:?}");
+        assert!(!args[at[0] + 1].contains("user"), "{args:?}");
     }
 
     /// KT-1587 — a directory under the run artifacts root is vetted as it was
