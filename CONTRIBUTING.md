@@ -75,18 +75,28 @@ git rebase --signoff HEAD~3
 
 Commits authored or co-authored by AI tools (Claude Code, Copilot, etc.) must still carry a human `Signed-off-by`. The human is responsible for reviewing and certifying the contribution.
 
-## AI Context (`ai/`)
+## Design rule: Kronn stays generic and cross-agent
 
-This project uses an AI-optimized context system in `ai/`. Before making changes:
+Kronn runs many agents (Claude Code, Codex, Gemini CLI, OpenCode, Copilot CLI, Kiro, Vibe, Ollama and HTTP providers) on any project its users add. Every contribution keeps it that way:
 
-1. Read `ai/index.md` — it contains project rules, coding conventions, and architecture decisions.
-2. After completing your work, update the relevant `ai/` file if you discovered something non-obvious (a gotcha, a pattern, an outdated doc).
-3. **Do not confuse** `ai/` (context for agents working on THIS repo) with `templates/ai/` (template skeleton installed into projects managed by Kronn).
+- **No provider-only code path.** A capability is modelled in agent-neutral terms and mapped by each agent's adapter. An agent that cannot provide it is refused with a clear reason.
+- **Configuration, not hard-coding.** Behaviour that varies is a cross-agent setting whose default keeps today's behaviour, overridable at a narrower scope (project, workflow, room, step, agent) when needed, the way trust levels are.
+- **Widening an agent's reach is a human decision.** A setting that gives an agent more reach (a browser session, the network, files outside its worktree, its trust level, validation access) can only be set by a human.
+
+Details and the question to ask before review: [`docs/coding-rules.md`](docs/coding-rules.md), section Global. A pull request that serves one agent, one provider or one machine only will be asked to generalise.
+
+## AI context (`docs/`)
+
+This project uses an AI-optimized context system in `docs/`. Before making changes:
+
+1. Read `docs/AGENTS.md` — the single entry point for project rules, coding conventions, and architecture decisions; it routes backend and frontend tasks to `docs/coding-rules.md`.
+2. After completing your work, update the relevant `docs/` file if you discovered something non-obvious (a gotcha, a pattern, an outdated doc).
+3. **Do not confuse** `docs/` (context for agents working on THIS repo) with `templates/docs/` (template skeleton installed into projects managed by Kronn).
 
 ## Pull Request Guidelines
 
 1. Fork the repo and create a branch from `main`
-2. Follow the coding rules documented in `ai/coding-rules.md`
+2. Follow `docs/coding-rules.md`, first of all the design rule above: Kronn stays generic and cross-agent
 3. **Sign off every commit** (`git commit -s`)
 4. **Keep the history small**: a small change lands in 3 commits at most.
    Squash review follow-ups and fixups into the commit they correct, and
